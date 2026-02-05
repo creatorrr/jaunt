@@ -1,0 +1,25 @@
+version = 1
+
+[paths]
+source_roots = ["src"]
+
+# Current CLI/tester expects test spec modules to import under the "tests.*" package,
+# so we discover from the project root (not from the tests/ dir itself).
+test_roots = ["."]
+
+generated_dir = "__generated__"
+
+[llm]
+provider = "openai"
+model = "gpt-4.1-mini"
+api_key_env = "OPENAI_API_KEY"
+
+[build]
+jobs = 2
+infer_deps = true
+
+[test]
+jobs = 2
+infer_deps = true
+pytest_args = ["-q"]
+

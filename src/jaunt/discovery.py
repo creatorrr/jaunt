@@ -36,6 +36,7 @@ def discover_modules(
     roots: list[Path],
     exclude: list[str],
     generated_dir: str,
+    module_prefix: str | None = None,
 ) -> list[str]:
     """Discover Python module names under the provided roots.
 
@@ -43,9 +44,11 @@ def discover_modules(
     - Converts each path to a module name relative to the root.
     - Excludes any file under a directory named `generated_dir` and any path
       matching a glob in `exclude` (matched against a posix-style relative path).
+    - If `module_prefix` is provided, prefixes discovered module names with it.
     """
 
     module_names: set[str] = set()
+    prefix = module_prefix or None
 
     for root in roots:
         for py_file in root.rglob("*.py"):
@@ -61,15 +64,22 @@ def discover_modules(
                 continue
 
             if rel.name == "__init__.py":
-                mod_path = rel.parent
+                base_mod = ".".join(rel.parent.parts)
             else:
-                mod_path = rel.with_suffix("")
+                base_mod = ".".join(rel.with_suffix("").parts)
 
-            if not mod_path.parts:
-                # Root-level __init__.py doesn't map to a sensible module name.
+            if base_mod == "":
+                # Root-level __init__.py doesn't map to a sensible module name
+                # unless the caller provides a namespace prefix (ex: tests).
+                if prefix is None:
+                    continue
+                module_names.add(prefix)
                 continue
 
-            module_names.add(".".join(mod_path.parts))
+            if prefix is None:
+                module_names.add(base_mod)
+            else:
+                module_names.add(f"{prefix}.{base_mod}")
 
     return sorted(module_names)
 

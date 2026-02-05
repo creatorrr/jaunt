@@ -3,6 +3,8 @@
 __pycache__/
 *.py[cod]
 
+**/__generated__/
+
 .venv/
 .ruff_cache/
 .pytest_cache/
@@ -12,4 +14,3 @@ __pycache__/
 dist/
 build/
 *.egg-info/
-
