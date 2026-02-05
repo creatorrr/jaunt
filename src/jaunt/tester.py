@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,12 +27,41 @@ def _tool_version() -> str:
         return "0"
 
 
-def run_pytest(files: list[Path], *, pytest_args: list[str] | None = None) -> int:
+def run_pytest(
+    files: list[Path],
+    *,
+    pytest_args: list[str] | None = None,
+    pythonpath: Sequence[Path] | None = None,
+    cwd: Path | None = None,
+) -> int:
     if not files:
         return 0
 
     args = [sys.executable, "-m", "pytest", *(pytest_args or []), *[str(p) for p in files]]
-    proc = subprocess.run(args, check=False)
+    env = os.environ.copy()
+    if pythonpath is not None:
+        new_parts: list[str] = []
+        for p in pythonpath:
+            rp = p.resolve()
+            if not rp.exists():
+                continue
+            new_parts.append(str(rp))
+
+        cur = env.get("PYTHONPATH") or ""
+        cur_parts = [x for x in cur.split(os.pathsep) if x] if cur else []
+
+        merged: list[str] = []
+        seen: set[str] = set()
+        for s in [*new_parts, *cur_parts]:
+            if s in seen:
+                continue
+            merged.append(s)
+            seen.add(s)
+
+        if merged:
+            env["PYTHONPATH"] = os.pathsep.join(merged)
+
+    proc = subprocess.run(args, check=False, cwd=str(cwd) if cwd else None, env=env)
     return int(proc.returncode)
 
 
@@ -42,7 +72,7 @@ def _generated_test_relpath(module_name: str, *, tests_package: str, generated_d
         raise ValueError(f"Test module {module_name!r} is not under {tests_package!r}.")
 
     gen_mod = paths.spec_module_to_generated_module(module_name, generated_dir=generated_dir)
-    rel = paths.generated_module_to_relpath(gen_mod)
+    rel = paths.generated_module_to_relpath(gen_mod, generated_dir=generated_dir)
 
     # Safety check: must be tests/<generated_dir>/...
     parts = rel.parts
@@ -167,6 +197,7 @@ async def run_test_generation(
     stale_modules: set[str],
     backend: GeneratorBackend,
     jobs: int = 4,
+    progress: object | None = None,
 ) -> TestGenerationReport:
     jobs = max(1, int(jobs))
 
@@ -266,6 +297,11 @@ async def run_test_generation(
             if bad:
                 failed[dep] = [f"Dependency failed: {d}" for d in bad]
                 completed.add(dep)
+                if progress is not None:
+                    try:
+                        progress.advance(dep, ok=False)  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
                 await complete(dep)
             else:
                 heapq.heappush(ready, (-prio.get(dep, 0), dep))
@@ -303,7 +339,19 @@ async def run_test_generation(
             else:
                 failed[m] = errs or ["Unknown error."]
 
+            if progress is not None:
+                try:
+                    progress.advance(m, ok=ok)  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+
             await complete(m)
+
+    if progress is not None:
+        try:
+            progress.finish()  # type: ignore[attr-defined]
+        except Exception:
+            pass
 
     return TestGenerationReport(
         generated=generated,
@@ -328,6 +376,9 @@ async def run_tests(
     pytest_args: list[str] | None = None,
     no_generate: bool = False,
     no_run: bool = False,
+    progress: object | None = None,
+    pythonpath: Sequence[Path] | None = None,
+    cwd: Path | None = None,
 ) -> PytestResult:
     generated_files: list[Path] = []
 
@@ -355,13 +406,16 @@ async def run_tests(
             stale_modules=stale_modules,
             backend=backend,
             jobs=jobs,
+            progress=progress,
         )
         generated_files = report.generated_files
 
     if no_run:
         return PytestResult(exit_code=0, passed=True, failed=False, failures=[])
 
-    exit_code = run_pytest(generated_files, pytest_args=pytest_args)
+    exit_code = run_pytest(
+        generated_files, pytest_args=pytest_args, pythonpath=pythonpath, cwd=cwd
+    )
     return PytestResult(
         exit_code=exit_code,
         passed=exit_code == 0,

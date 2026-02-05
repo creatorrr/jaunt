@@ -30,7 +30,35 @@ def test_run_pytest_multiple_files(tmp_path: Path) -> None:
     assert run_pytest([p1, p2], pytest_args=["-q"]) == 0
 
 
+def test_run_pytest_honors_pythonpath_and_cwd(tmp_path: Path) -> None:
+    (tmp_path / "src" / "dice_demo").mkdir(parents=True, exist_ok=True)
+    _write(tmp_path / "src" / "dice_demo" / "__init__.py", "VALUE = 1\n")
+
+    test_file = tmp_path / "tests" / "test_import.py"
+    _write(
+        test_file,
+        "\n".join(
+            [
+                "from dice_demo import VALUE",
+                "",
+                "def test_value() -> None:",
+                "    assert VALUE == 1",
+                "",
+            ]
+        ),
+    )
+
+    assert (
+        run_pytest(
+            [test_file],
+            pytest_args=["-q"],
+            pythonpath=[tmp_path / "src"],
+            cwd=tmp_path,
+        )
+        == 0
+    )
+
+
 def test_run_pytest_empty_list_is_ok(tmp_path: Path) -> None:
     # This should be a no-op and not accidentally collect repo tests.
     assert run_pytest([], pytest_args=["-q"]) == 0
-

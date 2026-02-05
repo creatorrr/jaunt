@@ -8,12 +8,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from jaunt import __version__
+from jaunt.dotenv import load_dotenv_into_environ
 from jaunt.errors import (
     JauntConfigError,
     JauntDependencyCycleError,
     JauntDiscoveryError,
     JauntGenerationError,
 )
+from jaunt.progress import ProgressBar
 
 if TYPE_CHECKING:  # pragma: no cover
     from jaunt.config import JauntConfig
@@ -50,6 +52,11 @@ def _add_common_flags(p: argparse.ArgumentParser) -> None:
         "--no-infer-deps",
         action="store_true",
         help="Disable best-effort dependency inference (uses explicit deps only).",
+    )
+    p.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable progress bars.",
     )
 
 
@@ -143,9 +150,32 @@ def _build_backend(cfg: JauntConfig):
     return OpenAIBackend(cfg.llm, cfg.prompts)
 
 
+def _eprint(msg: str) -> None:
+    print(msg, file=sys.stderr)
+
+
+def _print_error(e: BaseException) -> None:
+    if isinstance(e, KeyError) and e.args:
+        name = e.args[0]
+        if isinstance(name, str) and name:
+            _eprint(
+                f"error: missing environment variable {name}. "
+                f"Set it in the environment or add it to <project_root>/.env."
+            )
+            return
+    msg = (str(e) or repr(e)).strip()
+    _eprint(f"error: {msg}")
+
+
+def _maybe_load_dotenv(root: Path) -> None:
+    # Best-effort; never override existing environment variables.
+    load_dotenv_into_environ(root / ".env")
+
+
 def cmd_build(args: argparse.Namespace) -> int:
     try:
         root, cfg = _load_config(args)
+        _maybe_load_dotenv(root)
 
         source_dirs = [root / sr for sr in cfg.paths.source_roots]
         _prepend_sys_path(source_dirs)
@@ -191,6 +221,12 @@ def cmd_build(args: argparse.Namespace) -> int:
             allowed = _deps_closure(target_mods, module_dag=module_dag)
             stale = {m for m in stale if m in allowed}
 
+        stale = builder.expand_stale_modules(module_dag, stale)
+
+        progress = None
+        if stale and (not bool(args.no_progress)) and sys.stderr.isatty():
+            progress = ProgressBar(label="build", total=len(stale), enabled=True, stream=sys.stderr)
+
         jobs = int(args.jobs) if args.jobs is not None else int(cfg.build.jobs)
         report = asyncio.run(
             builder.run_build(
@@ -203,20 +239,24 @@ def cmd_build(args: argparse.Namespace) -> int:
                 stale_modules=stale,
                 backend=_build_backend(cfg),
                 jobs=jobs,
+                progress=progress,
             )
         )
         if getattr(report, "failed", None):
             return EXIT_GENERATION_ERROR
         return EXIT_OK
-    except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError, KeyError):
+    except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError, KeyError) as e:
+        _print_error(e)
         return EXIT_CONFIG_OR_DISCOVERY
-    except (JauntGenerationError, ImportError):
+    except (JauntGenerationError, ImportError) as e:
+        _print_error(e)
         return EXIT_GENERATION_ERROR
 
 
 def cmd_test(args: argparse.Namespace) -> int:
     try:
         root, cfg = _load_config(args)
+        _maybe_load_dotenv(root)
 
         source_dirs = [root / sr for sr in cfg.paths.source_roots]
         # Test modules are expected to be importable as `tests.*` (or another
@@ -279,6 +319,11 @@ def cmd_test(args: argparse.Namespace) -> int:
             allowed = _deps_closure(target_mods, module_dag=module_dag)
             stale = {m for m in stale if m in allowed}
 
+        progress = None
+        total = len(stale & set(module_specs.keys()))
+        if total and (not bool(args.no_progress)) and sys.stderr.isatty():
+            progress = ProgressBar(label="test", total=total, enabled=True, stream=sys.stderr)
+
         result = tester.run_tests(
             project_dir=root,
             generated_dir=cfg.paths.generated_dir,
@@ -292,6 +337,9 @@ def cmd_test(args: argparse.Namespace) -> int:
             no_generate=False,
             no_run=bool(args.no_run),
             pytest_args=pytest_args,
+            progress=progress,
+            pythonpath=[*source_dirs, root],
+            cwd=root,
         )
 
         if asyncio.iscoroutine(result):
@@ -301,9 +349,11 @@ def cmd_test(args: argparse.Namespace) -> int:
         if exit_code == 0:
             return EXIT_OK
         return EXIT_PYTEST_FAILURE if not bool(args.no_run) else EXIT_GENERATION_ERROR
-    except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError, KeyError):
+    except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError, KeyError) as e:
+        _print_error(e)
         return EXIT_CONFIG_OR_DISCOVERY
-    except (JauntGenerationError, ImportError, AttributeError):
+    except (JauntGenerationError, ImportError, AttributeError) as e:
+        _print_error(e)
         return EXIT_GENERATION_ERROR
 
 

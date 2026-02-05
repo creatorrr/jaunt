@@ -22,9 +22,8 @@ def module_to_relpath(module: str) -> Path:
     return Path(*parts)
 
 
-def generated_module_to_relpath(module: str) -> Path:
+def generated_module_to_relpath(module: str, *, generated_dir: str = "__generated__") -> Path:
     parts = module.split(".")
-    if parts and parts[-1] == "__generated__":
+    if parts and parts[-1] == generated_dir:
         return Path(*parts) / "__init__.py"
     return module_to_relpath(module)
-

@@ -15,6 +15,14 @@ export default function HomePage() {
         <Link href="/docs/getting-started" className="font-medium underline">
           Getting started
         </Link>
+        <a
+          className="font-medium underline"
+          href="https://github.com/ijindal1/jaunt"
+          rel="noreferrer noopener"
+          target="_blank"
+        >
+          GitHub
+        </a>
       </div>
     </div>
   );

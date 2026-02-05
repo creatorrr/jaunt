@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from jaunt.config import LLMConfig, PromptsConfig
+from jaunt.errors import JauntConfigError
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
 
 
@@ -40,8 +41,12 @@ def _fmt_kv_block(items: list[tuple[str, str]], *, empty: str = "(none)") -> str
 
 class OpenAIBackend(GeneratorBackend):
     def __init__(self, llm: LLMConfig, prompts: PromptsConfig | None = None) -> None:
-        # Spec: read directly from os.environ[...] (raises KeyError if missing).
-        api_key = os.environ[llm.api_key_env]
+        api_key = (os.environ.get(llm.api_key_env) or "").strip()
+        if not api_key:
+            raise JauntConfigError(
+                f"Missing API key: {llm.api_key_env}. "
+                f"Set it in the environment or add it to <project_root>/.env."
+            )
         self._model = llm.model
 
         # OpenAI SDK is an optional import for the rest of the system; only this

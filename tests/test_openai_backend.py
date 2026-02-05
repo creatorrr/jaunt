@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from jaunt.config import LLMConfig
+from jaunt.errors import JauntConfigError
 from jaunt.generate.base import ModuleSpecContext
 from jaunt.generate.openai_backend import OpenAIBackend
 
@@ -71,3 +74,10 @@ def test_openai_backend_renders_expected_names_and_kind_specific_rules(monkeypat
 
     # Test prompts: must generate tests only.
     assert ("Generate tests only" in test_user) or ("tests only" in test_system)
+
+
+def test_openai_backend_errors_when_api_key_missing(monkeypatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(JauntConfigError) as ei:
+        OpenAIBackend(LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY"))
+    assert "Missing API key" in str(ei.value)

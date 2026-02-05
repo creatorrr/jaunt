@@ -10,6 +10,7 @@ from pathlib import Path
 
 from jaunt import paths
 from jaunt.digest import extract_source_segment, module_digest
+from jaunt.errors import JauntDependencyCycleError
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
 from jaunt.header import extract_module_digest, format_header
 from jaunt.registry import SpecEntry
@@ -36,7 +37,7 @@ def _generated_relpath(module_name: str, *, generated_dir: str) -> Path:
     generated_module = paths.spec_module_to_generated_module(
         module_name, generated_dir=generated_dir
     )
-    return paths.generated_module_to_relpath(generated_module)
+    return paths.generated_module_to_relpath(generated_module, generated_dir=generated_dir)
 
 
 def _ensure_init_files(package_dir: Path, relpath: Path) -> None:
@@ -183,6 +184,25 @@ def _critical_path_lengths(modules: set[str], dag: dict[str, set[str]]) -> dict[
     return memo
 
 
+def _raise_cycle_error(module_graph: dict[str, set[str]]) -> None:
+    # Delegate cycle extraction/formatting to deps.toposort, which raises
+    # JauntDependencyCycleError with the participants in the message.
+    from jaunt.deps import toposort
+
+    try:
+        toposort(module_graph)
+    except JauntDependencyCycleError:
+        raise
+    raise JauntDependencyCycleError("Dependency cycle detected.")
+
+
+def _assert_acyclic(module_graph: dict[str, set[str]]) -> None:
+    from jaunt.deps import toposort
+
+    # `toposort` raises JauntDependencyCycleError and includes participants.
+    toposort(module_graph)
+
+
 async def run_build(
     *,
     package_dir: Path,
@@ -194,6 +214,7 @@ async def run_build(
     stale_modules: set[str],
     backend: GeneratorBackend,
     jobs: int = 4,
+    progress: object | None = None,
 ) -> BuildReport:
     jobs = max(1, int(jobs))
 
@@ -216,6 +237,8 @@ async def run_build(
         indeg[m] = len(deps)
         for d in deps:
             dependents.setdefault(d, set()).add(m)
+
+    _assert_acyclic(deps_in_stale)
 
     prio = _critical_path_lengths(stale, module_dag)
 
@@ -292,6 +315,11 @@ async def run_build(
             if bad:
                 failed[dep] = [f"Dependency failed: {d}" for d in bad]
                 completed.add(dep)
+                if progress is not None:
+                    try:
+                        progress.advance(dep, ok=False)  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
                 await complete(dep)
             else:
                 heapq.heappush(ready, (-prio.get(dep, 0), dep))
@@ -326,6 +354,25 @@ async def run_build(
             else:
                 failed[m] = errs or ["Unknown error."]
 
+            if progress is not None:
+                try:
+                    progress.advance(m, ok=ok)  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+
             await complete(m)
+
+    remaining = stale - completed
+    if remaining:
+        # Scheduler deadlock: remaining modules could not become ready. Most
+        # likely a dependency cycle among the remaining induced subgraph.
+        sub = {m: {d for d in deps_in_stale.get(m, set()) if d in remaining} for m in remaining}
+        _raise_cycle_error(sub)
+
+    if progress is not None:
+        try:
+            progress.finish()  # type: ignore[attr-defined]
+        except Exception:
+            pass
 
     return BuildReport(generated=generated, skipped=skipped, failed=failed)

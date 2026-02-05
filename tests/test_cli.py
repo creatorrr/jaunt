@@ -12,6 +12,7 @@ def test_parse_build_defaults() -> None:
     assert ns.force is False
     assert ns.target == []
     assert ns.no_infer_deps is False
+    assert ns.no_progress is False
 
 
 def test_parse_build_flags() -> None:
@@ -30,6 +31,7 @@ def test_parse_build_flags() -> None:
             "--target",
             "pkg.other",
             "--no-infer-deps",
+            "--no-progress",
         ]
     )
     assert ns.command == "build"
@@ -39,6 +41,7 @@ def test_parse_build_flags() -> None:
     assert ns.force is True
     assert ns.target == ["pkg.mod:foo", "pkg.other"]
     assert ns.no_infer_deps is True
+    assert ns.no_progress is True
 
 
 def test_parse_test_defaults() -> None:
@@ -47,6 +50,7 @@ def test_parse_test_defaults() -> None:
     assert ns.no_build is False
     assert ns.no_run is False
     assert ns.pytest_args == []
+    assert ns.no_progress is False
 
 
 def test_parse_test_flags() -> None:
@@ -55,6 +59,7 @@ def test_parse_test_flags() -> None:
             "test",
             "--no-build",
             "--no-run",
+            "--no-progress",
             "--pytest-args=-k",
             "--pytest-args",
             "foo",
@@ -64,6 +69,7 @@ def test_parse_test_flags() -> None:
     assert ns.no_build is True
     assert ns.no_run is True
     assert ns.pytest_args == ["-k", "foo"]
+    assert ns.no_progress is True
 
 
 def test_main_returns_version_exit_code_zero() -> None:

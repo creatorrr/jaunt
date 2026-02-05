@@ -20,7 +20,7 @@ export OPENAI_API_KEY=...
 uv run jaunt build --root toy-example
 
 # 2) Generate pytest tests for @jaunt.test specs and run them.
-PYTHONPATH=toy-example/src uv run jaunt test --root toy-example
+uv run jaunt test --root toy-example
 
 # 3) Call the generated implementation via the runtime wrappers.
 PYTHONPATH=toy-example/src uv run python - <<'PY'

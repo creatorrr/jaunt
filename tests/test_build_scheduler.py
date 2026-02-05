@@ -3,8 +3,11 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from jaunt.builder import run_build
 from jaunt.deps import build_spec_graph
+from jaunt.errors import JauntDependencyCycleError
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
 from jaunt.registry import SpecEntry
 from jaunt.spec_ref import normalize_spec_ref
@@ -113,3 +116,36 @@ def test_non_stale_modules_are_skipped(tmp_path: Path) -> None:
     assert report.failed == {}
     assert report.skipped == {"pkg.a"}
     assert backend.calls == []
+
+
+def test_scheduler_cycle_raises(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+
+    a_path = tmp_path / "a.py"
+    b_path = tmp_path / "b.py"
+    _write(a_path, "def A():\n    return 1\n")
+    _write(b_path, "def B():\n    return 2\n")
+
+    a = _entry(module="pkg.a", qualname="A", source_file=str(a_path), deps=["pkg.b:B"])
+    b = _entry(module="pkg.b", qualname="B", source_file=str(b_path), deps=["pkg.a:A"])
+
+    specs = {a.spec_ref: a, b.spec_ref: b}
+    spec_graph = build_spec_graph(specs, infer_default=False)
+    module_specs = {"pkg.a": [a], "pkg.b": [b]}
+    module_dag = {"pkg.a": {"pkg.b"}, "pkg.b": {"pkg.a"}}
+
+    backend = FakeBackend()
+    with pytest.raises(JauntDependencyCycleError):
+        asyncio.run(
+            run_build(
+                package_dir=src,
+                generated_dir="__generated__",
+                module_specs=module_specs,
+                specs=specs,
+                spec_graph=spec_graph,
+                module_dag=module_dag,
+                stale_modules=set(module_specs.keys()),
+                backend=backend,
+                jobs=1,
+            )
+        )

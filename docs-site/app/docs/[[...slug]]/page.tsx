@@ -12,9 +12,10 @@ export default async function Page(props: PageProps<'/docs/[[...slug]]'>) {
   if (!page) notFound();
 
   const MDX = page.data.body;
-  // Optional: set `NEXT_PUBLIC_GITHUB_REPO` to something like
-  // "https://github.com/<user>/<repo>" to enable "Open in GitHub".
-  const githubRepo = process.env.NEXT_PUBLIC_GITHUB_REPO;
+  // Optional overrides:
+  // - NEXT_PUBLIC_GITHUB_REPO="https://github.com/<user>/<repo>"
+  // - NEXT_PUBLIC_GITHUB_BRANCH="main"
+  const githubRepo = process.env.NEXT_PUBLIC_GITHUB_REPO ?? 'https://github.com/ijindal1/jaunt';
   const githubBranch = process.env.NEXT_PUBLIC_GITHUB_BRANCH ?? 'main';
   const githubUrl =
     githubRepo && githubRepo.startsWith('http')

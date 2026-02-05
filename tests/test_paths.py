@@ -25,3 +25,19 @@ def test_nested_module_paths() -> None:
     assert generated_module_to_relpath(gen_mod) == (
         Path("my_project") / "__generated__" / "sub" / "mod.py"
     )
+
+
+def test_custom_generated_dir_init_module_paths() -> None:
+    gen_mod = spec_module_to_generated_module("my_project", generated_dir="gen")
+    assert gen_mod == "my_project.gen"
+    assert generated_module_to_relpath(gen_mod, generated_dir="gen") == (
+        Path("my_project") / "gen" / "__init__.py"
+    )
+
+
+def test_custom_generated_dir_nested_module_paths() -> None:
+    gen_mod = spec_module_to_generated_module("my_project.sub.mod", generated_dir="gen")
+    assert gen_mod == "my_project.gen.sub.mod"
+    assert generated_module_to_relpath(gen_mod, generated_dir="gen") == (
+        Path("my_project") / "gen" / "sub" / "mod.py"
+    )
