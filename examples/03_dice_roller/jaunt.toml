@@ -1,0 +1,15 @@
+version = 1
+
+[paths]
+source_roots = ["src"]
+test_roots = ["tests"]
+generated_dir = "__generated__"
+
+[llm]
+provider = "openai"
+model = "gpt-5.2"
+api_key_env = "OPENAI_API_KEY"
+
+[test]
+pytest_args = ["-q"]
+
