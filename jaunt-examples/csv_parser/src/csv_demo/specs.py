@@ -35,6 +35,9 @@ def parse_csv(
       - Falsy: "false", "0", "no"
     - Strip whitespace from all cell values before coercion for all types.
     - Ignore empty trailing rows (rows where all cells are empty or whitespace).
+    - Must support dataclasses defined under `from __future__ import annotations`.
+      Resolve field types using `typing.get_type_hints(target)` (not `dataclasses.Field.type`)
+      so annotations like "str" / "bool" are handled correctly.
 
     Strict mode (strict=True):
     - Raise ValueError if any header column doesn't match a dataclass field.

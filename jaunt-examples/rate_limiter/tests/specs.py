@@ -13,7 +13,7 @@ def test_allows_up_to_limit() -> None:
     With max_requests=3, the first 3 calls to allow("ip-1")
     should return True. The 4th should return False.
 
-    Use a fake clock fixed at t=1000.0.
+    Use a fake clock callable fixed at t=1000.0.
     """
     raise AssertionError("spec stub (generated at test time)")
 
@@ -27,7 +27,7 @@ def test_window_expiry_frees_capacity() -> None:
     - At t=5: allow("k") -> False (still in window)
     - At t=11: allow("k") -> True (first two requests expired)
 
-    Use a fake clock whose .now() return value you can advance.
+    Use a fake clock callable whose return value you can advance.
     """
     raise AssertionError("spec stub (generated at test time)")
 

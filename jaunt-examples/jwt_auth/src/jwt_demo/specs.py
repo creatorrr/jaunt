@@ -38,7 +38,11 @@ def create_token(
 
     - Use HMAC-SHA256 with `secret` as the key.
     - base64url encoding must omit padding ("=" characters).
-    - Raise ValueError if user_id is empty or ttl is not positive.
+    - Raise ValueError if user_id is empty.
+
+    Notes:
+    - Allow any ttl (including negative) so tests can create already-expired tokens.
+    - Use integer unix timestamps (seconds) for iat/exp.
     """
     raise RuntimeError("spec stub (generated at build time)")
 
@@ -75,5 +79,10 @@ def rotate_token(token: str, secret: str, *, ttl: timedelta = timedelta(hours=1)
     - Verify the old token (propagate any errors).
     - Create a new token with the same user_id and a fresh ttl.
     - Return the new token string.
+
+    Freshness:
+    - The rotated token MUST have strictly increasing iat/exp compared to the input token.
+      If the current clock time has not advanced enough (for example, both calls land in the
+      same second), bump iat forward so iat2 > iat1.
     """
     raise RuntimeError("spec stub (generated at build time)")

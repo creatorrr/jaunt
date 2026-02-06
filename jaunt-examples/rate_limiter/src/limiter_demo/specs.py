@@ -6,17 +6,9 @@ A sliding-window rate limiter suitable for API endpoints.
 
 from __future__ import annotations
 
-from typing import Protocol
+from collections.abc import Callable
 
 import jaunt
-
-
-class Clock(Protocol):
-    """Injectable time source for testability."""
-
-    def now(self) -> float:
-        """Return current time as a unix timestamp."""
-        ...
 
 
 @jaunt.magic()
@@ -37,7 +29,7 @@ class SlidingWindowLimiter:
     Constructor:
     - max_requests: int — max allowed per window (must be >= 1).
     - window_seconds: float — window duration (must be > 0).
-    - clock: Clock — injectable time source (default: use time.time).
+    - clock: Callable[[], float] — injectable time source (default: use time.time).
 
     Cleanup:
     - Expired timestamps should be pruned on every call to allow().
@@ -51,7 +43,7 @@ class SlidingWindowLimiter:
         max_requests: int,
         window_seconds: float,
         *,
-        clock: Clock | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         raise RuntimeError("spec stub (generated at build time)")
 
