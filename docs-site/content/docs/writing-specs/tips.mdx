@@ -3,7 +3,19 @@ title: Spec Writing Tips
 description: "Practical patterns for getting better output from smaller specs."
 ---
 
-You don't "use Jaunt" once. You live in a loop: **write spec -> build -> review -> tighten spec -> rebuild**.
+You don't "use Jaunt" once. You live in a loop: **write spec → build → review → tighten spec → rebuild**.
+
+## Iterating On Specs
+
+This loop IS the development process:
+
+1. Write a spec with your best guess at the contract.
+2. Run `jaunt build`.
+3. Read the generated code. Does it match your intent?
+4. If not: tighten the docstring, add edge cases, use `prompt=` for constraints.
+5. Re-run `jaunt build`. Jaunt only regenerates what changed.
+
+You'll usually get 80% right on the first pass. The second pass — where you name the edge cases you forgot — is where the spec gets good. Don't try to write the perfect spec upfront. Iterate.
 
 ## Vague vs. Precise Docstrings
 
@@ -32,7 +44,9 @@ def parse_user_agent(ua: str) -> dict[str, str]:
     raise RuntimeError("spec stub (generated at build time)")
 ```
 
-## Use `prompt=` When The Docstring Isn’t Enough
+The difference: the vague spec leaves every decision to the LLM. The precise spec names the return shape, the failure mode, and the edge case. Better spec → better code → less iteration.
+
+## Use `prompt=` When The Docstring Isn't Enough
 
 If a constraint is non-negotiable, say it twice:
 
@@ -43,11 +57,17 @@ def stable_hash(text: str) -> str:
     raise RuntimeError("spec stub (generated at build time)")
 ```
 
-## Don’t Edit Generated Files
+Good uses of `prompt=`:
+
+- Force a specific library: `prompt="Use the cryptography library, not hashlib."`
+- Architectural constraints: `prompt="Must be async-safe. No global state."`
+- Style preferences: `prompt="Prefer explicit loops over list comprehensions for readability."`
+
+## Don't Edit Generated Files
 
 Generated output is disposable. Specs are the product.
 
-If you need a behavior change, change the spec and rebuild so your intent is versioned.
+If you need a behavior change, change the spec and rebuild so your intent is versioned. Editing `__generated__/` files directly means your changes will be overwritten on the next build.
 
 ## When Not To Use Jaunt
 

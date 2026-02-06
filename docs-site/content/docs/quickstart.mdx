@@ -11,18 +11,18 @@ This is the shortest path to an "aha": write one tiny spec, run `jaunt build`, a
 
 ## Project Layout
 
-Create a small "src layout" project:
+Create a small "src layout" project. The `__init__.py` files can be empty:
 
 ```text
 myproj/
   jaunt.toml
   src/
     my_app/
-      __init__.py
-      specs.py
+      __init__.py      # empty
+      specs.py          # your @jaunt.magic specs
   tests/
-    __init__.py
-    specs_email.py
+    __init__.py        # empty
+    specs_email.py     # your @jaunt.test specs
 ```
 
 ## 1) Install
@@ -96,9 +96,11 @@ From `myproj/`:
 jaunt build
 ```
 
-Jaunt will write a real module under:
+Jaunt reads your spec, sends it to OpenAI, validates the output, and writes a real module to:
 
-- `src/my_app/__generated__/specs.py`
+```text
+src/my_app/__generated__/specs.py
+```
 
 ## 5) Use It (Runtime Forwarding)
 

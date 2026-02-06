@@ -1,15 +1,15 @@
 ---
 title: jaunt, dont code.
-description: "Turn small Python specs into real modules (and tests) with an LLM."
+description: "Spec-driven code generation: write Python stubs, get real implementations from an LLM."
 ---
 
 Jaunt is a Python library + CLI for **spec-driven code generation**.
 
-You write **intent** as real Python stubs (types + docstrings). Jaunt generates the boring correctness work under `__generated__/`. You review and iterate. The spec is the contract.
+You write **specs** — real Python stubs with types and docstrings. Jaunt sends them to an LLM and generates real implementations + tests under `__generated__/`. You review, iterate, and ship. The spec is the contract — everything flows from it.
 
 ## The Wow Gap
 
-This is the pitch. A tiny spec on the left. Real code on the right.
+A tiny spec on the left. Real code on the right.
 
 <div className="grid gap-4 md:grid-cols-2">
   <div>
@@ -83,10 +83,10 @@ def create_token(user_id: str, secret: str, *, ttl: timedelta = timedelta(hours=
 
 ## Why Not Just Prompt An LLM Directly?
 
-- Specs are **versionable**: real Python in your repo, not chat history.
-- **Incremental rebuilds**: Jaunt hashes specs and only regenerates what’s stale.
-- **Dependency ordering**: specs can depend on other specs; Jaunt builds a DAG.
-- **Runtime forwarding**: import your spec module; the decorator forwards to generated code.
+- Specs are **versionable**: real Python in your repo, not ephemeral chat history.
+- **Incremental rebuilds**: Jaunt hashes specs and only regenerates what's stale.
+- **Dependency ordering**: specs can depend on other specs; Jaunt builds a DAG and generates in the right order.
+- **Runtime forwarding**: import your spec module and call it like normal Python; the `@jaunt.magic` decorator handles the rest.
 
 ## Start Here
 

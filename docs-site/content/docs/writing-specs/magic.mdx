@@ -44,11 +44,14 @@ If your spec says it returns `str`, the generator should not "helpfully" return 
 
 ### Docstring
 
-Write it like a really good ticket:
+The docstring IS the specification. Write it like a really good ticket, not a code comment:
 
-- say what the function **must do**
-- name the **inputs that should fail** and how they fail
-- include 1-3 **examples** if subtle
+- say what the function **must do** (behavior, not implementation)
+- name the **inputs that should fail** and how they fail (ValueError? None? silent fallback?)
+- include 1-3 **examples** if the behavior is subtle
+- be specific about return shape (keys, format, units)
+
+Think: "If I handed this to a senior developer, would they implement it the same way every time?" If not, add more constraints.
 
 ### Body
 
