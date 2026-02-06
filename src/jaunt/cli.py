@@ -179,6 +179,12 @@ def cmd_build(args: argparse.Namespace) -> int:
 
         source_dirs = [root / sr for sr in cfg.paths.source_roots]
 
+        # Propagate generated_dir to the runtime so @magic forwarding uses the
+        # configured directory (not just the hardcoded default).
+        import os as _os
+
+        _os.environ["JAUNT_GENERATED_DIR"] = cfg.paths.generated_dir
+
         skills_block = ""
         try:
             from jaunt import skills_auto
@@ -200,7 +206,7 @@ def cmd_build(args: argparse.Namespace) -> int:
         _prepend_sys_path(source_dirs)
 
         from jaunt import discovery, registry
-        from jaunt.deps import build_spec_graph, collapse_to_module_dag
+        from jaunt.deps import build_spec_graph, collapse_to_module_dag, find_cycles
 
         registry.clear_registries()
         modules = discovery.discover_modules(
@@ -217,6 +223,21 @@ def cmd_build(args: argparse.Namespace) -> int:
         infer_default = bool(cfg.build.infer_deps) and (not bool(args.no_infer_deps))
         spec_graph = build_spec_graph(specs, infer_default=infer_default)
         module_dag = collapse_to_module_dag(spec_graph)
+
+        # Early cycle detection with actionable diagnostics.
+        cycles = find_cycles(spec_graph)
+        if cycles:
+            _eprint("error: dependency cycle(s) detected")
+            for cycle in cycles:
+                path = " -> ".join(str(s) for s in cycle) + " -> " + str(cycle[0])
+                _eprint(f"  {path}")
+            _eprint("hint: break the cycle by removing a dep from one of these specs")
+            raise JauntDependencyCycleError(
+                "Dependency cycle detected: " + ", ".join(
+                    " -> ".join(str(s) for s in c) for c in cycles
+                )
+            )
+
         module_specs = registry.get_specs_by_module("magic")
 
         package_dir = next((d for d in source_dirs if d.exists()), None)

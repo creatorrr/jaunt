@@ -249,6 +249,7 @@ async def run_build(
             heapq.heappush(ready, (-prio.get(m, 0), m))
 
     generated: set[str] = set()
+    generated_sources: dict[str, str] = {}  # module_name -> generated source
     failed: dict[str, list[str]] = {}
     completed: set[str] = set()
 
@@ -264,6 +265,18 @@ async def run_build(
             if isinstance(p, str) and p:
                 decorator_prompts[e.spec_ref] = p
 
+        # Collect dependency context from already-generated modules.
+        dep_apis: dict[SpecRef, str] = {}
+        dep_gen_modules: dict[str, str] = {}
+        for dep_mod in module_dag.get(module_name, set()):
+            if dep_mod in generated_sources:
+                dep_gen_modules[dep_mod] = generated_sources[dep_mod]
+            for dep_entry in module_specs.get(dep_mod, []):
+                try:
+                    dep_apis[dep_entry.spec_ref] = extract_source_segment(dep_entry)
+                except Exception:  # pragma: no cover - best-effort
+                    pass
+
         ctx = ModuleSpecContext(
             kind="build",
             spec_module=module_name,
@@ -273,8 +286,8 @@ async def run_build(
             expected_names=expected,
             spec_sources=spec_sources,
             decorator_prompts=decorator_prompts,
-            dependency_apis={},
-            dependency_generated_modules={},
+            dependency_apis=dep_apis,
+            dependency_generated_modules=dep_gen_modules,
             skills_block=skills_block,
         )
 
@@ -285,6 +298,9 @@ async def run_build(
         errors = validate_generated_source(result.source, expected)
         if errors:
             return False, errors
+
+        # Store generated source for downstream dependents.
+        generated_sources[module_name] = result.source
 
         digest = module_digest(module_name, entries, specs, spec_graph)
         header_fields = {

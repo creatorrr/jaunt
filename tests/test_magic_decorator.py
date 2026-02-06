@@ -150,3 +150,25 @@ def test_rejects_custom_metaclass() -> None:
 
     with pytest.raises(JauntError):
         magic()(WithMeta)
+
+
+def test_runtime_respects_generated_dir_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When JAUNT_GENERATED_DIR is set, the runtime should use it instead of __generated__."""
+    monkeypatch.setenv("JAUNT_GENERATED_DIR", "__custom_gen__")
+
+    import_calls: list[str] = []
+
+    def _import(name: str) -> Any:
+        import_calls.append(name)
+        raise ModuleNotFoundError(name)
+
+    monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+    wrapped = magic()(top_level_fn)
+    with pytest.raises(JauntNotBuiltError):
+        wrapped(1)
+
+    # The import should have tried the custom generated dir, not __generated__
+    assert any("__custom_gen__" in c for c in import_calls), (
+        f"Expected import to use __custom_gen__, got: {import_calls}"
+    )

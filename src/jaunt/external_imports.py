@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import functools
 import os
 import re
 import sys
@@ -107,6 +108,7 @@ def _discover_internal_top_levels(*, source_roots: Sequence[Path]) -> set[str]:
     return internal
 
 
+@functools.lru_cache(maxsize=256)
 def _resolve_dist_by_name_heuristic(import_mod: str) -> tuple[str, str] | None:
     """Best-effort: try dists derived from dotted module path.
 

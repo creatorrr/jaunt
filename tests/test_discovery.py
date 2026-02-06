@@ -104,6 +104,26 @@ def test_import_and_collect_wraps_import_errors(
     assert "badmod" in str(excinfo.value)
 
 
+def test_discover_modules_with_target_modules_skips_scan(tmp_path: Path) -> None:
+    """When target_modules is provided, only those modules should be returned."""
+    _write(tmp_path / "pkg" / "__init__.py", "")
+    _write(tmp_path / "pkg" / "foo.py", "X = 1\n")
+    _write(tmp_path / "pkg" / "bar.py", "Y = 2\n")
+    _write(tmp_path / "pkg" / "baz.py", "Z = 3\n")
+
+    mods = discover_modules(
+        roots=[tmp_path],
+        exclude=[],
+        generated_dir="__generated__",
+        target_modules={"pkg.foo", "pkg.bar"},
+    )
+
+    # Only the targeted modules should be returned, not all discovered modules.
+    assert "pkg.foo" in mods
+    assert "pkg.bar" in mods
+    assert "pkg.baz" not in mods
+
+
 def test_import_and_collect_imports_modules(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

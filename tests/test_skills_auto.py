@@ -132,6 +132,84 @@ def test_existing_generated_skill_version_change_regenerates(tmp_path: Path, mon
     assert "jaunt:skill=pypi" not in res.skills_block
 
 
+def test_resolve_dist_by_name_heuristic_is_memoized(monkeypatch) -> None:
+    """_resolve_dist_by_name_heuristic should cache results to avoid repeated metadata lookups."""
+    import jaunt.external_imports as ei
+
+    # Clear any prior cache state.
+    ei._resolve_dist_by_name_heuristic.cache_clear()
+
+    call_count = 0
+
+    def counting_version(name: str) -> str:
+        nonlocal call_count
+        call_count += 1
+        if name == "requests":
+            return "2.31.0"
+        raise ei.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(ei.metadata, "version", counting_version)
+
+    # Call twice with the same input
+    r1 = ei._resolve_dist_by_name_heuristic("requests")
+    r2 = ei._resolve_dist_by_name_heuristic("requests")
+    assert r1 == ("requests", "2.31.0")
+    assert r1 == r2
+    # Second call should be cached — only 1 metadata.version call
+    assert call_count == 1
+
+    # Clean up cache so other tests aren't affected.
+    ei._resolve_dist_by_name_heuristic.cache_clear()
+
+
+def test_skill_generation_runs_concurrently(tmp_path: Path, monkeypatch) -> None:
+    """When multiple skills need generation, they should be generated concurrently."""
+    import jaunt.skillgen as sg
+    import jaunt.skills_auto as sa
+
+    dists = {"lib-a": "1.0.0", "lib-b": "2.0.0", "lib-c": "3.0.0"}
+    monkeypatch.setattr(
+        sa,
+        "discover_external_distributions_with_warnings",
+        lambda *_a, **_k: (dists, []),
+    )
+    monkeypatch.setattr(sa, "fetch_readme", lambda *_a, **_k: ("README", "text/markdown"))
+
+    generation_order: list[str] = []
+    concurrency_high_water: list[int] = [0]
+    active_count = [0]
+
+    class ConcurrencyTrackingGen:
+        def __init__(self, llm):  # noqa: ANN001
+            pass
+
+        async def generate_skill_markdown(self, dist, version, readme, readme_type):  # noqa: ANN001
+            active_count[0] += 1
+            concurrency_high_water[0] = max(concurrency_high_water[0], active_count[0])
+            await asyncio.sleep(0.01)  # Simulate async work
+            generation_order.append(dist)
+            active_count[0] -= 1
+            return f"SKILL for {dist}"
+
+    monkeypatch.setattr(sg, "OpenAISkillGenerator", ConcurrencyTrackingGen)
+
+    res = asyncio.run(
+        ensure_pypi_skills_and_block(
+            project_root=tmp_path,
+            source_roots=[],
+            generated_dir="__generated__",
+            llm=LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY"),
+        )
+    )
+    assert res.warnings == []
+    # All 3 skills should have been generated
+    assert len(generation_order) == 3
+    # With parallel generation, concurrency should be > 1
+    assert concurrency_high_water[0] > 1, (
+        f"Expected concurrent generation but high water mark was {concurrency_high_water[0]}"
+    )
+
+
 def test_user_managed_skill_never_overwritten(tmp_path: Path, monkeypatch) -> None:
     dist = "external-lib"
     version = "9.9.9"

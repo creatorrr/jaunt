@@ -37,6 +37,7 @@ def discover_modules(
     exclude: list[str],
     generated_dir: str,
     module_prefix: str | None = None,
+    target_modules: set[str] | None = None,
 ) -> list[str]:
     """Discover Python module names under the provided roots.
 
@@ -45,10 +46,40 @@ def discover_modules(
     - Excludes any file under a directory named `generated_dir` and any path
       matching a glob in `exclude` (matched against a posix-style relative path).
     - If `module_prefix` is provided, prefixes discovered module names with it.
+    - If `target_modules` is provided, fast-path: verify each target exists on
+      disk and return only those instead of scanning the full tree.
     """
 
-    module_names: set[str] = set()
     prefix = module_prefix or None
+
+    # Fast path: resolve target modules directly from their expected file paths.
+    if target_modules is not None:
+        found: set[str] = set()
+        for mod in target_modules:
+            # Strip prefix to get the relative module name.
+            relative_mod = mod
+            if prefix is not None and mod.startswith(f"{prefix}."):
+                relative_mod = mod[len(prefix) + 1 :]
+            elif prefix is not None and mod == prefix:
+                relative_mod = ""
+
+            for root in roots:
+                if relative_mod == "":
+                    candidate = root / "__init__.py"
+                    if candidate.is_file():
+                        found.add(mod)
+                        break
+                else:
+                    parts = relative_mod.split(".")
+                    # Could be a package (dir/__init__.py) or a module (file.py).
+                    file_path = root / Path(*parts).with_suffix(".py")
+                    pkg_path = root / Path(*parts) / "__init__.py"
+                    if file_path.is_file() or pkg_path.is_file():
+                        found.add(mod)
+                        break
+        return sorted(found)
+
+    module_names: set[str] = set()
 
     for root in roots:
         for py_file in root.rglob("*.py"):

@@ -89,6 +89,8 @@ async def ensure_pypi_skills_and_block(
     Returns a single concatenated injection block to pass to the code generator.
     """
 
+    import asyncio
+
     warnings: list[str] = []
     dists, scan_warnings = discover_external_distributions_with_warnings(
         source_roots, generated_dir=generated_dir
@@ -98,11 +100,8 @@ async def ensure_pypi_skills_and_block(
     if not dists:
         return SkillsAutoResult(skills_block="", warnings=warnings)
 
-    # Lazily constructed only if we actually need to generate something.
-    generator = None
-    generator_init_failed = False
-
-    # Ensure skills exist (or are updated if Jaunt-generated and version changed).
+    # Phase 1: identify which dists need (re)generation.
+    to_generate: list[tuple[str, str, Path]] = []  # (dist, version, path)
     for dist, version in sorted(dists.items(), key=lambda kv: pep503_normalize(kv[0])):
         path = skill_md_path(project_root=project_root, dist=dist)
 
@@ -129,52 +128,63 @@ async def ensure_pypi_skills_and_block(
                 if str(existing_ver).strip() != str(version).strip():
                     needs_generate = True
 
-        if not needs_generate:
-            continue
+        if needs_generate:
+            to_generate.append((dist, version, path))
 
-        # Fetch README from PyPI for exact version.
+    # Phase 2: generate skills concurrently.
+    if to_generate:
+        generator = None
         try:
-            readme, readme_type = fetch_readme(dist, version)
-        except PyPIReadmeError as e:
-            warnings.append(str(e))
-            continue
+            from jaunt.skillgen import OpenAISkillGenerator
+
+            generator = OpenAISkillGenerator(llm)
         except Exception as e:  # noqa: BLE001
             warnings.append(
-                f"Failed fetching PyPI README for {dist}=={version}: {type(e).__name__}: {e}"
+                f"Failed initializing OpenAI skill generator: {type(e).__name__}: {e}"
             )
-            continue
 
-        if generator is None and not generator_init_failed:
-            try:
-                from jaunt.skillgen import OpenAISkillGenerator
+        if generator is not None:
 
-                generator = OpenAISkillGenerator(llm)
-            except Exception as e:  # noqa: BLE001
-                warnings.append(
-                    f"Failed initializing OpenAI skill generator: {type(e).__name__}: {e}"
-                )
-                # Can't generate any skills; keep going so we can still inject existing ones.
-                generator_init_failed = True
+            async def _generate_one(dist: str, version: str, path: Path) -> None:
+                try:
+                    readme, readme_type = fetch_readme(dist, version)
+                except PyPIReadmeError as e:
+                    warnings.append(str(e))
+                    return
+                except Exception as e:  # noqa: BLE001
+                    warnings.append(
+                        f"Failed fetching PyPI README for {dist}=={version}: "
+                        f"{type(e).__name__}: {e}"
+                    )
+                    return
 
-        if generator is None:
-            continue
+                try:
+                    md = await generator.generate_skill_markdown(
+                        dist, version, readme, readme_type
+                    )
+                except Exception as e:  # noqa: BLE001
+                    warnings.append(
+                        f"Failed generating skill for {dist}=={version}: "
+                        f"{type(e).__name__}: {e}"
+                    )
+                    return
 
-        try:
-            md = await generator.generate_skill_markdown(dist, version, readme, readme_type)
-        except Exception as e:  # noqa: BLE001
-            warnings.append(
-                f"Failed generating skill for {dist}=={version}: {type(e).__name__}: {e}"
-            )
-            continue
+                try:
+                    content = _format_generated_skill_file(
+                        dist=dist, version=version, body_md=md
+                    )
+                    _atomic_write_text(path, content)
+                except Exception as e:  # noqa: BLE001
+                    warnings.append(
+                        f"Failed writing skill for {dist}=={version} to {path}: "
+                        f"{type(e).__name__}: {e}"
+                    )
 
-        try:
-            content = _format_generated_skill_file(dist=dist, version=version, body_md=md)
-            _atomic_write_text(path, content)
-        except Exception as e:  # noqa: BLE001
-            warnings.append(
-                f"Failed writing skill for {dist}=={version} to {path}: {type(e).__name__}: {e}"
-            )
-            continue
+            tasks = [
+                _generate_one(dist, version, path)
+                for dist, version, path in to_generate
+            ]
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     # Build injection block from whatever is on disk.
     sections: list[str] = []
