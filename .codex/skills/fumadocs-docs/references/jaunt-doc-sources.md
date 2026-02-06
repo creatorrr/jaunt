@@ -11,7 +11,7 @@ Use this as a map of existing documentation sources in this repository when buil
 
 - `TASK-*.md`: Focused design and implementation notes.
 - `jaunt_tdd_plan.md`: Larger implementation plan and behavior notes.
-- `AGENT_PROMPTS/`: Prompt slices used during development; may be useful for “how it works” context.
+- `examples/`: Runnable example projects demonstrating Jaunt features.
 
 ## Code references
 

@@ -18,25 +18,23 @@ uv run jaunt --version
 
 See `DOCS.md` for the full walkthrough and `docs-site/` for rendered docs.
 
-If you want the fastest “hackathon demo” experience, start with `jaunt-examples/` (consumer-style demo repos).
+All examples live under `examples/`. See `examples/README.md` for the full list.
 
-### Hackathon Demos (`jaunt-examples/`)
+### Hackathon Demo (JWT Auth)
 
-Headline demo: **JWT auth** (the “wow gap” example: short spec, real generated glue + tests).
+Headline demo: **JWT auth** (the "wow gap" example: short spec, real generated glue + tests).
 
 ```bash
 # Generate implementations for @jaunt.magic specs.
-uv run jaunt build --root jaunt-examples/jwt_auth
+uv run jaunt build --root examples/jwt_auth
 
 # Generate pytest tests for @jaunt.test specs and run them.
-PYTHONPATH=jaunt-examples/jwt_auth/src uv run jaunt test --root jaunt-examples/jwt_auth
+PYTHONPATH=examples/jwt_auth/src uv run jaunt test --root examples/jwt_auth
 ```
 
 This example also showcases `.agents/skills/**` auto-generation (because it imports `pydantic`):
 
-`jaunt-examples/jwt_auth/.agents/skills/pydantic/SKILL.md`
-
-Also see `toy-example/` for a minimal consumer project, and `examples/` for older runnable demos.
+`examples/jwt_auth/.agents/skills/pydantic/SKILL.md`
 
 ## Auto-Generate PyPI Skills (Build)
 

@@ -8,22 +8,22 @@ generate a skill for a real dependency.
 ## Build
 
 ```bash
-uv run jaunt build --root jaunt-examples/jwt_auth
+uv run jaunt build --root examples/jwt_auth
 ```
 
 ## Test
 
 ```bash
-PYTHONPATH=jaunt-examples/jwt_auth/src uv run jaunt test --root jaunt-examples/jwt_auth
+PYTHONPATH=examples/jwt_auth/src uv run jaunt test --root examples/jwt_auth
 ```
 
 ## Skills Proof
 
 After build, verify this file exists (it is generated and gitignored):
 
-`jaunt-examples/jwt_auth/.agents/skills/pydantic/SKILL.md`
+`examples/jwt_auth/.agents/skills/pydantic/SKILL.md`
 
 You should also see generated modules appear under:
 
-- `jaunt-examples/jwt_auth/src/jwt_demo/__generated__/`
-- `jaunt-examples/jwt_auth/tests/__generated__/`
+- `examples/jwt_auth/src/jwt_demo/__generated__/`
+- `examples/jwt_auth/tests/__generated__/`

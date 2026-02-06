@@ -6,12 +6,12 @@ This example defines a tiny subset of Markdown and renders it to HTML, purely in
 
 Build (generate implementation from the specs):
 ```bash
-uv run jaunt build --root jaunt-examples/markdown_render
+uv run jaunt build --root examples/markdown_render
 ```
 
 Test (run the generated implementation against the test specs):
 ```bash
-PYTHONPATH=jaunt-examples/markdown_render/src uv run jaunt test --root jaunt-examples/markdown_render
+PYTHONPATH=examples/markdown_render/src uv run jaunt test --root examples/markdown_render
 ```
 
 ## Why This Is Annoying To Implement

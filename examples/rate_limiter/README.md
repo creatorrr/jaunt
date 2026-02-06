@@ -11,12 +11,12 @@ empty out. A fake clock makes the correctness testable without sleeping.
 Build:
 
 ```bash
-uv run jaunt build --root jaunt-examples/rate_limiter
+uv run jaunt build --root examples/rate_limiter
 ```
 
 Test:
 
 ```bash
-PYTHONPATH=jaunt-examples/rate_limiter/src uv run jaunt test --root jaunt-examples/rate_limiter
+PYTHONPATH=examples/rate_limiter/src uv run jaunt test --root examples/rate_limiter
 ```
 

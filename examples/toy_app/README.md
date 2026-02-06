@@ -17,13 +17,13 @@ uv sync
 export OPENAI_API_KEY=...
 
 # 1) Generate implementation modules for @jaunt.magic specs.
-uv run jaunt build --root toy-example
+uv run jaunt build --root examples/toy_app
 
 # 2) Generate pytest tests for @jaunt.test specs and run them.
-uv run jaunt test --root toy-example
+uv run jaunt test --root examples/toy_app
 
 # 3) Call the generated implementation via the runtime wrappers.
-PYTHONPATH=toy-example/src uv run python - <<'PY'
+PYTHONPATH=examples/toy_app/src uv run python - <<'PY'
 from toy_app.email_specs import is_corporate_email, normalize_email
 
 print(normalize_email("  A.B+tag@Example.COM  "))

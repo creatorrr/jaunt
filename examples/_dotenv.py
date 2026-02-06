@@ -44,13 +44,13 @@ def ensure_openai_key(env: dict[str, str], repo_root: Path) -> dict[str, str]:
             vals = load_dotenv(dotenv_path)
         except OSError:
             vals = {}
-        for k, v in vals.items():
-            if k not in merged:
-                merged[k] = v
+        dotenv_key = (vals.get("OPENAI_API_KEY") or "").strip()
+        if dotenv_key:
+            merged["OPENAI_API_KEY"] = dotenv_key
 
     key = (merged.get("OPENAI_API_KEY") or "").strip()
     if not key:
-        raise RuntimeError(
+        raise SystemExit(
             "Missing OPENAI_API_KEY. Set it in the environment or add it to <repo_root>/.env."
         )
     return merged

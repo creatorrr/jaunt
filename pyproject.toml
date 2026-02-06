@@ -44,10 +44,10 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-exclude = ["jaunt-examples/**"]
+exclude = ["examples/**"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.ty.src]
-exclude = ["examples/**", "toy-example/**", "jaunt-examples/**"]
+exclude = ["examples/**"]

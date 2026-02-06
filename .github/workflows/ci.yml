@@ -61,12 +61,12 @@ jobs:
       fail-fast: false
       matrix:
         example:
-          - jaunt-examples/jwt_auth
-          - jaunt-examples/csv_parser
-          - jaunt-examples/markdown_render
-          - jaunt-examples/rate_limiter
-          - jaunt-examples/expr_eval
-          - jaunt-examples/diff_engine
+          - examples/jwt_auth
+          - examples/csv_parser
+          - examples/markdown_render
+          - examples/rate_limiter
+          - examples/expr_eval
+          - examples/diff_engine
           - examples/01_slugify
           - examples/02_lru_cache
           - examples/03_dice_roller

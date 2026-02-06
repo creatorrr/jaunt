@@ -18,7 +18,7 @@ This repo contains the Jaunt implementation (package: `src/jaunt/`), plus a test
 - `src/jaunt/skill/`: assistant-facing docs (a Jaunt “skill” + Cursor rules) packaged as resources.
 - `tests/`: unit/integration tests that define the MVP behavior.
 - `TASK-*.md` and `jaunt_tdd_plan.md`: architecture + implementation notes used to build the MVP.
-- `AGENT_PROMPTS/`: prompt slices intended for parallel “agent” implementation work (not required to use Jaunt).
+- `examples/`: runnable example projects demonstrating Jaunt features.
 
 ## Quickstart (Using This Repo)
 

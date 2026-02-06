@@ -20,7 +20,7 @@ A minimal HS256 JWT implementation from a single spec file:
 
 ## The Spec
 
-Full file: `jaunt-examples/jwt_auth/src/jwt_demo/specs.py`
+Full file: `examples/jwt_auth/src/jwt_demo/specs.py`
 
 ```python
 """JWT Authentication — Jaunt Example"""
@@ -100,13 +100,13 @@ From the repo root:
 ```bash
 uv sync
 export OPENAI_API_KEY=...
-uv run jaunt build --root jaunt-examples/jwt_auth
+uv run jaunt build --root examples/jwt_auth
 ```
 
 Jaunt writes the generated implementation to:
 
 ```text
-jaunt-examples/jwt_auth/src/jwt_demo/__generated__/specs.py
+examples/jwt_auth/src/jwt_demo/__generated__/specs.py
 ```
 
 ## Look At The Output
@@ -155,10 +155,10 @@ All the boring-but-critical stuff: padding removal, constant-time comparison, JS
 ## Generate And Run Tests
 
 ```bash
-PYTHONPATH=jaunt-examples/jwt_auth/src uv run jaunt test --root jaunt-examples/jwt_auth
+PYTHONPATH=examples/jwt_auth/src uv run jaunt test --root examples/jwt_auth
 ```
 
-Jaunt writes generated tests to `jaunt-examples/jwt_auth/tests/__generated__/specs.py`.
+Jaunt writes generated tests to `examples/jwt_auth/tests/__generated__/specs.py`.
 
 Example generated test excerpt:
 
@@ -176,7 +176,7 @@ def test_roundtrip_create_and_verify() -> None:
 Because the spec imports `pydantic`, Jaunt auto-generates a PyPI skill at build time:
 
 ```text
-jaunt-examples/jwt_auth/.agents/skills/pydantic/SKILL.md
+examples/jwt_auth/.agents/skills/pydantic/SKILL.md
 ```
 
 This gives the LLM concrete Pydantic usage patterns, improving the quality of generated code that uses external libraries.

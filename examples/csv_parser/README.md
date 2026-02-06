@@ -12,12 +12,12 @@ validation logic.
 Build:
 
 ```bash
-uv run jaunt build --root jaunt-examples/csv_parser
+uv run jaunt build --root examples/csv_parser
 ```
 
 Test:
 
 ```bash
-PYTHONPATH=jaunt-examples/csv_parser/src uv run jaunt test --root jaunt-examples/csv_parser
+PYTHONPATH=examples/csv_parser/src uv run jaunt test --root examples/csv_parser
 ```
 
