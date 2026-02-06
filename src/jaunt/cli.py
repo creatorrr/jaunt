@@ -292,8 +292,8 @@ def cmd_test(args: argparse.Namespace) -> int:
                 return rc
 
         from jaunt import discovery, registry
-        from jaunt.digest import extract_source_segment
         from jaunt.deps import build_spec_graph, collapse_to_module_dag
+        from jaunt.digest import extract_source_segment
         from jaunt.spec_ref import SpecRef
 
         # Provide production API reference material (from @jaunt.magic) so
