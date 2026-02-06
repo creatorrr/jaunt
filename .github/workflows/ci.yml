@@ -23,7 +23,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --frozen
       - name: Ruff fix
-        run: uv run ruff check --fix .
+        run: uv run ruff check --fix --unsafe-fixes .
       - name: Ruff format
         run: uv run ruff format .
       - name: Commit fixes
