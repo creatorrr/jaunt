@@ -3,14 +3,34 @@ title: Limitations / Gotchas
 description: "Current behavioral constraints in the MVP implementation."
 ---
 
-- Provider support: only `llm.provider = "openai"` is supported by the CLI today. The config loader has a `provider` field, but the CLI will reject anything else with a config error.
+Jaunt is an MVP. These are the sharp edges you should know about.
 
-- Generated dir name: runtime forwarding for `@jaunt.magic` currently imports using `generated_dir="__generated__"` (hardcoded). If you set `paths.generated_dir` to something else, `jaunt build` may still write files there, but calling your `@jaunt.magic` functions will fail because the runtime decorator imports from `__generated__/`. Workaround: keep `__generated__`, or import the generated module directly (not recommended for "spec is the API" workflows).
+## Provider Support
 
-- Prompt overrides: `prompts.*` are treated as **file paths** by the OpenAI backend. If you set them, those files must exist and contain the prompt text. If you want to tweak prompts, version the prompt files alongside your repo.
+Only `llm.provider = "openai"` is supported by the CLI today. The config loader accepts a `provider` field, but the CLI will reject anything other than `"openai"` with a config error. If you need a different backend, you'd need to implement the backend interface yourself and use it programmatically.
 
-- Dependency context plumbing: the dependency DAG, ordering, and staleness propagation work, but the backend does not currently get rich "dependency implementation source" context for dependents. You may need to be more explicit in docstrings (or add `prompt=`) when a spec depends on non-trivial behavior from another generated spec.
+## Hardcoded `__generated__` Dir Name
 
-- Auto-generated PyPI skills (if enabled): this can add extra network calls (PyPI) and extra OpenAI calls during `jaunt build`. Failures warn and continue, so the build output can differ based on environment, connectivity, and what’s installed in the active venv.
+Runtime forwarding for `@jaunt.magic` currently imports from `__generated__/` (hardcoded in the decorator). If you set `paths.generated_dir` to a custom name in `jaunt.toml`, `jaunt build` will write files there, but calling your `@jaunt.magic` functions at runtime will fail because the decorator still looks for `__generated__/`.
 
-Next: [Writing Specs](/docs/writing-specs/magic).
+Workaround: keep `generated_dir = "__generated__"`, or import the generated module directly instead of relying on the decorator forwarding (not recommended if you want the "spec is the API" workflow).
+
+## Prompt Overrides
+
+The `[prompts]` config keys (`build_system`, `build_module`, `test_system`, `test_module`) are treated as **file paths** by the OpenAI backend. If you set them, those files must exist on disk and contain the full prompt text — they're not inline strings.
+
+If you want to tweak prompts, copy the defaults from `src/jaunt/prompts/`, modify them, and version the prompt files alongside your repo.
+
+## Dependency Context Plumbing
+
+The dependency DAG, ordering, and staleness propagation all work correctly. However, the backend does not currently pass rich "here is the generated dependency source" context to dependents. The LLM generating a dependent spec doesn't see what its dependencies actually implemented.
+
+In practice, this means you may need to be more explicit in docstrings (or add `prompt=` context) when a spec depends on non-trivial behavior from another generated spec. Ordering and digest-based staleness still work — it's only the prompt context that's limited.
+
+## Auto-Generated PyPI Skills
+
+The skills system adds extra network calls (to PyPI for README fetches) and extra OpenAI calls (to generate skill docs) during `jaunt build`. These are best-effort: failures emit a warning and the build continues without the missing skills.
+
+This means build output can vary based on your environment, network connectivity, and what's installed in the active venv. If reproducibility matters, commit the generated `.agents/skills/` directory.
+
+Next: [Development](/docs/development/contributing).

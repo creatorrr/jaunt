@@ -1,31 +1,29 @@
 ---
 title: JWT Walkthrough
-description: "The hero 'wow gap' demo: small spec, real JWT implementation + tests."
+description: "The hero 'wow gap' demo: ~50 lines of spec, 100+ lines of correct JWT code."
 ---
 
-This is the Jaunt story in one page: a readable spec stub becomes a pile of boring correctness work (strict parsing, edge cases, runnable tests).
+This is the Jaunt story in one page: a readable spec stub becomes a pile of boring correctness work — strict parsing, HMAC verification, expiry checks, and runnable tests.
 
 <Callout type="warning">
   Running this guide calls the OpenAI API and will spend tokens. Make sure `OPENAI_API_KEY` is set.
 </Callout>
 
-## What We’re Building
+## What We're Building
 
-A minimal HS256 JWT implementation:
+A minimal HS256 JWT implementation from a single spec file:
 
+- A `Claims` model (Pydantic)
 - `create_token(user_id, secret, ttl=...) -> str`
 - `verify_token(token, secret) -> Claims`
 - `rotate_token(token, secret, ttl=...) -> str`
 
 ## The Spec
 
-Spec file:
-
-- `jaunt-examples/jwt_auth/src/jwt_demo/specs.py`
-
-Key excerpt:
+Full file: `jaunt-examples/jwt_auth/src/jwt_demo/specs.py`
 
 ```python
+"""JWT Authentication — Jaunt Example"""
 from __future__ import annotations
 
 from datetime import timedelta
@@ -37,22 +35,63 @@ from pydantic import BaseModel
 class Claims(BaseModel):
     """Decoded token payload."""
 
-    sub: str
-    iat: float
-    exp: float
+    sub: str   # subject (user id)
+    iat: float # issued-at (unix timestamp)
+    exp: float # expiry (unix timestamp)
 
 
 @jaunt.magic()
-def create_token(user_id: str, secret: str, *, ttl: timedelta = timedelta(hours=1)) -> str:
+def create_token(
+    user_id: str, secret: str, *, ttl: timedelta = timedelta(hours=1)
+) -> str:
     """
     Create an HS256-signed JWT.
 
-    - base64url encoding must omit padding ("=" characters).
+    Structure: base64url(header) . base64url(payload) . base64url(signature)
+    Header:  {"alg": "HS256", "typ": "JWT"}
+    Payload: {"sub": user_id, "iat": <now>, "exp": <now + ttl>}
+
     - Use HMAC-SHA256 with `secret` as the key.
-    - Raise ValueError if user_id is empty or ttl is not positive.
+    - base64url encoding must omit padding ("=" characters).
+    - Raise ValueError if user_id is empty.
+    """
+    raise RuntimeError("spec stub (generated at build time)")
+
+
+@jaunt.magic(deps=[create_token, Claims])
+def verify_token(token: str, secret: str) -> Claims:
+    """
+    Verify an HS256-signed JWT and return its claims.
+
+    Steps:
+    1. Split token on "." — must have exactly 3 parts.
+    2. Recompute HMAC-SHA256 over header.payload; compare to signature.
+    3. Decode payload JSON into Claims.
+    4. Check exp > current time.
+
+    Errors:
+    - Raise ValueError("malformed") if structure is wrong.
+    - Raise ValueError("invalid signature") if HMAC doesn't match.
+    - Raise ValueError("expired") if token has expired.
+    """
+    raise RuntimeError("spec stub (generated at build time)")
+
+
+@jaunt.magic(deps=[create_token, verify_token])
+def rotate_token(
+    token: str, secret: str, *, ttl: timedelta = timedelta(hours=1)
+) -> str:
+    """
+    Verify an existing token and issue a fresh one for the same subject.
+
+    - Verify the old token (propagate any errors).
+    - Create a new token with the same user_id and a fresh ttl.
+    - The rotated token MUST have strictly increasing iat/exp.
     """
     raise RuntimeError("spec stub (generated at build time)")
 ```
+
+That's the entire spec. ~50 lines of intent, zero implementation logic.
 
 ## Run The Build
 
@@ -64,22 +103,24 @@ export OPENAI_API_KEY=...
 uv run jaunt build --root jaunt-examples/jwt_auth
 ```
 
-Jaunt writes the generated implementation under:
+Jaunt writes the generated implementation to:
 
-- `jaunt-examples/jwt_auth/src/jwt_demo/__generated__/specs.py`
+```text
+jaunt-examples/jwt_auth/src/jwt_demo/__generated__/specs.py
+```
 
-## Look At The Output (Excerpts)
+## Look At The Output
 
-The generator does the boring bits you don’t want to hand-roll.
+You wrote ~50 lines of spec. Jaunt generated 100+ lines of correct, edge-case-handling code. Here are excerpts:
 
-Base64url helper (no padding):
+**Base64url helper (no padding):**
 
 ```python
 def _b64url_encode_no_pad(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 ```
 
-Real JWT assembly with canonical JSON:
+**JWT assembly with canonical JSON:**
 
 ```python
 header_json = json.dumps(header_obj, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -94,17 +135,32 @@ sig_b64 = _b64url_encode_no_pad(sig)
 return f"{signing_input}.{sig_b64}"
 ```
 
+**Signature verification and expiry checks:**
+
+```python
+# Recompute HMAC and compare
+expected_sig = hmac.new(
+    secret.encode("utf-8"), signing_input.encode("utf-8"), hashlib.sha256
+).digest()
+if not hmac.compare_digest(actual_sig, expected_sig):
+    raise ValueError("invalid signature")
+
+# Check expiry
+if payload["exp"] <= time.time():
+    raise ValueError("expired")
+```
+
+All the boring-but-critical stuff: padding removal, constant-time comparison, JSON canonicalization, expiry enforcement. You specified *what*; Jaunt did *how*.
+
 ## Generate And Run Tests
 
 ```bash
 PYTHONPATH=jaunt-examples/jwt_auth/src uv run jaunt test --root jaunt-examples/jwt_auth
 ```
 
-Jaunt writes generated tests under:
+Jaunt writes generated tests to `jaunt-examples/jwt_auth/tests/__generated__/specs.py`.
 
-- `jaunt-examples/jwt_auth/tests/__generated__/specs.py`
-
-Example generated test:
+Example generated test excerpt:
 
 ```python
 def test_roundtrip_create_and_verify() -> None:
@@ -117,9 +173,13 @@ def test_roundtrip_create_and_verify() -> None:
 
 ## The Skills Bonus
 
-Because the spec imports `pydantic`, `jaunt build` will (best-effort) generate and inject a PyPI skill:
+Because the spec imports `pydantic`, Jaunt auto-generates a PyPI skill at build time:
 
-- `jaunt-examples/jwt_auth/.agents/skills/pydantic/SKILL.md`
+```text
+jaunt-examples/jwt_auth/.agents/skills/pydantic/SKILL.md
+```
+
+This gives the LLM concrete Pydantic usage patterns, improving the quality of generated code that uses external libraries.
 
 See: [Auto-Generated PyPI Skills](/docs/guides/pypi-skills).
 
