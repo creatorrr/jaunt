@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from jaunt.deps import build_spec_graph, collapse_to_module_dag, find_cycles, toposort
-from jaunt.parse_cache import ParseCache
 from jaunt.errors import JauntDependencyCycleError
+from jaunt.parse_cache import ParseCache
 from jaunt.registry import SpecEntry
 from jaunt.spec_ref import normalize_spec_ref
 
@@ -118,16 +118,12 @@ def test_infer_deps_multi_level_attribute_chain(tmp_path: Path) -> None:
     """Inference should resolve alias.sub.Foo where alias maps to a package."""
     src = tmp_path / "mod.py"
     src.write_text(
-        "import pkg.sub as ps\n"
-        "\n"
-        "def caller():\n"
-        "    ps.inner.Helper()\n",
+        "import pkg.sub as ps\n\ndef caller():\n    ps.inner.Helper()\n",
         encoding="utf-8",
     )
     helper_src = tmp_path / "helper.py"
     helper_src.write_text(
-        "def Helper():\n"
-        "    pass\n",
+        "def Helper():\n    pass\n",
         encoding="utf-8",
     )
 
@@ -159,20 +155,13 @@ def test_infer_deps_follows_reexports(tmp_path: Path) -> None:
     # Set up a package with a re-export.
     pkg_dir = tmp_path / "pkg"
     pkg_dir.mkdir()
-    (pkg_dir / "__init__.py").write_text(
-        "from pkg.internal import Helper\n", encoding="utf-8"
-    )
-    (pkg_dir / "internal.py").write_text(
-        "def Helper():\n    pass\n", encoding="utf-8"
-    )
+    (pkg_dir / "__init__.py").write_text("from pkg.internal import Helper\n", encoding="utf-8")
+    (pkg_dir / "internal.py").write_text("def Helper():\n    pass\n", encoding="utf-8")
 
     # Consumer module imports Helper from pkg (re-export).
     consumer = tmp_path / "consumer.py"
     consumer.write_text(
-        "from pkg import Helper\n"
-        "\n"
-        "def caller():\n"
-        "    Helper()\n",
+        "from pkg import Helper\n\ndef caller():\n    Helper()\n",
         encoding="utf-8",
     )
 
@@ -208,11 +197,7 @@ def test_build_spec_graph_collects_inference_warnings(tmp_path: Path) -> None:
     """build_spec_graph should collect warnings about names it tried but failed to resolve."""
     src = tmp_path / "mod.py"
     src.write_text(
-        "from unknown_pkg import Mystery\n"
-        "\n"
-        "def caller():\n"
-        "    Mystery()\n"
-        "    Nonexistent()\n",
+        "from unknown_pkg import Mystery\n\ndef caller():\n    Mystery()\n    Nonexistent()\n",
         encoding="utf-8",
     )
     caller = _entry(
@@ -236,11 +221,7 @@ def test_build_spec_graph_no_warnings_when_all_resolved(tmp_path: Path) -> None:
     """No warnings should be emitted when all references resolve to known specs."""
     src = tmp_path / "mod.py"
     src.write_text(
-        "def Helper():\n"
-        "    pass\n"
-        "\n"
-        "def caller():\n"
-        "    Helper()\n",
+        "def Helper():\n    pass\n\ndef caller():\n    Helper()\n",
         encoding="utf-8",
     )
     caller = _entry(

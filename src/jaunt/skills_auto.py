@@ -139,9 +139,7 @@ async def ensure_pypi_skills_and_block(
 
             generator = OpenAISkillGenerator(llm)
         except Exception as e:  # noqa: BLE001
-            warnings.append(
-                f"Failed initializing OpenAI skill generator: {type(e).__name__}: {e}"
-            )
+            warnings.append(f"Failed initializing OpenAI skill generator: {type(e).__name__}: {e}")
 
         if generator is not None:
 
@@ -159,20 +157,15 @@ async def ensure_pypi_skills_and_block(
                     return
 
                 try:
-                    md = await generator.generate_skill_markdown(
-                        dist, version, readme, readme_type
-                    )
+                    md = await generator.generate_skill_markdown(dist, version, readme, readme_type)
                 except Exception as e:  # noqa: BLE001
                     warnings.append(
-                        f"Failed generating skill for {dist}=={version}: "
-                        f"{type(e).__name__}: {e}"
+                        f"Failed generating skill for {dist}=={version}: {type(e).__name__}: {e}"
                     )
                     return
 
                 try:
-                    content = _format_generated_skill_file(
-                        dist=dist, version=version, body_md=md
-                    )
+                    content = _format_generated_skill_file(dist=dist, version=version, body_md=md)
                     _atomic_write_text(path, content)
                 except Exception as e:  # noqa: BLE001
                     warnings.append(
@@ -180,10 +173,7 @@ async def ensure_pypi_skills_and_block(
                         f"{type(e).__name__}: {e}"
                     )
 
-            tasks = [
-                _generate_one(dist, version, path)
-                for dist, version, path in to_generate
-            ]
+            tasks = [_generate_one(dist, version, path) for dist, version, path in to_generate]
             await asyncio.gather(*tasks, return_exceptions=True)
 
     # Build injection block from whatever is on disk.

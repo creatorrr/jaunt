@@ -233,9 +233,8 @@ def cmd_build(args: argparse.Namespace) -> int:
                 _eprint(f"  {path}")
             _eprint("hint: break the cycle by removing a dep from one of these specs")
             raise JauntDependencyCycleError(
-                "Dependency cycle detected: " + ", ".join(
-                    " -> ".join(str(s) for s in c) for c in cycles
-                )
+                "Dependency cycle detected: "
+                + ", ".join(" -> ".join(str(s) for s in c) for c in cycles)
             )
 
         module_specs = registry.get_specs_by_module("magic")

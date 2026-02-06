@@ -62,10 +62,7 @@ class ParseCache:
         if cache_path.exists():
             try:
                 data = pickle.loads(cache_path.read_bytes())  # noqa: S301
-                if (
-                    data.get("mtime_ns") == mtime_ns
-                    and data.get("size") == size
-                ):
+                if data.get("mtime_ns") == mtime_ns and data.get("size") == size:
                     source = data["source"]
                     tree = data["tree"]
                     self._memo[file_path] = (source, tree)
