@@ -31,4 +31,3 @@ class LRUCache:
     def size(self) -> int:
         """Return the current number of entries in the cache."""
         raise RuntimeError("spec stub (generated at build time)")
-

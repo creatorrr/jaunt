@@ -6,4 +6,3 @@ from __future__ import annotations
 # `importlib.resources.files("jaunt.skill")` rather than assuming filesystem paths.
 
 __all__ = []
-

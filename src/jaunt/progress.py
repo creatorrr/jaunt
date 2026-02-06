@@ -74,4 +74,3 @@ class ProgressBar:
         msg = msg[: max(0, cols - 1)]
 
         self._write("\r" + msg)
-

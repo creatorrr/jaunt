@@ -58,4 +58,3 @@ def extract_module_digest(source: str) -> str | None:
     if parsed is None:
         return None
     return parsed.get("module_digest")
-

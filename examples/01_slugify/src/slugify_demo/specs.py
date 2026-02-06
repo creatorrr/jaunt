@@ -39,4 +39,3 @@ def post_slug(title: str, *, post_id: int) -> str:
     - post_slug("Hello", post_id=42) == "hello-42"
     """
     raise RuntimeError("spec stub (generated at build time)")
-

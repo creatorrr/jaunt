@@ -30,4 +30,3 @@ def test_can_catch_any_jaunt_error() -> None:
 
     with pytest.raises(JauntError):
         raise_one()
-

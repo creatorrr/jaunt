@@ -158,4 +158,3 @@ def test_validation_jobs_must_be_ge_1(tmp_path: Path) -> None:
     )
     with pytest.raises(JauntConfigError):
         load_config(root=tmp_path)
-

@@ -53,9 +53,7 @@ def test_scan_external_imports_filters_stdlib_and_internal(tmp_path: Path, monke
 
 def test_skill_path_layout(tmp_path: Path) -> None:
     p = skill_md_path(project_root=tmp_path, dist="typing_extensions")
-    assert p == (
-        tmp_path / ".agents" / "skills" / "typing-extensions" / "SKILL.md"
-    ).resolve()
+    assert p == (tmp_path / ".agents" / "skills" / "typing-extensions" / "SKILL.md").resolve()
 
 
 def test_existing_generated_skill_same_version_skips_regen(tmp_path: Path, monkeypatch) -> None:
@@ -80,9 +78,7 @@ def test_existing_generated_skill_same_version_skips_regen(tmp_path: Path, monke
             project_root=tmp_path,
             source_roots=[],
             generated_dir="__generated__",
-            llm=LLMConfig(
-                provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY"
-            ),
+            llm=LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY"),
         )
     )
     assert res.warnings == []
@@ -124,9 +120,7 @@ def test_existing_generated_skill_version_change_regenerates(tmp_path: Path, mon
             project_root=tmp_path,
             source_roots=[],
             generated_dir="__generated__",
-            llm=LLMConfig(
-                provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY"
-            ),
+            llm=LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY"),
         )
     )
     assert calls == [(dist, new_version)]
@@ -160,9 +154,7 @@ def test_user_managed_skill_never_overwritten(tmp_path: Path, monkeypatch) -> No
             project_root=tmp_path,
             source_roots=[],
             generated_dir="__generated__",
-            llm=LLMConfig(
-                provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY"
-            ),
+            llm=LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY"),
         )
     )
     assert path.read_text(encoding="utf-8") == "USER SKILL\n"

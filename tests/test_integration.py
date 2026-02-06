@@ -24,9 +24,9 @@ def _make_min_project(tmp_path: Path, *, pkg: str) -> None:
                 "version = 1",
                 "",
                 "[paths]",
-                "source_roots = [\"src\"]",
-                "test_roots = [\"tests\"]",
-                "generated_dir = \"__generated__\"",
+                'source_roots = ["src"]',
+                'test_roots = ["tests"]',
+                'generated_dir = "__generated__"',
                 "",
             ]
         ),
@@ -40,8 +40,8 @@ def _make_min_project(tmp_path: Path, *, pkg: str) -> None:
                 "",
                 "@jaunt.magic()",
                 "def greet(name: str) -> str:",
-                "    \"\"\"Magic spec stub.\"\"\"",
-                "    raise RuntimeError(\"stub\")",
+                '    """Magic spec stub."""',
+                '    raise RuntimeError("stub")',
                 "",
             ]
         ),
@@ -55,7 +55,7 @@ def _make_min_project(tmp_path: Path, *, pkg: str) -> None:
                 "",
                 "@jaunt.test()",
                 "def test_smoke() -> None:",
-                "    \"\"\"Test spec stub.\"\"\"",
+                '    """Test spec stub."""',
                 "    return None",
                 "",
             ]

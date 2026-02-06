@@ -102,6 +102,7 @@ def magic(
                 mod = _import_generated_module(module)
                 gen_cls = getattr(mod, name)
             except (ModuleNotFoundError, AttributeError):
+
                 def __new__(cls, *args: Any, **kwargs: Any):  # noqa: ANN001
                     raise _not_built_error(spec_ref)
 

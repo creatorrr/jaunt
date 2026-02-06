@@ -71,4 +71,3 @@ def get_specs_by_module(kind: Literal["magic", "test"]) -> dict[str, list[SpecEn
         grouped[module] = module_entries
 
     return grouped
-

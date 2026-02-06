@@ -156,4 +156,3 @@ def B():
     m2 = module_digest("m", [a, b], specs, spec_graph)
     assert m1 == m2
     assert re.fullmatch(r"[0-9a-f]{64}", m1) is not None
-

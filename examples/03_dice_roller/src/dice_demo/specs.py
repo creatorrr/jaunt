@@ -35,4 +35,3 @@ def roll(expr: str, *, rng: random.Random) -> int:
     - With rng=random.Random(0), roll("2d6+3", rng=rng) == 11.
     """
     raise RuntimeError("spec stub (generated at build time)")
-

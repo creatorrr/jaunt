@@ -84,4 +84,3 @@ def test_toposort_cycle_raises_with_participants() -> None:
         assert "a" in msg and "b" in msg and "c" in msg
     else:  # pragma: no cover
         raise AssertionError("expected cycle error")
-

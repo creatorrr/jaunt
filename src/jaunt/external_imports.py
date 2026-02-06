@@ -130,9 +130,7 @@ def _resolve_dist_by_name_heuristic(import_mod: str) -> tuple[str, str] | None:
     return None
 
 
-def _choose_dist_for_top_level(
-    top_level: str, *, candidates: Sequence[str]
-) -> str | None:
+def _choose_dist_for_top_level(top_level: str, *, candidates: Sequence[str]) -> str | None:
     if not candidates:
         return None
     if len(candidates) == 1:
@@ -213,9 +211,7 @@ def discover_external_distributions_with_warnings(
             continue
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
-            warnings.append(
-                f"could not resolve installed version for distribution '{dist}': {err}"
-            )
+            warnings.append(f"could not resolve installed version for distribution '{dist}': {err}")
             continue
 
         out.setdefault(dist, ver)

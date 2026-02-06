@@ -117,17 +117,14 @@ def A():
     spec_graph = build_spec_graph(specs, infer_default=False)
     module_specs = {"m": [e]}
 
-    assert (
-        detect_stale_modules(
-            package_dir=src,
-            generated_dir="__generated__",
-            module_specs=module_specs,
-            specs=specs,
-            spec_graph=spec_graph,
-            force=True,
-        )
-        == {"m"}
-    )
+    assert detect_stale_modules(
+        package_dir=src,
+        generated_dir="__generated__",
+        module_specs=module_specs,
+        specs=specs,
+        spec_graph=spec_graph,
+        force=True,
+    ) == {"m"}
 
     d1 = module_digest("m", [e], specs, spec_graph)
     out = write_generated_module(
@@ -166,4 +163,3 @@ def A():
         spec_graph=spec_graph2,
     )
     assert stale == {"m"}
-

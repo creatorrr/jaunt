@@ -121,4 +121,3 @@ class OpenAISkillGenerator:
 
         assert last_err is not None
         raise last_err
-

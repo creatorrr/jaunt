@@ -41,4 +41,3 @@ def is_corporate_email(raw: str, *, domain: str = "example.com") -> bool:
     - is_corporate_email("user@other.com") is False
     - is_corporate_email("u@corp.example", domain="corp.example") is True
     """
-

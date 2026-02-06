@@ -45,4 +45,3 @@ def user_to_public_dict(user: User) -> dict[str, object]:
     - Use user.model_dump(mode="json").
     - Return only keys: id, email, is_active.
     """
-

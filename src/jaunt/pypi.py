@@ -55,4 +55,3 @@ def fetch_readme(dist: str, version: str, *, timeout_s: float = 10.0) -> tuple[s
         raise PyPIReadmeError(f"PyPI README missing/empty for {dist}=={version}.")
 
     return text, content_type
-

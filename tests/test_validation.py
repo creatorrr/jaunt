@@ -30,4 +30,3 @@ def test_validate_class_and_assignment_count_as_defined() -> None:
 
 def test_validate_empty_expected_names_with_empty_source_ok() -> None:
     assert validate_generated_source("", []) == []
-

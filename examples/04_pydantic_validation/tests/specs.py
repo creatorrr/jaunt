@@ -64,4 +64,3 @@ def test_user_to_public_dict_is_json_safe_and_selects_keys() -> None:
 
     u = parse_user({"id": 7, "email": "  A@B.Com  "})
     assert user_to_public_dict(u) == {"id": 7, "email": "a@b.com", "is_active": True}
-

@@ -54,4 +54,3 @@ def ensure_openai_key(env: dict[str, str], repo_root: Path) -> dict[str, str]:
             "Missing OPENAI_API_KEY. Set it in the environment or add it to <repo_root>/.env."
         )
     return merged
-

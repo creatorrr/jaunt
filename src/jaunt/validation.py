@@ -71,4 +71,3 @@ def compile_check(source: str, filename: str) -> list[str]:
     except Exception as e:  # pragma: no cover - rare, but return a friendly string.
         return [f"CompileError: {e!r}"]
     return []
-

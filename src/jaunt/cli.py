@@ -195,9 +195,7 @@ def cmd_build(args: argparse.Namespace) -> int:
                 _eprint(f"warn: {w}")
             skills_block = skills_res.skills_block
         except Exception as e:  # noqa: BLE001 - best-effort; never block build
-            _eprint(
-                f"warn: failed ensuring external library skills: {type(e).__name__}: {e}"
-            )
+            _eprint(f"warn: failed ensuring external library skills: {type(e).__name__}: {e}")
 
         _prepend_sys_path(source_dirs)
 

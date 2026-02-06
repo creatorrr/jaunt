@@ -416,9 +416,7 @@ async def run_tests(
     if no_run:
         return PytestResult(exit_code=0, passed=True, failed=False, failures=[])
 
-    exit_code = run_pytest(
-        generated_files, pytest_args=pytest_args, pythonpath=pythonpath, cwd=cwd
-    )
+    exit_code = run_pytest(generated_files, pytest_args=pytest_args, pythonpath=pythonpath, cwd=cwd)
     return PytestResult(
         exit_code=exit_code,
         passed=exit_code == 0,

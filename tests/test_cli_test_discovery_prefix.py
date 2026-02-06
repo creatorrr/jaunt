@@ -46,12 +46,12 @@ def test_jaunt_test_discovers_tests_package_when_test_roots_is_tests(
                 "version = 1",
                 "",
                 "[paths]",
-                "source_roots = [\"src\"]",
-                "test_roots = [\"tests\"]",
-                "generated_dir = \"__generated__\"",
+                'source_roots = ["src"]',
+                'test_roots = ["tests"]',
+                'generated_dir = "__generated__"',
                 "",
                 "[test]",
-                "pytest_args = [\"-q\"]",
+                'pytest_args = ["-q"]',
                 "",
             ]
         ),
@@ -71,8 +71,8 @@ def test_jaunt_test_discovers_tests_package_when_test_roots_is_tests(
                 "",
                 "@jaunt.test()",
                 "def test_generated_smoke() -> None:",
-                "    \"\"\"Generated tests should run via `jaunt test`.\"\"\"",
-                "    raise AssertionError(\"spec stub\")",
+                '    """Generated tests should run via `jaunt test`."""',
+                '    raise AssertionError("spec stub")',
                 "",
             ]
         ),
@@ -101,4 +101,3 @@ def test_jaunt_test_discovers_tests_package_when_test_roots_is_tests(
             if name == "tests" or name.startswith("tests."):
                 sys.modules.pop(name, None)
         _restore_module("tests", orig_tests_mod, existed=had_tests)
-

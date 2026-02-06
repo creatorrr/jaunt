@@ -52,4 +52,3 @@ def load_dotenv_into_environ(path: Path) -> bool:
             continue
         os.environ[k] = v
     return True
-

@@ -27,4 +27,3 @@ class JauntGenerationError(JauntError):
 
 class JauntDependencyCycleError(JauntError):
     """Raised when a dependency graph contains a cycle."""
-

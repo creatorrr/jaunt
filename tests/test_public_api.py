@@ -27,4 +27,3 @@ def test_exceptions_are_exported() -> None:
         JauntDependencyCycleError,
     ):
         assert issubclass(exc, Exception)
-

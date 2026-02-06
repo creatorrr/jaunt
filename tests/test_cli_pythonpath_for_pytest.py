@@ -52,12 +52,12 @@ def test_jaunt_test_sets_pythonpath_for_pytest_subprocess(
                 "version = 1",
                 "",
                 "[paths]",
-                "source_roots = [\"src\"]",
-                "test_roots = [\"tests\"]",
-                "generated_dir = \"__generated__\"",
+                'source_roots = ["src"]',
+                'test_roots = ["tests"]',
+                'generated_dir = "__generated__"',
                 "",
                 "[test]",
-                "pytest_args = [\"-q\"]",
+                'pytest_args = ["-q"]',
                 "",
             ]
         ),
@@ -77,8 +77,8 @@ def test_jaunt_test_sets_pythonpath_for_pytest_subprocess(
                 "",
                 "@jaunt.test()",
                 "def test_imports_project_module() -> None:",
-                "    \"\"\"Generated tests should import modules from paths.source_roots.\"\"\"",
-                "    raise AssertionError(\"spec stub\")",
+                '    """Generated tests should import modules from paths.source_roots."""',
+                '    raise AssertionError("spec stub")',
                 "",
             ]
         ),
@@ -107,4 +107,3 @@ def test_jaunt_test_sets_pythonpath_for_pytest_subprocess(
             if name == "tests" or name.startswith("tests."):
                 sys.modules.pop(name, None)
         _restore_module("tests", orig_tests_mod, existed=had_tests)
-
