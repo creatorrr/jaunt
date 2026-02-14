@@ -1,0 +1,4 @@
+interface:
+  display_name: "MCP Server (FastMCP)"
+  short_description: "Build production MCP servers with FastMCP"
+  default_prompt: "Use $fastmcp-mcp-server to design and build an MCP server."
