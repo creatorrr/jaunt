@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
+import os
 import sys
 from collections.abc import Iterable, Sequence
 from pathlib import Path
@@ -57,6 +59,12 @@ def _add_common_flags(p: argparse.ArgumentParser) -> None:
         "--no-progress",
         action="store_true",
         help="Disable progress bars.",
+    )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Emit structured JSON output to stdout (for agent/CI consumption).",
     )
 
 
@@ -143,11 +151,22 @@ def _prepend_sys_path(dirs: Sequence[Path]) -> None:
 
 
 def _build_backend(cfg: JauntConfig):
-    if cfg.llm.provider != "openai":
-        raise JauntConfigError(f"Unsupported llm.provider: {cfg.llm.provider!r}")
-    from jaunt.generate.openai_backend import OpenAIBackend
+    provider = cfg.llm.provider
+    if provider == "openai":
+        from jaunt.generate.openai_backend import OpenAIBackend
 
-    return OpenAIBackend(cfg.llm, cfg.prompts)
+        return OpenAIBackend(cfg.llm, cfg.prompts)
+    if provider == "anthropic":
+        from jaunt.generate.anthropic_backend import AnthropicBackend
+
+        return AnthropicBackend(cfg.llm, cfg.prompts)
+    raise JauntConfigError(
+        f"Unsupported llm.provider: {provider!r}. Supported: 'openai', 'anthropic'."
+    )
+
+
+def _is_json_mode(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "json_output", False))
 
 
 def _eprint(msg: str) -> None:
@@ -167,15 +186,27 @@ def _print_error(e: BaseException) -> None:
     _eprint(f"error: {msg}")
 
 
+def _emit_json(data: dict[str, object]) -> None:
+    """Write structured JSON to stdout."""
+    print(json.dumps(data, indent=2, default=str))
+
+
+def _sync_generated_dir_env(cfg: JauntConfig) -> None:
+    """Propagate generated_dir to env so runtime forwarding uses the right path."""
+    os.environ.setdefault("JAUNT_GENERATED_DIR", cfg.paths.generated_dir)
+
+
 def _maybe_load_dotenv(root: Path) -> None:
     # Best-effort; never override existing environment variables.
     load_dotenv_into_environ(root / ".env")
 
 
 def cmd_build(args: argparse.Namespace) -> int:
+    json_mode = _is_json_mode(args)
     try:
         root, cfg = _load_config(args)
         _maybe_load_dotenv(root)
+        _sync_generated_dir_env(cfg)
 
         source_dirs = [root / sr for sr in cfg.paths.source_roots]
 
@@ -212,6 +243,10 @@ def cmd_build(args: argparse.Namespace) -> int:
 
         specs = dict(registry.get_magic_registry())
         if not specs:
+            if json_mode:
+                _emit_json(
+                    {"command": "build", "ok": True, "generated": [], "skipped": [], "failed": {}}
+                )
             return EXIT_OK
 
         infer_default = bool(cfg.build.infer_deps) and (not bool(args.no_infer_deps))
@@ -243,7 +278,7 @@ def cmd_build(args: argparse.Namespace) -> int:
         stale = builder.expand_stale_modules(module_dag, stale)
 
         progress = None
-        if stale and (not bool(args.no_progress)) and sys.stderr.isatty():
+        if stale and not json_mode and (not bool(args.no_progress)) and sys.stderr.isatty():
             progress = ProgressBar(label="build", total=len(stale), enabled=True, stream=sys.stderr)
 
         jobs = int(args.jobs) if args.jobs is not None else int(cfg.build.jobs)
@@ -262,21 +297,39 @@ def cmd_build(args: argparse.Namespace) -> int:
                 progress=progress,
             )
         )
+
+        if json_mode:
+            _emit_json(
+                {
+                    "command": "build",
+                    "ok": not report.failed,
+                    "generated": sorted(report.generated),
+                    "skipped": sorted(report.skipped),
+                    "failed": {k: v for k, v in sorted(report.failed.items())},
+                }
+            )
+
         if getattr(report, "failed", None):
             return EXIT_GENERATION_ERROR
         return EXIT_OK
     except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError, KeyError) as e:
         _print_error(e)
+        if json_mode:
+            _emit_json({"command": "build", "ok": False, "error": str(e)})
         return EXIT_CONFIG_OR_DISCOVERY
     except (JauntGenerationError, ImportError) as e:
         _print_error(e)
+        if json_mode:
+            _emit_json({"command": "build", "ok": False, "error": str(e)})
         return EXIT_GENERATION_ERROR
 
 
 def cmd_test(args: argparse.Namespace) -> int:
+    json_mode = _is_json_mode(args)
     try:
         root, cfg = _load_config(args)
         _maybe_load_dotenv(root)
+        _sync_generated_dir_env(cfg)
 
         source_dirs = [root / sr for sr in cfg.paths.source_roots]
         # Test modules are expected to be importable as `tests.*` (or another
@@ -335,6 +388,8 @@ def cmd_test(args: argparse.Namespace) -> int:
 
         specs = dict(registry.get_test_registry())
         if not specs:
+            if json_mode:
+                _emit_json({"command": "test", "ok": True, "exit_code": 0})
             return EXIT_OK
 
         infer_default = bool(cfg.test.infer_deps) and (not bool(args.no_infer_deps))
@@ -365,7 +420,7 @@ def cmd_test(args: argparse.Namespace) -> int:
 
         progress = None
         total = len(stale & set(module_specs.keys()))
-        if total and (not bool(args.no_progress)) and sys.stderr.isatty():
+        if total and not json_mode and (not bool(args.no_progress)) and sys.stderr.isatty():
             progress = ProgressBar(label="test", total=total, enabled=True, stream=sys.stderr)
 
         result = tester.run_tests(
@@ -391,14 +446,28 @@ def cmd_test(args: argparse.Namespace) -> int:
             result = asyncio.run(result)
 
         exit_code = int(getattr(result, "exit_code", 1))
+
+        if json_mode:
+            _emit_json(
+                {
+                    "command": "test",
+                    "ok": exit_code == 0,
+                    "exit_code": exit_code,
+                }
+            )
+
         if exit_code == 0:
             return EXIT_OK
         return EXIT_PYTEST_FAILURE if not bool(args.no_run) else EXIT_GENERATION_ERROR
     except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError, KeyError) as e:
         _print_error(e)
+        if json_mode:
+            _emit_json({"command": "test", "ok": False, "error": str(e)})
         return EXIT_CONFIG_OR_DISCOVERY
     except (JauntGenerationError, ImportError, AttributeError) as e:
         _print_error(e)
+        if json_mode:
+            _emit_json({"command": "test", "ok": False, "error": str(e)})
         return EXIT_GENERATION_ERROR
 
 

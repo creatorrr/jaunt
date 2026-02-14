@@ -1,13 +1,16 @@
 [project]
 name = "jaunt"
-version = "0.1.0"
-description = "A tiny Python library with a CLI."
+version = "0.2.0"
+description = "Spec-driven code generation framework: write intent as decorated Python stubs, generate implementations and tests with LLMs."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "openai>=1.0.0,<2",
-  "pydantic>=2,<3",
 ]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.39.0,<1"]
+all = ["anthropic>=0.39.0,<1"]
 
 [project.scripts]
 jaunt = "jaunt.cli:main"
