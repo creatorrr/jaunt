@@ -306,39 +306,14 @@ class TestMCPServerCreation:
 
 
 # ---------------------------------------------------------------------------
-# Config [mcp] section
+# Config shape
 # ---------------------------------------------------------------------------
 
 
-class TestMCPConfig:
-    """Test that jaunt.toml supports [mcp] section."""
+def test_config_has_no_mcp_field(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "jaunt.toml").write_text("version = 1\n", encoding="utf-8")
+    from jaunt.config import load_config
 
-    def test_config_loads_mcp_enabled(self, tmp_path: Path) -> None:
-        (tmp_path / "src").mkdir()
-        (tmp_path / "jaunt.toml").write_text(
-            "version = 1\n\n[mcp]\nenabled = true\n",
-            encoding="utf-8",
-        )
-        from jaunt.config import load_config
-
-        cfg = load_config(root=tmp_path)
-        assert cfg.mcp.enabled is True
-
-    def test_config_mcp_defaults_to_enabled(self, tmp_path: Path) -> None:
-        (tmp_path / "src").mkdir()
-        (tmp_path / "jaunt.toml").write_text("version = 1\n", encoding="utf-8")
-        from jaunt.config import load_config
-
-        cfg = load_config(root=tmp_path)
-        assert cfg.mcp.enabled is True
-
-    def test_config_mcp_disabled(self, tmp_path: Path) -> None:
-        (tmp_path / "src").mkdir()
-        (tmp_path / "jaunt.toml").write_text(
-            "version = 1\n\n[mcp]\nenabled = false\n",
-            encoding="utf-8",
-        )
-        from jaunt.config import load_config
-
-        cfg = load_config(root=tmp_path)
-        assert cfg.mcp.enabled is False
+    cfg = load_config(root=tmp_path)
+    assert not hasattr(cfg, "mcp")

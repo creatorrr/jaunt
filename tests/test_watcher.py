@@ -374,35 +374,48 @@ def test_format_json_build_failure() -> None:
 
 
 def test_cycle_runner_calls_cmd_build(monkeypatch) -> None:
-    build_calls: list[object] = []
-    monkeypatch.setattr("jaunt.cli.cmd_build", lambda args: (build_calls.append(args), 0)[1])
+    build_calls: list[bool] = []
+    monkeypatch.setattr(
+        "jaunt.cli.cmd_build",
+        lambda args: (build_calls.append(bool(args.json_output)), 0)[1],
+    )
 
     import jaunt.cli
 
-    ns = jaunt.cli.parse_args(["watch"])
+    ns = jaunt.cli.parse_args(["watch", "--json"])
     runner = build_cycle_runner(ns, run_tests=False)
 
     event = WatchEvent(changed_paths=frozenset({Path("/src/a.py")}), timestamp=1000.0)
     result = runner(event)
     assert result.build_exit_code == 0
     assert result.test_exit_code is None
-    assert len(build_calls) == 1
+    assert build_calls == [False]
 
 
 def test_cycle_runner_calls_cmd_test_when_enabled(monkeypatch) -> None:
-    build_calls: list[object] = []
-    test_calls: list[tuple[bool, bool, list[str]]] = []
-    monkeypatch.setattr("jaunt.cli.cmd_build", lambda args: (build_calls.append(args), 0)[1])
+    build_calls: list[bool] = []
+    test_calls: list[tuple[bool, bool, bool, list[str]]] = []
+    monkeypatch.setattr(
+        "jaunt.cli.cmd_build",
+        lambda args: (build_calls.append(bool(args.json_output)), 0)[1],
+    )
 
     def fake_cmd_test(args: Any) -> int:
-        test_calls.append((bool(args.no_build), bool(args.no_run), list(args.pytest_args)))
+        test_calls.append(
+            (
+                bool(args.no_build),
+                bool(args.no_run),
+                bool(args.json_output),
+                list(args.pytest_args),
+            )
+        )
         return 0
 
     monkeypatch.setattr("jaunt.cli.cmd_test", fake_cmd_test)
 
     import jaunt.cli
 
-    ns = jaunt.cli.parse_args(["watch", "--test"])
+    ns = jaunt.cli.parse_args(["watch", "--test", "--json"])
     runner = build_cycle_runner(ns, run_tests=True)
 
     event = WatchEvent(changed_paths=frozenset({Path("/src/a.py")}), timestamp=1000.0)
@@ -411,7 +424,8 @@ def test_cycle_runner_calls_cmd_test_when_enabled(monkeypatch) -> None:
     assert result.test_exit_code == 0
     assert len(build_calls) == 1
     assert len(test_calls) == 1
-    assert test_calls[0] == (True, False, [])
+    assert build_calls == [False]
+    assert test_calls[0] == (True, False, False, [])
 
 
 def test_cycle_runner_skips_test_on_build_failure(monkeypatch) -> None:

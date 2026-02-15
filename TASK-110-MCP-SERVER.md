@@ -38,11 +38,6 @@ jaunt mcp serve              # start MCP server (stdio transport)
 - Use `fastmcp` for the Python MCP server
 - Reuse existing CLI logic — each tool calls the same functions as the CLI
 - Return structured JSON (same shape as `--json` output from TASK-030)
-- Support configuration via `jaunt.toml`:
-  ```toml
-  [mcp]
-  enabled = true
-  ```
 
 ### Agent configuration
 
