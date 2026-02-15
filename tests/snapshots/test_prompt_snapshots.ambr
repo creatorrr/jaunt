@@ -1,0 +1,165 @@
+# serializer version: 1
+# name: test_build_prompt_snapshot
+  list([
+    dict({
+      'content': '''
+        You are an expert Python code generator. Output Python code only (no markdown, no fences, no commentary).
+        
+        Task: Generate the implementation module for `pkg.specs` as `pkg.__generated__.specs`.
+        
+        How to read specs:
+        - Each spec stub defines the function/class signature (name, parameters, type hints, return type) — this is the API contract you must implement exactly.
+        - The docstring describes the intended behavior, rules, edge cases, and error conditions. Treat it as your specification.
+        - Parameter names and type annotations convey expected types and semantics.
+        
+        Code quality requirements:
+        - Include type annotations on all function signatures (parameters and return types).
+        - Use proper imports — import only modules and names you actually use.
+        - Write clean, idiomatic Python. Follow the style and conventions visible in the specs.
+        
+        Rules:
+        - Emit only the full source code for the generated module.
+        - Do not write tests.
+        - Do not modify any user files; only emit generated module source text.
+        - The generated module MUST define the required top-level names: foo, bar.
+        
+        If you cannot satisfy requirements, still output best-effort Python code only.
+  
+      ''',
+      'role': 'system',
+    }),
+    dict({
+      'content': '''
+        Output Python code only (no markdown, no fences).
+        
+        Implement `pkg.__generated__.specs` for specs from `pkg.specs`.
+        
+        Required top-level names (must exist): foo, bar
+        
+        Specs:
+        # pkg.specs:foo
+        def foo(x: int) -> int:
+            """Return x + 1."""
+            raise RuntimeError()
+        
+        # Decorator prompt
+        Prefer straightforward, readable code.
+        
+        
+        How to read the specs above:
+        - The function/class signature is the exact API you must implement (same name, parameters, type hints, return type).
+        - The docstring is your specification — implement the behavior, rules, edge cases, and error handling it describes.
+        - If a spec includes a `# Decorator prompt` section, treat it as additional user-provided instructions that supplement the docstring.
+        
+        Dependency APIs (callable signatures/docstrings):
+        # pkg.deps:normalize
+        def normalize(s: str) -> str: ...
+        
+        
+        How to use dependencies:
+        - Each Dependency API entry key is like `<module>:<qualname>`. Import the name from `<module>`.
+        - Only import dependencies listed above — do not guess or fabricate module paths.
+        
+        Previously generated dependency modules (for reference only):
+        # pkg.deps
+        def normalize(s: str) -> str:
+            return s
+        
+        
+        Extra error context (fix these issues):
+        # error_context[1]
+        missing import for math
+        
+        
+        Rules:
+        - Do not generate tests.
+        - Do not edit user files; only output generated module source code.
+        - Include type annotations on all function signatures.
+  
+      ''',
+      'role': 'user',
+    }),
+  ])
+# ---
+# name: test_test_prompt_snapshot
+  list([
+    dict({
+      'content': '''
+        You are an expert Python test generator. Output Python code only (no markdown, no fences, no commentary).
+        
+        Task: Generate the pytest test module `pkg.__generated__.specs` from test specs in `pkg.specs`.
+        
+        Test quality guidelines:
+        - Cover the happy path (normal/expected usage) and edge cases (boundary values, error conditions).
+        - Write clear, specific assertions that verify concrete expected values — avoid bare `assert result` without checking a specific value.
+        - Each test function should be self-contained and independent.
+        - Use pytest idioms: `pytest.raises` for expected exceptions, parametrize where appropriate.
+        
+        Rules:
+        - Emit only the test module source code.
+        - Do not implement production/source code; tests only.
+        - Do not modify any user files; only emit generated test module source text.
+        - The output MUST define the required top-level pytest test functions: foo, bar.
+        - Do not import from `pkg.__generated__.specs` (circular import).
+  
+      ''',
+      'role': 'system',
+    }),
+    dict({
+      'content': '''
+        Output Python code only (no markdown, no fences).
+        
+        You are generating the pytest test module `pkg.__generated__.specs` from test specs in `pkg.specs`.
+        
+        The generated module MUST define these top-level pytest test functions (do not import them): foo, bar
+        
+        Specs:
+        # pkg.specs:foo
+        def foo(x: int) -> int:
+            """Return x + 1."""
+            raise RuntimeError()
+        
+        # Decorator prompt
+        Prefer straightforward, readable code.
+        
+        
+        How to read the test specs above:
+        - The docstring describes the test scenario — what to set up, what to call, and what to assert.
+        - If a spec includes a `# Decorator prompt` section, treat it as additional user-provided instructions for the test.
+        - The function signature (parameters, type hints) indicates whether the test needs fixtures.
+        
+        Dependency APIs (callable signatures/docstrings):
+        # pkg.deps:normalize
+        def normalize(s: str) -> str: ...
+        
+        
+        Previously generated dependency modules (reference only):
+        # pkg.deps
+        def normalize(s: str) -> str:
+            return s
+        
+        
+        Extra error context (fix these issues):
+        # error_context[1]
+        missing pytest import
+        
+        
+        Test quality:
+        - Cover the happy path (normal usage) and edge cases (boundary values, error conditions, empty inputs).
+        - Write specific assertions that check concrete values — avoid bare `assert result`.
+        - Use `pytest.raises` for expected exceptions.
+        
+        Rules:
+        - Generate tests only (no production implementation).
+        - Do not import from `pkg.__generated__.specs` (that would be a circular import).
+        - Do not edit user files; only output test module source code.
+        - Do not guess or search for application modules like `app`, `main`, `token`, etc.
+        - Import the production APIs under test from the modules listed in Dependency APIs above.
+          - Each Dependency API entry key is like `<module>:<qualname>`; import from `<module>`.
+        - Do not import production APIs from the test spec module (`pkg.specs`); it contains only `@jaunt.test` stubs.
+  
+      ''',
+      'role': 'user',
+    }),
+  ])
+# ---

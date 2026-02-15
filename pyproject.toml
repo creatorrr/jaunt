@@ -38,6 +38,7 @@ include = [
 [dependency-groups]
 dev = [
   "pytest>=8",
+  "syrupy>=4.8.0",
   "ruff>=0.9",
   "ty",
   "openai>=1.0.0,<2",

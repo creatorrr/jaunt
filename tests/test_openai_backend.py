@@ -234,7 +234,7 @@ def test_openai_call_structured_sends_response_format(monkeypatch) -> None:
     schema = rf["json_schema"]["schema"]
     assert "python_source" in schema["properties"]
     assert "imports_used" in schema["properties"]
-    assert schema["required"] == ["python_source"]
+    assert schema["required"] == ["python_source", "imports_used"]
 
 
 def test_openai_structured_json_parse_error_raises(monkeypatch) -> None:
