@@ -10,6 +10,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from jaunt import __version__
+from jaunt.diagnostics import (
+    format_build_failures,
+    format_error_with_hint,
+    format_test_generation_failures,
+)
 from jaunt.dotenv import load_dotenv_into_environ
 from jaunt.errors import (
     JauntConfigError,
@@ -217,16 +222,7 @@ def _eprint(msg: str) -> None:
 
 
 def _print_error(e: BaseException) -> None:
-    if isinstance(e, KeyError) and e.args:
-        name = e.args[0]
-        if isinstance(name, str) and name:
-            _eprint(
-                f"error: missing environment variable {name}. "
-                f"Set it in the environment or add it to <project_root>/.env."
-            )
-            return
-    msg = (str(e) or repr(e)).strip()
-    _eprint(f"error: {msg}")
+    _eprint(format_error_with_hint(e))
 
 
 def _emit_json(data: dict[str, object]) -> None:
@@ -513,6 +509,9 @@ def cmd_build(args: argparse.Namespace) -> int:
             )
         )
 
+        if report.failed and not json_mode:
+            _eprint(format_build_failures(report.failed))
+
         if json_mode:
             _emit_json(
                 {
@@ -661,6 +660,10 @@ def cmd_test(args: argparse.Namespace) -> int:
             result = asyncio.run(result)
 
         exit_code = int(getattr(result, "exit_code", 1))
+
+        gen_failed = getattr(result, "generation_failed", {})
+        if gen_failed and not json_mode:
+            _eprint(format_test_generation_failures(gen_failed))
 
         if json_mode:
             _emit_json(

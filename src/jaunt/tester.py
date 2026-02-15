@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from jaunt import paths
@@ -158,6 +158,7 @@ class PytestResult:
     passed: bool
     failed: bool
     failures: list[str]
+    generation_failed: dict[str, list[str]] = field(default_factory=dict)
 
 
 def _critical_path_lengths(modules: set[str], dag: dict[str, set[str]]) -> dict[str, int]:
@@ -383,6 +384,7 @@ async def run_tests(
     cwd: Path | None = None,
 ) -> PytestResult:
     generated_files: list[Path] = []
+    gen_failed: dict[str, list[str]] = {}
 
     if not no_generate:
         if (
@@ -412,9 +414,16 @@ async def run_tests(
             progress=progress,
         )
         generated_files = report.generated_files
+        gen_failed = report.failed
 
     if no_run:
-        return PytestResult(exit_code=0, passed=True, failed=False, failures=[])
+        return PytestResult(
+            exit_code=0,
+            passed=True,
+            failed=False,
+            failures=[],
+            generation_failed=gen_failed,
+        )
 
     exit_code = run_pytest(generated_files, pytest_args=pytest_args, pythonpath=pythonpath, cwd=cwd)
     return PytestResult(
@@ -422,4 +431,5 @@ async def run_tests(
         passed=exit_code == 0,
         failed=exit_code != 0,
         failures=[],
+        generation_failed=gen_failed,
     )
