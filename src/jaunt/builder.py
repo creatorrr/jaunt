@@ -266,9 +266,7 @@ def _ty_error_context(
                 timeout=_TY_CHECK_TIMEOUT_S,
             )
         except subprocess.TimeoutExpired as exc:
-            timeout_msg = (
-                f"ty check timed out for {module_name} after {_TY_CHECK_TIMEOUT_S:.1f}s."
-            )
+            timeout_msg = f"ty check timed out for {module_name} after {_TY_CHECK_TIMEOUT_S:.1f}s."
             stderr_obj = exc.stderr
             if isinstance(stderr_obj, bytes):
                 stderr = stderr_obj.decode("utf-8", errors="replace").strip()
