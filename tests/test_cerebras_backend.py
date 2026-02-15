@@ -102,9 +102,7 @@ def test_cerebras_backend_errors_when_package_missing(monkeypatch) -> None:
 
         with pytest.raises(JauntConfigError, match="'cerebras-cloud-sdk' package is required"):
             CerebrasBackend(
-                LLMConfig(
-                    provider="cerebras", model="llama-test", api_key_env="CEREBRAS_API_KEY"
-                )
+                LLMConfig(provider="cerebras", model="llama-test", api_key_env="CEREBRAS_API_KEY")
             )
     finally:
         if original is not None:
