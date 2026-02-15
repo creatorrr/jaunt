@@ -10,7 +10,8 @@ dependencies = [
 
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.39.0,<1"]
-all = ["anthropic>=0.39.0,<1"]
+watch = ["watchfiles>=1.0.0"]
+all = ["anthropic>=0.39.0,<1", "watchfiles>=1.0.0"]
 
 [project.scripts]
 jaunt = "jaunt.cli:main"

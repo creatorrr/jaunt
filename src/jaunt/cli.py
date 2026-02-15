@@ -131,6 +131,15 @@ def _build_parser() -> argparse.ArgumentParser:
     status_p = subparsers.add_parser("status", help="Show project build status.")
     _add_common_flags(status_p)
 
+    watch_p = subparsers.add_parser("watch", help="Watch for changes and rebuild.")
+    _add_common_flags(watch_p)
+    watch_p.add_argument(
+        "--test",
+        action="store_true",
+        dest="test",
+        help="Run tests after each successful build.",
+    )
+
     return parser
 
 
@@ -686,6 +695,84 @@ def cmd_test(args: argparse.Namespace) -> int:
         return EXIT_GENERATION_ERROR
 
 
+def cmd_watch(args: argparse.Namespace) -> int:
+    json_mode = _is_json_mode(args)
+
+    from jaunt.watcher import check_watchfiles_available
+
+    try:
+        check_watchfiles_available()
+    except ImportError as e:
+        _eprint(f"error: {e}")
+        if json_mode:
+            _emit_json({"command": "watch", "ok": False, "error": str(e)})
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    try:
+        root, cfg = _load_config(args)
+    except (JauntConfigError, KeyError) as e:
+        _print_error(e)
+        if json_mode:
+            _emit_json({"command": "watch", "ok": False, "error": str(e)})
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    from jaunt.watcher import (
+        WatchCycleResult,
+        build_cycle_runner,
+        format_watch_cycle_json,
+        make_watchfiles_iter,
+        run_watch_loop,
+    )
+
+    source_roots = [root / sr for sr in cfg.paths.source_roots]
+    test_roots = [root / tr for tr in cfg.paths.test_roots] if getattr(args, "test", False) else []
+    watch_paths = [d for d in (source_roots + test_roots) if d.exists()]
+
+    if not watch_paths:
+        msg = "No existing source or test roots to watch."
+        _eprint(f"error: {msg}")
+        if json_mode:
+            _emit_json({"command": "watch", "ok": False, "error": msg})
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    run_tests = bool(getattr(args, "test", False))
+    runner = build_cycle_runner(args, run_tests=run_tests)
+
+    def on_event(msg: str) -> None:
+        if not json_mode:
+            _eprint(msg)
+
+    def on_cycle_result(result: WatchCycleResult) -> None:
+        if json_mode:
+            _emit_json(format_watch_cycle_json(result))
+
+    def on_error(e: BaseException) -> None:
+        _eprint(f"[watch] error: {e}")
+
+    if not json_mode:
+        n = len(watch_paths)
+        dirs_word = "directory" if n == 1 else "directories"
+        _eprint(f"[watch] watching {n} {dirs_word}... (Ctrl+C to stop)")
+
+    try:
+        asyncio.run(
+            run_watch_loop(
+                changes_iter=make_watchfiles_iter(watch_paths),
+                run_cycle=runner,
+                on_event=on_event,
+                on_cycle_result=on_cycle_result,
+                on_error=on_error,
+                source_roots=source_roots,
+                test_roots=test_roots,
+            )
+        )
+    except KeyboardInterrupt:
+        if not json_mode:
+            _eprint("\n[watch] stopped.")
+
+    return EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_args(list(sys.argv[1:] if argv is None else argv))
@@ -704,6 +791,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_clean(args)
     if args.command == "status":
         return cmd_status(args)
+    if args.command == "watch":
+        return cmd_watch(args)
 
     return EXIT_CONFIG_OR_DISCOVERY
 
