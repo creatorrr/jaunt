@@ -141,6 +141,57 @@ def _build_parser() -> argparse.ArgumentParser:
     status_p = subparsers.add_parser("status", help="Show project build status.")
     _add_common_flags(status_p)
 
+    eval_p = subparsers.add_parser("eval", help="Run built-in eval suite against a real backend.")
+    eval_p.add_argument(
+        "--root",
+        type=str,
+        default=None,
+        help="Project root (defaults to searching upward for jaunt.toml).",
+    )
+    eval_p.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to jaunt.toml (defaults to <root>/jaunt.toml).",
+    )
+    eval_p.add_argument(
+        "--provider",
+        type=str,
+        default=None,
+        help="LLM provider override (defaults to [llm].provider).",
+    )
+    eval_p.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="LLM model override (defaults to [llm].model).",
+    )
+    eval_p.add_argument(
+        "--compare",
+        action="append",
+        nargs="+",
+        default=[],
+        help="Compare explicit targets in 'provider:model' format.",
+    )
+    eval_p.add_argument(
+        "--case",
+        action="append",
+        default=[],
+        help="Run only selected eval case id(s) (repeatable).",
+    )
+    eval_p.add_argument(
+        "--out",
+        type=str,
+        default=None,
+        help="Output directory root (defaults to <root>/.jaunt/evals).",
+    )
+    eval_p.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Emit structured JSON output to stdout.",
+    )
+
     watch_p = subparsers.add_parser("watch", help="Watch for changes and rebuild.")
     _add_common_flags(watch_p)
     watch_p.add_argument(
@@ -795,6 +846,67 @@ def cmd_test(args: argparse.Namespace) -> int:
         return EXIT_GENERATION_ERROR
 
 
+def cmd_eval(args: argparse.Namespace) -> int:
+    json_mode = _is_json_mode(args)
+    try:
+        root, cfg = _load_config(args)
+        _maybe_load_dotenv(root)
+
+        from jaunt import eval as jaunt_eval
+
+        compare_values = [v for group in list(args.compare or []) for v in group]
+        targets = jaunt_eval.resolve_eval_targets(
+            compare_values=compare_values,
+            provider_override=getattr(args, "provider", None),
+            model_override=getattr(args, "model", None),
+            config_provider=cfg.llm.provider,
+            config_model=cfg.llm.model,
+        )
+        cases = jaunt_eval.load_cases(list(args.case or []))
+
+        out_root = Path(args.out).resolve() if args.out else (root / ".jaunt" / "evals")
+        run_dir = jaunt_eval.make_run_dir(out_root)
+
+        if len(targets) == 1:
+            suite = jaunt_eval.run_eval_suite(target=targets[0], cases=cases)
+            jaunt_eval.write_single_target_results(suite=suite, run_dir=run_dir)
+
+            if json_mode:
+                _emit_json(jaunt_eval.suite_to_cli_json(suite=suite, run_dir=run_dir))
+            else:
+                print(jaunt_eval.format_suite_table(suite))
+                print(f"\nResults written to: {run_dir}")
+
+            return EXIT_OK if suite.failed == 0 else EXIT_GENERATION_ERROR
+
+        compare = jaunt_eval.run_compare(targets=targets, cases=cases)
+        jaunt_eval.write_compare_results(compare=compare, run_dir=run_dir)
+
+        if json_mode:
+            _emit_json(jaunt_eval.compare_to_cli_json(compare=compare, run_dir=run_dir))
+        else:
+            print(jaunt_eval.format_compare_table(compare))
+            print(f"\nResults written to: {run_dir}")
+
+        return EXIT_OK if compare.ok else EXIT_GENERATION_ERROR
+    except (
+        JauntConfigError,
+        JauntDiscoveryError,
+        JauntDependencyCycleError,
+        KeyError,
+        ValueError,
+    ) as e:
+        _print_error(e)
+        if json_mode:
+            _emit_json({"command": "eval", "ok": False, "error": str(e)})
+        return EXIT_CONFIG_OR_DISCOVERY
+    except (JauntGenerationError, ImportError, OSError) as e:
+        _print_error(e)
+        if json_mode:
+            _emit_json({"command": "eval", "ok": False, "error": str(e)})
+        return EXIT_GENERATION_ERROR
+
+
 def cmd_cache(args: argparse.Namespace) -> int:
     json_mode = _is_json_mode(args)
     try:
@@ -941,6 +1053,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_clean(args)
     if args.command == "status":
         return cmd_status(args)
+    if args.command == "eval":
+        return cmd_eval(args)
     if args.command == "watch":
         return cmd_watch(args)
     if args.command == "mcp":

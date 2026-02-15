@@ -53,7 +53,7 @@ _OPENAI_MODULE_RESPONSE_FORMAT: dict[str, Any] = {
                 "python_source": {"type": "string"},
                 "imports_used": {"type": "array", "items": {"type": "string"}},
             },
-            "required": ["python_source"],
+            "required": ["python_source", "imports_used"],
             "additionalProperties": False,
         },
     },

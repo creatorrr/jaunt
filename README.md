@@ -40,6 +40,30 @@ uv run jaunt build --root examples/jwt_auth
 PYTHONPATH=examples/jwt_auth/src uv run jaunt test --root examples/jwt_auth
 ```
 
+## Eval Suite
+
+Run the built-in eval suite against your configured backend:
+
+```bash
+uv run jaunt eval
+uv run jaunt eval --model gpt-4o
+uv run jaunt eval --provider anthropic --model claude-sonnet-4-5-20250929
+```
+
+Compare explicit provider/model targets:
+
+```bash
+uv run jaunt eval --compare openai:gpt-4o anthropic:claude-sonnet-4-5-20250929
+```
+
+Eval outputs are written under `.jaunt/evals/<timestamp>/`.
+
+Prompt snapshots:
+
+```bash
+uv run pytest tests/test_prompt_snapshots.py --snapshot-update
+```
+
 ## Auto-Generate PyPI Skills (Build)
 
 `jaunt build` includes a best-effort pre-build step that auto-generates “skills” for external libraries your project imports and injects them into the build prompt.
