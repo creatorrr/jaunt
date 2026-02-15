@@ -24,6 +24,8 @@ from jaunt.registry import SpecEntry
 from jaunt.spec_ref import SpecRef
 from jaunt.validation import validate_generated_source
 
+_TY_CHECK_TIMEOUT_S = 20.0
+
 
 def _tool_version() -> str:
     try:
@@ -251,14 +253,30 @@ def _ty_error_context(
             seen.add(p)
         env["PYTHONPATH"] = os.pathsep.join(merged)
 
-        proc = subprocess.run(
-            [*ty_cmd, "check", str(tmp_path)],
-            cwd=str(package_dir),
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            # NOTE: This is called from the async build flow through a sync
+            # validator callback; keep it short and bounded.
+            proc = subprocess.run(
+                [*ty_cmd, "check", str(tmp_path)],
+                cwd=str(package_dir),
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=_TY_CHECK_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired as exc:
+            timeout_msg = (
+                f"ty check timed out for {module_name} after {_TY_CHECK_TIMEOUT_S:.1f}s."
+            )
+            stderr_obj = exc.stderr
+            if isinstance(stderr_obj, bytes):
+                stderr = stderr_obj.decode("utf-8", errors="replace").strip()
+            else:
+                stderr = (stderr_obj or "").strip()
+            if stderr:
+                timeout_msg = f"{stderr}\n{timeout_msg}"
+            return [timeout_msg]
         if proc.returncode == 0:
             return []
 
@@ -326,13 +344,11 @@ async def run_build(
             heapq.heappush(ready, (-prio.get(m, 0), m))
 
     generated: set[str] = set()
-    generated_sources: dict[str, str] = {}  # module_name -> generated source
+    # Track generated source for dependency context injection.
+    generated_sources: dict[str, str] = {}
     failed: dict[str, list[str]] = {}
     completed: set[str] = set()
     ty_cmd = _resolve_ty_cmd() if ty_attempts is not None else None
-
-    # Track generated source for dependency context injection.
-    generated_sources: dict[str, str] = {}
 
     def _collect_dependency_context(
         module_name: str,
@@ -425,6 +441,8 @@ async def run_build(
             )
             cached = response_cache.get(ck)
             if cached is not None:
+                # Re-validate cached output with current validators (including
+                # optional ty check) to avoid serving stale-bad cache entries.
                 cache_errors = _validate_candidate(cached.source)
                 if not cache_errors:
                     result_source = cached.source
@@ -432,7 +450,7 @@ async def run_build(
                         cost_tracker.record_cache_hit()
 
         if result_source is None:
-            max_attempts = 2 + (ty_attempts or 0) if ty_validator is not None else 2
+            max_attempts = (2 + (ty_attempts or 0)) if ty_validator is not None else 2
             result = await backend.generate_with_retry(
                 ctx, max_attempts=max_attempts, extra_validator=ty_validator
             )
