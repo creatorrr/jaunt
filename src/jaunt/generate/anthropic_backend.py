@@ -91,12 +91,8 @@ class AnthropicBackend(GeneratorBackend):
         self._build_module = load_prompt(
             "build_module.md", prompts.build_module if prompts else None
         )
-        self._test_system = load_prompt(
-            "test_system.md", prompts.test_system if prompts else None
-        )
-        self._test_module = load_prompt(
-            "test_module.md", prompts.test_module if prompts else None
-        )
+        self._test_system = load_prompt("test_system.md", prompts.test_system if prompts else None)
+        self._test_module = load_prompt("test_module.md", prompts.test_module if prompts else None)
 
     async def _call_anthropic(self, system: str, messages: list[dict[str, str]]) -> str:
         """Call Anthropic Messages API with retry and exponential backoff."""
