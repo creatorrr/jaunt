@@ -7,17 +7,23 @@ Jaunt is an MVP. These are the sharp edges you should know about.
 
 ## Provider Support
 
-Only `llm.provider = "openai"` is supported by the CLI today. The config loader accepts a `provider` field, but the CLI will reject anything other than `"openai"` with a config error. If you need a different backend, you'd need to implement the backend interface yourself and use it programmatically.
+The CLI supports `llm.provider = "openai"` and `llm.provider = "anthropic"`.
+
+Practical gotcha: provider SDKs are optional dependencies. You need the matching extra installed in the environment that runs Jaunt:
+
+- `pip install jaunt[openai]`
+- `pip install jaunt[anthropic]`
+- or `pip install jaunt[all]`
 
 ## Hardcoded `__generated__` Dir Name
 
-Runtime forwarding for `@jaunt.magic` currently imports from `__generated__/` (hardcoded in the decorator). If you set `paths.generated_dir` to a custom name in `jaunt.toml`, `jaunt build` will write files there, but calling your `@jaunt.magic` functions at runtime will fail because the decorator still looks for `__generated__/`.
+Runtime forwarding for `@jaunt.magic` reads `JAUNT_GENERATED_DIR` (default: `__generated__`). `jaunt build`/`jaunt test` set this env var in-process, but that does not persist across separate shell sessions or app runtimes.
 
-Workaround: keep `generated_dir = "__generated__"`, or import the generated module directly instead of relying on the decorator forwarding (not recommended if you want the "spec is the API" workflow).
+If you use a custom `paths.generated_dir`, set `JAUNT_GENERATED_DIR` in the environment where your app runs. Otherwise forwarding will still look under `__generated__`.
 
 ## Prompt Overrides
 
-The `[prompts]` config keys (`build_system`, `build_module`, `test_system`, `test_module`) are treated as **file paths** by the OpenAI backend. If you set them, those files must exist on disk and contain the full prompt text — they're not inline strings.
+The `[prompts]` config keys (`build_system`, `build_module`, `test_system`, `test_module`) are treated as **file paths** by the backend. If you set them, those files must exist on disk and contain the full prompt text — they're not inline strings.
 
 If you want to tweak prompts, copy the defaults from `src/jaunt/prompts/`, modify them, and version the prompt files alongside your repo.
 

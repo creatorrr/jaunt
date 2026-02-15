@@ -40,11 +40,13 @@ uv run jaunt --version
 If you’re adding Jaunt to your own project, install it however you vend it (local path, internal index, or git). You also need pytest for `jaunt test`:
 
 ```bash
-# Example (local path):
-uv add --editable /path/to/jaunt
+# Example (from package index):
+uv add "jaunt[openai]"   # or jaunt[anthropic]
 uv add pytest
 export OPENAI_API_KEY=...
 ```
+
+If you install Jaunt from a local editable path, also install the provider SDK (`openai` or `anthropic`) in that environment.
 
 ## 2) Create `jaunt.toml`
 

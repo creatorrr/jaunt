@@ -7,6 +7,17 @@ For a guided, end-to-end introduction, start with [Quickstart](/docs/quickstart)
 
 Entry point: `jaunt = "jaunt.cli:main"` (see `pyproject.toml` in the repo root).
 
+## Init
+
+Create a starter `jaunt.toml` in the target directory:
+
+```bash
+uv run jaunt init
+uv run jaunt init --root /tmp/myproj
+uv run jaunt init --force
+uv run jaunt init --json
+```
+
 ## Build
 
 Generate implementation modules for `@jaunt.magic` specs:
@@ -17,6 +28,7 @@ uv run jaunt build --force
 uv run jaunt build --jobs 16
 uv run jaunt build --target my_app.specs
 uv run jaunt build --no-infer-deps
+uv run jaunt build --json
 ```
 
 ## Test
@@ -28,7 +40,51 @@ uv run jaunt test
 uv run jaunt test --no-build
 uv run jaunt test --no-run
 uv run jaunt test --pytest-args=-k --pytest-args email
+uv run jaunt test --json
 ```
+
+## Status
+
+Show stale/fresh modules:
+
+```bash
+uv run jaunt status
+uv run jaunt status --target my_app.specs
+uv run jaunt status --json
+```
+
+## Clean
+
+Remove generated directories under configured source/test roots:
+
+```bash
+uv run jaunt clean
+uv run jaunt clean --dry-run
+uv run jaunt clean --json
+```
+
+## Watch
+
+Watch source/test roots and rebuild on relevant `.py` changes:
+
+```bash
+uv run jaunt watch
+uv run jaunt watch --test
+uv run jaunt watch --json
+```
+
+When `--json` is enabled, watch emits one JSON object per rebuild cycle (the watch envelope), not nested build/test JSON documents.
+
+## MCP
+
+Start the stdio MCP server:
+
+```bash
+uv run jaunt mcp serve
+uv run jaunt mcp serve --root /path/to/project
+```
+
+`mcp` requires the optional dependency: `pip install jaunt[mcp]`.
 
 ## Common Flags
 
@@ -36,6 +92,7 @@ uv run jaunt test --pytest-args=-k --pytest-args email
 - `--config /path/to/jaunt.toml`: override config path.
 - `--target MODULE[:QUALNAME]`: restrict work to one or more modules (currently module-level; `:QUALNAME` is ignored for filtering).
 - `--no-infer-deps`: disable best-effort dependency inference (explicit `deps=` still applies).
+- `--json`: emit structured JSON output for agent/CI workflows.
 
 ## Exit Codes
 
