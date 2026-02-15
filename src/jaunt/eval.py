@@ -106,9 +106,7 @@ def parse_compare_targets(raw_values: list[str]) -> list[EvalTarget]:
             continue
         provider, sep, model = token.partition(":")
         if sep != ":" or not provider or not model:
-            raise ValueError(
-                f"Invalid --compare target {token!r}. Use explicit 'provider:model'."
-            )
+            raise ValueError(f"Invalid --compare target {token!r}. Use explicit 'provider:model'.")
         targets.append(EvalTarget(provider=provider, model=model))
 
     if not targets:

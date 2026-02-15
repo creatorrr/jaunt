@@ -13,11 +13,13 @@ def test_parse_compare_targets_requires_provider_model() -> None:
 
 
 def test_parse_compare_targets_dedupes() -> None:
-    got = jaunt_eval.parse_compare_targets([
-        "openai:gpt-4o",
-        "openai:gpt-4o",
-        "anthropic:claude-sonnet-4-5-20250929",
-    ])
+    got = jaunt_eval.parse_compare_targets(
+        [
+            "openai:gpt-4o",
+            "openai:gpt-4o",
+            "anthropic:claude-sonnet-4-5-20250929",
+        ]
+    )
     assert [(t.provider, t.model) for t in got] == [
         ("openai", "gpt-4o"),
         ("anthropic", "claude-sonnet-4-5-20250929"),

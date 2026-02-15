@@ -37,12 +37,12 @@ def add(a: int, b: int) -> int:
     raise RuntimeError("spec stub (generated at build time)")
 ''',
             },
-            assertion_code='''from app.specs import add
+            assertion_code="""from app.specs import add
 
 assert add(2, 3) == 5
 assert add(-2, 3) == 1
 assert add(0, 0) == 0
-''',
+""",
         ),
         BuiltinEvalCase(
             case_id="complex_return_type",
@@ -67,11 +67,11 @@ def summarize_scores(values: list[int]) -> dict[str, int | float]:
     raise RuntimeError("spec stub (generated at build time)")
 ''',
             },
-            assertion_code='''from app.specs import summarize_scores
+            assertion_code="""from app.specs import summarize_scores
 
 assert summarize_scores([]) == {"count": 0, "total": 0, "average": 0.0}
 assert summarize_scores([10, 20, 30]) == {"count": 3, "total": 60, "average": 20.0}
-''',
+""",
         ),
         BuiltinEvalCase(
             case_id="class_methods_properties",
@@ -107,7 +107,7 @@ class NameFormatter:
         raise RuntimeError("spec stub (generated at build time)")
 ''',
             },
-            assertion_code='''import pytest
+            assertion_code="""import pytest
 
 from app.specs import NameFormatter
 
@@ -120,7 +120,7 @@ with pytest.raises(ValueError):
 
 with pytest.raises(ValueError):
     fmt.format_name("   ")
-''',
+""",
         ),
         BuiltinEvalCase(
             case_id="module_with_deps",
@@ -163,11 +163,11 @@ def make_slug(title: str) -> str:
     raise RuntimeError("spec stub (generated at build time)")
 ''',
             },
-            assertion_code='''from app.specs import make_slug
+            assertion_code="""from app.specs import make_slug
 
 assert make_slug("  Hello   World  ") == "hello-world"
 assert make_slug("Python 3.12!!!") == "python-312"
-''',
+""",
         ),
         BuiltinEvalCase(
             case_id="external_library_pydantic",
@@ -206,7 +206,7 @@ def parse_user(payload: dict[str, Any]) -> tuple[str, int]:
     raise RuntimeError("spec stub (generated at build time)")
 ''',
             },
-            assertion_code='''from pathlib import Path
+            assertion_code="""from pathlib import Path
 
 import pytest
 
@@ -224,7 +224,7 @@ generated_source = (Path.cwd() / "src" / "app" / "__generated__" / "specs.py").r
     encoding="utf-8"
 )
 assert "pydantic" in generated_source.lower()
-''',
+""",
             required_packages=("pydantic",),
         ),
         BuiltinEvalCase(
@@ -267,7 +267,7 @@ def post_slug(title: str, *, post_id: int) -> str:
     raise RuntimeError("spec stub (generated at build time)")
 ''',
             },
-            assertion_code='''import pytest
+            assertion_code="""import pytest
 
 from slugify_demo.specs import post_slug, slugify
 
@@ -281,7 +281,7 @@ assert post_slug("Hello", post_id=42) == "hello-42"
 
 with pytest.raises(ValueError):
     post_slug("Hello", post_id=0)
-''',
+""",
         ),
         BuiltinEvalCase(
             case_id="example_dice_smoke",
@@ -327,7 +327,7 @@ def roll(expr: str, *, rng: random.Random) -> int:
     raise RuntimeError("spec stub (generated at build time)")
 ''',
             },
-            assertion_code='''import random
+            assertion_code="""import random
 
 import pytest
 
@@ -342,6 +342,6 @@ with pytest.raises(ValueError):
 
 rng = random.Random(0)
 assert roll("2d6+3", rng=rng) == 11
-''',
+""",
         ),
     ]

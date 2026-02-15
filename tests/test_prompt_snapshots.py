@@ -40,9 +40,7 @@ def _ctx(kind: str) -> ModuleSpecContext:
         expected_names=["foo", "bar"],
         spec_sources={
             foo_ref: (
-                "def foo(x: int) -> int:\n"
-                "    \"\"\"Return x + 1.\"\"\"\n"
-                "    raise RuntimeError()\n"
+                'def foo(x: int) -> int:\n    """Return x + 1."""\n    raise RuntimeError()\n'
             )
         },
         decorator_prompts={foo_ref: "Prefer straightforward, readable code."},
