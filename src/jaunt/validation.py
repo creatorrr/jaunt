@@ -1,3 +1,9 @@
+"""Fearful symmetry: AST validation of generated code.
+
+Could frame thy fearful symmetry? -- verify that what the furnace produced
+has the right shape.
+"""
+
 from __future__ import annotations
 
 import ast

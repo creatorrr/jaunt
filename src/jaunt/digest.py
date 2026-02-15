@@ -1,4 +1,4 @@
-"""Stable digests for incremental rebuild decisions."""
+"""The tiger's mark -- stable digests for incremental rebuild decisions."""
 
 from __future__ import annotations
 

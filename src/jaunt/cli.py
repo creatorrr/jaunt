@@ -1,3 +1,8 @@
+"""CLI entry point for Jaunt.
+
+Think about where you want to be, and you're there -- that's jaunting.
+"""
+
 from __future__ import annotations
 
 import argparse

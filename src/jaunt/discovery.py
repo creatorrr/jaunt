@@ -1,7 +1,8 @@
-"""Discovery helpers: scan for modules and import them to populate registries.
+"""Prowling the forests of the night -- discovery helpers.
 
-This module is intentionally lightweight. Callers are responsible for managing
-`sys.path` so that discovered modules are importable.
+Scan for modules and import them to populate registries. This module is
+intentionally lightweight. Callers are responsible for managing `sys.path`
+so that discovered modules are importable.
 """
 
 from __future__ import annotations

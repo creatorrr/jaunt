@@ -1,4 +1,4 @@
-"""Dependency graph helpers.
+"""Twist the sinews of thy heart -- dependency graph helpers.
 
 This module builds a spec-level dependency graph from decorator metadata and
 optionally infers additional edges from best-effort AST analysis.

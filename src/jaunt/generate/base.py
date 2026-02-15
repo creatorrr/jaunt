@@ -1,3 +1,5 @@
+"""In what furnace was thy brain? -- abstract LLM generation backend."""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod

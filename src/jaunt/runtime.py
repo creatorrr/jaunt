@@ -1,4 +1,4 @@
-"""Runtime decorators for declaring Jaunt specs.
+"""On what wings dare he aspire? -- runtime decorators for declaring Jaunt specs.
 
 Decorators register specs at import/definition time. `@magic` provides a runtime
 stub that forwards to built/generated implementations when available, otherwise

@@ -1,3 +1,8 @@
+"""The assay: test generation and pytest orchestration.
+
+Did he smile his work to see? -- generate tests, then let pytest be the judge.
+"""
+
 from __future__ import annotations
 
 import asyncio
