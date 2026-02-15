@@ -8,32 +8,26 @@ from jaunt.cache import CacheEntry, ResponseCache, cache_key_from_context
 from jaunt.generate.base import ModuleSpecContext
 
 
-def _make_ctx(**overrides) -> ModuleSpecContext:
-    defaults = {
-        "kind": "build",
-        "spec_module": "pkg.specs",
-        "generated_module": "pkg.__generated__.specs",
-        "expected_names": ["foo"],
-        "spec_sources": {},
-        "decorator_prompts": {},
-        "dependency_apis": {},
-        "dependency_generated_modules": {},
-    }
-    defaults.update(overrides)
-    return ModuleSpecContext(**defaults)
+def _make_ctx(**overrides: object) -> ModuleSpecContext:    return ModuleSpecContext(
+        kind=overrides.get("kind", "build"),  # type: ignore[arg-type]
+        spec_module=overrides.get("spec_module", "pkg.specs"),  # type: ignore[arg-type]
+        generated_module=overrides.get("generated_module", "pkg.__generated__.specs"),  # type: ignore[arg-type]
+        expected_names=overrides.get("expected_names", ["foo"]),  # type: ignore[arg-type]
+        spec_sources=overrides.get("spec_sources", {}),  # type: ignore[arg-type]
+        decorator_prompts=overrides.get("decorator_prompts", {}),  # type: ignore[arg-type]
+        dependency_apis=overrides.get("dependency_apis", {}),  # type: ignore[arg-type]
+        dependency_generated_modules=overrides.get("dependency_generated_modules", {}),  # type: ignore[arg-type]
+    )
 
 
-def _make_entry(**overrides) -> CacheEntry:
-    defaults = {
-        "source": "def foo(): pass\n",
-        "prompt_tokens": 100,
-        "completion_tokens": 50,
-        "model": "gpt-test",
-        "provider": "openai",
-        "cached_at": 1000.0,
-    }
-    defaults.update(overrides)
-    return CacheEntry(**defaults)
+def _make_entry(**overrides: object) -> CacheEntry:    return CacheEntry(
+        source=overrides.get("source", "def foo(): pass\n"),  # type: ignore[arg-type]
+        prompt_tokens=overrides.get("prompt_tokens", 100),  # type: ignore[arg-type]
+        completion_tokens=overrides.get("completion_tokens", 50),  # type: ignore[arg-type]
+        model=overrides.get("model", "gpt-test"),  # type: ignore[arg-type]
+        provider=overrides.get("provider", "openai"),  # type: ignore[arg-type]
+        cached_at=overrides.get("cached_at", 1000.0),  # type: ignore[arg-type]
+    )
 
 
 def test_cache_miss_returns_none(tmp_path: Path) -> None:

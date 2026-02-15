@@ -23,7 +23,9 @@ _COST_TABLE: dict[str, tuple[float, float]] = {
 def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
     """Return estimated cost in USD. Returns 0.0 for unknown models."""
     # Try longest prefix match first so "gpt-4.1-mini" beats "gpt-4.1".
-    for prefix in sorted(_COST_TABLE, key=len, reverse=True):
+    prefixes: list[str] = list(_COST_TABLE.keys())
+    prefixes.sort(key=len, reverse=True)
+    for prefix in prefixes:
         if model.startswith(prefix):
             inp_rate, out_rate = _COST_TABLE[prefix]
             return (prompt_tokens * inp_rate + completion_tokens * out_rate) / 1_000_000
