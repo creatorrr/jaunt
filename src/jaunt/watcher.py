@@ -113,6 +113,17 @@ def build_cycle_runner(
     """Create a cycle runner that calls cmd_build() and optionally cmd_test()."""
     from jaunt.cli import cmd_build, cmd_test
 
+    build_args = argparse.Namespace(
+        root=getattr(args, "root", None),
+        config=getattr(args, "config", None),
+        jobs=getattr(args, "jobs", None),
+        force=bool(getattr(args, "force", False)),
+        target=list(getattr(args, "target", [])),
+        no_infer_deps=bool(getattr(args, "no_infer_deps", False)),
+        no_progress=bool(getattr(args, "no_progress", False)),
+        json_output=False,
+    )
+
     test_args = argparse.Namespace(
         root=getattr(args, "root", None),
         config=getattr(args, "config", None),
@@ -121,7 +132,7 @@ def build_cycle_runner(
         target=list(getattr(args, "target", [])),
         no_infer_deps=bool(getattr(args, "no_infer_deps", False)),
         no_progress=bool(getattr(args, "no_progress", False)),
-        json_output=bool(getattr(args, "json_output", False)),
+        json_output=False,
         no_build=True,
         no_run=False,
         pytest_args=[],
@@ -129,7 +140,7 @@ def build_cycle_runner(
 
     def runner(event: WatchEvent) -> WatchCycleResult:
         t0 = time.monotonic()
-        build_rc = cmd_build(args)
+        build_rc = cmd_build(build_args)
 
         test_rc: int | None = None
         if run_tests and build_rc == 0:

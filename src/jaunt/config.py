@@ -51,11 +51,6 @@ class PromptsConfig:
 
 
 @dataclass(frozen=True)
-class MCPConfig:
-    enabled: bool
-
-
-@dataclass(frozen=True)
 class JauntConfig:
     version: int
     paths: PathsConfig
@@ -63,7 +58,6 @@ class JauntConfig:
     build: BuildConfig
     test: TestConfig
     prompts: PromptsConfig
-    mcp: MCPConfig
 
 
 def find_project_root(start: Path) -> Path:
@@ -164,7 +158,6 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     build_tbl = _as_table(data.get("build"), name="build")
     test_tbl = _as_table(data.get("test"), name="test")
     prompts_tbl = _as_table(data.get("prompts"), name="prompts")
-    mcp_tbl = _as_table(data.get("mcp"), name="mcp")
 
     if "source_roots" in paths_tbl:
         source_roots = _as_str_list(paths_tbl["source_roots"], name="paths.source_roots")
@@ -241,11 +234,6 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     else:
         test_module = ""
 
-    if "enabled" in mcp_tbl:
-        mcp_enabled = _as_bool(mcp_tbl["enabled"], name="mcp.enabled")
-    else:
-        mcp_enabled = True
-
     # Validation
     if not any((root / sr).exists() for sr in source_roots):
         raise JauntConfigError(
@@ -276,5 +264,4 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             test_system=test_system,
             test_module=test_module,
         ),
-        mcp=MCPConfig(enabled=mcp_enabled),
     )
