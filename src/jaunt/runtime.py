@@ -46,9 +46,13 @@ def _source_file(obj: object) -> str:
     return "<unknown>"
 
 
+def _get_generated_dir() -> str:
+    """Return the generated directory name, respecting JAUNT_GENERATED_DIR env var."""
+    return os.environ.get("JAUNT_GENERATED_DIR", "__generated__")
+
+
 def _import_generated_module(spec_module: str) -> ModuleType:
-    generated_dir = os.environ.get("JAUNT_GENERATED_DIR", "__generated__")
-    generated = spec_module_to_generated_module(spec_module, generated_dir=generated_dir)
+    generated = spec_module_to_generated_module(spec_module, generated_dir=_get_generated_dir())
     return importlib.import_module(generated)
 
 

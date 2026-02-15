@@ -1,87 +1,66 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
-import re
-from importlib import resources
-from pathlib import Path
 from typing import Any
 
 from jaunt.config import LLMConfig, PromptsConfig
 from jaunt.errors import JauntConfigError
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
+from jaunt.generate.openai_backend import (
+    _fmt_kv_block,
+    _strip_markdown_fences,
+    render_template,
+)
 
-logger = logging.getLogger("jaunt.generate.openai")
+logger = logging.getLogger("jaunt.generate.anthropic")
 
 _MAX_API_RETRIES = 4
 _BASE_BACKOFF_S = 1.0
 
 
-def render_template(text: str, mapping: dict[str, str]) -> str:
-    """Very small template renderer: replaces `{{name}}` placeholders."""
-
-    rendered = text
-    for key, value in mapping.items():
-        rendered = rendered.replace(f"{{{{{key}}}}}", value)
-    return rendered
-
-
-_FENCE_RE = re.compile(r"^\s*```[a-zA-Z0-9_-]*\s*\n(?P<code>.*)\n\s*```\s*$", re.DOTALL)
-
-
-def _strip_markdown_fences(text: str) -> str:
-    m = _FENCE_RE.match(text or "")
-    if not m:
-        return (text or "").strip()
-    return (m.group("code") or "").strip()
-
-
-def _fmt_kv_block(items: list[tuple[str, str]], *, empty: str = "(none)") -> str:
-    if not items:
-        return empty
-    chunks: list[str] = []
-    for key, value in items:
-        chunks.append(f"# {key}\n{value.rstrip()}\n")
-    return "\n".join(chunks).rstrip() + "\n"
-
-
 def _is_retryable(exc: BaseException) -> bool:
-    """Return True for transient API errors worth retrying."""
-    # openai.RateLimitError, openai.APITimeoutError, openai.APIConnectionError,
-    # and 5xx APIStatusError are retryable.
+    """Return True for transient Anthropic API errors worth retrying."""
     cls_name = type(exc).__name__
     if cls_name in ("RateLimitError", "APITimeoutError", "APIConnectionError"):
         return True
     if cls_name == "APIStatusError":
         status = getattr(exc, "status_code", 0)
         return int(status) >= 500
-    # Catch generic connection/timeout errors.
     if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
         return True
     return False
 
 
-_OPENAI_MODULE_RESPONSE_FORMAT: dict[str, Any] = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "module_output",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "properties": {
-                "python_source": {"type": "string"},
-                "imports_used": {"type": "array", "items": {"type": "string"}},
+_ANTHROPIC_WRITE_MODULE_TOOL: dict[str, Any] = {
+    "name": "write_module",
+    "description": "Write the generated Python module source code.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "python_source": {
+                "type": "string",
+                "description": "The complete Python source code for the module.",
             },
-            "required": ["python_source"],
-            "additionalProperties": False,
+            "imports_used": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "List of imported module names.",
+            },
+            "notes": {
+                "type": "string",
+                "description": "Optional generation notes.",
+            },
         },
+        "required": ["python_source"],
     },
 }
 
 
-class OpenAIBackend(GeneratorBackend):
+class AnthropicBackend(GeneratorBackend):
+    """Code generation backend using the Anthropic Messages API."""
+
     @property
     def supports_structured_output(self) -> bool:
         return True
@@ -95,50 +74,52 @@ class OpenAIBackend(GeneratorBackend):
             )
         self._model = llm.model
 
-        # OpenAI SDK is an optional import for the rest of the system; only this
-        # backend module imports it.
-        from openai import AsyncOpenAI
+        try:
+            from anthropic import AsyncAnthropic  # type: ignore[import-untyped]
+        except ImportError as e:
+            raise JauntConfigError(
+                "The 'anthropic' package is required for provider='anthropic'. "
+                "Install it with: pip install anthropic"
+            ) from e
 
-        self._client: Any = AsyncOpenAI(api_key=api_key)
+        self._client: Any = AsyncAnthropic(api_key=api_key)
 
-        build_system_override = prompts.build_system if prompts else None
-        build_module_override = prompts.build_module if prompts else None
-        test_system_override = prompts.test_system if prompts else None
-        test_module_override = prompts.test_module if prompts else None
+        from importlib import resources
+        from pathlib import Path
 
-        self._build_system = self._load_prompt("build_system.md", build_system_override)
-        self._build_module = self._load_prompt("build_module.md", build_module_override)
-        self._test_system = self._load_prompt("test_system.md", test_system_override)
-        self._test_module = self._load_prompt("test_module.md", test_module_override)
+        def _load(name: str, override: str | None) -> str:
+            if override:
+                return Path(override).read_text(encoding="utf-8")
+            p = resources.files("jaunt") / "prompts" / name
+            return p.read_text(encoding="utf-8")
 
-    def _load_prompt(self, default_name: str, override_path: str | None) -> str:
-        if override_path:
-            return Path(override_path).read_text(encoding="utf-8")
+        self._build_system = _load("build_system.md", prompts.build_system if prompts else None)
+        self._build_module = _load("build_module.md", prompts.build_module if prompts else None)
+        self._test_system = _load("test_system.md", prompts.test_system if prompts else None)
+        self._test_module = _load("test_module.md", prompts.test_module if prompts else None)
 
-        # Prompts are packaged under src/jaunt/prompts/** (see pyproject include).
-        p = resources.files("jaunt") / "prompts" / default_name
-        return p.read_text(encoding="utf-8")
-
-    async def _call_openai(self, messages: list[dict[str, str]]) -> str:
-        """Call OpenAI API with retry and exponential backoff for transient errors."""
+    async def _call_anthropic(self, system: str, messages: list[dict[str, str]]) -> str:
+        """Call Anthropic Messages API with retry and exponential backoff."""
         last_exc: BaseException | None = None
         for attempt in range(_MAX_API_RETRIES):
             try:
-                resp: Any = await self._client.chat.completions.create(
+                resp: Any = await self._client.messages.create(
                     model=self._model,
+                    max_tokens=16384,
+                    system=system,
                     messages=messages,
                 )
-                content = resp.choices[0].message.content
-                if not isinstance(content, str):
-                    raise RuntimeError("OpenAI returned empty content.")
-                return content
+                content = resp.content
+                if not content or not hasattr(content[0], "text"):
+                    raise RuntimeError("Anthropic returned empty content.")
+                return str(content[0].text)
             except Exception as exc:
                 last_exc = exc
                 if not _is_retryable(exc) or attempt >= _MAX_API_RETRIES - 1:
                     raise
                 delay = _BASE_BACKOFF_S * (2**attempt)
                 logger.warning(
-                    "OpenAI API error (attempt %d/%d), retrying in %.1fs: %s",
+                    "Anthropic API error (attempt %d/%d), retrying in %.1fs: %s",
                     attempt + 1,
                     _MAX_API_RETRIES,
                     delay,
@@ -148,32 +129,39 @@ class OpenAIBackend(GeneratorBackend):
 
         raise last_exc  # type: ignore[misc]
 
-    async def _call_openai_structured(self, messages: list[dict[str, str]]) -> str:
-        """Call OpenAI API with structured output (json_schema response_format)."""
+    async def _call_anthropic_structured(self, system: str, messages: list[dict[str, str]]) -> str:
+        """Call Anthropic Messages API with tool_use for structured output."""
         last_exc: BaseException | None = None
         for attempt in range(_MAX_API_RETRIES):
             try:
-                resp: Any = await self._client.chat.completions.create(
+                resp: Any = await self._client.messages.create(
                     model=self._model,
+                    max_tokens=16384,
+                    system=system,
                     messages=messages,
-                    response_format=_OPENAI_MODULE_RESPONSE_FORMAT,
+                    tools=[_ANTHROPIC_WRITE_MODULE_TOOL],
+                    tool_choice={"type": "tool", "name": "write_module"},
                 )
-                content = resp.choices[0].message.content
-                if not isinstance(content, str):
-                    raise RuntimeError("OpenAI returned empty content.")
-                parsed = json.loads(content)
-                source = parsed["python_source"]
-                imports = parsed.get("imports_used", [])
-                if imports:
-                    logger.debug("Structured output imports_used: %s", imports)
-                return source
+                for block in resp.content:
+                    if getattr(block, "type", None) == "tool_use" and block.name == "write_module":
+                        source = block.input["python_source"]
+                        imports = block.input.get("imports_used", [])
+                        notes = block.input.get("notes", "")
+                        if imports:
+                            logger.debug("Structured output imports_used: %s", imports)
+                        if notes:
+                            logger.debug("Structured output notes: %s", notes)
+                        return source
+                raise RuntimeError(
+                    "Anthropic response did not contain a write_module tool_use block."
+                )
             except Exception as exc:
                 last_exc = exc
                 if not _is_retryable(exc) or attempt >= _MAX_API_RETRIES - 1:
                     raise
                 delay = _BASE_BACKOFF_S * (2**attempt)
                 logger.warning(
-                    "OpenAI API error (attempt %d/%d), retrying in %.1fs: %s",
+                    "Anthropic API error (attempt %d/%d), retrying in %.1fs: %s",
                     attempt + 1,
                     _MAX_API_RETRIES,
                     delay,
@@ -185,7 +173,8 @@ class OpenAIBackend(GeneratorBackend):
 
     def _render_messages(
         self, ctx: ModuleSpecContext, *, extra_error_context: list[str] | None
-    ) -> list[dict[str, str]]:
+    ) -> tuple[str, list[dict[str, str]]]:
+        """Return (system_prompt, messages) for the Anthropic Messages API."""
         expected = ", ".join(ctx.expected_names)
 
         spec_items: list[tuple[str, str]] = []
@@ -229,18 +218,24 @@ class OpenAIBackend(GeneratorBackend):
         system = render_template(system_t, mapping).strip() + "\n"
         user = render_template(user_t, mapping).strip() + "\n"
 
-        messages: list[dict[str, str]] = [{"role": "system", "content": system}]
+        messages: list[dict[str, str]] = []
         if (ctx.skills_block or "").strip():
             skills_msg = "External library skills (reference):\n" + ctx.skills_block.strip() + "\n"
             messages.append({"role": "user", "content": skills_msg})
+            messages.append(
+                {"role": "assistant", "content": "Understood. I'll reference these libraries."}
+            )
         messages.append({"role": "user", "content": user})
-        return messages
+        return system, messages
 
     async def generate_module(
-        self, ctx: ModuleSpecContext, *, extra_error_context: list[str] | None = None
+        self,
+        ctx: ModuleSpecContext,
+        *,
+        extra_error_context: list[str] | None = None,
     ) -> str:
-        messages = self._render_messages(ctx, extra_error_context=extra_error_context)
+        system, messages = self._render_messages(ctx, extra_error_context=extra_error_context)
         if self.supports_structured_output:
-            return await self._call_openai_structured(messages)
-        raw = await self._call_openai(messages)
+            return await self._call_anthropic_structured(system, messages)
+        raw = await self._call_anthropic(system, messages)
         return _strip_markdown_fences(raw)

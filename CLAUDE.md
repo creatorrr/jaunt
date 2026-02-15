@@ -1,0 +1,125 @@
+# Jaunt — Developer Guide for Coding Agents
+
+Jaunt is a spec-driven code generation framework for Python. Users write
+implementation intent as decorator-marked stubs (`@jaunt.magic`) and test intent
+as test stubs (`@jaunt.test`). Jaunt generates real implementations and pytest
+tests into `__generated__/` directories using an LLM backend (OpenAI or
+Anthropic).
+
+## Quick Reference
+
+```bash
+# Install
+uv sync --frozen
+
+# Run tests (unit tests for jaunt itself)
+uv run pytest
+
+# Lint
+uv run ruff check .
+
+# Typecheck
+uv run ty check
+
+# Build an example project (requires OPENAI_API_KEY or ANTHROPIC_API_KEY)
+cd examples/jwt_auth && uv run --project ../.. jaunt build
+
+# Run with JSON output (for programmatic consumption)
+jaunt build --json
+jaunt test --json
+```
+
+## Project Layout
+
+```
+src/jaunt/          # Library source
+  cli.py            # CLI entry point (jaunt build, jaunt test)
+  runtime.py        # @magic and @test decorators
+  builder.py        # Build orchestration and parallel scheduling
+  tester.py         # Test generation and pytest runner
+  config.py         # jaunt.toml parsing
+  deps.py           # Dependency graph (explicit + AST-inferred)
+  discovery.py      # Module scanning
+  registry.py       # Global spec registries
+  digest.py         # SHA-256 digests for incremental builds
+  validation.py     # AST validation of generated code
+  generate/
+    base.py         # Abstract GeneratorBackend interface
+    openai_backend.py    # OpenAI provider
+    anthropic_backend.py # Anthropic/Claude provider
+  prompts/          # LLM prompt templates (Jinja-like {{var}})
+tests/              # pytest test suite (~27 files)
+examples/           # Runnable example projects
+```
+
+## Key Concepts
+
+- **Spec**: A decorated Python function/class stub that describes *what* to
+  implement. Uses `@jaunt.magic` for implementations, `@jaunt.test` for tests.
+- **Generated dir**: Output directory (default `__generated__/`) where LLM-
+  generated code is written. Configurable via `jaunt.toml` or
+  `JAUNT_GENERATED_DIR` env var.
+- **Incremental builds**: Jaunt computes SHA-256 digests over spec source +
+  decorator kwargs + transitive deps. Only stale modules are regenerated.
+- **Dependency graph**: Built from explicit `deps=` kwargs and optional
+  AST-based inference. Topologically sorted; cycle detection with clear errors.
+
+## Configuration (`jaunt.toml`)
+
+```toml
+version = 1
+
+[llm]
+provider = "openai"          # or "anthropic"
+model = "gpt-5.2"            # or "claude-sonnet-4-20250514", etc.
+api_key_env = "OPENAI_API_KEY"  # or "ANTHROPIC_API_KEY"
+
+[paths]
+source_roots = ["src", "."]
+generated_dir = "__generated__"
+
+[build]
+jobs = 8
+infer_deps = true
+```
+
+## Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0    | Success |
+| 2    | Config, discovery, or dependency cycle error |
+| 3    | Code generation error |
+| 4    | Pytest failure |
+
+## Testing Changes
+
+Always run the full test suite after changes:
+
+```bash
+uv run pytest
+```
+
+The test suite uses mocking for OpenAI calls and does not require API keys.
+Tests are organized by module — `test_cli.py`, `test_builder_io.py`,
+`test_config.py`, etc.
+
+## Lint and Format
+
+```bash
+uv run ruff check --fix .
+uv run ruff format .
+```
+
+Ruff is configured for line-length 100, Python 3.12+, with rules E/F/I/UP/B.
+
+## JSON Output Mode
+
+Use `--json` flag with `jaunt build` or `jaunt test` for machine-readable
+output on stdout. Errors still go to stderr. Progress bars are suppressed in
+JSON mode.
+
+```bash
+jaunt build --json
+# {"command": "build", "ok": true, "generated": ["mymod"], "skipped": [], "failed": {}}
+```

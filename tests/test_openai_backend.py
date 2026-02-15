@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 
 import pytest
 
@@ -29,6 +31,9 @@ def test_openai_backend_strips_fences(monkeypatch) -> None:
         LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY")
     )
 
+    # Force fallback (non-structured) path.
+    monkeypatch.setattr(type(backend), "supports_structured_output", property(lambda self: False))
+
     async def fake_call(messages):
         assert isinstance(messages, list)
         return "```python\nprint('hi')\n```"
@@ -50,7 +55,8 @@ def test_openai_backend_renders_expected_names_and_kind_specific_rules(monkeypat
         seen.append(messages)
         return "def foo():\n    return 1\n"
 
-    monkeypatch.setattr(backend, "_call_openai", fake_call)
+    # Uses structured path by default — mock it.
+    monkeypatch.setattr(backend, "_call_openai_structured", fake_call)
 
     asyncio.run(backend.generate_module(_ctx("build")))
     asyncio.run(backend.generate_module(_ctx("test")))
@@ -96,7 +102,8 @@ def test_openai_backend_injects_skills_block_as_extra_user_message(monkeypatch) 
         seen.append(messages)
         return "def foo():\n    return 1\n"
 
-    monkeypatch.setattr(backend, "_call_openai", fake_call)
+    # Uses structured path by default — mock it.
+    monkeypatch.setattr(backend, "_call_openai_structured", fake_call)
 
     ctx = ModuleSpecContext(
         kind="build",
@@ -117,3 +124,193 @@ def test_openai_backend_injects_skills_block_as_extra_user_message(monkeypatch) 
     assert len(msgs) == 3
     assert msgs[1]["role"] == "user"
     assert "External library skills (reference):" in msgs[1]["content"]
+
+
+# -- Structured output tests --
+
+
+def test_openai_backend_supports_structured_output(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    backend = OpenAIBackend(
+        LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY")
+    )
+    assert backend.supports_structured_output is True
+
+
+def test_openai_generate_module_uses_structured_output(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    backend = OpenAIBackend(
+        LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY")
+    )
+
+    structured_called: list[list[dict[str, str]]] = []
+
+    async def fake_structured_call(messages):
+        structured_called.append(messages)
+        return "def foo():\n    return 42\n"
+
+    monkeypatch.setattr(backend, "_call_openai_structured", fake_structured_call)
+
+    result = asyncio.run(backend.generate_module(_ctx("build")))
+    assert result == "def foo():\n    return 42\n"
+    assert len(structured_called) == 1
+
+
+def test_openai_generate_module_fallback_when_structured_disabled(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    backend = OpenAIBackend(
+        LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY")
+    )
+
+    monkeypatch.setattr(type(backend), "supports_structured_output", property(lambda self: False))
+
+    async def fake_call(messages):
+        return "```python\ndef foo():\n    return 99\n```"
+
+    monkeypatch.setattr(backend, "_call_openai", fake_call)
+
+    result = asyncio.run(backend.generate_module(_ctx("build")))
+    assert result == "def foo():\n    return 99"
+
+
+def test_openai_call_structured_sends_response_format(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    backend = OpenAIBackend(
+        LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY")
+    )
+
+    captured_kwargs: list[dict] = []
+
+    class _FakeResp:
+        class _Choice:
+            class _Message:
+                content = '{"python_source": "def foo():\\n    return 1\\n", "imports_used": []}'
+
+            message = _Message()
+
+        choices = [_Choice()]
+
+    class _FakeCompletions:
+        @staticmethod
+        async def create(**kwargs):
+            captured_kwargs.append(kwargs)
+            return _FakeResp()
+
+    monkeypatch.setattr(
+        backend,
+        "_client",
+        type("C", (), {"chat": type("Ch", (), {"completions": _FakeCompletions})()})(),
+    )
+
+    messages = [{"role": "user", "content": "generate code"}]
+    result = asyncio.run(backend._call_openai_structured(messages))
+
+    assert result == "def foo():\n    return 1\n"
+    assert len(captured_kwargs) == 1
+    assert "response_format" in captured_kwargs[0]
+    rf = captured_kwargs[0]["response_format"]
+    assert rf["type"] == "json_schema"
+    assert rf["json_schema"]["name"] == "module_output"
+    schema = rf["json_schema"]["schema"]
+    assert "python_source" in schema["properties"]
+    assert "imports_used" in schema["properties"]
+    assert schema["required"] == ["python_source"]
+
+
+def test_openai_structured_json_parse_error_raises(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    backend = OpenAIBackend(
+        LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY")
+    )
+
+    class _FakeResp:
+        class _Choice:
+            class _Message:
+                content = "this is not json"
+
+            message = _Message()
+
+        choices = [_Choice()]
+
+    class _FakeCompletions:
+        @staticmethod
+        async def create(**kwargs):
+            return _FakeResp()
+
+    monkeypatch.setattr(
+        backend,
+        "_client",
+        type("C", (), {"chat": type("Ch", (), {"completions": _FakeCompletions})()})(),
+    )
+    import jaunt.generate.openai_backend as mod
+
+    monkeypatch.setattr(mod, "_BASE_BACKOFF_S", 0.001)
+
+    with pytest.raises(json.JSONDecodeError):
+        asyncio.run(backend._call_openai_structured([{"role": "user", "content": "hi"}]))
+
+
+def test_openai_structured_missing_python_source_raises(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    backend = OpenAIBackend(
+        LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY")
+    )
+
+    class _FakeResp:
+        class _Choice:
+            class _Message:
+                content = '{"imports_used": ["os"]}'
+
+            message = _Message()
+
+        choices = [_Choice()]
+
+    class _FakeCompletions:
+        @staticmethod
+        async def create(**kwargs):
+            return _FakeResp()
+
+    monkeypatch.setattr(
+        backend,
+        "_client",
+        type("C", (), {"chat": type("Ch", (), {"completions": _FakeCompletions})()})(),
+    )
+    import jaunt.generate.openai_backend as mod
+
+    monkeypatch.setattr(mod, "_BASE_BACKOFF_S", 0.001)
+
+    with pytest.raises(KeyError):
+        asyncio.run(backend._call_openai_structured([{"role": "user", "content": "hi"}]))
+
+
+def test_openai_structured_logs_imports_used(monkeypatch, caplog) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    backend = OpenAIBackend(
+        LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY")
+    )
+
+    class _FakeResp:
+        class _Choice:
+            class _Message:
+                content = '{"python_source": "import os\\n", "imports_used": ["os", "sys"]}'
+
+            message = _Message()
+
+        choices = [_Choice()]
+
+    class _FakeCompletions:
+        @staticmethod
+        async def create(**kwargs):
+            return _FakeResp()
+
+    monkeypatch.setattr(
+        backend,
+        "_client",
+        type("C", (), {"chat": type("Ch", (), {"completions": _FakeCompletions})()})(),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="jaunt.generate.openai"):
+        result = asyncio.run(backend._call_openai_structured([{"role": "user", "content": "hi"}]))
+
+    assert result == "import os\n"
+    assert "imports_used" in caplog.text

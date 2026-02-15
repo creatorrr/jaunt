@@ -7,6 +7,11 @@ The generated module MUST define these top-level pytest test functions (do not i
 Specs:
 {{specs_block}}
 
+How to read the test specs above:
+- The docstring describes the test scenario — what to set up, what to call, and what to assert.
+- If a spec includes a `# Decorator prompt` section, treat it as additional user-provided instructions for the test.
+- The function signature (parameters, type hints) indicates whether the test needs fixtures.
+
 Dependency APIs (callable signatures/docstrings):
 {{deps_api_block}}
 
@@ -15,6 +20,11 @@ Previously generated dependency modules (reference only):
 
 Extra error context (fix these issues):
 {{error_context_block}}
+
+Test quality:
+- Cover the happy path (normal usage) and edge cases (boundary values, error conditions, empty inputs).
+- Write specific assertions that check concrete values — avoid bare `assert result`.
+- Use `pytest.raises` for expected exceptions.
 
 Rules:
 - Generate tests only (no production implementation).

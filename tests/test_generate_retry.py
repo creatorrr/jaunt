@@ -44,3 +44,8 @@ def test_generate_with_retry_calls_twice_and_succeeds() -> None:
     assert backend.extra_contexts[0] is None
     assert backend.extra_contexts[1] is not None
     assert any("previous output errors:" in s for s in backend.extra_contexts[1] or [])
+
+
+def test_base_backend_supports_structured_output_default_false() -> None:
+    backend = DummyBackend()
+    assert backend.supports_structured_output is False
