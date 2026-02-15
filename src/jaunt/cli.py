@@ -145,6 +145,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Run tests after each successful build.",
     )
 
+    mcp_p = subparsers.add_parser("mcp", help="MCP server commands.")
+    mcp_sub = mcp_p.add_subparsers(dest="mcp_command", required=True)
+    serve_p = mcp_sub.add_parser("serve", help="Start MCP server (stdio transport).")
+    serve_p.add_argument(
+        "--root",
+        type=str,
+        default=None,
+        help="Project root (defaults to searching upward for jaunt.toml).",
+    )
+
     return parser
 
 
@@ -810,6 +820,17 @@ def cmd_watch(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_mcp(args: argparse.Namespace) -> int:
+    try:
+        from jaunt.mcp_server import run_server
+    except ImportError:
+        _eprint("error: fastmcp is not installed. Install it with: pip install jaunt[mcp]")
+        return EXIT_CONFIG_OR_DISCOVERY
+    root = getattr(args, "root", None)
+    run_server(root=root)
+    return EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_args(list(sys.argv[1:] if argv is None else argv))
@@ -830,6 +851,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_status(args)
     if args.command == "watch":
         return cmd_watch(args)
+    if args.command == "mcp":
+        return cmd_mcp(args)
 
     return EXIT_CONFIG_OR_DISCOVERY
 

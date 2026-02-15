@@ -13,6 +13,7 @@ def test_sync_generated_dir_env_sets_default(monkeypatch) -> None:
         BuildConfig,
         JauntConfig,
         LLMConfig,
+        MCPConfig,
         PathsConfig,
         PromptsConfig,
         TestConfig,
@@ -25,6 +26,7 @@ def test_sync_generated_dir_env_sets_default(monkeypatch) -> None:
         build=BuildConfig(jobs=1, infer_deps=True),
         test=TestConfig(jobs=1, infer_deps=True, pytest_args=[]),
         prompts=PromptsConfig(build_system="", build_module="", test_system="", test_module=""),
+        mcp=MCPConfig(enabled=True),
     )
 
     _sync_generated_dir_env(cfg)
@@ -42,6 +44,7 @@ def test_sync_generated_dir_env_does_not_override(monkeypatch) -> None:
         BuildConfig,
         JauntConfig,
         LLMConfig,
+        MCPConfig,
         PathsConfig,
         PromptsConfig,
         TestConfig,
@@ -54,6 +57,7 @@ def test_sync_generated_dir_env_does_not_override(monkeypatch) -> None:
         build=BuildConfig(jobs=1, infer_deps=True),
         test=TestConfig(jobs=1, infer_deps=True, pytest_args=[]),
         prompts=PromptsConfig(build_system="", build_module="", test_system="", test_module=""),
+        mcp=MCPConfig(enabled=True),
     )
 
     _sync_generated_dir_env(cfg)

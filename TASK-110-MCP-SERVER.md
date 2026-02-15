@@ -1,7 +1,7 @@
 ---
 id: "110"
 title: MCP Server
-status: todo
+status: done
 priority: 6
 effort: medium
 depends: ["030", "060"]
