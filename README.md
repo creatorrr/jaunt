@@ -93,6 +93,29 @@ cd docs-site
 npm run dev
 ```
 
+## Publish to PyPI
+
+If you keep your token in `.env` as `UV_PUBLISH_TOKEN=...`, load it into your shell first:
+
+```bash
+set -a
+source .env
+set +a
+```
+
+Build and validate artifacts:
+
+```bash
+uv build
+uvx twine check dist/*
+```
+
+Upload to PyPI:
+
+```bash
+uv publish --check-url https://pypi.org/simple/
+```
+
 ## Dev
 
 ```bash
