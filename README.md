@@ -74,6 +74,20 @@ uv run jaunt eval --compare openai:gpt-4o anthropic:claude-sonnet-4-5-20250929
 
 Eval outputs are written under `.jaunt/evals/<timestamp>/`.
 
+### Eval Results (2026-02-15 UTC)
+
+| Run (UTC) | Mode | Target | Reasoning | Passed | Failed | Skipped | Total | Notes | Artifacts |
+| --- | --- | --- | --- | ---:| ---:| ---:| ---:| --- | --- |
+| 2026-02-15T21-34-58Z | single | `cerebras:gpt-oss-120b` | none | 0 | 10 | 0 | 10 | Missing `cerebras-cloud-sdk` dependency | [`examples/expr_eval/.jaunt/evals/2026-02-15T21-34-58Z`](examples/expr_eval/.jaunt/evals/2026-02-15T21-34-58Z) |
+| 2026-02-15T21-35-17Z | single | `cerebras:gpt-oss-120b` | none | 0 | 10 | 0 | 10 | Cerebras `402 payment_required` quota/billing error | [`examples/expr_eval/.jaunt/evals/2026-02-15T21-35-17Z`](examples/expr_eval/.jaunt/evals/2026-02-15T21-35-17Z) |
+| 2026-02-15T21-36-54Z | single | `cerebras:gpt-oss-120b` | none | 10 | 0 | 0 | 10 | All eval cases passed | [`examples/expr_eval/.jaunt/evals/2026-02-15T21-36-54Z`](examples/expr_eval/.jaunt/evals/2026-02-15T21-36-54Z) |
+| 2026-02-15T22-01-24Z-custom-compare | compare | `cerebras:gpt-oss-120b` | low | 10 | 0 | 0 | 10 | All eval cases passed | [`examples/expr_eval/.jaunt/evals/2026-02-15T22-01-24Z-custom-compare`](examples/expr_eval/.jaunt/evals/2026-02-15T22-01-24Z-custom-compare) |
+| 2026-02-15T22-01-24Z-custom-compare | compare | `openai:gpt-5.2` | none | 10 | 0 | 0 | 10 | All eval cases passed | [`examples/expr_eval/.jaunt/evals/2026-02-15T22-01-24Z-custom-compare`](examples/expr_eval/.jaunt/evals/2026-02-15T22-01-24Z-custom-compare) |
+| 2026-02-15T22-01-24Z-custom-compare | compare | `anthropic:opus-4.6` | none | 0 | 10 | 0 | 10 | Anthropic `404 not_found_error` for model name | [`examples/expr_eval/.jaunt/evals/2026-02-15T22-01-24Z-custom-compare`](examples/expr_eval/.jaunt/evals/2026-02-15T22-01-24Z-custom-compare) |
+| 2026-02-15T22-04-19Z-custom-compare | compare | `cerebras:gpt-oss-120b` | low | 10 | 0 | 0 | 10 | All eval cases passed | [`examples/expr_eval/.jaunt/evals/2026-02-15T22-04-19Z-custom-compare`](examples/expr_eval/.jaunt/evals/2026-02-15T22-04-19Z-custom-compare) |
+| 2026-02-15T22-04-19Z-custom-compare | compare | `openai:gpt-5.2` | none | 10 | 0 | 0 | 10 | All eval cases passed | [`examples/expr_eval/.jaunt/evals/2026-02-15T22-04-19Z-custom-compare`](examples/expr_eval/.jaunt/evals/2026-02-15T22-04-19Z-custom-compare) |
+| 2026-02-15T22-04-19Z-custom-compare | compare | `anthropic:claude-haiku-4-5` | none | 9 | 1 | 0 | 10 | One assertion failure (`example_slugify_smoke`) | [`examples/expr_eval/.jaunt/evals/2026-02-15T22-04-19Z-custom-compare`](examples/expr_eval/.jaunt/evals/2026-02-15T22-04-19Z-custom-compare) |
+
 Prompt snapshots:
 
 ```bash

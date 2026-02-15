@@ -74,6 +74,12 @@ class AnthropicBackend(GeneratorBackend):
                 f"Set it in the environment or add it to <project_root>/.env."
             )
         self._model = llm.model
+        self._thinking: dict[str, Any] | None = None
+        if llm.anthropic_thinking_budget_tokens is not None:
+            self._thinking = {
+                "type": "enabled",
+                "budget_tokens": llm.anthropic_thinking_budget_tokens,
+            }
 
         try:
             from anthropic import AsyncAnthropic  # type: ignore[import-untyped]
@@ -105,12 +111,15 @@ class AnthropicBackend(GeneratorBackend):
         last_exc: BaseException | None = None
         for attempt in range(_MAX_API_RETRIES):
             try:
-                resp: Any = await self._client.messages.create(
-                    model=self._model,
-                    max_tokens=16384,
-                    system=system,
-                    messages=messages,
-                )
+                request_kwargs: dict[str, Any] = {
+                    "model": self._model,
+                    "max_tokens": 16384,
+                    "system": system,
+                    "messages": messages,
+                }
+                if self._thinking is not None:
+                    request_kwargs["thinking"] = self._thinking
+                resp: Any = await self._client.messages.create(**request_kwargs)
                 content = resp.content
                 if not content or not hasattr(content[0], "text"):
                     raise RuntimeError("Anthropic returned empty content.")
@@ -146,14 +155,17 @@ class AnthropicBackend(GeneratorBackend):
         last_exc: BaseException | None = None
         for attempt in range(_MAX_API_RETRIES):
             try:
-                resp: Any = await self._client.messages.create(
-                    model=self._model,
-                    max_tokens=16384,
-                    system=system,
-                    messages=messages,
-                    tools=[_ANTHROPIC_WRITE_MODULE_TOOL],
-                    tool_choice={"type": "tool", "name": "write_module"},
-                )
+                request_kwargs: dict[str, Any] = {
+                    "model": self._model,
+                    "max_tokens": 16384,
+                    "system": system,
+                    "messages": messages,
+                    "tools": [_ANTHROPIC_WRITE_MODULE_TOOL],
+                    "tool_choice": {"type": "tool", "name": "write_module"},
+                }
+                if self._thinking is not None:
+                    request_kwargs["thinking"] = self._thinking
+                resp: Any = await self._client.messages.create(**request_kwargs)
                 usage = None
                 if getattr(resp, "usage", None) is not None:
                     usage = TokenUsage(

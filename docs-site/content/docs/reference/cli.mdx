@@ -103,4 +103,22 @@ uv run jaunt mcp serve --root /path/to/project
 
 Note: `jaunt test` runs pytest only on the generated test files it just wrote (not the entire suite). Run `pytest` separately for a full test run.
 
+## Eval Results Snapshot (2026-02-15 UTC)
+
+The table below captures the eval runs executed during provider bring-up and reasoning-control testing.
+
+| Run (UTC) | Mode | Target | Reasoning | Passed | Failed | Skipped | Total | Notes |
+| --- | --- | --- | --- | ---:| ---:| ---:| ---:| --- |
+| 2026-02-15T21-34-58Z | single | `cerebras:gpt-oss-120b` | none | 0 | 10 | 0 | 10 | Missing `cerebras-cloud-sdk` dependency |
+| 2026-02-15T21-35-17Z | single | `cerebras:gpt-oss-120b` | none | 0 | 10 | 0 | 10 | Cerebras `402 payment_required` quota/billing error |
+| 2026-02-15T21-36-54Z | single | `cerebras:gpt-oss-120b` | none | 10 | 0 | 0 | 10 | All eval cases passed |
+| 2026-02-15T22-01-24Z-custom-compare | compare | `cerebras:gpt-oss-120b` | low | 10 | 0 | 0 | 10 | All eval cases passed |
+| 2026-02-15T22-01-24Z-custom-compare | compare | `openai:gpt-5.2` | none | 10 | 0 | 0 | 10 | All eval cases passed |
+| 2026-02-15T22-01-24Z-custom-compare | compare | `anthropic:opus-4.6` | none | 0 | 10 | 0 | 10 | Anthropic `404 not_found_error` for model name |
+| 2026-02-15T22-04-19Z-custom-compare | compare | `cerebras:gpt-oss-120b` | low | 10 | 0 | 0 | 10 | All eval cases passed |
+| 2026-02-15T22-04-19Z-custom-compare | compare | `openai:gpt-5.2` | none | 10 | 0 | 0 | 10 | All eval cases passed |
+| 2026-02-15T22-04-19Z-custom-compare | compare | `anthropic:claude-haiku-4-5` | none | 9 | 1 | 0 | 10 | One assertion failure (`example_slugify_smoke`) |
+
+Raw artifacts are under `examples/expr_eval/.jaunt/evals/` in the repository.
+
 Next: [Configuration](/docs/reference/config).

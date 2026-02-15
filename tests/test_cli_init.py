@@ -147,4 +147,4 @@ def test_cmd_init_toml_is_valid(tmp_path: Path, monkeypatch) -> None:
     raw = (tmp_path / "jaunt.toml").read_bytes()
     data = tomllib.loads(raw.decode("utf-8"))
     assert data["version"] == 1
-    assert data["llm"]["provider"] in ("openai", "anthropic")
+    assert data["llm"]["provider"] in ("openai", "anthropic", "cerebras")
