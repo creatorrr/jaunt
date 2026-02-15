@@ -15,6 +15,12 @@ from typing import Any
 
 from jaunt.eval_cases import BuiltinEvalCase, get_builtin_eval_cases
 
+_BUILD_TIMEOUT_S = 300.0
+_ASSERT_TIMEOUT_S = 120.0
+_TYPECHECK_TIMEOUT_S = 120.0
+_EXIT_TYPECHECK_MISSING = 127
+_EXIT_TIMEOUT = 124
+
 
 @dataclass(frozen=True, slots=True)
 class EvalTarget:
@@ -234,9 +240,15 @@ def run_eval_case(*, target: EvalTarget, case: BuiltinEvalCase) -> EvalCaseResul
         generated_sources = _collect_generated_sources(project_root)
 
         status = "passed"
+        skip_reason: str | None = None
         if not build_step.ok or (assertion_step is not None and not assertion_step.ok):
             status = "failed"
-        elif typecheck_step is None or not typecheck_step.ok:
+        elif typecheck_step is None:
+            status = "failed"
+        elif typecheck_step.exit_code == _EXIT_TYPECHECK_MISSING:
+            status = "skipped"
+            skip_reason = "Type checker 'ty' is not installed or importable."
+        elif not typecheck_step.ok:
             status = "failed"
 
         return EvalCaseResult(
@@ -244,7 +256,7 @@ def run_eval_case(*, target: EvalTarget, case: BuiltinEvalCase) -> EvalCaseResul
             description=case.description,
             status=status,
             duration_sec=round(time.perf_counter() - started, 3),
-            skip_reason=None,
+            skip_reason=skip_reason,
             build=build_step,
             assertions=assertion_step,
             typecheck=typecheck_step,
@@ -456,12 +468,16 @@ def _run_build(project_root: Path) -> StepResult:
         "--force",
         "--no-progress",
     ]
-    return _run_subprocess(cmd=cmd, cwd=project_root, env=_build_env(project_root))
+    return _run_subprocess(
+        cmd=cmd, cwd=project_root, env=_build_env(project_root), timeout_sec=_BUILD_TIMEOUT_S
+    )
 
 
 def _run_assertions(project_root: Path, assertion_code: str) -> StepResult:
     cmd = [sys.executable, "-c", assertion_code]
-    return _run_subprocess(cmd=cmd, cwd=project_root, env=_build_env(project_root))
+    return _run_subprocess(
+        cmd=cmd, cwd=project_root, env=_build_env(project_root), timeout_sec=_ASSERT_TIMEOUT_S
+    )
 
 
 def _run_typecheck(project_root: Path) -> StepResult:
@@ -469,13 +485,18 @@ def _run_typecheck(project_root: Path) -> StepResult:
     if ty_cmd is None:
         return StepResult(
             ok=False,
-            exit_code=127,
+            exit_code=_EXIT_TYPECHECK_MISSING,
             stdout="",
             stderr="Type checker 'ty' is not installed or importable.",
             duration_sec=0.0,
         )
     cmd = [*ty_cmd, "check", str(project_root / "src")]
-    return _run_subprocess(cmd=cmd, cwd=project_root, env=_build_env(project_root))
+    return _run_subprocess(
+        cmd=cmd,
+        cwd=project_root,
+        env=_build_env(project_root),
+        timeout_sec=_TYPECHECK_TIMEOUT_S,
+    )
 
 
 def _resolve_ty_cmd() -> list[str] | None:
@@ -490,24 +511,44 @@ def _resolve_ty_cmd() -> list[str] | None:
         return None
 
 
-def _run_subprocess(*, cmd: list[str], cwd: Path, env: dict[str, str]) -> StepResult:
+def _run_subprocess(
+    *,
+    cmd: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    timeout_sec: float | None = None,
+) -> StepResult:
     started = time.perf_counter()
-    proc = subprocess.run(
-        cmd,
-        cwd=str(cwd),
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    duration = round(time.perf_counter() - started, 3)
-    return StepResult(
-        ok=proc.returncode == 0,
-        exit_code=int(proc.returncode),
-        stdout=proc.stdout,
-        stderr=proc.stderr,
-        duration_sec=duration,
-    )
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(cwd),
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout_sec,
+        )
+        duration = round(time.perf_counter() - started, 3)
+        return StepResult(
+            ok=proc.returncode == 0,
+            exit_code=int(proc.returncode),
+            stdout=proc.stdout,
+            stderr=proc.stderr,
+            duration_sec=duration,
+        )
+    except subprocess.TimeoutExpired as exc:
+        duration = round(time.perf_counter() - started, 3)
+        timeout_note = f"Command timed out after {timeout_sec:.1f}s."
+        stderr = _to_text(exc.stderr)
+        stderr = f"{stderr.rstrip()}\n{timeout_note}\n" if stderr else timeout_note
+        return StepResult(
+            ok=False,
+            exit_code=_EXIT_TIMEOUT,
+            stdout=_to_text(exc.stdout),
+            stderr=stderr,
+            duration_sec=duration,
+        )
 
 
 def _build_env(project_root: Path) -> dict[str, str]:
@@ -563,3 +604,11 @@ def _write_text(path: Path, content: str) -> None:
 
 def _json(data: dict[str, Any]) -> str:
     return json.dumps(data, indent=2, sort_keys=False)
+
+
+def _to_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value

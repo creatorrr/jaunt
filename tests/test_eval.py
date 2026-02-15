@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -139,3 +141,56 @@ def test_run_eval_case_skips_when_required_package_missing(monkeypatch) -> None:
     assert result.status == "skipped"
     assert result.skip_reason is not None
     assert "Missing required package" in result.skip_reason
+
+
+def test_run_eval_case_skips_when_typechecker_missing(monkeypatch) -> None:
+    case = jaunt_eval.load_cases(["simple_function"])[0]
+    target = jaunt_eval.EvalTarget(provider="openai", model="gpt-4o")
+
+    monkeypatch.setattr(jaunt_eval, "_module_missing", lambda module_name: False)
+    monkeypatch.setattr(
+        jaunt_eval,
+        "_run_build",
+        lambda project_root: jaunt_eval.StepResult(
+            ok=True, exit_code=0, stdout="", stderr="", duration_sec=0.1
+        ),
+    )
+    monkeypatch.setattr(
+        jaunt_eval,
+        "_run_assertions",
+        lambda project_root, assertion_code: jaunt_eval.StepResult(
+            ok=True, exit_code=0, stdout="", stderr="", duration_sec=0.1
+        ),
+    )
+    monkeypatch.setattr(
+        jaunt_eval,
+        "_run_typecheck",
+        lambda project_root: jaunt_eval.StepResult(
+            ok=False,
+            exit_code=127,
+            stdout="",
+            stderr="Type checker 'ty' is not installed or importable.",
+            duration_sec=0.0,
+        ),
+    )
+
+    result = jaunt_eval.run_eval_case(target=target, case=case)
+
+    assert result.status == "skipped"
+    assert result.skip_reason == "Type checker 'ty' is not installed or importable."
+    assert result.build is not None and result.build.ok is True
+    assert result.assertions is not None and result.assertions.ok is True
+    assert result.typecheck is not None and result.typecheck.exit_code == 127
+
+
+def test_run_subprocess_timeout_returns_exit_124(tmp_path: Path) -> None:
+    result = jaunt_eval._run_subprocess(  # noqa: SLF001 - intentional direct helper coverage
+        cmd=[sys.executable, "-c", "import time; time.sleep(0.2)"],
+        cwd=tmp_path,
+        env=os.environ.copy(),
+        timeout_sec=0.01,
+    )
+
+    assert result.ok is False
+    assert result.exit_code == 124
+    assert "timed out" in result.stderr.lower()
