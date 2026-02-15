@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -63,7 +64,11 @@ class GeneratorBackend(ABC):
         """
 
     async def generate_with_retry(
-        self, ctx: ModuleSpecContext, *, max_attempts: int = 2
+        self,
+        ctx: ModuleSpecContext,
+        *,
+        max_attempts: int = 2,
+        extra_validator: Callable[[str], list[str]] | None = None,
     ) -> GenerationResult:
         """Generate code, validate, and retry with error context (deterministic)."""
 
@@ -82,6 +87,8 @@ class GeneratorBackend(ABC):
                 total_completion += usage.completion_tokens
 
             last_errors = validate_generated_source(last_source, ctx.expected_names)
+            if not last_errors and extra_validator is not None:
+                last_errors = extra_validator(last_source)
             if not last_errors:
                 agg = (
                     TokenUsage(total_prompt, total_completion, self.model_name, self.provider_name)

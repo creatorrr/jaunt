@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -200,3 +201,23 @@ def test_scheduler_cycle_raises(tmp_path: Path) -> None:
                 jobs=1,
             )
         )
+
+
+def test_ty_error_context_timeout_returns_error(monkeypatch, tmp_path: Path) -> None:
+    from jaunt import builder
+
+    def _timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=["ty"], timeout=1.0, stderr="hung")
+
+    monkeypatch.setattr(builder.subprocess, "run", _timeout)
+
+    errs = builder._ty_error_context(  # noqa: SLF001 - direct helper coverage
+        source="def foo() -> int:\n    return 1\n",
+        module_name="pkg.mod",
+        package_dir=tmp_path,
+        generated_dir="__generated__",
+        ty_cmd=["ty"],
+    )
+
+    assert errs
+    assert "timed out" in errs[0]

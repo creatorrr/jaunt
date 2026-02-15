@@ -23,6 +23,7 @@ def test_load_minimal_config_defaults_apply(tmp_path: Path) -> None:
 
     assert cfg.build.jobs == 8
     assert cfg.build.infer_deps is True
+    assert cfg.build.ty_retry_attempts == 1
 
     assert cfg.test.jobs == 4
     assert cfg.test.infer_deps is True
@@ -53,6 +54,7 @@ def test_load_config_overrides_work(tmp_path: Path) -> None:
                 "[build]",
                 "jobs = 2",
                 "infer_deps = false",
+                "ty_retry_attempts = 2",
                 "",
                 "[test]",
                 "jobs = 3",
@@ -82,6 +84,7 @@ def test_load_config_overrides_work(tmp_path: Path) -> None:
 
     assert cfg.build.jobs == 2
     assert cfg.build.infer_deps is False
+    assert cfg.build.ty_retry_attempts == 2
 
     assert cfg.test.jobs == 3
     assert cfg.test.infer_deps is False
@@ -150,6 +153,24 @@ def test_validation_jobs_must_be_ge_1(tmp_path: Path) -> None:
                 "",
                 "[build]",
                 "jobs = 0",
+                "",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(JauntConfigError):
+        load_config(root=tmp_path)
+
+
+def test_validation_ty_retry_attempts_must_be_ge_0(tmp_path: Path) -> None:
+    (tmp_path / "jaunt.toml").write_text(
+        "\n".join(
+            [
+                "version = 1",
+                "",
+                "[build]",
+                "ty_retry_attempts = -1",
                 "",
             ]
         )

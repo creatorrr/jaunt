@@ -29,3 +29,4 @@ Rules:
 - Do not generate tests.
 - Do not edit user files; only output generated module source code.
 - Include type annotations on all function signatures.
+- Ensure every non-Optional return type has explicit return/raise on all code paths.

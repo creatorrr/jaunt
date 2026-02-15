@@ -34,6 +34,7 @@ class LLMConfig:
 class BuildConfig:
     jobs: int
     infer_deps: bool
+    ty_retry_attempts: int = 1
 
 
 @dataclass(frozen=True)
@@ -210,6 +211,13 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     else:
         build_infer_deps = True
 
+    if "ty_retry_attempts" in build_tbl:
+        build_ty_retry_attempts = _as_int(
+            build_tbl["ty_retry_attempts"], name="build.ty_retry_attempts"
+        )
+    else:
+        build_ty_retry_attempts = 1
+
     if "jobs" in test_tbl:
         test_jobs = _as_int(test_tbl["jobs"], name="test.jobs")
     else:
@@ -258,6 +266,8 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
 
     if build_jobs < 1 or test_jobs < 1:
         raise JauntConfigError("Invalid config: jobs must be >= 1.")
+    if build_ty_retry_attempts < 0:
+        raise JauntConfigError("Invalid config: build.ty_retry_attempts must be >= 0.")
 
     return JauntConfig(
         version=version_i,
@@ -272,7 +282,11 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             api_key_env=api_key_env,
             max_cost_per_build=max_cost_per_build,
         ),
-        build=BuildConfig(jobs=build_jobs, infer_deps=build_infer_deps),
+        build=BuildConfig(
+            jobs=build_jobs,
+            infer_deps=build_infer_deps,
+            ty_retry_attempts=build_ty_retry_attempts,
+        ),
         test=TestConfig(jobs=test_jobs, infer_deps=test_infer_deps, pytest_args=pytest_args),
         prompts=PromptsConfig(
             build_system=build_system,
