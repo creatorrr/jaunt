@@ -138,17 +138,18 @@ wheels = [
 name = "jaunt"
 version = "0.2.0"
 source = { editable = "." }
-dependencies = [
-    { name = "openai" },
-]
 
 [package.optional-dependencies]
 all = [
     { name = "anthropic" },
+    { name = "openai" },
     { name = "watchfiles" },
 ]
 anthropic = [
     { name = "anthropic" },
+]
+openai = [
+    { name = "openai" },
 ]
 watch = [
     { name = "watchfiles" },
@@ -156,6 +157,7 @@ watch = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "openai" },
     { name = "pytest" },
     { name = "ruff" },
     { name = "ty" },
@@ -165,14 +167,16 @@ dev = [
 requires-dist = [
     { name = "anthropic", marker = "extra == 'all'", specifier = ">=0.39.0,<1" },
     { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=0.39.0,<1" },
-    { name = "openai", specifier = ">=1.0.0,<2" },
+    { name = "openai", marker = "extra == 'all'", specifier = ">=1.0.0,<2" },
+    { name = "openai", marker = "extra == 'openai'", specifier = ">=1.0.0,<2" },
     { name = "watchfiles", marker = "extra == 'all'", specifier = ">=1.0.0" },
     { name = "watchfiles", marker = "extra == 'watch'", specifier = ">=1.0.0" },
 ]
-provides-extras = ["anthropic", "watch", "all"]
+provides-extras = ["openai", "anthropic", "watch", "all"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "openai", specifier = ">=1.0.0,<2" },
     { name = "pytest", specifier = ">=8" },
     { name = "ruff", specifier = ">=0.9" },
     { name = "ty" },

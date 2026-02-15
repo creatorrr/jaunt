@@ -74,9 +74,13 @@ class OpenAIBackend(GeneratorBackend):
             )
         self._model = llm.model
 
-        # OpenAI SDK is an optional import for the rest of the system; only this
-        # backend module imports it.
-        from openai import AsyncOpenAI
+        try:
+            from openai import AsyncOpenAI
+        except ImportError as e:
+            raise JauntConfigError(
+                "The 'openai' package is required for provider='openai'. "
+                "Install it with: pip install jaunt[openai]"
+            ) from e
 
         self._client: Any = AsyncOpenAI(api_key=api_key)
 

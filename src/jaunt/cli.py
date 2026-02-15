@@ -258,6 +258,7 @@ test_roots = ["tests"]
 generated_dir = "__generated__"
 
 [llm]
+# Install your chosen provider: pip install jaunt[openai] or pip install jaunt[anthropic]
 provider = "openai"
 model = "gpt-5.2"
 api_key_env = "OPENAI_API_KEY"

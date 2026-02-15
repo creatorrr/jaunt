@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 
 import pytest
 
@@ -81,6 +82,25 @@ def test_openai_backend_renders_expected_names_and_kind_specific_rules(monkeypat
     # Test prompts: must generate tests only.
     assert ("Generate tests only" in test_user) or ("tests only" in test_system)
     assert "Do not guess" in test_user
+
+
+def test_openai_backend_errors_when_package_missing(monkeypatch) -> None:
+    """If openai SDK is not installed, a clear JauntConfigError is raised."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    original = sys.modules.get("openai")
+    sys.modules["openai"] = None  # type: ignore[assignment]
+
+    try:
+        with pytest.raises(JauntConfigError, match="'openai' package is required"):
+            OpenAIBackend(
+                LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY")
+            )
+    finally:
+        if original is not None:
+            sys.modules["openai"] = original
+        else:
+            sys.modules.pop("openai", None)
 
 
 def test_openai_backend_errors_when_api_key_missing(monkeypatch) -> None:

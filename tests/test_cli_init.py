@@ -126,6 +126,16 @@ def test_cmd_init_with_root_flag(tmp_path: Path) -> None:
     assert (target / "jaunt.toml").exists()
 
 
+def test_cmd_init_template_includes_install_hint(tmp_path: Path, monkeypatch) -> None:
+    """Generated jaunt.toml should hint at installing the provider extra."""
+    monkeypatch.chdir(tmp_path)
+    ns = jaunt.cli.parse_args(["init"])
+    jaunt.cli.cmd_init(ns)
+
+    content = (tmp_path / "jaunt.toml").read_text()
+    assert "jaunt[openai]" in content
+
+
 def test_cmd_init_toml_is_valid(tmp_path: Path, monkeypatch) -> None:
     """Generated jaunt.toml should be loadable by the config system."""
     import tomllib

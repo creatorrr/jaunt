@@ -31,9 +31,13 @@ class OpenAISkillGenerator:
 
         self._model = llm.model
 
-        # Optional import so the rest of jaunt can be imported without OpenAI
-        # (but `jaunt build` requires it anyway).
-        from openai import AsyncOpenAI
+        try:
+            from openai import AsyncOpenAI
+        except ImportError as e:
+            raise JauntConfigError(
+                "The 'openai' package is required for provider='openai'. "
+                "Install it with: pip install jaunt[openai]"
+            ) from e
 
         self._client: Any = AsyncOpenAI(api_key=api_key)
 

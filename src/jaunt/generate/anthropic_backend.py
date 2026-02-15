@@ -80,7 +80,7 @@ class AnthropicBackend(GeneratorBackend):
         except ImportError as e:
             raise JauntConfigError(
                 "The 'anthropic' package is required for provider='anthropic'. "
-                "Install it with: pip install anthropic"
+                "Install it with: pip install jaunt[anthropic]"
             ) from e
 
         self._client: Any = AsyncAnthropic(api_key=api_key)
