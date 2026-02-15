@@ -823,6 +823,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
 def cmd_mcp(args: argparse.Namespace) -> int:
     try:
         from jaunt.mcp_server import run_server
+
         root = getattr(args, "root", None)
         run_server(root=root)
     except ImportError:
