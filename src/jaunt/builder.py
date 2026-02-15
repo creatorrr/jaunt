@@ -4,7 +4,12 @@ import asyncio
 import heapq
 import importlib.metadata
 import os
+import re
+import shutil
+import subprocess
+import sys
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -205,6 +210,72 @@ def _assert_acyclic(module_graph: dict[str, set[str]]) -> None:
     toposort(module_graph)
 
 
+def _resolve_ty_cmd() -> list[str] | None:
+    if shutil.which("ty"):
+        return ["ty"]
+
+    try:
+        import ty  # noqa: F401
+
+        return [sys.executable, "-m", "ty"]
+    except Exception:
+        return None
+
+
+def _ty_error_context(
+    *,
+    source: str,
+    module_name: str,
+    package_dir: Path,
+    generated_dir: str,
+    ty_cmd: list[str],
+) -> list[str]:
+    relpath = _generated_relpath(module_name, generated_dir=generated_dir)
+    with tempfile.TemporaryDirectory(prefix=".jaunt-ty-") as tmp:
+        tmp_root = Path(tmp)
+        tmp_path = tmp_root / relpath
+        tmp_path.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_init_files(tmp_root, relpath)
+        tmp_path.write_text((source or "").rstrip() + "\n", encoding="utf-8")
+
+        env = os.environ.copy()
+        cur = env.get("PYTHONPATH") or ""
+        cur_parts = [x for x in cur.split(os.pathsep) if x] if cur else []
+        pp = [str(tmp_root.resolve()), str(package_dir.resolve()), *cur_parts]
+        merged: list[str] = []
+        seen: set[str] = set()
+        for p in pp:
+            if p in seen:
+                continue
+            merged.append(p)
+            seen.add(p)
+        env["PYTHONPATH"] = os.pathsep.join(merged)
+
+        proc = subprocess.run(
+            [*ty_cmd, "check", str(tmp_path)],
+            cwd=str(package_dir),
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode == 0:
+            return []
+
+        raw = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+        if not raw:
+            raw = f"ty check exited with status {proc.returncode}"
+        error_codes = set(re.findall(r"error\[([^\]]+)\]", raw))
+        if error_codes and error_codes.issubset({"unresolved-import"}):
+            # The candidate source is checked from an isolated temp tree; imports
+            # that resolve in the final project layout may be transiently
+            # unresolved here. Ignore pure unresolved-import diagnostics.
+            return []
+        lines = [line for line in raw.splitlines() if line.strip()]
+        snippet = "\n".join(lines[:16])
+        return [f"ty check failed for {module_name}: {snippet}"]
+
+
 async def run_build(
     *,
     package_dir: Path,
@@ -220,8 +291,10 @@ async def run_build(
     progress: object | None = None,
     response_cache: ResponseCache | None = None,
     cost_tracker: CostTracker | None = None,
+    ty_retry_attempts: int | None = None,
 ) -> BuildReport:
     jobs = max(1, int(jobs))
+    ty_attempts = max(0, int(ty_retry_attempts)) if ty_retry_attempts is not None else None
 
     # Expand rebuild set and restrict to modules we actually have specs for.
     expanded = expand_stale_modules(module_dag, set(stale_modules))
@@ -256,6 +329,7 @@ async def run_build(
     generated_sources: dict[str, str] = {}  # module_name -> generated source
     failed: dict[str, list[str]] = {}
     completed: set[str] = set()
+    ty_cmd = _resolve_ty_cmd() if ty_attempts is not None else None
 
     # Track generated source for dependency context injection.
     generated_sources: dict[str, str] = {}
@@ -319,6 +393,29 @@ async def run_build(
             skills_block=skills_block,
         )
 
+        ty_validator: Callable[[str], list[str]] | None = None
+        if ty_cmd is not None:
+            ty_cmd_local = ty_cmd
+
+            def _local_ty_validator(source: str) -> list[str]:
+                return _ty_error_context(
+                    source=source,
+                    module_name=module_name,
+                    package_dir=package_dir,
+                    generated_dir=generated_dir,
+                    ty_cmd=ty_cmd_local,
+                )
+
+            ty_validator = _local_ty_validator
+
+        def _validate_candidate(source: str) -> list[str]:
+            errs = validate_generated_source(source, expected)
+            if errs:
+                return errs
+            if ty_validator is None:
+                return []
+            return ty_validator(source)
+
         # Check response cache before calling LLM.
         result_source: str | None = None
         ck: str | None = None
@@ -328,20 +425,22 @@ async def run_build(
             )
             cached = response_cache.get(ck)
             if cached is not None:
-                cache_errors = validate_generated_source(cached.source, expected)
+                cache_errors = _validate_candidate(cached.source)
                 if not cache_errors:
                     result_source = cached.source
                     if cost_tracker is not None:
                         cost_tracker.record_cache_hit()
 
         if result_source is None:
-            result = await backend.generate_with_retry(ctx)
+            max_attempts = 2 + (ty_attempts or 0) if ty_validator is not None else 2
+            result = await backend.generate_with_retry(
+                ctx, max_attempts=max_attempts, extra_validator=ty_validator
+            )
             if result.source is None:
                 return False, result.errors or ["No source returned."]
 
-            errors = validate_generated_source(result.source, expected)
-            if errors:
-                return False, errors
+            if result.errors:
+                return False, result.errors
 
             result_source = result.source
 

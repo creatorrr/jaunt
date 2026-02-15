@@ -648,6 +648,7 @@ def cmd_build(args: argparse.Namespace) -> int:
                 progress=progress,
                 response_cache=response_cache,
                 cost_tracker=cost_tracker,
+                ty_retry_attempts=cfg.build.ty_retry_attempts,
             )
         )
 

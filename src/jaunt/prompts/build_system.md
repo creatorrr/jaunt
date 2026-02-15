@@ -11,6 +11,7 @@ Code quality requirements:
 - Include type annotations on all function signatures (parameters and return types).
 - Use proper imports — import only modules and names you actually use.
 - Write clean, idiomatic Python. Follow the style and conventions visible in the specs.
+- Generated code should pass static type checking (ty): avoid implicit `None` return paths for non-Optional return types.
 
 Rules:
 - Emit only the full source code for the generated module.

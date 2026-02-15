@@ -228,6 +228,231 @@ assert "pydantic" in generated_source.lower()
             required_packages=("pydantic",),
         ),
         BuiltinEvalCase(
+            case_id="async_retry_flow",
+            description="Async function with retries, error handling, and callable dependency.",
+            files={
+                "src/app/__init__.py": "",
+                "src/app/specs.py": '''from __future__ import annotations
+
+from typing import Awaitable, Callable
+
+import jaunt
+
+
+@jaunt.magic(
+    prompt=(
+        "Generated code must pass ty static checking. "
+        "Do not leave an implicit None path in this async function; "
+        "use an explicit final raise for exhausted retries."
+    )
+)
+async def fetch_with_retries(
+    fetcher: Callable[[], Awaitable[str]],
+    attempts: int,
+) -> str:
+    """
+    Fetch text with retry behavior.
+
+    Rules:
+    - attempts must be >= 1, else raise ValueError.
+    - Call `await fetcher()` up to `attempts` times.
+    - Retry only when fetcher raises TimeoutError.
+    - Return the first successful string result.
+    - If all attempts raise TimeoutError, re-raise TimeoutError.
+    - Function must satisfy static typing without implicit None return paths.
+    """
+    raise RuntimeError("spec stub (generated at build time)")
+''',
+            },
+            assertion_code="""import asyncio
+
+import pytest
+
+from app.specs import fetch_with_retries
+
+
+class _Flaky:
+    def __init__(self, fail_count: int) -> None:
+        self.remaining = fail_count
+        self.calls = 0
+
+    async def __call__(self) -> str:
+        self.calls += 1
+        if self.remaining > 0:
+            self.remaining -= 1
+            raise TimeoutError("temporary")
+        return "ok"
+
+
+async def _run() -> None:
+    flaky = _Flaky(fail_count=2)
+    out = await fetch_with_retries(flaky, attempts=3)
+    assert out == "ok"
+    assert flaky.calls == 3
+
+    always_timeout = _Flaky(fail_count=5)
+    with pytest.raises(TimeoutError):
+        await fetch_with_retries(always_timeout, attempts=2)
+    assert always_timeout.calls == 2
+
+    with pytest.raises(ValueError):
+        await fetch_with_retries(flaky, attempts=0)
+
+
+asyncio.run(_run())
+""",
+        ),
+        BuiltinEvalCase(
+            case_id="multi_module_chain",
+            description="Three-module dependency chain with deterministic aggregation output.",
+            files={
+                "src/app/__init__.py": "",
+                "src/app/parser_specs.py": '''from __future__ import annotations
+
+import jaunt
+
+
+@jaunt.magic()
+def parse_kv_line(raw: str) -> tuple[str, int]:
+    """
+    Parse a single key/value line in the form "name=number".
+
+    Rules:
+    - Trim surrounding whitespace.
+    - Key must be non-empty and lowercase alphabetic only.
+    - Value must parse as a base-10 integer.
+    - Raise ValueError for invalid format/input.
+    """
+    raise RuntimeError("spec stub (generated at build time)")
+''',
+                "src/app/agg_specs.py": '''from __future__ import annotations
+
+import jaunt
+
+
+@jaunt.magic(deps="app.parser_specs:parse_kv_line")
+def combine_lines(lines: list[str]) -> dict[str, int]:
+    """
+    Parse all lines and sum values by key.
+
+    - Uses parse_kv_line for every line.
+    - Return mapping of key -> summed value.
+    """
+    raise RuntimeError("spec stub (generated at build time)")
+''',
+                "src/app/report_specs.py": '''from __future__ import annotations
+
+import jaunt
+
+
+@jaunt.magic(deps="app.agg_specs:combine_lines")
+def summarize(lines: list[str]) -> str:
+    """
+    Produce a deterministic report from key/value lines.
+
+    - Uses combine_lines(lines).
+    - Sort keys lexicographically.
+    - Emit one line per key in the format "<key>=<sum>".
+    - Append final line "total=<overall_sum>".
+    - Join lines with "\\n".
+    """
+    raise RuntimeError("spec stub (generated at build time)")
+''',
+            },
+            assertion_code="""import pytest
+
+from app.agg_specs import combine_lines
+from app.report_specs import summarize
+
+lines = ["a=1", "b=2", "a=3", "b=4"]
+assert combine_lines(lines) == {"a": 4, "b": 6}
+assert summarize(lines) == "a=4\\nb=6\\ntotal=10"
+
+with pytest.raises(ValueError):
+    summarize(["bad-line"])
+""",
+        ),
+        BuiltinEvalCase(
+            case_id="stateful_inventory_class",
+            description="Stateful class with mutation semantics and defensive snapshot behavior.",
+            files={
+                "src/app/__init__.py": "",
+                "src/app/specs.py": '''from __future__ import annotations
+
+import jaunt
+
+
+@jaunt.magic()
+class Inventory:
+    """
+    Track item quantities in memory.
+
+    Behavior:
+    - add(name, qty): qty must be > 0, else ValueError.
+    - remove(name, qty): qty must be > 0, else ValueError.
+      - Raise KeyError if name does not exist.
+      - Raise ValueError if qty exceeds current quantity.
+      - Remove item entirely when quantity reaches 0.
+    - quantity(name): return current quantity or 0 if missing.
+    - total_items(): sum of all quantities.
+    - snapshot property: return a copy of internal mapping.
+    """
+
+    def __init__(self) -> None:
+        raise RuntimeError("spec stub (generated at build time)")
+
+    def add(self, name: str, qty: int) -> None:
+        raise RuntimeError("spec stub (generated at build time)")
+
+    def remove(self, name: str, qty: int) -> None:
+        raise RuntimeError("spec stub (generated at build time)")
+
+    def quantity(self, name: str) -> int:
+        raise RuntimeError("spec stub (generated at build time)")
+
+    def total_items(self) -> int:
+        raise RuntimeError("spec stub (generated at build time)")
+
+    @property
+    def snapshot(self) -> dict[str, int]:
+        raise RuntimeError("spec stub (generated at build time)")
+''',
+            },
+            assertion_code="""import pytest
+
+from app.specs import Inventory
+
+inv = Inventory()
+inv.add("apple", 3)
+inv.add("banana", 2)
+inv.add("apple", 2)
+assert inv.quantity("apple") == 5
+assert inv.quantity("banana") == 2
+assert inv.total_items() == 7
+
+snap = inv.snapshot
+snap["apple"] = 99
+assert inv.quantity("apple") == 5
+
+inv.remove("apple", 4)
+assert inv.quantity("apple") == 1
+inv.remove("apple", 1)
+assert inv.quantity("apple") == 0
+
+with pytest.raises(KeyError):
+    inv.remove("apple", 1)
+
+with pytest.raises(ValueError):
+    inv.add("pear", 0)
+
+with pytest.raises(ValueError):
+    inv.remove("banana", -1)
+
+with pytest.raises(ValueError):
+    inv.remove("banana", 5)
+""",
+        ),
+        BuiltinEvalCase(
             case_id="example_slugify_smoke",
             description="Example smoke case derived from examples/01_slugify.",
             files={
