@@ -12,13 +12,13 @@ class DummyBackend(GeneratorBackend):
 
     async def generate_module(
         self, ctx: ModuleSpecContext, *, extra_error_context: list[str] | None = None
-    ) -> str:
+    ) -> tuple[str, None]:
         self.calls += 1
         self.extra_contexts.append(extra_error_context)
         if self.calls == 1:
             # Valid Python but missing the required symbol.
-            return "def not_it():\n    return 1\n"
-        return "def foo():\n    return 1\n"
+            return "def not_it():\n    return 1\n", None
+        return "def foo():\n    return 1\n", None
 
 
 def test_generate_with_retry_calls_twice_and_succeeds() -> None:

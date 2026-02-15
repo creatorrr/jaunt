@@ -66,6 +66,11 @@ def _add_common_flags(p: argparse.ArgumentParser) -> None:
         help="Disable progress bars.",
     )
     p.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Bypass LLM response cache.",
+    )
+    p.add_argument(
         "--json",
         action="store_true",
         dest="json_output",
@@ -153,6 +158,29 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Project root (defaults to searching upward for jaunt.toml).",
+    )
+
+    cache_p = subparsers.add_parser("cache", help="Manage LLM response cache.")
+    cache_sub = cache_p.add_subparsers(dest="cache_command", required=True)
+
+    cache_info_p = cache_sub.add_parser("info", help="Show cache statistics.")
+    cache_info_p.add_argument("--root", type=str, default=None)
+    cache_info_p.add_argument("--config", type=str, default=None)
+    cache_info_p.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Emit structured JSON output to stdout.",
+    )
+
+    cache_clear_p = cache_sub.add_parser("clear", help="Clear all cached responses.")
+    cache_clear_p.add_argument("--root", type=str, default=None)
+    cache_clear_p.add_argument("--config", type=str, default=None)
+    cache_clear_p.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Emit structured JSON output to stdout.",
     )
 
     return parser
@@ -545,6 +573,14 @@ def cmd_build(args: argparse.Namespace) -> int:
         if stale and not json_mode and (not bool(args.no_progress)) and sys.stderr.isatty():
             progress = ProgressBar(label="build", total=len(stale), enabled=True, stream=sys.stderr)
 
+        from jaunt.cache import ResponseCache
+        from jaunt.cost import CostTracker
+
+        cache_dir = root / ".jaunt" / "cache"
+        no_cache = bool(getattr(args, "no_cache", False))
+        response_cache = ResponseCache(cache_dir, enabled=not no_cache)
+        cost_tracker = CostTracker(max_cost=cfg.llm.max_cost_per_build)
+
         jobs = int(args.jobs) if args.jobs is not None else int(cfg.build.jobs)
         report = asyncio.run(
             builder.run_build(
@@ -559,11 +595,16 @@ def cmd_build(args: argparse.Namespace) -> int:
                 skills_block=skills_block,
                 jobs=jobs,
                 progress=progress,
+                response_cache=response_cache,
+                cost_tracker=cost_tracker,
             )
         )
 
         if report.failed and not json_mode:
             _eprint(format_build_failures(report.failed))
+
+        if not json_mode and (cost_tracker.api_calls > 0 or cost_tracker.cache_hits > 0):
+            _eprint(cost_tracker.format_summary())
 
         if json_mode:
             _emit_json(
@@ -573,6 +614,8 @@ def cmd_build(args: argparse.Namespace) -> int:
                     "generated": sorted(report.generated),
                     "skipped": sorted(report.skipped),
                     "failed": {k: v for k, v in sorted(report.failed.items())},
+                    "cost": cost_tracker.summary_dict(),
+                    "cache": {"hits": response_cache.hits, "misses": response_cache.misses},
                 }
             )
 
@@ -690,6 +733,14 @@ def cmd_test(args: argparse.Namespace) -> int:
         if total and not json_mode and (not bool(args.no_progress)) and sys.stderr.isatty():
             progress = ProgressBar(label="test", total=total, enabled=True, stream=sys.stderr)
 
+        from jaunt.cache import ResponseCache
+        from jaunt.cost import CostTracker
+
+        cache_dir = root / ".jaunt" / "cache"
+        no_cache = bool(getattr(args, "no_cache", False))
+        response_cache = ResponseCache(cache_dir, enabled=not no_cache)
+        cost_tracker = CostTracker(max_cost=cfg.llm.max_cost_per_build)
+
         result = tester.run_tests(
             project_dir=root,
             generated_dir=cfg.paths.generated_dir,
@@ -707,6 +758,8 @@ def cmd_test(args: argparse.Namespace) -> int:
             progress=progress,
             pythonpath=[*source_dirs, root],
             cwd=root,
+            response_cache=response_cache,
+            cost_tracker=cost_tracker,
         )
 
         if asyncio.iscoroutine(result):
@@ -740,6 +793,44 @@ def cmd_test(args: argparse.Namespace) -> int:
         if json_mode:
             _emit_json({"command": "test", "ok": False, "error": str(e)})
         return EXIT_GENERATION_ERROR
+
+
+def cmd_cache(args: argparse.Namespace) -> int:
+    json_mode = _is_json_mode(args)
+    try:
+        root, cfg = _load_config(args)
+    except (JauntConfigError, KeyError) as e:
+        _print_error(e)
+        if json_mode:
+            _emit_json({"command": "cache", "ok": False, "error": str(e)})
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    from jaunt.cache import ResponseCache
+
+    cache_dir = root / ".jaunt" / "cache"
+    rc = ResponseCache(cache_dir)
+    subcmd = args.cache_command
+
+    if subcmd == "info":
+        info = rc.info()
+        if json_mode:
+            _emit_json({"command": "cache info", "ok": True, **info})
+        else:
+            size_mb = int(info["size_bytes"]) / (1024 * 1024)  # type: ignore[arg-type]
+            print(f"Cache directory: {info['path']}")
+            print(f"Entries: {info['entries']}")
+            print(f"Size: {size_mb:.2f} MB")
+        return EXIT_OK
+
+    if subcmd == "clear":
+        count = rc.clear_all()
+        if json_mode:
+            _emit_json({"command": "cache clear", "ok": True, "removed": count})
+        else:
+            print(f"Cleared {count} cache entries.")
+        return EXIT_OK
+
+    return EXIT_CONFIG_OR_DISCOVERY
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
@@ -854,6 +945,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_watch(args)
     if args.command == "mcp":
         return cmd_mcp(args)
+    if args.command == "cache":
+        return cmd_cache(args)
 
     return EXIT_CONFIG_OR_DISCOVERY
 

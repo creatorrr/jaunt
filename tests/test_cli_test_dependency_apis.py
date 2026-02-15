@@ -17,7 +17,7 @@ def _write(path: Path, content: str) -> None:
 class AssertingBackend(GeneratorBackend):
     async def generate_module(
         self, ctx: ModuleSpecContext, *, extra_error_context: list[str] | None = None
-    ) -> str:
+    ) -> tuple[str, None]:
         # The CLI should provide magic specs as Dependency APIs so test generation
         # can import real APIs (not guess module names).
         assert ctx.dependency_apis
@@ -27,7 +27,7 @@ class AssertingBackend(GeneratorBackend):
         lines: list[str] = []
         for name in ctx.expected_names:
             lines.append(f"def {name}() -> None:\n    assert True\n")
-        return "\n".join(lines).rstrip() + "\n"
+        return "\n".join(lines).rstrip() + "\n", None
 
 
 def _restore_module(name: str, original, *, existed: bool) -> None:

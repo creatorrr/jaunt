@@ -22,10 +22,21 @@ class ModuleSpecContext:
 
 
 @dataclass(frozen=True, slots=True)
+class TokenUsage:
+    """Token counts from a single LLM generation call."""
+
+    prompt_tokens: int
+    completion_tokens: int
+    model: str
+    provider: str
+
+
+@dataclass(frozen=True, slots=True)
 class GenerationResult:
     attempts: int
     source: str | None
     errors: list[str]
+    usage: TokenUsage | None = None
 
 
 class GeneratorBackend(ABC):
@@ -34,11 +45,22 @@ class GeneratorBackend(ABC):
         """Whether this backend uses provider-native structured output."""
         return False
 
+    @property
+    def model_name(self) -> str:
+        return getattr(self, "_model", "")
+
+    @property
+    def provider_name(self) -> str:
+        return ""
+
     @abstractmethod
     async def generate_module(
         self, ctx: ModuleSpecContext, *, extra_error_context: list[str] | None = None
-    ) -> str:
-        """Generate a Python module for the given context (returns source code)."""
+    ) -> tuple[str, TokenUsage | None]:
+        """Generate a Python module for the given context.
+
+        Returns (source_code, optional_token_usage).
+        """
 
     async def generate_with_retry(
         self, ctx: ModuleSpecContext, *, max_attempts: int = 2
@@ -49,13 +71,24 @@ class GeneratorBackend(ABC):
         last_source: str | None = None
         last_errors: list[str] = []
         extra_ctx: list[str] | None = None
+        total_prompt = 0
+        total_completion = 0
 
         while attempts < max_attempts:
             attempts += 1
-            last_source = await self.generate_module(ctx, extra_error_context=extra_ctx)
+            last_source, usage = await self.generate_module(ctx, extra_error_context=extra_ctx)
+            if usage is not None:
+                total_prompt += usage.prompt_tokens
+                total_completion += usage.completion_tokens
+
             last_errors = validate_generated_source(last_source, ctx.expected_names)
             if not last_errors:
-                return GenerationResult(attempts=attempts, source=last_source, errors=[])
+                agg = (
+                    TokenUsage(total_prompt, total_completion, self.model_name, self.provider_name)
+                    if total_prompt or total_completion
+                    else None
+                )
+                return GenerationResult(attempts=attempts, source=last_source, errors=[], usage=agg)
 
             if attempts >= max_attempts:
                 break
@@ -64,4 +97,11 @@ class GeneratorBackend(ABC):
             retry_ctx = [f"previous output errors: {e}" for e in last_errors]
             extra_ctx = (extra_ctx or []) + retry_ctx
 
-        return GenerationResult(attempts=attempts, source=last_source, errors=last_errors)
+        agg = (
+            TokenUsage(total_prompt, total_completion, self.model_name, self.provider_name)
+            if total_prompt or total_completion
+            else None
+        )
+        return GenerationResult(
+            attempts=attempts, source=last_source, errors=last_errors, usage=agg
+        )

@@ -17,12 +17,12 @@ def _write(path: Path, content: str) -> None:
 class FakeBackend(GeneratorBackend):
     async def generate_module(
         self, ctx: ModuleSpecContext, *, extra_error_context: list[str] | None = None
-    ) -> str:
+    ) -> tuple[str, None]:
         # Generate a minimal pytest module that defines all expected test functions.
         lines: list[str] = []
         for name in ctx.expected_names:
             lines.append(f"def {name}() -> None:\n    assert True\n")
-        return "\n".join(lines).rstrip() + "\n"
+        return "\n".join(lines).rstrip() + "\n", None
 
 
 def _restore_module(name: str, original, *, existed: bool) -> None:

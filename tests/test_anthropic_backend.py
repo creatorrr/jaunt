@@ -75,13 +75,13 @@ def test_anthropic_backend_strips_fences(monkeypatch) -> None:
     monkeypatch.setattr(type(backend), "supports_structured_output", property(lambda self: False))
 
     async def fake_call(system, messages):
-        return "```python\ndef foo():\n    return 42\n```"
+        return "```python\ndef foo():\n    return 42\n```", None
 
     monkeypatch.setattr(backend, "_call_anthropic", fake_call)
 
-    result = asyncio.run(backend.generate_module(_ctx()))
-    assert "def foo" in result
-    assert "```" not in result
+    source, usage = asyncio.run(backend.generate_module(_ctx()))
+    assert "def foo" in source
+    assert "```" not in source
 
 
 def test_anthropic_backend_render_messages_structure(monkeypatch) -> None:
@@ -131,12 +131,12 @@ def test_anthropic_generate_module_uses_structured_output(monkeypatch) -> None:
 
     async def fake_structured_call(system, messages):
         structured_called.append((system, messages))
-        return "def foo():\n    return 42\n"
+        return "def foo():\n    return 42\n", None
 
     monkeypatch.setattr(backend, "_call_anthropic_structured", fake_structured_call)
 
-    result = asyncio.run(backend.generate_module(_ctx()))
-    assert result == "def foo():\n    return 42\n"
+    source, usage = asyncio.run(backend.generate_module(_ctx()))
+    assert source == "def foo():\n    return 42\n"
     assert len(structured_called) == 1
 
 
@@ -152,13 +152,13 @@ def test_anthropic_generate_module_fallback_when_structured_disabled(monkeypatch
     monkeypatch.setattr(type(backend), "supports_structured_output", property(lambda self: False))
 
     async def fake_call(system, messages):
-        return "```python\ndef foo():\n    return 99\n```"
+        return "```python\ndef foo():\n    return 99\n```", None
 
     monkeypatch.setattr(backend, "_call_anthropic", fake_call)
 
-    result = asyncio.run(backend.generate_module(_ctx()))
-    assert result == "def foo():\n    return 99"
-    assert "```" not in result
+    source, usage = asyncio.run(backend.generate_module(_ctx()))
+    assert source == "def foo():\n    return 99"
+    assert "```" not in source
 
 
 def test_anthropic_call_structured_sends_tools_and_extracts_source(monkeypatch) -> None:
@@ -195,11 +195,11 @@ def test_anthropic_call_structured_sends_tools_and_extracts_source(monkeypatch) 
         type("C", (), {"messages": type("M", (), {"create": staticmethod(fake_create)})()})(),
     )
 
-    result = asyncio.run(
+    source, usage = asyncio.run(
         backend._call_anthropic_structured("system prompt", [{"role": "user", "content": "hi"}])
     )
 
-    assert result == "def foo():\n    return 1\n"
+    assert source == "def foo():\n    return 1\n"
     assert len(captured_kwargs) == 1
     assert "tools" in captured_kwargs[0]
     tools = captured_kwargs[0]["tools"]
@@ -290,10 +290,10 @@ def test_anthropic_structured_retries_on_transient_error(monkeypatch) -> None:
 
     monkeypatch.setattr(mod, "_BASE_BACKOFF_S", 0.001)
 
-    result = asyncio.run(
+    source, usage = asyncio.run(
         backend._call_anthropic_structured("system", [{"role": "user", "content": "hi"}])
     )
-    assert result == "def foo(): pass\n"
+    assert source == "def foo(): pass\n"
     assert len(calls) == 2
 
 
@@ -329,10 +329,10 @@ def test_anthropic_structured_logs_imports_and_notes(monkeypatch, caplog) -> Non
     )
 
     with caplog.at_level(logging.DEBUG, logger="jaunt.generate.anthropic"):
-        result = asyncio.run(
+        source, usage = asyncio.run(
             backend._call_anthropic_structured("system", [{"role": "user", "content": "hi"}])
         )
 
-    assert result == "import os\n"
+    assert source == "import os\n"
     assert "imports_used" in caplog.text
     assert "notes" in caplog.text

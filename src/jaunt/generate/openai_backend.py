@@ -8,7 +8,7 @@ from typing import Any
 
 from jaunt.config import LLMConfig, PromptsConfig
 from jaunt.errors import JauntConfigError
-from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
+from jaunt.generate.base import GeneratorBackend, ModuleSpecContext, TokenUsage
 from jaunt.generate.shared import (
     fmt_kv_block,
     load_prompt,
@@ -98,7 +98,11 @@ class OpenAIBackend(GeneratorBackend):
     def _load_prompt(default_name: str, override_path: str | None) -> str:
         return load_prompt(default_name, override_path)
 
-    async def _call_openai(self, messages: list[dict[str, str]]) -> str:
+    @property
+    def provider_name(self) -> str:
+        return "openai"
+
+    async def _call_openai(self, messages: list[dict[str, str]]) -> tuple[str, TokenUsage | None]:
         """Call OpenAI API with retry and exponential backoff for transient errors."""
         last_exc: BaseException | None = None
         for attempt in range(_MAX_API_RETRIES):
@@ -110,7 +114,15 @@ class OpenAIBackend(GeneratorBackend):
                 content = resp.choices[0].message.content
                 if not isinstance(content, str):
                     raise RuntimeError("OpenAI returned empty content.")
-                return content
+                usage = None
+                if getattr(resp, "usage", None) is not None:
+                    usage = TokenUsage(
+                        prompt_tokens=getattr(resp.usage, "prompt_tokens", 0) or 0,
+                        completion_tokens=getattr(resp.usage, "completion_tokens", 0) or 0,
+                        model=self._model,
+                        provider="openai",
+                    )
+                return content, usage
             except Exception as exc:
                 last_exc = exc
                 if not _is_retryable(exc) or attempt >= _MAX_API_RETRIES - 1:
@@ -127,7 +139,9 @@ class OpenAIBackend(GeneratorBackend):
 
         raise last_exc  # type: ignore[misc]
 
-    async def _call_openai_structured(self, messages: list[dict[str, str]]) -> str:
+    async def _call_openai_structured(
+        self, messages: list[dict[str, str]]
+    ) -> tuple[str, TokenUsage | None]:
         """Call OpenAI API with structured output (json_schema response_format)."""
         last_exc: BaseException | None = None
         for attempt in range(_MAX_API_RETRIES):
@@ -145,7 +159,15 @@ class OpenAIBackend(GeneratorBackend):
                 imports = parsed.get("imports_used", [])
                 if imports:
                     logger.debug("Structured output imports_used: %s", imports)
-                return source
+                usage = None
+                if getattr(resp, "usage", None) is not None:
+                    usage = TokenUsage(
+                        prompt_tokens=getattr(resp.usage, "prompt_tokens", 0) or 0,
+                        completion_tokens=getattr(resp.usage, "completion_tokens", 0) or 0,
+                        model=self._model,
+                        provider="openai",
+                    )
+                return source, usage
             except Exception as exc:
                 last_exc = exc
                 if not _is_retryable(exc) or attempt >= _MAX_API_RETRIES - 1:
@@ -217,9 +239,9 @@ class OpenAIBackend(GeneratorBackend):
 
     async def generate_module(
         self, ctx: ModuleSpecContext, *, extra_error_context: list[str] | None = None
-    ) -> str:
+    ) -> tuple[str, TokenUsage | None]:
         messages = self._render_messages(ctx, extra_error_context=extra_error_context)
         if self.supports_structured_output:
             return await self._call_openai_structured(messages)
-        raw = await self._call_openai(messages)
-        return _strip_markdown_fences(raw)
+        raw, usage = await self._call_openai(messages)
+        return _strip_markdown_fences(raw), usage

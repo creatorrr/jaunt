@@ -17,7 +17,7 @@ def _write(path: Path, content: str) -> None:
 class FakeBackend(GeneratorBackend):
     async def generate_module(
         self, ctx: ModuleSpecContext, *, extra_error_context: list[str] | None = None
-    ) -> str:
+    ) -> tuple[str, None]:
         # Generated tests should be able to import modules from paths.source_roots.
         lines: list[str] = ["from dice_demo import VALUE", ""]
         for name in ctx.expected_names:
@@ -28,7 +28,7 @@ class FakeBackend(GeneratorBackend):
                     "",
                 ]
             )
-        return "\n".join(lines).rstrip() + "\n"
+        return "\n".join(lines).rstrip() + "\n", None
 
 
 def _restore_module(name: str, original, *, existed: bool) -> None:

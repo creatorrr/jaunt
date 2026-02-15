@@ -27,6 +27,7 @@ class LLMConfig:
     provider: str
     model: str
     api_key_env: str
+    max_cost_per_build: float | None = None
 
 
 @dataclass(frozen=True)
@@ -115,6 +116,12 @@ def _as_str(value: Any, *, name: str) -> str:
     return value
 
 
+def _as_float(value: Any, *, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise JauntConfigError(f"Expected {name} to be a number.")
+    return float(value)
+
+
 def load_config(*, root: Path | None = None, config_path: Path | None = None) -> JauntConfig:
     """Load and validate `jaunt.toml`.
 
@@ -189,6 +196,10 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     else:
         api_key_env = "OPENAI_API_KEY"
 
+    max_cost_per_build: float | None = None
+    if "max_cost_per_build" in llm_tbl:
+        max_cost_per_build = _as_float(llm_tbl["max_cost_per_build"], name="llm.max_cost_per_build")
+
     if "jobs" in build_tbl:
         build_jobs = _as_int(build_tbl["jobs"], name="build.jobs")
     else:
@@ -255,7 +266,12 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             test_roots=test_roots,
             generated_dir=generated_dir,
         ),
-        llm=LLMConfig(provider=provider, model=model, api_key_env=api_key_env),
+        llm=LLMConfig(
+            provider=provider,
+            model=model,
+            api_key_env=api_key_env,
+            max_cost_per_build=max_cost_per_build,
+        ),
         build=BuildConfig(jobs=build_jobs, infer_deps=build_infer_deps),
         test=TestConfig(jobs=test_jobs, infer_deps=test_infer_deps, pytest_args=pytest_args),
         prompts=PromptsConfig(
