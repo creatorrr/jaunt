@@ -135,6 +135,6 @@ def make_watchfiles_iter(
     watch_paths: list[Path],
 ) -> AsyncIterator[set[tuple[Any, str]]]:
     """Create an async iterator using watchfiles.awatch()."""
-    import watchfiles
+    import watchfiles  # type: ignore[import-untyped]
 
     return watchfiles.awatch(*watch_paths, debounce=200)
