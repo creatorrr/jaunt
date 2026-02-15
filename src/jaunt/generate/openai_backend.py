@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -62,7 +63,29 @@ def _is_retryable(exc: BaseException) -> bool:
     return False
 
 
+_OPENAI_MODULE_RESPONSE_FORMAT: dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "module_output",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "python_source": {"type": "string"},
+                "imports_used": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["python_source"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
 class OpenAIBackend(GeneratorBackend):
+    @property
+    def supports_structured_output(self) -> bool:
+        return True
+
     def __init__(self, llm: LLMConfig, prompts: PromptsConfig | None = None) -> None:
         api_key = (os.environ.get(llm.api_key_env) or "").strip()
         if not api_key:
@@ -109,6 +132,41 @@ class OpenAIBackend(GeneratorBackend):
                 if not isinstance(content, str):
                     raise RuntimeError("OpenAI returned empty content.")
                 return content
+            except Exception as exc:
+                last_exc = exc
+                if not _is_retryable(exc) or attempt >= _MAX_API_RETRIES - 1:
+                    raise
+                delay = _BASE_BACKOFF_S * (2**attempt)
+                logger.warning(
+                    "OpenAI API error (attempt %d/%d), retrying in %.1fs: %s",
+                    attempt + 1,
+                    _MAX_API_RETRIES,
+                    delay,
+                    exc,
+                )
+                await asyncio.sleep(delay)
+
+        raise last_exc  # type: ignore[misc]
+
+    async def _call_openai_structured(self, messages: list[dict[str, str]]) -> str:
+        """Call OpenAI API with structured output (json_schema response_format)."""
+        last_exc: BaseException | None = None
+        for attempt in range(_MAX_API_RETRIES):
+            try:
+                resp: Any = await self._client.chat.completions.create(
+                    model=self._model,
+                    messages=messages,
+                    response_format=_OPENAI_MODULE_RESPONSE_FORMAT,
+                )
+                content = resp.choices[0].message.content
+                if not isinstance(content, str):
+                    raise RuntimeError("OpenAI returned empty content.")
+                parsed = json.loads(content)
+                source = parsed["python_source"]
+                imports = parsed.get("imports_used", [])
+                if imports:
+                    logger.debug("Structured output imports_used: %s", imports)
+                return source
             except Exception as exc:
                 last_exc = exc
                 if not _is_retryable(exc) or attempt >= _MAX_API_RETRIES - 1:
@@ -182,5 +240,7 @@ class OpenAIBackend(GeneratorBackend):
         self, ctx: ModuleSpecContext, *, extra_error_context: list[str] | None = None
     ) -> str:
         messages = self._render_messages(ctx, extra_error_context=extra_error_context)
+        if self.supports_structured_output:
+            return await self._call_openai_structured(messages)
         raw = await self._call_openai(messages)
         return _strip_markdown_fences(raw)

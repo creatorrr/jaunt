@@ -29,6 +29,11 @@ class GenerationResult:
 
 
 class GeneratorBackend(ABC):
+    @property
+    def supports_structured_output(self) -> bool:
+        """Whether this backend uses provider-native structured output."""
+        return False
+
     @abstractmethod
     async def generate_module(
         self, ctx: ModuleSpecContext, *, extra_error_context: list[str] | None = None

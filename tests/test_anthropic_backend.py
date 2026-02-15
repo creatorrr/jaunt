@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 
 import pytest
@@ -70,6 +71,9 @@ def test_anthropic_backend_strips_fences(monkeypatch) -> None:
         LLMConfig(provider="anthropic", model="claude-test", api_key_env="ANTHROPIC_API_KEY")
     )
 
+    # Force fallback (non-structured) path.
+    monkeypatch.setattr(type(backend), "supports_structured_output", property(lambda self: False))
+
     async def fake_call(system, messages):
         return "```python\ndef foo():\n    return 42\n```"
 
@@ -98,3 +102,237 @@ def test_anthropic_backend_render_messages_structure(monkeypatch) -> None:
     # Messages should have at least one user message.
     assert len(messages) >= 1
     assert messages[-1]["role"] == "user"
+
+
+# -- Structured output tests --
+
+
+def test_anthropic_backend_supports_structured_output(monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    from jaunt.generate.anthropic_backend import AnthropicBackend
+
+    backend = AnthropicBackend(
+        LLMConfig(provider="anthropic", model="claude-test", api_key_env="ANTHROPIC_API_KEY")
+    )
+    assert backend.supports_structured_output is True
+
+
+def test_anthropic_generate_module_uses_structured_output(monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    from jaunt.generate.anthropic_backend import AnthropicBackend
+
+    backend = AnthropicBackend(
+        LLMConfig(provider="anthropic", model="claude-test", api_key_env="ANTHROPIC_API_KEY")
+    )
+
+    structured_called: list[tuple] = []
+
+    async def fake_structured_call(system, messages):
+        structured_called.append((system, messages))
+        return "def foo():\n    return 42\n"
+
+    monkeypatch.setattr(backend, "_call_anthropic_structured", fake_structured_call)
+
+    result = asyncio.run(backend.generate_module(_ctx()))
+    assert result == "def foo():\n    return 42\n"
+    assert len(structured_called) == 1
+
+
+def test_anthropic_generate_module_fallback_when_structured_disabled(monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    from jaunt.generate.anthropic_backend import AnthropicBackend
+
+    backend = AnthropicBackend(
+        LLMConfig(provider="anthropic", model="claude-test", api_key_env="ANTHROPIC_API_KEY")
+    )
+
+    monkeypatch.setattr(type(backend), "supports_structured_output", property(lambda self: False))
+
+    async def fake_call(system, messages):
+        return "```python\ndef foo():\n    return 99\n```"
+
+    monkeypatch.setattr(backend, "_call_anthropic", fake_call)
+
+    result = asyncio.run(backend.generate_module(_ctx()))
+    assert result == "def foo():\n    return 99"
+    assert "```" not in result
+
+
+def test_anthropic_call_structured_sends_tools_and_extracts_source(monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    from jaunt.generate.anthropic_backend import AnthropicBackend
+
+    backend = AnthropicBackend(
+        LLMConfig(provider="anthropic", model="claude-test", api_key_env="ANTHROPIC_API_KEY")
+    )
+
+    captured_kwargs: list[dict] = []
+
+    class _FakeToolUseBlock:
+        type = "tool_use"
+        name = "write_module"
+        input = {
+            "python_source": "def foo():\n    return 1\n",
+            "imports_used": ["os"],
+            "notes": "simple function",
+        }
+
+    class _FakeResp:
+        content = [_FakeToolUseBlock()]
+        stop_reason = "tool_use"
+
+    async def fake_create(**kwargs):
+        captured_kwargs.append(kwargs)
+        return _FakeResp()
+
+    monkeypatch.setattr(
+        backend,
+        "_client",
+        type("C", (), {"messages": type("M", (), {"create": staticmethod(fake_create)})()})(),
+    )
+
+    result = asyncio.run(
+        backend._call_anthropic_structured("system prompt", [{"role": "user", "content": "hi"}])
+    )
+
+    assert result == "def foo():\n    return 1\n"
+    assert len(captured_kwargs) == 1
+    assert "tools" in captured_kwargs[0]
+    tools = captured_kwargs[0]["tools"]
+    assert len(tools) == 1
+    assert tools[0]["name"] == "write_module"
+    assert "python_source" in tools[0]["input_schema"]["properties"]
+    assert "imports_used" in tools[0]["input_schema"]["properties"]
+    assert "notes" in tools[0]["input_schema"]["properties"]
+    assert tools[0]["input_schema"]["required"] == ["python_source"]
+    # tool_choice forces the model to use the tool.
+    assert captured_kwargs[0]["tool_choice"] == {"type": "tool", "name": "write_module"}
+
+
+def test_anthropic_structured_no_tool_use_block_raises(monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    from jaunt.generate.anthropic_backend import AnthropicBackend
+
+    backend = AnthropicBackend(
+        LLMConfig(provider="anthropic", model="claude-test", api_key_env="ANTHROPIC_API_KEY")
+    )
+
+    class _FakeTextBlock:
+        type = "text"
+        text = "I cannot generate that."
+
+    class _FakeResp:
+        content = [_FakeTextBlock()]
+        stop_reason = "end_turn"
+
+    async def fake_create(**kwargs):
+        return _FakeResp()
+
+    monkeypatch.setattr(
+        backend,
+        "_client",
+        type("C", (), {"messages": type("M", (), {"create": staticmethod(fake_create)})()})(),
+    )
+
+    import jaunt.generate.anthropic_backend as mod
+
+    monkeypatch.setattr(mod, "_BASE_BACKOFF_S", 0.001)
+
+    with pytest.raises(RuntimeError, match="write_module tool_use block"):
+        asyncio.run(
+            backend._call_anthropic_structured("system", [{"role": "user", "content": "hi"}])
+        )
+
+
+def test_anthropic_structured_retries_on_transient_error(monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    from jaunt.generate.anthropic_backend import AnthropicBackend
+
+    backend = AnthropicBackend(
+        LLMConfig(provider="anthropic", model="claude-test", api_key_env="ANTHROPIC_API_KEY")
+    )
+
+    calls: list[dict] = []
+
+    class _FakeToolUseBlock:
+        type = "tool_use"
+        name = "write_module"
+        input = {"python_source": "def foo(): pass\n"}
+
+    class _FakeResp:
+        content = [_FakeToolUseBlock()]
+        stop_reason = "tool_use"
+
+    class _FakeRateLimitError(Exception):
+        pass
+
+    _FakeRateLimitError.__name__ = "RateLimitError"
+
+    async def fake_create(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise _FakeRateLimitError("rate limited")
+        return _FakeResp()
+
+    monkeypatch.setattr(
+        backend,
+        "_client",
+        type("C", (), {"messages": type("M", (), {"create": staticmethod(fake_create)})()})(),
+    )
+
+    import jaunt.generate.anthropic_backend as mod
+
+    monkeypatch.setattr(mod, "_BASE_BACKOFF_S", 0.001)
+
+    result = asyncio.run(
+        backend._call_anthropic_structured("system", [{"role": "user", "content": "hi"}])
+    )
+    assert result == "def foo(): pass\n"
+    assert len(calls) == 2
+
+
+def test_anthropic_structured_logs_imports_and_notes(monkeypatch, caplog) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    from jaunt.generate.anthropic_backend import AnthropicBackend
+
+    backend = AnthropicBackend(
+        LLMConfig(provider="anthropic", model="claude-test", api_key_env="ANTHROPIC_API_KEY")
+    )
+
+    class _FakeToolUseBlock:
+        type = "tool_use"
+        name = "write_module"
+        input = {
+            "python_source": "import os\n",
+            "imports_used": ["os"],
+            "notes": "simple import",
+        }
+
+    class _FakeResp:
+        content = [_FakeToolUseBlock()]
+        stop_reason = "tool_use"
+
+    async def fake_create(**kwargs):
+        return _FakeResp()
+
+    monkeypatch.setattr(
+        backend,
+        "_client",
+        type("C", (), {"messages": type("M", (), {"create": staticmethod(fake_create)})()})(),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="jaunt.generate.anthropic"):
+        result = asyncio.run(
+            backend._call_anthropic_structured("system", [{"role": "user", "content": "hi"}])
+        )
+
+    assert result == "import os\n"
+    assert "imports_used" in caplog.text
+    assert "notes" in caplog.text

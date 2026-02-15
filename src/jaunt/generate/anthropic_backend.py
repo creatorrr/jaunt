@@ -33,8 +33,37 @@ def _is_retryable(exc: BaseException) -> bool:
     return False
 
 
+_ANTHROPIC_WRITE_MODULE_TOOL: dict[str, Any] = {
+    "name": "write_module",
+    "description": "Write the generated Python module source code.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "python_source": {
+                "type": "string",
+                "description": "The complete Python source code for the module.",
+            },
+            "imports_used": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "List of imported module names.",
+            },
+            "notes": {
+                "type": "string",
+                "description": "Optional generation notes.",
+            },
+        },
+        "required": ["python_source"],
+    },
+}
+
+
 class AnthropicBackend(GeneratorBackend):
     """Code generation backend using the Anthropic Messages API."""
+
+    @property
+    def supports_structured_output(self) -> bool:
+        return True
 
     def __init__(self, llm: LLMConfig, prompts: PromptsConfig | None = None) -> None:
         api_key = (os.environ.get(llm.api_key_env) or "").strip()
@@ -84,6 +113,48 @@ class AnthropicBackend(GeneratorBackend):
                 if not content or not hasattr(content[0], "text"):
                     raise RuntimeError("Anthropic returned empty content.")
                 return str(content[0].text)
+            except Exception as exc:
+                last_exc = exc
+                if not _is_retryable(exc) or attempt >= _MAX_API_RETRIES - 1:
+                    raise
+                delay = _BASE_BACKOFF_S * (2**attempt)
+                logger.warning(
+                    "Anthropic API error (attempt %d/%d), retrying in %.1fs: %s",
+                    attempt + 1,
+                    _MAX_API_RETRIES,
+                    delay,
+                    exc,
+                )
+                await asyncio.sleep(delay)
+
+        raise last_exc  # type: ignore[misc]
+
+    async def _call_anthropic_structured(self, system: str, messages: list[dict[str, str]]) -> str:
+        """Call Anthropic Messages API with tool_use for structured output."""
+        last_exc: BaseException | None = None
+        for attempt in range(_MAX_API_RETRIES):
+            try:
+                resp: Any = await self._client.messages.create(
+                    model=self._model,
+                    max_tokens=16384,
+                    system=system,
+                    messages=messages,
+                    tools=[_ANTHROPIC_WRITE_MODULE_TOOL],
+                    tool_choice={"type": "tool", "name": "write_module"},
+                )
+                for block in resp.content:
+                    if getattr(block, "type", None) == "tool_use" and block.name == "write_module":
+                        source = block.input["python_source"]
+                        imports = block.input.get("imports_used", [])
+                        notes = block.input.get("notes", "")
+                        if imports:
+                            logger.debug("Structured output imports_used: %s", imports)
+                        if notes:
+                            logger.debug("Structured output notes: %s", notes)
+                        return source
+                raise RuntimeError(
+                    "Anthropic response did not contain a write_module tool_use block."
+                )
             except Exception as exc:
                 last_exc = exc
                 if not _is_retryable(exc) or attempt >= _MAX_API_RETRIES - 1:
@@ -164,5 +235,7 @@ class AnthropicBackend(GeneratorBackend):
         extra_error_context: list[str] | None = None,
     ) -> str:
         system, messages = self._render_messages(ctx, extra_error_context=extra_error_context)
+        if self.supports_structured_output:
+            return await self._call_anthropic_structured(system, messages)
         raw = await self._call_anthropic(system, messages)
         return _strip_markdown_fences(raw)
