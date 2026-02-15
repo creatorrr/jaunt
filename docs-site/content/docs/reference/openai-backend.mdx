@@ -9,6 +9,7 @@ The default backend is `jaunt.generate.openai_backend.OpenAIBackend`:
 - requires the OpenAI SDK to be installed (`pip install jaunt[openai]`)
 - uses the OpenAI Python SDK (`openai.AsyncOpenAI`)
 - calls `chat.completions.create(model=..., messages=[...])`
+- passes `reasoning_effort` when `llm.reasoning_effort` is configured
 - prefers structured output (`response_format = json_schema`) for module generation
 - strips a single top-level markdown fence (```...```) when fallback text mode is used
 - retries transient API failures with exponential backoff

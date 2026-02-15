@@ -28,6 +28,8 @@ class LLMConfig:
     model: str
     api_key_env: str
     max_cost_per_build: float | None = None
+    reasoning_effort: str | None = None
+    anthropic_thinking_budget_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -201,6 +203,19 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     if "max_cost_per_build" in llm_tbl:
         max_cost_per_build = _as_float(llm_tbl["max_cost_per_build"], name="llm.max_cost_per_build")
 
+    reasoning_effort: str | None = None
+    if "reasoning_effort" in llm_tbl:
+        reasoning_effort = _as_str(llm_tbl["reasoning_effort"], name="llm.reasoning_effort").strip()
+        if not reasoning_effort:
+            reasoning_effort = None
+
+    anthropic_thinking_budget_tokens: int | None = None
+    if "anthropic_thinking_budget_tokens" in llm_tbl:
+        anthropic_thinking_budget_tokens = _as_int(
+            llm_tbl["anthropic_thinking_budget_tokens"],
+            name="llm.anthropic_thinking_budget_tokens",
+        )
+
     if "jobs" in build_tbl:
         build_jobs = _as_int(build_tbl["jobs"], name="build.jobs")
     else:
@@ -268,6 +283,8 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
         raise JauntConfigError("Invalid config: jobs must be >= 1.")
     if build_ty_retry_attempts < 0:
         raise JauntConfigError("Invalid config: build.ty_retry_attempts must be >= 0.")
+    if anthropic_thinking_budget_tokens is not None and anthropic_thinking_budget_tokens < 1:
+        raise JauntConfigError("Invalid config: llm.anthropic_thinking_budget_tokens must be >= 1.")
 
     return JauntConfig(
         version=version_i,
@@ -281,6 +298,8 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             model=model,
             api_key_env=api_key_env,
             max_cost_per_build=max_cost_per_build,
+            reasoning_effort=reasoning_effort,
+            anthropic_thinking_budget_tokens=anthropic_thinking_budget_tokens,
         ),
         build=BuildConfig(
             jobs=build_jobs,

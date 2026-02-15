@@ -20,6 +20,8 @@ def test_load_minimal_config_defaults_apply(tmp_path: Path) -> None:
     assert cfg.llm.provider == "openai"
     assert cfg.llm.model == "gpt-5.2"
     assert cfg.llm.api_key_env == "OPENAI_API_KEY"
+    assert cfg.llm.reasoning_effort is None
+    assert cfg.llm.anthropic_thinking_budget_tokens is None
 
     assert cfg.build.jobs == 8
     assert cfg.build.infer_deps is True
@@ -50,6 +52,8 @@ def test_load_config_overrides_work(tmp_path: Path) -> None:
                 'provider = "openai"',
                 'model = "gpt-4.1-mini"',
                 'api_key_env = "X_API_KEY"',
+                'reasoning_effort = "high"',
+                "anthropic_thinking_budget_tokens = 2048",
                 "",
                 "[build]",
                 "jobs = 2",
@@ -81,6 +85,8 @@ def test_load_config_overrides_work(tmp_path: Path) -> None:
 
     assert cfg.llm.model == "gpt-4.1-mini"
     assert cfg.llm.api_key_env == "X_API_KEY"
+    assert cfg.llm.reasoning_effort == "high"
+    assert cfg.llm.anthropic_thinking_budget_tokens == 2048
 
     assert cfg.build.jobs == 2
     assert cfg.build.infer_deps is False
@@ -178,4 +184,40 @@ def test_validation_ty_retry_attempts_must_be_ge_0(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     with pytest.raises(JauntConfigError):
+        load_config(root=tmp_path)
+
+
+def test_validation_anthropic_thinking_budget_tokens_must_be_int(tmp_path: Path) -> None:
+    (tmp_path / "jaunt.toml").write_text(
+        "\n".join(
+            [
+                "version = 1",
+                "",
+                "[llm]",
+                'anthropic_thinking_budget_tokens = "oops"',
+                "",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(JauntConfigError):
+        load_config(root=tmp_path)
+
+
+def test_validation_anthropic_thinking_budget_tokens_must_be_ge_1(tmp_path: Path) -> None:
+    (tmp_path / "jaunt.toml").write_text(
+        "\n".join(
+            [
+                "version = 1",
+                "",
+                "[llm]",
+                "anthropic_thinking_budget_tokens = 0",
+                "",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(JauntConfigError, match="anthropic_thinking_budget_tokens"):
         load_config(root=tmp_path)

@@ -31,12 +31,18 @@ test_roots = ["tests"]
 generated_dir = "__generated__"
 
 [llm]
-# Supported by the CLI: "openai" or "anthropic".
+# Supported by the CLI: "openai", "anthropic", or "cerebras".
 provider = "openai"
 # Model name passed to the backend (default: "gpt-5.2").
 model = "gpt-5.2"
 # Environment variable used for the API key (default: "OPENAI_API_KEY").
 api_key_env = "OPENAI_API_KEY"
+# Optional pass-through for OpenAI/Cerebras.
+# Common values: "low", "medium", "high".
+# reasoning_effort = "medium"
+# Optional Anthropic thinking budget. If set, Jaunt sends:
+# thinking = { type = "enabled", budget_tokens = ... }.
+# anthropic_thinking_budget_tokens = 1024
 
 [build]
 # Max parallel workers for build generation.
@@ -65,7 +71,7 @@ Notes:
 
 - `paths.source_roots`: the CLI picks the *first existing* source root as the output base for generated build modules.
 - `prompts.*` are treated as *file paths* and read at runtime by the configured backend.
-- Provider SDKs are optional extras. Install `jaunt[openai]` or `jaunt[anthropic]` (or `jaunt[all]`).
+- Provider SDKs are optional extras. Install `jaunt[openai]`, `jaunt[anthropic]`, or `jaunt[cerebras]` (or `jaunt[all]`).
 - There is no `[mcp]` config section; MCP is started explicitly via `jaunt mcp serve`.
 
 Next: [Output Locations](/docs/reference/output).

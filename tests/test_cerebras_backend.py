@@ -232,6 +232,93 @@ def test_cerebras_call_structured_sends_response_format(monkeypatch) -> None:
     assert "python_source" in schema["properties"]
     assert "imports_used" in schema["properties"]
     assert schema["required"] == ["python_source", "imports_used"]
+    assert "reasoning_effort" not in captured_kwargs[0]
+
+
+def test_cerebras_call_structured_includes_reasoning_effort_when_set(monkeypatch) -> None:
+    monkeypatch.setenv("CEREBRAS_API_KEY", "test-key")
+    from jaunt.generate.cerebras_backend import CerebrasBackend
+
+    backend = CerebrasBackend(
+        LLMConfig(
+            provider="cerebras",
+            model="llama-test",
+            api_key_env="CEREBRAS_API_KEY",
+            reasoning_effort="high",
+        )
+    )
+
+    captured_kwargs: list[dict] = []
+
+    class _FakeResp:
+        class _Choice:
+            class _Message:
+                content = '{"python_source": "def foo():\\n    return 1\\n", "imports_used": []}'
+
+            message = _Message()
+
+        choices = [_Choice()]
+
+    class _FakeCompletions:
+        @staticmethod
+        async def create(**kwargs):
+            captured_kwargs.append(kwargs)
+            return _FakeResp()
+
+    monkeypatch.setattr(
+        backend,
+        "_client",
+        type("C", (), {"chat": type("Ch", (), {"completions": _FakeCompletions})()})(),
+    )
+
+    source, usage = asyncio.run(
+        backend._call_cerebras_structured([{"role": "user", "content": "hi"}])
+    )
+
+    assert source == "def foo():\n    return 1\n"
+    assert captured_kwargs[0]["reasoning_effort"] == "high"
+
+
+def test_cerebras_call_includes_reasoning_effort_when_set(monkeypatch) -> None:
+    monkeypatch.setenv("CEREBRAS_API_KEY", "test-key")
+    from jaunt.generate.cerebras_backend import CerebrasBackend
+
+    backend = CerebrasBackend(
+        LLMConfig(
+            provider="cerebras",
+            model="llama-test",
+            api_key_env="CEREBRAS_API_KEY",
+            reasoning_effort="medium",
+        )
+    )
+
+    captured_kwargs: list[dict] = []
+
+    class _FakeResp:
+        class _Choice:
+            class _Message:
+                content = "def foo():\n    return 1\n"
+
+            message = _Message()
+
+        choices = [_Choice()]
+
+    class _FakeCompletions:
+        @staticmethod
+        async def create(**kwargs):
+            captured_kwargs.append(kwargs)
+            return _FakeResp()
+
+    monkeypatch.setattr(
+        backend,
+        "_client",
+        type("C", (), {"chat": type("Ch", (), {"completions": _FakeCompletions})()})(),
+    )
+
+    source, usage = asyncio.run(backend._call_cerebras([{"role": "user", "content": "hi"}]))
+
+    assert source == "def foo():\n    return 1\n"
+    assert captured_kwargs[0]["reasoning_effort"] == "medium"
 
 
 def test_cerebras_structured_json_parse_error_raises(monkeypatch) -> None:

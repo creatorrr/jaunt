@@ -71,6 +71,7 @@ class CerebrasBackend(GeneratorBackend):
                 f"Set it in the environment or add it to <project_root>/.env."
             )
         self._model = llm.model
+        self._reasoning_effort = llm.reasoning_effort
 
         try:
             from cerebras.cloud.sdk import AsyncCerebras
@@ -105,10 +106,13 @@ class CerebrasBackend(GeneratorBackend):
         last_exc: BaseException | None = None
         for attempt in range(_MAX_API_RETRIES):
             try:
-                resp: Any = await self._client.chat.completions.create(
-                    model=self._model,
-                    messages=messages,
-                )
+                request_kwargs: dict[str, Any] = {
+                    "model": self._model,
+                    "messages": messages,
+                }
+                if self._reasoning_effort is not None:
+                    request_kwargs["reasoning_effort"] = self._reasoning_effort
+                resp: Any = await self._client.chat.completions.create(**request_kwargs)
                 content = resp.choices[0].message.content
                 if not isinstance(content, str):
                     raise RuntimeError("Cerebras returned empty content.")
@@ -144,11 +148,14 @@ class CerebrasBackend(GeneratorBackend):
         last_exc: BaseException | None = None
         for attempt in range(_MAX_API_RETRIES):
             try:
-                resp: Any = await self._client.chat.completions.create(
-                    model=self._model,
-                    messages=messages,
-                    response_format=_CEREBRAS_MODULE_RESPONSE_FORMAT,
-                )
+                request_kwargs: dict[str, Any] = {
+                    "model": self._model,
+                    "messages": messages,
+                    "response_format": _CEREBRAS_MODULE_RESPONSE_FORMAT,
+                }
+                if self._reasoning_effort is not None:
+                    request_kwargs["reasoning_effort"] = self._reasoning_effort
+                resp: Any = await self._client.chat.completions.create(**request_kwargs)
                 content = resp.choices[0].message.content
                 if not isinstance(content, str):
                     raise RuntimeError("Cerebras returned empty content.")

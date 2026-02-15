@@ -360,6 +360,11 @@ generated_dir = "__generated__"
 provider = "openai"
 model = "gpt-5.2"
 api_key_env = "OPENAI_API_KEY"
+# Optional: pass through provider reasoning control (OpenAI/Cerebras).
+# reasoning_effort = "medium"
+# Optional: Anthropic thinking budget; when set Jaunt sends
+# thinking = { type = "enabled", budget_tokens = ... }.
+# anthropic_thinking_budget_tokens = 1024
 """
 
 

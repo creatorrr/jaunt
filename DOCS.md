@@ -80,9 +80,14 @@ test_roots = ["tests"]
 generated_dir = "__generated__"
 
 [llm]
-provider = "openai"         # or "anthropic"
+provider = "openai"         # or "anthropic" / "cerebras"
 model = "gpt-5.2"           # default used by this repo's config loader
 api_key_env = "OPENAI_API_KEY"
+# Optional pass-through (OpenAI/Cerebras): "low" | "medium" | "high" (or provider-specific strings).
+# reasoning_effort = "medium"
+# Optional Anthropic-only thinking budget. If set, Jaunt sends:
+# thinking = { type = "enabled", budget_tokens = <value> }.
+# anthropic_thinking_budget_tokens = 1024
 
 [build]
 jobs = 8
@@ -292,6 +297,7 @@ The default backend is `jaunt.generate.openai_backend.OpenAIBackend`:
 - reads the API key from `os.environ[llm.api_key_env]`
 - uses the OpenAI Python SDK (`openai.AsyncOpenAI`)
 - calls `chat.completions.create(model=..., messages=[...])`
+- passes `reasoning_effort` when `llm.reasoning_effort` is set
 - strips a single top-level markdown fence (```...```) if present
 - retries once if the output fails basic validation (syntax + required top-level names)
 

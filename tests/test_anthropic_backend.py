@@ -211,6 +211,125 @@ def test_anthropic_call_structured_sends_tools_and_extracts_source(monkeypatch) 
     assert tools[0]["input_schema"]["required"] == ["python_source"]
     # tool_choice forces the model to use the tool.
     assert captured_kwargs[0]["tool_choice"] == {"type": "tool", "name": "write_module"}
+    assert "thinking" not in captured_kwargs[0]
+
+
+def test_anthropic_call_structured_includes_thinking_when_budget_set(monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    from jaunt.generate.anthropic_backend import AnthropicBackend
+
+    backend = AnthropicBackend(
+        LLMConfig(
+            provider="anthropic",
+            model="claude-test",
+            api_key_env="ANTHROPIC_API_KEY",
+            anthropic_thinking_budget_tokens=1536,
+        )
+    )
+
+    captured_kwargs: list[dict] = []
+
+    class _FakeToolUseBlock:
+        type = "tool_use"
+        name = "write_module"
+        input = {"python_source": "def foo():\n    return 1\n"}
+
+    class _FakeResp:
+        content = [_FakeToolUseBlock()]
+        stop_reason = "tool_use"
+
+    async def fake_create(**kwargs):
+        captured_kwargs.append(kwargs)
+        return _FakeResp()
+
+    monkeypatch.setattr(
+        backend,
+        "_client",
+        type("C", (), {"messages": type("M", (), {"create": staticmethod(fake_create)})()})(),
+    )
+
+    source, usage = asyncio.run(
+        backend._call_anthropic_structured("system prompt", [{"role": "user", "content": "hi"}])
+    )
+
+    assert source == "def foo():\n    return 1\n"
+    assert captured_kwargs[0]["thinking"] == {"type": "enabled", "budget_tokens": 1536}
+
+
+def test_anthropic_call_includes_thinking_when_budget_set(monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    from jaunt.generate.anthropic_backend import AnthropicBackend
+
+    backend = AnthropicBackend(
+        LLMConfig(
+            provider="anthropic",
+            model="claude-test",
+            api_key_env="ANTHROPIC_API_KEY",
+            anthropic_thinking_budget_tokens=1024,
+        )
+    )
+
+    captured_kwargs: list[dict] = []
+
+    class _FakeTextBlock:
+        text = "def foo():\n    return 1\n"
+
+    class _FakeResp:
+        content = [_FakeTextBlock()]
+
+    async def fake_create(**kwargs):
+        captured_kwargs.append(kwargs)
+        return _FakeResp()
+
+    monkeypatch.setattr(
+        backend,
+        "_client",
+        type("C", (), {"messages": type("M", (), {"create": staticmethod(fake_create)})()})(),
+    )
+
+    source, usage = asyncio.run(
+        backend._call_anthropic("system", [{"role": "user", "content": "hi"}])
+    )
+
+    assert source == "def foo():\n    return 1\n"
+    assert captured_kwargs[0]["thinking"] == {"type": "enabled", "budget_tokens": 1024}
+
+
+def test_anthropic_call_omits_thinking_when_budget_unset(monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    from jaunt.generate.anthropic_backend import AnthropicBackend
+
+    backend = AnthropicBackend(
+        LLMConfig(provider="anthropic", model="claude-test", api_key_env="ANTHROPIC_API_KEY")
+    )
+
+    captured_kwargs: list[dict] = []
+
+    class _FakeTextBlock:
+        text = "def foo():\n    return 1\n"
+
+    class _FakeResp:
+        content = [_FakeTextBlock()]
+
+    async def fake_create(**kwargs):
+        captured_kwargs.append(kwargs)
+        return _FakeResp()
+
+    monkeypatch.setattr(
+        backend,
+        "_client",
+        type("C", (), {"messages": type("M", (), {"create": staticmethod(fake_create)})()})(),
+    )
+
+    source, usage = asyncio.run(
+        backend._call_anthropic("system", [{"role": "user", "content": "hi"}])
+    )
+
+    assert source == "def foo():\n    return 1\n"
+    assert "thinking" not in captured_kwargs[0]
 
 
 def test_anthropic_structured_no_tool_use_block_raises(monkeypatch) -> None:
