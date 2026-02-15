@@ -30,12 +30,12 @@ def _entry(*, module: str, qualname: str, source_file: str) -> SpecEntry:
 class FakeBackend(GeneratorBackend):
     async def generate_module(
         self, ctx: ModuleSpecContext, *, extra_error_context: list[str] | None = None
-    ) -> str:
+    ) -> tuple[str, None]:
         # Generate a minimal pytest module that defines all expected test functions.
         lines: list[str] = []
         for name in ctx.expected_names:
             lines.append(f"def {name}():\n    assert True\n")
-        return "\n".join(lines).rstrip() + "\n"
+        return "\n".join(lines).rstrip() + "\n", None
 
 
 def test_tester_generates_into_tests_tree_and_runs_pytest(tmp_path: Path) -> None:
@@ -120,9 +120,9 @@ def test_generated():
     class AssertingBackend(GeneratorBackend):
         async def generate_module(
             self, ctx: ModuleSpecContext, *, extra_error_context: list[str] | None = None
-        ) -> str:
+        ) -> tuple[str, None]:
             assert ctx.dependency_apis == sentinel
-            return "def test_generated():\n    assert True\n"
+            return "def test_generated():\n    assert True\n", None
 
     backend = AssertingBackend()
     report = asyncio.run(

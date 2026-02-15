@@ -19,11 +19,11 @@ class _CapturingBackend(GeneratorBackend):
 
     async def generate_module(
         self, ctx: ModuleSpecContext, *, extra_error_context: list[str] | None = None
-    ) -> str:
+    ) -> tuple[str, None]:
         self.contexts.append(ctx)
         names = ctx.expected_names
         lines = [f"def {n}(): pass" for n in names]
-        return "\n".join(lines) + "\n"
+        return "\n".join(lines) + "\n", None
 
 
 def _make_spec_file(tmp_path: Path, module: str, qualname: str) -> str:

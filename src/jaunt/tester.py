@@ -12,7 +12,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from jaunt import paths
+from jaunt.cache import CacheEntry, ResponseCache, cache_key_from_context
+from jaunt.cost import CostTracker
 from jaunt.digest import extract_source_segment, module_digest
+from jaunt.errors import JauntGenerationError
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
 from jaunt.header import format_header
 from jaunt.registry import SpecEntry
@@ -200,6 +203,8 @@ async def run_test_generation(
     backend: GeneratorBackend,
     jobs: int = 4,
     progress: object | None = None,
+    response_cache: ResponseCache | None = None,
+    cost_tracker: CostTracker | None = None,
 ) -> TestGenerationReport:
     jobs = max(1, int(jobs))
 
@@ -260,13 +265,47 @@ async def run_test_generation(
             dependency_generated_modules={},
         )
 
-        result = await backend.generate_with_retry(ctx)
-        if result.source is None:
-            return False, result.errors or ["No source returned."], None
+        # Check response cache before calling LLM.
+        result_source: str | None = None
+        ck: str | None = None
+        if response_cache is not None:
+            ck = cache_key_from_context(
+                ctx, model=backend.model_name, provider=backend.provider_name
+            )
+            cached = response_cache.get(ck)
+            if cached is not None:
+                cache_errors = validate_generated_source(cached.source, expected)
+                if not cache_errors:
+                    result_source = cached.source
+                    if cost_tracker is not None:
+                        cost_tracker.record_cache_hit()
 
-        errors = validate_generated_source(result.source, expected)
-        if errors:
-            return False, errors, None
+        if result_source is None:
+            result = await backend.generate_with_retry(ctx)
+            if result.source is None:
+                return False, result.errors or ["No source returned."], None
+
+            errors = validate_generated_source(result.source, expected)
+            if errors:
+                return False, errors, None
+
+            result_source = result.source
+
+            if cost_tracker is not None and result.usage is not None:
+                cost_tracker.record(module_name, result.usage)
+
+            if response_cache is not None and ck is not None:
+                import time
+
+                entry = CacheEntry(
+                    source=result_source,
+                    prompt_tokens=result.usage.prompt_tokens if result.usage else 0,
+                    completion_tokens=result.usage.completion_tokens if result.usage else 0,
+                    model=result.usage.model if result.usage else "",
+                    provider=result.usage.provider if result.usage else "",
+                    cached_at=time.time(),
+                )
+                response_cache.put(ck, entry)
 
         digest = module_digest(module_name, entries, specs, spec_graph)
         header_fields = {
@@ -282,7 +321,7 @@ async def run_test_generation(
             tests_package=tests_package,
             generated_dir=generated_dir,
             module_name=module_name,
-            source=result.source,
+            source=result_source,
             header_fields=header_fields,
         )
         return True, [], out
@@ -349,6 +388,19 @@ async def run_test_generation(
 
             await complete(m)
 
+        # Check budget after processing completed tasks.
+        if cost_tracker is not None:
+            try:
+                cost_tracker.check_budget()
+            except JauntGenerationError:
+                for t in in_flight:
+                    t.cancel()
+                for rem in stale - completed:
+                    failed[rem] = ["Budget limit exceeded."]
+                    completed.add(rem)
+                in_flight.clear()
+                break
+
     if progress is not None:
         try:
             progress.finish()  # type: ignore[attr-defined]
@@ -382,6 +434,8 @@ async def run_tests(
     progress: object | None = None,
     pythonpath: Sequence[Path] | None = None,
     cwd: Path | None = None,
+    response_cache: ResponseCache | None = None,
+    cost_tracker: CostTracker | None = None,
 ) -> PytestResult:
     generated_files: list[Path] = []
     gen_failed: dict[str, list[str]] = {}
@@ -412,6 +466,8 @@ async def run_tests(
             backend=backend,
             jobs=jobs,
             progress=progress,
+            response_cache=response_cache,
+            cost_tracker=cost_tracker,
         )
         generated_files = report.generated_files
         gen_failed = report.failed

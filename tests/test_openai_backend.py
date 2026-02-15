@@ -37,11 +37,11 @@ def test_openai_backend_strips_fences(monkeypatch) -> None:
 
     async def fake_call(messages):
         assert isinstance(messages, list)
-        return "```python\nprint('hi')\n```"
+        return "```python\nprint('hi')\n```", None
 
     monkeypatch.setattr(backend, "_call_openai", fake_call)
-    out = asyncio.run(backend.generate_module(_ctx("build")))
-    assert out == "print('hi')"
+    source, usage = asyncio.run(backend.generate_module(_ctx("build")))
+    assert source == "print('hi')"
 
 
 def test_openai_backend_renders_expected_names_and_kind_specific_rules(monkeypatch) -> None:
@@ -54,7 +54,7 @@ def test_openai_backend_renders_expected_names_and_kind_specific_rules(monkeypat
 
     async def fake_call(messages):
         seen.append(messages)
-        return "def foo():\n    return 1\n"
+        return "def foo():\n    return 1\n", None
 
     # Uses structured path by default — mock it.
     monkeypatch.setattr(backend, "_call_openai_structured", fake_call)
@@ -120,7 +120,7 @@ def test_openai_backend_injects_skills_block_as_extra_user_message(monkeypatch) 
 
     async def fake_call(messages):
         seen.append(messages)
-        return "def foo():\n    return 1\n"
+        return "def foo():\n    return 1\n", None
 
     # Uses structured path by default — mock it.
     monkeypatch.setattr(backend, "_call_openai_structured", fake_call)
@@ -137,8 +137,8 @@ def test_openai_backend_injects_skills_block_as_extra_user_message(monkeypatch) 
         skills_block="## requests==2.0.0\nUse requests.get(...)\n",
     )
 
-    out = asyncio.run(backend.generate_module(ctx))
-    assert "def foo" in out
+    source, usage = asyncio.run(backend.generate_module(ctx))
+    assert "def foo" in source
     assert len(seen) == 1
     msgs = seen[0]
     assert len(msgs) == 3
@@ -167,12 +167,12 @@ def test_openai_generate_module_uses_structured_output(monkeypatch) -> None:
 
     async def fake_structured_call(messages):
         structured_called.append(messages)
-        return "def foo():\n    return 42\n"
+        return "def foo():\n    return 42\n", None
 
     monkeypatch.setattr(backend, "_call_openai_structured", fake_structured_call)
 
-    result = asyncio.run(backend.generate_module(_ctx("build")))
-    assert result == "def foo():\n    return 42\n"
+    source, usage = asyncio.run(backend.generate_module(_ctx("build")))
+    assert source == "def foo():\n    return 42\n"
     assert len(structured_called) == 1
 
 
@@ -185,12 +185,12 @@ def test_openai_generate_module_fallback_when_structured_disabled(monkeypatch) -
     monkeypatch.setattr(type(backend), "supports_structured_output", property(lambda self: False))
 
     async def fake_call(messages):
-        return "```python\ndef foo():\n    return 99\n```"
+        return "```python\ndef foo():\n    return 99\n```", None
 
     monkeypatch.setattr(backend, "_call_openai", fake_call)
 
-    result = asyncio.run(backend.generate_module(_ctx("build")))
-    assert result == "def foo():\n    return 99"
+    source, usage = asyncio.run(backend.generate_module(_ctx("build")))
+    assert source == "def foo():\n    return 99"
 
 
 def test_openai_call_structured_sends_response_format(monkeypatch) -> None:
@@ -223,9 +223,9 @@ def test_openai_call_structured_sends_response_format(monkeypatch) -> None:
     )
 
     messages = [{"role": "user", "content": "generate code"}]
-    result = asyncio.run(backend._call_openai_structured(messages))
+    source, usage = asyncio.run(backend._call_openai_structured(messages))
 
-    assert result == "def foo():\n    return 1\n"
+    assert source == "def foo():\n    return 1\n"
     assert len(captured_kwargs) == 1
     assert "response_format" in captured_kwargs[0]
     rf = captured_kwargs[0]["response_format"]
@@ -330,7 +330,9 @@ def test_openai_structured_logs_imports_used(monkeypatch, caplog) -> None:
     )
 
     with caplog.at_level(logging.DEBUG, logger="jaunt.generate.openai"):
-        result = asyncio.run(backend._call_openai_structured([{"role": "user", "content": "hi"}]))
+        source, usage = asyncio.run(
+            backend._call_openai_structured([{"role": "user", "content": "hi"}])
+        )
 
-    assert result == "import os\n"
+    assert source == "import os\n"
     assert "imports_used" in caplog.text

@@ -104,8 +104,8 @@ def test_call_openai_retries_on_retryable_error(monkeypatch) -> None:
 
     monkeypatch.setattr(mod, "_BASE_BACKOFF_S", 0.001)
 
-    result = asyncio.run(backend._call_openai([{"role": "user", "content": "hi"}]))
-    assert result == "def foo(): pass"
+    source, usage = asyncio.run(backend._call_openai([{"role": "user", "content": "hi"}]))
+    assert source == "def foo(): pass"
     assert len(calls) == 3
 
 

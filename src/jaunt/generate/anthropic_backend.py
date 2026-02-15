@@ -7,7 +7,7 @@ from typing import Any
 
 from jaunt.config import LLMConfig, PromptsConfig
 from jaunt.errors import JauntConfigError
-from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
+from jaunt.generate.base import GeneratorBackend, ModuleSpecContext, TokenUsage
 from jaunt.generate.shared import (
     fmt_kv_block,
     load_prompt,
@@ -94,7 +94,13 @@ class AnthropicBackend(GeneratorBackend):
         self._test_system = load_prompt("test_system.md", prompts.test_system if prompts else None)
         self._test_module = load_prompt("test_module.md", prompts.test_module if prompts else None)
 
-    async def _call_anthropic(self, system: str, messages: list[dict[str, str]]) -> str:
+    @property
+    def provider_name(self) -> str:
+        return "anthropic"
+
+    async def _call_anthropic(
+        self, system: str, messages: list[dict[str, str]]
+    ) -> tuple[str, TokenUsage | None]:
         """Call Anthropic Messages API with retry and exponential backoff."""
         last_exc: BaseException | None = None
         for attempt in range(_MAX_API_RETRIES):
@@ -108,7 +114,15 @@ class AnthropicBackend(GeneratorBackend):
                 content = resp.content
                 if not content or not hasattr(content[0], "text"):
                     raise RuntimeError("Anthropic returned empty content.")
-                return str(content[0].text)
+                usage = None
+                if getattr(resp, "usage", None) is not None:
+                    usage = TokenUsage(
+                        prompt_tokens=getattr(resp.usage, "input_tokens", 0) or 0,
+                        completion_tokens=getattr(resp.usage, "output_tokens", 0) or 0,
+                        model=self._model,
+                        provider="anthropic",
+                    )
+                return str(content[0].text), usage
             except Exception as exc:
                 last_exc = exc
                 if not _is_retryable(exc) or attempt >= _MAX_API_RETRIES - 1:
@@ -125,7 +139,9 @@ class AnthropicBackend(GeneratorBackend):
 
         raise last_exc  # type: ignore[misc]
 
-    async def _call_anthropic_structured(self, system: str, messages: list[dict[str, str]]) -> str:
+    async def _call_anthropic_structured(
+        self, system: str, messages: list[dict[str, str]]
+    ) -> tuple[str, TokenUsage | None]:
         """Call Anthropic Messages API with tool_use for structured output."""
         last_exc: BaseException | None = None
         for attempt in range(_MAX_API_RETRIES):
@@ -138,6 +154,14 @@ class AnthropicBackend(GeneratorBackend):
                     tools=[_ANTHROPIC_WRITE_MODULE_TOOL],
                     tool_choice={"type": "tool", "name": "write_module"},
                 )
+                usage = None
+                if getattr(resp, "usage", None) is not None:
+                    usage = TokenUsage(
+                        prompt_tokens=getattr(resp.usage, "input_tokens", 0) or 0,
+                        completion_tokens=getattr(resp.usage, "output_tokens", 0) or 0,
+                        model=self._model,
+                        provider="anthropic",
+                    )
                 for block in resp.content:
                     if getattr(block, "type", None) == "tool_use" and block.name == "write_module":
                         source = block.input["python_source"]
@@ -147,7 +171,7 @@ class AnthropicBackend(GeneratorBackend):
                             logger.debug("Structured output imports_used: %s", imports)
                         if notes:
                             logger.debug("Structured output notes: %s", notes)
-                        return source
+                        return source, usage
                 raise RuntimeError(
                     "Anthropic response did not contain a write_module tool_use block."
                 )
@@ -229,9 +253,9 @@ class AnthropicBackend(GeneratorBackend):
         ctx: ModuleSpecContext,
         *,
         extra_error_context: list[str] | None = None,
-    ) -> str:
+    ) -> tuple[str, TokenUsage | None]:
         system, messages = self._render_messages(ctx, extra_error_context=extra_error_context)
         if self.supports_structured_output:
             return await self._call_anthropic_structured(system, messages)
-        raw = await self._call_anthropic(system, messages)
-        return strip_markdown_fences(raw)
+        raw, usage = await self._call_anthropic(system, messages)
+        return strip_markdown_fences(raw), usage

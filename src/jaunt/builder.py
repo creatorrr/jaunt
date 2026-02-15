@@ -9,8 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from jaunt import paths
+from jaunt.cache import CacheEntry, ResponseCache, cache_key_from_context
+from jaunt.cost import CostTracker
 from jaunt.digest import extract_source_segment, module_digest
-from jaunt.errors import JauntDependencyCycleError
+from jaunt.errors import JauntDependencyCycleError, JauntGenerationError
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
 from jaunt.header import extract_module_digest, format_header
 from jaunt.registry import SpecEntry
@@ -216,6 +218,8 @@ async def run_build(
     skills_block: str = "",
     jobs: int = 4,
     progress: object | None = None,
+    response_cache: ResponseCache | None = None,
+    cost_tracker: CostTracker | None = None,
 ) -> BuildReport:
     jobs = max(1, int(jobs))
 
@@ -315,16 +319,50 @@ async def run_build(
             skills_block=skills_block,
         )
 
-        result = await backend.generate_with_retry(ctx)
-        if result.source is None:
-            return False, result.errors or ["No source returned."]
+        # Check response cache before calling LLM.
+        result_source: str | None = None
+        ck: str | None = None
+        if response_cache is not None:
+            ck = cache_key_from_context(
+                ctx, model=backend.model_name, provider=backend.provider_name
+            )
+            cached = response_cache.get(ck)
+            if cached is not None:
+                cache_errors = validate_generated_source(cached.source, expected)
+                if not cache_errors:
+                    result_source = cached.source
+                    if cost_tracker is not None:
+                        cost_tracker.record_cache_hit()
 
-        errors = validate_generated_source(result.source, expected)
-        if errors:
-            return False, errors
+        if result_source is None:
+            result = await backend.generate_with_retry(ctx)
+            if result.source is None:
+                return False, result.errors or ["No source returned."]
+
+            errors = validate_generated_source(result.source, expected)
+            if errors:
+                return False, errors
+
+            result_source = result.source
+
+            if cost_tracker is not None and result.usage is not None:
+                cost_tracker.record(module_name, result.usage)
+
+            if response_cache is not None and ck is not None:
+                import time
+
+                entry = CacheEntry(
+                    source=result_source,
+                    prompt_tokens=result.usage.prompt_tokens if result.usage else 0,
+                    completion_tokens=result.usage.completion_tokens if result.usage else 0,
+                    model=result.usage.model if result.usage else "",
+                    provider=result.usage.provider if result.usage else "",
+                    cached_at=time.time(),
+                )
+                response_cache.put(ck, entry)
 
         # Store generated source for downstream dependents.
-        generated_sources[module_name] = result.source
+        generated_sources[module_name] = result_source
 
         digest = module_digest(module_name, entries, specs, spec_graph)
         header_fields = {
@@ -339,11 +377,9 @@ async def run_build(
             package_dir=package_dir,
             generated_dir=generated_dir,
             module_name=module_name,
-            source=result.source,
+            source=result_source,
             header_fields=header_fields,
         )
-        # Store generated source so downstream modules get it as context.
-        generated_sources[module_name] = result.source
         return True, []
 
     async def complete(m: str) -> None:
@@ -405,6 +441,19 @@ async def run_build(
                     pass
 
             await complete(m)
+
+        # Check budget after processing completed tasks.
+        if cost_tracker is not None:
+            try:
+                cost_tracker.check_budget()
+            except JauntGenerationError:
+                for t in in_flight:
+                    t.cancel()
+                for rem in stale - completed:
+                    failed[rem] = ["Budget limit exceeded."]
+                    completed.add(rem)
+                in_flight.clear()
+                break
 
     remaining = stale - completed
     if remaining:
