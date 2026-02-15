@@ -12,12 +12,17 @@ Install Jaunt however you vend it (local path, internal index, or git). You’ll
 Examples:
 
 ```bash
-# Local checkout:
+# Package index:
+uv add "jaunt[openai]"   # or jaunt[anthropic]
+
+# Local checkout (editable):
 uv add --editable /path/to/jaunt
 
 # Ensure pytest is installed for `jaunt test`:
 uv add pytest
 ```
+
+If you use an editable local path install, also install the matching provider SDK (`openai` or `anthropic`) in that environment.
 
 ## 2) Add `jaunt.toml`
 

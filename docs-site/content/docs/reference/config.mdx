@@ -31,7 +31,7 @@ test_roots = ["tests"]
 generated_dir = "__generated__"
 
 [llm]
-# Currently only "openai" is supported by the CLI.
+# Supported by the CLI: "openai" or "anthropic".
 provider = "openai"
 # Model name passed to the backend (default: "gpt-5.2").
 model = "gpt-5.2"
@@ -64,6 +64,8 @@ test_module = ""
 Notes:
 
 - `paths.source_roots`: the CLI picks the *first existing* source root as the output base for generated build modules.
-- `prompts.*` are treated as *file paths* and read at runtime by the OpenAI backend.
+- `prompts.*` are treated as *file paths* and read at runtime by the configured backend.
+- Provider SDKs are optional extras. Install `jaunt[openai]` or `jaunt[anthropic]` (or `jaunt[all]`).
+- There is no `[mcp]` config section; MCP is started explicitly via `jaunt mcp serve`.
 
 Next: [Output Locations](/docs/reference/output).
