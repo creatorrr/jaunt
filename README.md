@@ -4,7 +4,7 @@ Jaunt is a small Python library + CLI for **spec-driven code generation**:
 
 - Write implementation intent as normal Python stubs decorated with `@jaunt.magic(...)`.
 - Optionally write test intent as stubs decorated with `@jaunt.test(...)`.
-- Jaunt generates real modules under `__generated__/` using an LLM backend (OpenAI).
+- Jaunt generates real modules under `__generated__/` using an LLM backend (OpenAI or Anthropic).
 
 ## Quickstart (This Repo)
 
@@ -12,11 +12,11 @@ Prereqs: `uv` installed.
 
 ```bash
 uv sync
-export OPENAI_API_KEY=...
+export OPENAI_API_KEY=...   # or ANTHROPIC_API_KEY for Claude
 uv run jaunt --version
 ```
 
-See `DOCS.md` for the full walkthrough and `docs-site/` for rendered docs.
+See `docs-site/` for rendered docs, or `DOCS.md` for a plain-text walkthrough.
 
 All examples live under `examples/`. See `examples/README.md` for the full list.
 
@@ -32,10 +32,6 @@ uv run jaunt build --root examples/jwt_auth
 PYTHONPATH=examples/jwt_auth/src uv run jaunt test --root examples/jwt_auth
 ```
 
-This example also showcases `.agents/skills/**` auto-generation (because it imports `pydantic`):
-
-`examples/jwt_auth/.agents/skills/pydantic/SKILL.md`
-
 ## Auto-Generate PyPI Skills (Build)
 
 `jaunt build` includes a best-effort pre-build step that auto-generates “skills” for external libraries your project imports and injects them into the build prompt.
@@ -46,7 +42,7 @@ What happens:
 - Resolve imports to installed PyPI distributions + versions from the current environment.
 - Ensure a skill exists per distribution at:
   - `<project_root>/.agents/skills/<dist-normalized>/SKILL.md`
-- If missing/outdated, fetch the exact PyPI README for `<dist>==<version>` and generate `SKILL.md` using OpenAI.
+- If missing/outdated, fetch the exact PyPI README for `<dist>==<version>` and generate `SKILL.md` using the configured LLM provider.
 - Inject the concatenated skills text into the build LLM prompt.
 
 Overwrite rules:

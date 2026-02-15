@@ -1,7 +1,7 @@
 ---
 id: "100"
 title: Watch Mode
-status: todo
+status: done
 priority: 6
 effort: medium
 depends: ["060"]

@@ -1,7 +1,7 @@
 ---
 id: "070"
 title: Prompt Quality
-status: todo
+status: done
 priority: 4
 effort: medium
 depends: ["020", "010"]

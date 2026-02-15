@@ -4,47 +4,26 @@ import asyncio
 import json
 import logging
 import os
-import re
-from importlib import resources
-from pathlib import Path
 from typing import Any
 
 from jaunt.config import LLMConfig, PromptsConfig
 from jaunt.errors import JauntConfigError
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
+from jaunt.generate.shared import (
+    fmt_kv_block,
+    load_prompt,
+    render_template,
+    strip_markdown_fences,
+)
 
 logger = logging.getLogger("jaunt.generate.openai")
 
 _MAX_API_RETRIES = 4
 _BASE_BACKOFF_S = 1.0
 
-
-def render_template(text: str, mapping: dict[str, str]) -> str:
-    """Very small template renderer: replaces `{{name}}` placeholders."""
-
-    rendered = text
-    for key, value in mapping.items():
-        rendered = rendered.replace(f"{{{{{key}}}}}", value)
-    return rendered
-
-
-_FENCE_RE = re.compile(r"^\s*```[a-zA-Z0-9_-]*\s*\n(?P<code>.*)\n\s*```\s*$", re.DOTALL)
-
-
-def _strip_markdown_fences(text: str) -> str:
-    m = _FENCE_RE.match(text or "")
-    if not m:
-        return (text or "").strip()
-    return (m.group("code") or "").strip()
-
-
-def _fmt_kv_block(items: list[tuple[str, str]], *, empty: str = "(none)") -> str:
-    if not items:
-        return empty
-    chunks: list[str] = []
-    for key, value in items:
-        chunks.append(f"# {key}\n{value.rstrip()}\n")
-    return "\n".join(chunks).rstrip() + "\n"
+# Aliases for backward compatibility (tests import these names directly).
+_strip_markdown_fences = strip_markdown_fences
+_fmt_kv_block = fmt_kv_block
 
 
 def _is_retryable(exc: BaseException) -> bool:
@@ -111,13 +90,9 @@ class OpenAIBackend(GeneratorBackend):
         self._test_system = self._load_prompt("test_system.md", test_system_override)
         self._test_module = self._load_prompt("test_module.md", test_module_override)
 
-    def _load_prompt(self, default_name: str, override_path: str | None) -> str:
-        if override_path:
-            return Path(override_path).read_text(encoding="utf-8")
-
-        # Prompts are packaged under src/jaunt/prompts/** (see pyproject include).
-        p = resources.files("jaunt") / "prompts" / default_name
-        return p.read_text(encoding="utf-8")
+    @staticmethod
+    def _load_prompt(default_name: str, override_path: str | None) -> str:
+        return load_prompt(default_name, override_path)
 
     async def _call_openai(self, messages: list[dict[str, str]]) -> str:
         """Call OpenAI API with retry and exponential backoff for transient errors."""

@@ -1,7 +1,7 @@
 ---
 id: "080"
 title: Error Messages & DX
-status: todo
+status: done
 priority: 5
 effort: small-medium
 depends: ["040"]

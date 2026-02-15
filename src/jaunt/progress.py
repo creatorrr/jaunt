@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from shutil import get_terminal_size
 
 
-@dataclass(slots=True)
+@dataclass
 class ProgressBar:
     label: str
     total: int

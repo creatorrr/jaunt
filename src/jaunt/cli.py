@@ -430,12 +430,6 @@ def cmd_build(args: argparse.Namespace) -> int:
 
         source_dirs = [root / sr for sr in cfg.paths.source_roots]
 
-        # Propagate generated_dir to the runtime so @magic forwarding uses the
-        # configured directory (not just the hardcoded default).
-        import os as _os
-
-        _os.environ["JAUNT_GENERATED_DIR"] = cfg.paths.generated_dir
-
         skills_block = ""
         try:
             from jaunt import skills_auto
@@ -552,7 +546,7 @@ def cmd_build(args: argparse.Namespace) -> int:
                 }
             )
 
-        if getattr(report, "failed", None):
+        if report.failed:
             return EXIT_GENERATION_ERROR
         return EXIT_OK
     except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError, KeyError) as e:

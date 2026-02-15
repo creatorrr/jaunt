@@ -8,10 +8,11 @@ from typing import Any
 from jaunt.config import LLMConfig, PromptsConfig
 from jaunt.errors import JauntConfigError
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
-from jaunt.generate.openai_backend import (
-    _fmt_kv_block,
-    _strip_markdown_fences,
+from jaunt.generate.shared import (
+    fmt_kv_block,
+    load_prompt,
     render_template,
+    strip_markdown_fences,
 )
 
 logger = logging.getLogger("jaunt.generate.anthropic")
@@ -84,19 +85,18 @@ class AnthropicBackend(GeneratorBackend):
 
         self._client: Any = AsyncAnthropic(api_key=api_key)
 
-        from importlib import resources
-        from pathlib import Path
-
-        def _load(name: str, override: str | None) -> str:
-            if override:
-                return Path(override).read_text(encoding="utf-8")
-            p = resources.files("jaunt") / "prompts" / name
-            return p.read_text(encoding="utf-8")
-
-        self._build_system = _load("build_system.md", prompts.build_system if prompts else None)
-        self._build_module = _load("build_module.md", prompts.build_module if prompts else None)
-        self._test_system = _load("test_system.md", prompts.test_system if prompts else None)
-        self._test_module = _load("test_module.md", prompts.test_module if prompts else None)
+        self._build_system = load_prompt(
+            "build_system.md", prompts.build_system if prompts else None
+        )
+        self._build_module = load_prompt(
+            "build_module.md", prompts.build_module if prompts else None
+        )
+        self._test_system = load_prompt(
+            "test_system.md", prompts.test_system if prompts else None
+        )
+        self._test_module = load_prompt(
+            "test_module.md", prompts.test_module if prompts else None
+        )
 
     async def _call_anthropic(self, system: str, messages: list[dict[str, str]]) -> str:
         """Call Anthropic Messages API with retry and exponential backoff."""
@@ -202,10 +202,10 @@ class AnthropicBackend(GeneratorBackend):
             "spec_module": ctx.spec_module,
             "generated_module": ctx.generated_module,
             "expected_names": expected,
-            "specs_block": _fmt_kv_block(spec_items),
-            "deps_api_block": _fmt_kv_block(deps_api_items),
-            "deps_generated_block": _fmt_kv_block(deps_gen_items),
-            "error_context_block": _fmt_kv_block(err_items),
+            "specs_block": fmt_kv_block(spec_items),
+            "deps_api_block": fmt_kv_block(deps_api_items),
+            "deps_generated_block": fmt_kv_block(deps_gen_items),
+            "error_context_block": fmt_kv_block(err_items),
         }
 
         if ctx.kind == "build":
@@ -238,4 +238,4 @@ class AnthropicBackend(GeneratorBackend):
         if self.supports_structured_output:
             return await self._call_anthropic_structured(system, messages)
         raw = await self._call_anthropic(system, messages)
-        return _strip_markdown_fences(raw)
+        return strip_markdown_fences(raw)

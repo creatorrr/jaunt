@@ -1,7 +1,7 @@
 ---
 id: "060"
 title: CLI Ergonomics (init, clean, status)
-status: todo
+status: done
 priority: 3
 effort: medium
 depends: ["030"]

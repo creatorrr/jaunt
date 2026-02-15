@@ -6,14 +6,14 @@ Jaunt is a small Python library + CLI for **spec-driven code generation**:
 
 - You write **intent** as normal Python functions/classes decorated with `@jaunt.magic(...)`.
 - You optionally write **test intent** as Python stubs decorated with `@jaunt.test(...)`.
-- Jaunt uses an LLM backend (currently OpenAI) to generate real modules under `__generated__/`.
+- Jaunt uses an LLM backend (OpenAI or Anthropic) to generate real modules under `__generated__/`.
 - You review the generated output and iterate by editing the specs and rerunning generation.
 
 This repo contains the Jaunt implementation (package: `src/jaunt/`), plus a test suite that documents the intended behavior.
 
 ## Repo Tour
 
-- `src/jaunt/`: library + CLI (`jaunt.cli`) and the OpenAI backend (`jaunt.generate.openai_backend`).
+- `src/jaunt/`: library + CLI (`jaunt.cli`) and LLM backends (`jaunt.generate.openai_backend`, `jaunt.generate.anthropic_backend`).
 - `src/jaunt/prompts/`: default prompt templates packaged into the distribution.
 - `src/jaunt/skill/`: assistant-facing docs (a Jaunt “skill” + Cursor rules) packaged as resources.
 - `tests/`: unit/integration tests that define the MVP behavior.
@@ -78,7 +78,7 @@ test_roots = ["tests"]
 generated_dir = "__generated__"
 
 [llm]
-provider = "openai"         # currently the only supported provider
+provider = "openai"         # or "anthropic"
 model = "gpt-5.2"           # default used by this repo's config loader
 api_key_env = "OPENAI_API_KEY"
 
@@ -297,10 +297,8 @@ Prompt templates live in `src/jaunt/prompts/` and are packaged with the wheel/sd
 
 ## Limitations / Gotchas (Current Code)
 
-- Provider support: only `llm.provider = "openai"` is supported by the CLI.
-- Generated dir name: runtime forwarding for `@jaunt.magic` currently imports using `generated_dir="__generated__"` (hardcoded). If you set `paths.generated_dir` to something else, generation may still write files, but the runtime wrapper will not find them unless you import the generated module directly.
-- Prompt overrides: `prompts.*` are treated as file paths by the OpenAI backend. If you set them, ensure those files exist and contain the prompt text.
-- Context plumbing: dependency API and previously generated dependency-module source are currently passed as empty blocks to the backend (ordering and digesting still work).
+- Generated dir name: runtime forwarding for `@jaunt.magic` uses the `JAUNT_GENERATED_DIR` environment variable (set automatically by the CLI). If you call the runtime outside the CLI, set this env var to match your `paths.generated_dir` config.
+- Prompt overrides: `prompts.*` are treated as file paths by the backends. If you set them, ensure those files exist and contain the prompt text.
 
 ## Developing Jaunt (This Repo)
 

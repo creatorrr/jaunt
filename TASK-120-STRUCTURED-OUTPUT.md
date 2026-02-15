@@ -1,7 +1,7 @@
 ---
 id: "120"
 title: Structured Output for Generation
-status: todo
+status: done
 priority: 7
 effort: medium
 depends: ["010"]

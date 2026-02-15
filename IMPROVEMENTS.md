@@ -379,7 +379,7 @@ If I had to sequence these for maximum impact with minimum effort:
 1. **Caching** (#10) — Cost optimization. Medium effort.
 1. **Eval suite** (#12) — Quality assurance. Medium effort.
 
-Items 1-4 are the minimum for a credible “v0.2” release. Items 1-9 make it production-ready. Items 10-14 make it polished.
+Items 1-4 shipped in v0.2.0. Items 5-9 are the next tier for production-readiness. Items 10-14 add polish.
 
 -----
 
