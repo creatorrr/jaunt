@@ -21,7 +21,7 @@ uv run ruff check .
 # Typecheck
 uv run ty check
 
-# Build an example project (requires OPENAI_API_KEY or ANTHROPIC_API_KEY)
+# Build an example project (requires OPENAI_API_KEY, ANTHROPIC_API_KEY, or CEREBRAS_API_KEY)
 cd examples/jwt_auth && uv run --project ../.. jaunt build
 
 # Run with JSON output (for programmatic consumption)
@@ -54,6 +54,7 @@ src/jaunt/          # Library source
     base.py              # Abstract GeneratorBackend interface
     openai_backend.py    # OpenAI provider
     anthropic_backend.py # Anthropic/Claude provider
+    cerebras_backend.py  # Cerebras provider
   prompts/          # LLM prompt templates (Jinja-like {{var}})
 tests/              # pytest test suite (~41 files)
 examples/           # Runnable example projects
@@ -77,9 +78,9 @@ examples/           # Runnable example projects
 version = 1
 
 [llm]
-provider = "openai"          # or "anthropic"
-model = "gpt-5.2"            # or "claude-sonnet-4-20250514", etc.
-api_key_env = "OPENAI_API_KEY"  # or "ANTHROPIC_API_KEY"
+provider = "openai"          # or "anthropic", "cerebras"
+model = "gpt-5.2"            # or "claude-sonnet-4-20250514", "llama-4-scout-17b-16e-instruct", etc.
+api_key_env = "OPENAI_API_KEY"  # or "ANTHROPIC_API_KEY", "CEREBRAS_API_KEY"
 
 [paths]
 source_roots = ["src", "."]

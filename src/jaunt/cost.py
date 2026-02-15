@@ -17,6 +17,9 @@ _COST_TABLE: dict[str, tuple[float, float]] = {
     "claude-sonnet": (3.00, 15.00),
     "claude-opus": (15.00, 75.00),
     "claude-haiku": (0.25, 1.25),
+    "llama-4": (0.60, 0.60),
+    "llama3.3-70b": (0.60, 0.60),
+    "llama3.1-8b": (0.10, 0.10),
 }
 
 

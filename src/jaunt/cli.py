@@ -306,8 +306,12 @@ def _build_backend(cfg: JauntConfig):
         from jaunt.generate.anthropic_backend import AnthropicBackend
 
         return AnthropicBackend(cfg.llm, cfg.prompts)
+    if provider == "cerebras":
+        from jaunt.generate.cerebras_backend import CerebrasBackend
+
+        return CerebrasBackend(cfg.llm, cfg.prompts)
     raise JauntConfigError(
-        f"Unsupported llm.provider: {provider!r}. Supported: 'openai', 'anthropic'."
+        f"Unsupported llm.provider: {provider!r}. Supported: 'openai', 'anthropic', 'cerebras'."
     )
 
 
@@ -347,7 +351,7 @@ test_roots = ["tests"]
 generated_dir = "__generated__"
 
 [llm]
-# Install your chosen provider: pip install jaunt[openai] or pip install jaunt[anthropic]
+# Install your chosen provider: pip install jaunt[openai], jaunt[anthropic], or jaunt[cerebras]
 provider = "openai"
 model = "gpt-5.2"
 api_key_env = "OPENAI_API_KEY"
