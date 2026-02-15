@@ -1,3 +1,9 @@
+"""The forge: build orchestration and parallel scheduling.
+
+What the hammer? what the chain? -- specs enter the furnace, implementations
+emerge on the other side.
+"""
+
 from __future__ import annotations
 
 import asyncio

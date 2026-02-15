@@ -3,7 +3,21 @@ title: jaunt, dont code.
 description: "Spec-driven code generation: write Python stubs, get real implementations from an LLM."
 ---
 
+<div style={{ float: "right", marginLeft: "1.5rem", marginBottom: "1rem", maxWidth: "180px" }}>
+  <img src="/images/tyger-blake-1794.jpg" alt="William Blake, 'The Tyger' (1794)" style={{ borderRadius: "6px" }} />
+  <p style={{ fontSize: "0.65rem", opacity: 0.6, marginTop: "0.25rem", lineHeight: 1.3 }}>
+    Blake, <em>The Tyger</em>, 1794.{" "}
+    <a href="https://www.metmuseum.org/art/collection/search/347983">Met Open Access.</a>
+  </p>
+</div>
+
+> *Tyger Tyger, burning bright, / In the forests of the night*
+> -- William Blake, via Alfred Bester's *The Stars My Destination*
+
 Jaunt is a Python library + CLI for **spec-driven code generation**.
+
+Named after *jaunting* -- teleportation by thought alone -- from Bester's
+1956 novel. You think about where you want to be, and you're there.
 
 You write **specs** — real Python stubs with types and docstrings. Jaunt sends them to an LLM and generates real implementations + tests under `__generated__/`. You review, iterate, and ship. The spec is the contract — everything flows from it.
 

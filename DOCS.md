@@ -1,5 +1,7 @@
 # Jaunt (MVP)
 
+> *"The stars my destination."* -- Gully Foyle
+
 Note: `DOCS.md` is deprecated. The rendered docs site under `docs-site/` is the canonical documentation going forward.
 
 Jaunt is a small Python library + CLI for **spec-driven code generation**:
@@ -17,7 +19,7 @@ This repo contains the Jaunt implementation (package: `src/jaunt/`), plus a test
 - `src/jaunt/prompts/`: default prompt templates packaged into the distribution.
 - `src/jaunt/skill/`: assistant-facing docs (a Jaunt “skill” + Cursor rules) packaged as resources.
 - `tests/`: unit/integration tests that define the MVP behavior.
-- `TASK-*.md` and `jaunt_tdd_plan.md`: architecture + implementation notes used to build the MVP.
+- `TASK-*.md` and `jaunt_tdd_plan.md`: architecture + implementation notes used to build the MVP (since removed).
 - `examples/`: runnable example projects demonstrating Jaunt features.
 
 ## Quickstart (Using This Repo)

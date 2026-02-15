@@ -1,3 +1,9 @@
+"""The ledger: global spec registries for magic and test entries.
+
+Every spec is branded at import time, like the Scientific People tattooing
+Foyle's face -- an indelible mark of identity.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

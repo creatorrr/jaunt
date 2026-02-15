@@ -1,5 +1,21 @@
 # Jaunt
 
+<div align="center">
+  <img src="docs-site/public/images/tyger-blake-1794.jpg" alt="William Blake, 'The Tyger' from Songs of Experience (1794). The Metropolitan Museum of Art, Open Access." width="280" />
+  <br/>
+  <sub>William Blake, <em>The Tyger</em>, plate 42 from <em>Songs of Experience</em> (1794).
+  <a href="https://www.metmuseum.org/art/collection/search/347983">The Metropolitan Museum of Art, Open Access.</a></sub>
+</div>
+
+<br/>
+
+> *Tyger Tyger, burning bright,*
+> *In the forests of the night;*
+> *What immortal hand or eye,*
+> *Could frame thy fearful symmetry?*
+>
+> -- William Blake, via Alfred Bester's *The Stars My Destination*
+
 Jaunt is a small Python library + CLI for **spec-driven code generation**:
 
 - Write implementation intent as normal Python stubs decorated with `@jaunt.magic(...)`.
@@ -123,3 +139,18 @@ uv run ruff check .
 uv run ty check
 uv run pytest
 ```
+
+## Why "Jaunt"?
+
+Named after *jaunting* -- teleportation by thought alone -- from Alfred
+Bester's 1956 novel [*The Stars My Destination*](https://en.wikipedia.org/wiki/The_Stars_My_Destination)
+(originally published as *Tiger! Tiger!*). You think about where you want to
+be, and you're there.
+
+Jaunt works the same way: describe your intent, and arrive at working code.
+
+The forge-and-furnace imagery you'll find scattered through the codebase
+comes from William Blake's poem "The Tyger," which Bester used as the
+novel's epigraph and alternate title. The poem's vision of creation --
+hammer, chain, furnace, anvil -- mirrors the act of forging code from pure
+specification.

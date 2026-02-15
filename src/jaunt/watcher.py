@@ -1,4 +1,4 @@
-"""Watch mode: rebuild on spec file changes."""
+"""Vigil in the forests of the night -- watch mode, rebuild on spec changes."""
 
 from __future__ import annotations
 
