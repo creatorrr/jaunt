@@ -454,6 +454,8 @@ def _default_api_key_env(provider: str) -> str:
         return "OPENAI_API_KEY"
     if p == "anthropic":
         return "ANTHROPIC_API_KEY"
+    if p == "cerebras":
+        return "CEREBRAS_API_KEY"
     return f"{provider.upper()}_API_KEY"
 
 

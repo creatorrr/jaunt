@@ -25,9 +25,10 @@ Issues = "https://github.com/creatorrr/jaunt/issues"
 [project.optional-dependencies]
 openai = ["openai>=1.0.0,<2"]
 anthropic = ["anthropic>=0.39.0,<1"]
+cerebras = ["cerebras-cloud-sdk>=1.0.0"]
 watch = ["watchfiles>=1.0.0"]
 mcp = ["fastmcp>=2.0.0"]
-all = ["openai>=1.0.0,<2", "anthropic>=0.39.0,<1", "watchfiles>=1.0.0", "fastmcp>=2.0.0"]
+all = ["openai>=1.0.0,<2", "anthropic>=0.39.0,<1", "cerebras-cloud-sdk>=1.0.0", "watchfiles>=1.0.0", "fastmcp>=2.0.0"]
 
 [project.scripts]
 jaunt = "jaunt.cli:main"
@@ -58,6 +59,7 @@ dev = [
   "ruff>=0.9",
   "ty",
   "openai>=1.0.0,<2",
+  "cerebras-cloud-sdk>=1.0.0",
   "fastmcp>=2.0.0",
 ]
 

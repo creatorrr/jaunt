@@ -52,6 +52,20 @@ def test_build_backend_anthropic(monkeypatch) -> None:
     assert isinstance(backend, AnthropicBackend)
 
 
+@pytest.mark.skipif(
+    not pytest.importorskip("cerebras.cloud.sdk", reason="cerebras SDK not installed"),
+    reason="cerebras SDK not installed",
+)
+def test_build_backend_cerebras(monkeypatch) -> None:
+    from jaunt.cli import _build_backend
+
+    monkeypatch.setenv("CEREBRAS_API_KEY", "test-key")
+    backend = _build_backend(_cfg("cerebras", "CEREBRAS_API_KEY"))
+    from jaunt.generate.cerebras_backend import CerebrasBackend
+
+    assert isinstance(backend, CerebrasBackend)
+
+
 def test_build_backend_unsupported() -> None:
     from jaunt.cli import _build_backend
 
