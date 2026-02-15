@@ -1,5 +1,14 @@
 # Jaunt
 
+<div align="center">
+  <img src="docs-site/public/images/tyger-blake-1794.jpg" alt="William Blake, 'The Tyger' from Songs of Experience (1794). The Metropolitan Museum of Art, Open Access." width="280" />
+  <br/>
+  <sub>William Blake, <em>The Tyger</em>, plate 42 from <em>Songs of Experience</em> (1794).
+  <a href="https://www.metmuseum.org/art/collection/search/347983">The Metropolitan Museum of Art, Open Access.</a></sub>
+</div>
+
+<br/>
+
 > *Tyger Tyger, burning bright,*
 > *In the forests of the night;*
 > *What immortal hand or eye,*
