@@ -635,6 +635,7 @@ watch = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "cerebras-cloud-sdk" },
     { name = "fastmcp" },
     { name = "openai" },
     { name = "pytest" },
@@ -660,6 +661,7 @@ provides-extras = ["openai", "anthropic", "cerebras", "watch", "mcp", "all"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "cerebras-cloud-sdk", specifier = ">=1.0.0" },
     { name = "fastmcp", specifier = ">=2.0.0" },
     { name = "openai", specifier = ">=1.0.0,<2" },
     { name = "pytest", specifier = ">=8" },
