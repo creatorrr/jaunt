@@ -8,7 +8,8 @@ from jaunt.cache import CacheEntry, ResponseCache, cache_key_from_context
 from jaunt.generate.base import ModuleSpecContext
 
 
-def _make_ctx(**overrides: object) -> ModuleSpecContext:    return ModuleSpecContext(
+def _make_ctx(**overrides: object) -> ModuleSpecContext:
+    return ModuleSpecContext(
         kind=overrides.get("kind", "build"),  # type: ignore[arg-type]
         spec_module=overrides.get("spec_module", "pkg.specs"),  # type: ignore[arg-type]
         generated_module=overrides.get("generated_module", "pkg.__generated__.specs"),  # type: ignore[arg-type]
@@ -20,7 +21,8 @@ def _make_ctx(**overrides: object) -> ModuleSpecContext:    return ModuleSpecCon
     )
 
 
-def _make_entry(**overrides: object) -> CacheEntry:    return CacheEntry(
+def _make_entry(**overrides: object) -> CacheEntry:
+    return CacheEntry(
         source=overrides.get("source", "def foo(): pass\n"),  # type: ignore[arg-type]
         prompt_tokens=overrides.get("prompt_tokens", 100),  # type: ignore[arg-type]
         completion_tokens=overrides.get("completion_tokens", 50),  # type: ignore[arg-type]
