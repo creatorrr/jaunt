@@ -284,9 +284,7 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     if build_ty_retry_attempts < 0:
         raise JauntConfigError("Invalid config: build.ty_retry_attempts must be >= 0.")
     if anthropic_thinking_budget_tokens is not None and anthropic_thinking_budget_tokens < 1:
-        raise JauntConfigError(
-            "Invalid config: llm.anthropic_thinking_budget_tokens must be >= 1."
-        )
+        raise JauntConfigError("Invalid config: llm.anthropic_thinking_budget_tokens must be >= 1.")
 
     return JauntConfig(
         version=version_i,
