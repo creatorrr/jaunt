@@ -1,6 +1,6 @@
 {
   "name": "jaunt",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Claude Code plugin for the Jaunt spec-driven code generation framework. Provides skills for writing specs, building, testing, and managing Jaunt projects.",
   "author": {
     "name": "Jaunt Contributors"
