@@ -41,3 +41,19 @@ def load_prompt(default_name: str, override_path: str | None) -> str:
         return Path(override_path).read_text(encoding="utf-8")
     p = resources.files("jaunt") / "prompts" / default_name
     return p.read_text(encoding="utf-8")
+
+
+def async_test_info(async_runner: str) -> str:
+    """Return prompt guidance for async test functions based on the configured runner."""
+    if async_runner == "anyio":
+        return (
+            "- If a test spec uses `async def`, the generated test MUST also be `async def` "
+            "and decorated with `@pytest.mark.anyio` (import pytest; the anyio pytest plugin "
+            "handles running async tests on the configured backend)."
+        )
+    # Default: asyncio
+    return (
+        "- If a test spec uses `async def`, the generated test MUST also be `async def` "
+        "and decorated with `@pytest.mark.asyncio` (import pytest; requires the "
+        "pytest-asyncio package)."
+    )

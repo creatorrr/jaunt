@@ -210,6 +210,7 @@ async def run_test_generation(
     progress: object | None = None,
     response_cache: ResponseCache | None = None,
     cost_tracker: CostTracker | None = None,
+    async_runner: str = "asyncio",
 ) -> TestGenerationReport:
     jobs = max(1, int(jobs))
 
@@ -268,6 +269,7 @@ async def run_test_generation(
             decorator_prompts=decorator_prompts,
             dependency_apis=dependency_apis or {},
             dependency_generated_modules={},
+            async_runner=async_runner,
         )
 
         # Check response cache before calling LLM.
@@ -441,6 +443,7 @@ async def run_tests(
     cwd: Path | None = None,
     response_cache: ResponseCache | None = None,
     cost_tracker: CostTracker | None = None,
+    async_runner: str = "asyncio",
 ) -> PytestResult:
     generated_files: list[Path] = []
     gen_failed: dict[str, list[str]] = {}
@@ -473,6 +476,7 @@ async def run_tests(
             progress=progress,
             response_cache=response_cache,
             cost_tracker=cost_tracker,
+            async_runner=async_runner,
         )
         generated_files = report.generated_files
         gen_failed = report.failed

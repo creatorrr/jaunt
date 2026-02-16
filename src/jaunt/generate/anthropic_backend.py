@@ -9,6 +9,7 @@ from jaunt.config import LLMConfig, PromptsConfig
 from jaunt.errors import JauntConfigError
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext, TokenUsage
 from jaunt.generate.shared import (
+    async_test_info,
     fmt_kv_block,
     load_prompt,
     render_template,
@@ -238,6 +239,7 @@ class AnthropicBackend(GeneratorBackend):
             "deps_api_block": fmt_kv_block(deps_api_items),
             "deps_generated_block": fmt_kv_block(deps_gen_items),
             "error_context_block": fmt_kv_block(err_items),
+            "async_test_info": async_test_info(ctx.async_runner),
         }
 
         if ctx.kind == "build":

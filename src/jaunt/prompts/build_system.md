@@ -12,6 +12,7 @@ Code quality requirements:
 - Use proper imports — import only modules and names you actually use.
 - Write clean, idiomatic Python. Follow the style and conventions visible in the specs.
 - Generated code should pass static type checking (ty): avoid implicit `None` return paths for non-Optional return types.
+- If a spec is declared with `async def`, the generated implementation MUST also use `async def` — preserve the async signature exactly.
 
 Rules:
 - Emit only the full source code for the generated module.

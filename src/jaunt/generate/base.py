@@ -22,6 +22,7 @@ class ModuleSpecContext:
     dependency_apis: dict[SpecRef, str]
     dependency_generated_modules: dict[str, str]
     skills_block: str = ""
+    async_runner: str = "asyncio"
 
 
 @dataclass(frozen=True, slots=True)

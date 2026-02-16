@@ -30,3 +30,4 @@ Rules:
 - Do not edit user files; only output generated module source code.
 - Include type annotations on all function signatures.
 - Ensure every non-Optional return type has explicit return/raise on all code paths.
+- If a spec uses `async def`, the generated implementation MUST also be `async def`. Use `await` for any async calls within.

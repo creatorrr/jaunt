@@ -314,6 +314,7 @@ async def run_build(
     response_cache: ResponseCache | None = None,
     cost_tracker: CostTracker | None = None,
     ty_retry_attempts: int | None = None,
+    async_runner: str = "asyncio",
 ) -> BuildReport:
     jobs = max(1, int(jobs))
     ty_attempts = max(0, int(ty_retry_attempts)) if ty_retry_attempts is not None else None
@@ -411,6 +412,7 @@ async def run_build(
             dependency_apis=dep_apis,
             dependency_generated_modules=dep_gen,
             skills_block=skills_block,
+            async_runner=async_runner,
         )
 
         ty_validator: Callable[[str], list[str]] | None = None
