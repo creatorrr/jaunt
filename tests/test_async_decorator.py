@@ -110,9 +110,7 @@ class TestMagicAsyncWrapper:
         wrapped = magic()(async_top_level_fn)
         assert inspect.iscoroutinefunction(wrapped)
 
-    def test_sync_wrapper_is_not_coroutine_function(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_sync_wrapper_is_not_coroutine_function(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _import(_name: str) -> Any:
             raise ModuleNotFoundError(_name)
 
@@ -147,9 +145,7 @@ class TestMagicAsyncWrapper:
 class TestMagicAsyncUnbuilt:
     """Tests that unbuilt async @magic specs raise proper errors."""
 
-    def test_unbuilt_async_raises_not_built_error(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_unbuilt_async_raises_not_built_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _import(_name: str) -> Any:
             raise ModuleNotFoundError(_name)
 
@@ -160,9 +156,7 @@ class TestMagicAsyncUnbuilt:
             asyncio.run(wrapped(1))
         assert "jaunt build" in str(exc.value)
 
-    def test_unbuilt_async_attribute_error_raises(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_unbuilt_async_attribute_error_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """AttributeError during getattr also raises JauntNotBuiltError."""
 
         def _import(_name: str) -> Any:
