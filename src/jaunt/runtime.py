@@ -11,7 +11,7 @@ import functools
 import importlib
 import inspect
 import os
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from types import ModuleType
 from typing import Any, TypeVar, cast
 
@@ -141,7 +141,7 @@ def magic(
                     gen_fn = getattr(mod, name)
                 except (ModuleNotFoundError, AttributeError):
                     raise _not_built_error(spec_ref) from None
-                return await cast(Callable[..., object], gen_fn)(*args, **kwargs)
+                return await cast(Callable[..., Awaitable[object]], gen_fn)(*args, **kwargs)
 
             return _async_wrapper
 
