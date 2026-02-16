@@ -7,6 +7,7 @@ file_path=$(echo "$input" | jq -r '.tool_input.file_path // empty')
 
 if [[ "$file_path" == *"__generated__/"* ]]; then
   echo '{"decision":"block","reason":"Do not edit __generated__/ files directly. Modify the spec stub and run jaunt build (or /jaunt-build) to regenerate."}'
+  exit 2
 else
-  echo '{"decision":"approve"}'
+  exit 0
 fi

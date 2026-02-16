@@ -32,10 +32,14 @@ Exposes Jaunt tools (`build`, `test`, `status`, `clean`, `spec_info`) as MCP too
 claude --plugin-dir ./jaunt-claude-plugin
 ```
 
-### From repository
+### From marketplace
 
 ```bash
-claude /plugin install jaunt
+# Add the marketplace (from local clone or repo URL)
+/plugin marketplace add ./jaunt-claude-plugin
+
+# Install the plugin
+/plugin install jaunt@jaunt-plugins
 ```
 
 ## Requirements
