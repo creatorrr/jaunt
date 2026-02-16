@@ -1,0 +1,23 @@
+{
+  "name": "jaunt-plugins",
+  "owner": {
+    "name": "Jaunt Contributors"
+  },
+  "metadata": {
+    "description": "Claude Code plugins for the Jaunt spec-driven code generation framework",
+    "version": "0.3.0"
+  },
+  "plugins": [
+    {
+      "name": "jaunt",
+      "source": "./",
+      "description": "Claude Code plugin for the Jaunt spec-driven code generation framework. Provides skills for writing specs, building, testing, and managing Jaunt projects.",
+      "version": "0.3.0",
+      "author": {
+        "name": "Jaunt Contributors"
+      },
+      "category": "development",
+      "keywords": ["jaunt", "spec-driven", "code-generation", "python", "llm"]
+    }
+  ]
+}

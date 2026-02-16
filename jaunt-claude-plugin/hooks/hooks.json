@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/guard-generated.sh",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "If this bash command would delete, modify, or overwrite files inside a `__generated__/` directory, respond with DENY and explain that __generated__/ files are managed by Jaunt and will be overwritten on next build. Suggest using /jaunt-clean to remove them or modifying spec stubs and running /jaunt-build to regenerate. Otherwise, ALLOW."
+          }
+        ]
+      }
+    ]
+  }
+}
