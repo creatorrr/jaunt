@@ -1,0 +1,69 @@
+---
+title: Claude Code Plugin
+description: "Use Jaunt inside Claude Code with dedicated commands, hooks, and MCP tools."
+---
+
+`jaunt-claude-plugin/` includes a ready-made Claude Code plugin for Jaunt.
+
+## What the Plugin Provides
+
+### Skills
+
+| Skill | Type | Purpose |
+|-------|------|---------|
+| `jaunt` | Background knowledge | Keeps Claude’s context aligned with Jaunt workflows and spec style. |
+| `/jaunt-build` | Command | Runs `jaunt build`. |
+| `/jaunt-test` | Command | Runs `jaunt test`. |
+| `/jaunt-status` | Command (auto-invocable) | Checks stale vs fresh modules. |
+| `/jaunt-init` | Command | Generates a starter `jaunt.toml`. |
+| `/jaunt-clean` | Command | Removes `__generated__/` directories. |
+
+### Hooks
+
+- **`__generated__/` file guard**: blocks `Write`/`Edit` operations on generated files.
+- **Bash guard**: warns on shell commands that write to `__generated__/`.
+
+### MCP Server
+
+Jaunt MCP tools are available from Claude Code:
+
+- `build`
+- `test`
+- `status`
+- `clean`
+- `spec_info`
+
+## Installation
+
+### Local testing
+
+```bash
+claude --plugin-dir ./jaunt-claude-plugin
+```
+
+### Marketplace install
+
+```bash
+# Add the marketplace (from local clone or repo URL)
+/plugin marketplace add ./jaunt-claude-plugin
+
+# Install the plugin
+/plugin install jaunt@jaunt-plugins
+```
+
+## Quick Usage Walkthrough
+
+After install:
+
+1. Run `/jaunt-init` in your project to scaffold `jaunt.toml`.
+2. Write `@jaunt.magic` and `@jaunt.test` stubs as usual.
+3. Run `/jaunt-build`.
+4. Run `/jaunt-test`.
+5. Run `/jaunt-status` before you ship.
+
+## Requirements
+
+- Python 3.12+
+- [uv](https://docs.astral.sh/uv/) package manager
+- Jaunt installed (`uv pip install jaunt`)
+- An API key for OpenAI, Anthropic, or Cerebras

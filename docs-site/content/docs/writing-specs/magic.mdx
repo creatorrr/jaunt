@@ -126,6 +126,31 @@ class LRUCache:
 
 MVP constraint: custom metaclasses are not supported for `@jaunt.magic` classes.
 
+## Async Functions
+
+`@jaunt.magic()` also accepts `async def` stubs.
+
+At runtime, Jaunt returns an async wrapper so call sites still `await` the generated implementation. The generated implementation is also emitted as `async def`.
+
+```python
+from __future__ import annotations
+
+import asyncio
+import jaunt
+
+
+@jaunt.magic()
+async def fetch_user_profile(user_id: str) -> dict[str, object]:
+    """
+    Return a normalized user profile by id.
+
+    Errors:
+    - Raise ValueError if `user_id` is empty.
+    """
+    await asyncio.sleep(0)
+    raise RuntimeError("spec stub (generated at build time)")
+```
+
 ## If The Output Is Garbage
 
 Don't "fix the generated file." Fix the spec.

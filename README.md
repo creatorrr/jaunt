@@ -20,13 +20,15 @@ Jaunt is a small Python library + CLI for **spec-driven code generation**:
 
 - Write implementation intent as normal Python stubs decorated with `@jaunt.magic(...)`.
 - Optionally write test intent as stubs decorated with `@jaunt.test(...)`.
-- Jaunt generates real modules under `__generated__/` using an LLM backend (OpenAI or Anthropic).
+- Jaunt generates real modules under `__generated__/` using an LLM backend (OpenAI, Anthropic, or Cerebras).
+- Async support is available for both implementation and test specs through `async def` plus the `build.async_runner` setting.
 
 ## Installation
 
 ```bash
 pip install jaunt[openai]      # for OpenAI
 pip install jaunt[anthropic]   # for Anthropic/Claude
+pip install jaunt[cerebras]    # for Cerebras
 pip install jaunt[all]         # both providers
 ```
 

@@ -49,6 +49,8 @@ api_key_env = "OPENAI_API_KEY"
 jobs = 8
 # Best-effort dependency inference (explicit deps always apply).
 infer_deps = true
+# Pytest marker backend for generated async tests: "asyncio" or "anyio".
+async_runner = "asyncio"
 
 [test]
 # Max parallel workers for test generation.
@@ -73,5 +75,6 @@ Notes:
 - `prompts.*` are treated as *file paths* and read at runtime by the configured backend.
 - Provider SDKs are optional extras. Install `jaunt[openai]`, `jaunt[anthropic]`, or `jaunt[cerebras]` (or `jaunt[all]`).
 - There is no `[mcp]` config section; MCP is started explicitly via `jaunt mcp serve`.
+- `build.async_runner` controls the pytest marker selected for generated async tests.
 
 Next: [Output Locations](/docs/reference/output).

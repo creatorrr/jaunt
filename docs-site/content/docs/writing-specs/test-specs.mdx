@@ -39,6 +39,32 @@ def test_normalize_email__lowercases_and_strips() -> None:
 - **Name edge cases**: empty strings, invalid formats, boundary values.
 - **Import the thing you’re testing** inside the docstring or stub body if needed. The generator tends to do better when it sees the intended import path.
 
+## Async Test Specs
+
+`@jaunt.test()` also accepts `async def` stubs.
+
+Jaunt uses `build.async_runner` to choose the generated marker:
+
+- `asyncio` -> `@pytest.mark.asyncio`
+- `anyio` -> `@pytest.mark.anyio`
+
+```python
+from __future__ import annotations
+
+import jaunt
+
+
+@jaunt.test()
+async def test_fetch_user_profile__returns_payload() -> None:
+    """
+    Assert fetch_user_profile returns a normalized payload.
+
+    Concrete assertions:
+    - "abc" is the user id in the returned payload
+    """
+    raise AssertionError("spec stub (generated at test time)")
+```
+
 ## Running
 
 ```bash

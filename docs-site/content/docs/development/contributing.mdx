@@ -12,4 +12,18 @@ uv run ty check
 uv run pytest
 ```
 
+## Pre-commit Hooks
+
+Enable repository hooks once from the root:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The hook runs:
+
+- `ruff check .`
+- `ruff format --check .`
+- `ty check`
+
 Next: [Architecture Notes](/docs/development/architecture-notes).

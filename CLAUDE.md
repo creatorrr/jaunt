@@ -27,6 +27,11 @@ uv run ty check
 # Build an example project (requires OPENAI_API_KEY, ANTHROPIC_API_KEY, or CEREBRAS_API_KEY)
 cd examples/jwt_auth && uv run --project ../.. jaunt build
 
+# Optional extras:
+# - pytest markers for async tests
+pip install jaunt[async]     # for pytest-asyncio marker
+pip install jaunt[anyio]     # for anyio marker
+
 # Run with JSON output (for programmatic consumption)
 jaunt build --json
 jaunt test --json
@@ -93,6 +98,7 @@ generated_dir = "__generated__"
 [build]
 jobs = 8
 infer_deps = true
+async_runner = "asyncio"
 
 [test]
 jobs = 4
