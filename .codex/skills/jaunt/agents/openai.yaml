@@ -1,0 +1,4 @@
+interface:
+  display_name: "Jaunt (spec-driven code gen)"
+  short_description: "Write specs and tests for Jaunt code generation"
+  default_prompt: "Use $jaunt to help me write spec stubs and test specs, then build and iterate."
