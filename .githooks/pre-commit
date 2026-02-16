@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -e
+
+echo "Running ruff check..."
+uv run ruff check .
+
+echo "Running ruff format check..."
+uv run ruff format --check .
+
+echo "Running ty type check..."
+uv run ty check
+
+echo "All pre-commit checks passed."
