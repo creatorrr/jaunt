@@ -663,6 +663,7 @@ def cmd_build(args: argparse.Namespace) -> int:
                 response_cache=response_cache,
                 cost_tracker=cost_tracker,
                 ty_retry_attempts=cfg.build.ty_retry_attempts,
+                async_runner=cfg.build.async_runner,
             )
         )
 
@@ -826,6 +827,7 @@ def cmd_test(args: argparse.Namespace) -> int:
             cwd=root,
             response_cache=response_cache,
             cost_tracker=cost_tracker,
+            async_runner=cfg.build.async_runner,
         )
 
         if asyncio.iscoroutine(result):

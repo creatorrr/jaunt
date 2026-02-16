@@ -14,3 +14,4 @@ Rules:
 - Do not modify any user files; only emit generated test module source text.
 - The output MUST define the required top-level pytest test functions: {{expected_names}}.
 - Do not import from `{{generated_module}}` (circular import).
+{{async_test_info}}

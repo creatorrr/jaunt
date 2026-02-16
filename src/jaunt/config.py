@@ -32,11 +32,15 @@ class LLMConfig:
     anthropic_thinking_budget_tokens: int | None = None
 
 
+_VALID_ASYNC_RUNNERS = ("asyncio", "anyio")
+
+
 @dataclass(frozen=True)
 class BuildConfig:
     jobs: int
     infer_deps: bool
     ty_retry_attempts: int = 1
+    async_runner: str = "asyncio"
 
 
 @dataclass(frozen=True)
@@ -233,6 +237,11 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     else:
         build_ty_retry_attempts = 1
 
+    if "async_runner" in build_tbl:
+        async_runner = _as_str(build_tbl["async_runner"], name="build.async_runner")
+    else:
+        async_runner = "asyncio"
+
     if "jobs" in test_tbl:
         test_jobs = _as_int(test_tbl["jobs"], name="test.jobs")
     else:
@@ -283,6 +292,11 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
         raise JauntConfigError("Invalid config: jobs must be >= 1.")
     if build_ty_retry_attempts < 0:
         raise JauntConfigError("Invalid config: build.ty_retry_attempts must be >= 0.")
+    if async_runner not in _VALID_ASYNC_RUNNERS:
+        raise JauntConfigError(
+            f"Invalid config: build.async_runner must be one of {_VALID_ASYNC_RUNNERS!r}, "
+            f"got {async_runner!r}."
+        )
     if anthropic_thinking_budget_tokens is not None and anthropic_thinking_budget_tokens < 1:
         raise JauntConfigError("Invalid config: llm.anthropic_thinking_budget_tokens must be >= 1.")
 
@@ -305,6 +319,7 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             jobs=build_jobs,
             infer_deps=build_infer_deps,
             ty_retry_attempts=build_ty_retry_attempts,
+            async_runner=async_runner,
         ),
         test=TestConfig(jobs=test_jobs, infer_deps=test_infer_deps, pytest_args=pytest_args),
         prompts=PromptsConfig(

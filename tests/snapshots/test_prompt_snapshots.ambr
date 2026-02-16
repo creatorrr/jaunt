@@ -17,6 +17,7 @@
         - Use proper imports — import only modules and names you actually use.
         - Write clean, idiomatic Python. Follow the style and conventions visible in the specs.
         - Generated code should pass static type checking (ty): avoid implicit `None` return paths for non-Optional return types.
+        - If a spec is declared with `async def`, the generated implementation MUST also use `async def` — preserve the async signature exactly.
         
         Rules:
         - Emit only the full source code for the generated module.
@@ -77,6 +78,7 @@
         - Do not edit user files; only output generated module source code.
         - Include type annotations on all function signatures.
         - Ensure every non-Optional return type has explicit return/raise on all code paths.
+        - If a spec uses `async def`, the generated implementation MUST also be `async def`. Use `await` for any async calls within.
   
       ''',
       'role': 'user',
@@ -103,6 +105,7 @@
         - Do not modify any user files; only emit generated test module source text.
         - The output MUST define the required top-level pytest test functions: foo, bar.
         - Do not import from `pkg.__generated__.specs` (circular import).
+        - If a test spec uses `async def`, the generated test MUST also be `async def` and decorated with `@pytest.mark.asyncio` (import pytest; requires the pytest-asyncio package).
   
       ''',
       'role': 'system',
@@ -159,6 +162,7 @@
         - Import the production APIs under test from the modules listed in Dependency APIs above.
           - Each Dependency API entry key is like `<module>:<qualname>`; import from `<module>`.
         - Do not import production APIs from the test spec module (`pkg.specs`); it contains only `@jaunt.test` stubs.
+        - If a test spec uses `async def`, the generated test MUST also be `async def` and decorated with `@pytest.mark.asyncio` (import pytest; requires the pytest-asyncio package).
   
       ''',
       'role': 'user',

@@ -34,3 +34,4 @@ Rules:
 - Import the production APIs under test from the modules listed in Dependency APIs above.
   - Each Dependency API entry key is like `<module>:<qualname>`; import from `<module>`.
 - Do not import production APIs from the test spec module (`{{spec_module}}`); it contains only `@jaunt.test` stubs.
+{{async_test_info}}

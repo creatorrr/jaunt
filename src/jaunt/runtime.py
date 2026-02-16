@@ -11,7 +11,7 @@ import functools
 import importlib
 import inspect
 import os
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from types import ModuleType
 from typing import Any, TypeVar, cast
 
@@ -131,6 +131,19 @@ def magic(
             raise JauntError(f"@magic can only decorate callables or classes (got {type(obj)!r}).")
 
         fn = cast(Callable[..., object], obj)
+
+        if inspect.iscoroutinefunction(fn):
+
+            @functools.wraps(fn)
+            async def _async_wrapper(*args: Any, **kwargs: Any) -> object:
+                try:
+                    mod = _import_generated_module(module)
+                    gen_fn = getattr(mod, name)
+                except (ModuleNotFoundError, AttributeError):
+                    raise _not_built_error(spec_ref) from None
+                return await cast(Callable[..., Awaitable[object]], gen_fn)(*args, **kwargs)
+
+            return _async_wrapper
 
         @functools.wraps(fn)
         def _wrapper(*args: Any, **kwargs: Any) -> object:

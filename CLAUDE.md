@@ -12,6 +12,9 @@ Anthropic).
 # Install
 uv sync --frozen
 
+# Enable git pre-commit hooks (ruff lint+format, ty type check)
+git config core.hooksPath .githooks
+
 # Run tests (unit tests for jaunt itself)
 uv run pytest
 
