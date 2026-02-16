@@ -1,0 +1,4 @@
+interface:
+  display_name: "Claude Code Plugins"
+  short_description: "Build skills, plugins, hooks for Claude Code"
+  default_prompt: "Use $claude-plugin-skill to build a Claude Code plugin or skill."
