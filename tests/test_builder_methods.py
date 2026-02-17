@@ -262,9 +262,7 @@ def test_rejects_class_and_method_magic_on_same_class(tmp_path: Path) -> None:
     spec_path = tmp_path / "mod.py"
     _write(
         spec_path,
-        "class MyService:\n"
-        "    def get_user(self, uid: int) -> dict:\n"
-        "        ...\n",
+        "class MyService:\n    def get_user(self, uid: int) -> dict:\n        ...\n",
     )
 
     # Whole-class spec (class_name=None, qualname="MyService")

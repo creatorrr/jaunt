@@ -233,9 +233,7 @@ def test_local_digest_for_method_stable_when_unchanged(tmp_path: Path) -> None:
     p = tmp_path / "m.py"
     _write(
         p,
-        "class MyService:\n"
-        "    def get_user(self, uid: int) -> dict:\n"
-        "        ...\n",
+        "class MyService:\n    def get_user(self, uid: int) -> dict:\n        ...\n",
     )
     e = _entry(
         kind="magic",
