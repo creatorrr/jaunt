@@ -188,6 +188,21 @@ def magic(
     return _decorate
 
 
+def _unwrap_from_class(cls: type, name: str) -> Callable[..., object]:
+    """Get the raw function from a class, bypassing the descriptor protocol.
+
+    ``getattr(cls, name)`` invokes descriptors — ``@classmethod`` would return
+    a bound method with ``cls`` already injected, double-passing it when the
+    wrapper also receives ``cls`` from the original class's descriptor.  Access
+    via ``__dict__`` and unwrap ``classmethod`` / ``staticmethod`` to get the
+    underlying function.
+    """
+    raw = cls.__dict__[name]
+    if isinstance(raw, (classmethod, staticmethod)):
+        return cast(Callable[..., object], raw.__func__)
+    return cast(Callable[..., object], raw)
+
+
 def _make_method_wrapper(
     obj: object,
     module: str,
@@ -205,8 +220,8 @@ def _make_method_wrapper(
             try:
                 mod = _import_generated_module(module)
                 gen_cls = getattr(mod, class_name)
-                gen_fn = getattr(gen_cls, method_name)
-            except (ModuleNotFoundError, AttributeError):
+                gen_fn = _unwrap_from_class(gen_cls, method_name)
+            except (ModuleNotFoundError, AttributeError, KeyError):
                 raise _not_built_error(spec_ref) from None
             # Clear @abstractmethod flag once the implementation is available.
             if getattr(_async_method_wrapper, "__isabstractmethod__", False):
@@ -220,8 +235,8 @@ def _make_method_wrapper(
         try:
             mod = _import_generated_module(module)
             gen_cls = getattr(mod, class_name)
-            gen_fn = getattr(gen_cls, method_name)
-        except (ModuleNotFoundError, AttributeError):
+            gen_fn = _unwrap_from_class(gen_cls, method_name)
+        except (ModuleNotFoundError, AttributeError, KeyError):
             raise _not_built_error(spec_ref) from None
         # Clear @abstractmethod flag once the implementation is available.
         if getattr(_method_wrapper, "__isabstractmethod__", False):

@@ -353,6 +353,46 @@ class TestMethodWrapper:
         assert result == {"id": 7, "async_generated": True}
 
 
+    def test_classmethod_delegates_correctly_when_generated_uses_classmethod(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Generated class with @classmethod must not double-pass cls."""
+
+        class GenClass:
+            @classmethod
+            def cls_method(cls, config: dict) -> str:
+                return f"built-{config['key']}"
+
+        def _import(_name: str) -> Any:
+            return SimpleNamespace(HostClass=GenClass)
+
+        monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+        wrapped = magic()(_raw_cls)
+        # Simulate classmethod descriptor: Python passes cls as first arg
+        result = wrapped(HostClass, {"key": "val"})
+        assert result == "built-val"
+
+    def test_staticmethod_delegates_correctly_when_generated_uses_staticmethod(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Generated class with @staticmethod must not inject extra self/cls."""
+
+        class GenClass:
+            @staticmethod
+            def static_method(value: int) -> bool:
+                return value > 0
+
+        def _import(_name: str) -> Any:
+            return SimpleNamespace(HostClass=GenClass)
+
+        monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+        wrapped = magic()(_raw_static)
+        assert wrapped(42) is True
+        assert wrapped(-1) is False
+
+
 class TestMethodEdgeCases:
     """Edge cases and error conditions for method decoration."""
 
