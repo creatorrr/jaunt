@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from jaunt import paths
+from jaunt.agent_docs import ensure_agent_docs
 from jaunt.cache import CacheEntry, ResponseCache, cache_key_from_context
 from jaunt.cost import CostTracker
 from jaunt.digest import extract_source_segment, module_digest
@@ -87,6 +88,13 @@ def write_generated_module(
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     _ensure_init_files(package_dir, relpath)
+
+    # Place AGENTS.md (+ CLAUDE.md symlink) in the __generated__/ root so
+    # coding agents know not to touch the contents.
+    for parent in out_path.parents:
+        if parent.name == generated_dir:
+            ensure_agent_docs(parent)
+            break
 
     hdr = format_header(**header_fields)  # type: ignore[arg-type]
     content = hdr + "\n" + (source or "").rstrip() + "\n"
