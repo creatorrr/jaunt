@@ -26,21 +26,21 @@ class TopLevelClass:
 class HostClass:
     """A top-level class whose raw methods are used for method decorator tests."""
 
-    def regular_method(self, uid: int) -> dict:
+    def regular_method(self, uid: int) -> dict:  # type: ignore[empty-body]
         """Get a user by ID."""
         ...
 
-    async def async_method(self, uid: int) -> dict:
+    async def async_method(self, uid: int) -> dict:  # type: ignore[empty-body]
         """Async method stub."""
         ...
 
     @classmethod
-    def cls_method(cls, config: dict) -> HostClass:
+    def cls_method(cls, config: dict) -> HostClass:  # type: ignore[empty-body]
         """Create from config."""
         ...
 
     @staticmethod
-    def static_method(value: int) -> bool:
+    def static_method(value: int) -> bool:  # type: ignore[empty-body]
         """Validate a value."""
         ...
 

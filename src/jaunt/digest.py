@@ -24,7 +24,7 @@ def extract_source_segment(entry: SpecEntry) -> str:
     src = Path(entry.source_file).read_text(encoding="utf-8")
     tree = ast.parse(src, filename=entry.source_file)
 
-    node: ast.AST | None = None
+    node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef | None = None
 
     if "." in entry.qualname:
         # Method spec: extract the enclosing class.
@@ -33,10 +33,6 @@ def extract_source_segment(entry: SpecEntry) -> str:
             if isinstance(top, ast.ClassDef) and top.name == class_name:
                 node = top
                 break
-        if node is None:
-            raise ValueError(
-                f"Enclosing class {class_name!r} not found for {entry.spec_ref!s}"
-            )
     else:
         for top in tree.body:
             if (
@@ -45,8 +41,14 @@ def extract_source_segment(entry: SpecEntry) -> str:
             ):
                 node = top
                 break
-        if node is None:
-            raise ValueError(f"Top-level definition not found for {entry.spec_ref!s}")
+
+    if node is None:
+        if "." in entry.qualname:
+            class_name = entry.qualname.split(".")[0]
+            raise ValueError(
+                f"Enclosing class {class_name!r} not found for {entry.spec_ref!s}"
+            )
+        raise ValueError(f"Top-level definition not found for {entry.spec_ref!s}")
 
     seg = ast.get_source_segment(src, node)
     if seg is None:

@@ -225,7 +225,7 @@ def _make_method_wrapper(
                 raise _not_built_error(spec_ref) from None
             # Clear @abstractmethod flag once the implementation is available.
             if getattr(_async_method_wrapper, "__isabstractmethod__", False):
-                _async_method_wrapper.__isabstractmethod__ = False
+                object.__setattr__(_async_method_wrapper, "__isabstractmethod__", False)
             return await cast(Callable[..., Awaitable[object]], gen_fn)(*args, **kwargs)
 
         return _async_method_wrapper
@@ -240,8 +240,8 @@ def _make_method_wrapper(
             raise _not_built_error(spec_ref) from None
         # Clear @abstractmethod flag once the implementation is available.
         if getattr(_method_wrapper, "__isabstractmethod__", False):
-            _method_wrapper.__isabstractmethod__ = False
-        return cast(Callable[..., object], gen_fn)(*args, **kwargs)
+            object.__setattr__(_method_wrapper, "__isabstractmethod__", False)
+        return gen_fn(*args, **kwargs)
 
     return _method_wrapper
 
