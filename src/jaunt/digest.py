@@ -45,9 +45,7 @@ def extract_source_segment(entry: SpecEntry) -> str:
     if node is None:
         if "." in entry.qualname:
             class_name = entry.qualname.split(".")[0]
-            raise ValueError(
-                f"Enclosing class {class_name!r} not found for {entry.spec_ref!s}"
-            )
+            raise ValueError(f"Enclosing class {class_name!r} not found for {entry.spec_ref!s}")
         raise ValueError(f"Top-level definition not found for {entry.spec_ref!s}")
 
     seg = ast.get_source_segment(src, node)
