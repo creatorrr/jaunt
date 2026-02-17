@@ -107,7 +107,7 @@ def slugify(title: str) -> str:
 
 ## Classes Work Too
 
-You can decorate top-level classes. At runtime, Jaunt will substitute the generated class (or raise `JauntNotBuiltError` if you haven’t built yet).
+You can decorate top-level classes. At runtime, Jaunt will substitute the generated class (or raise `JauntNotBuiltError` if you haven't built yet).
 
 ```python
 import jaunt
@@ -124,7 +124,85 @@ class LRUCache:
     pass
 ```
 
+This "whole-class" style hands full control to the LLM — it decides `__init__`, internal data structures, and method signatures.
+
 MVP constraint: custom metaclasses are not supported for `@jaunt.magic` classes.
+
+## Method-Level Specs
+
+Instead of decorating the entire class, you can decorate **individual methods** with `@jaunt.magic()`. This lets you keep control of the class structure while generating only the methods you want.
+
+```python
+from __future__ import annotations
+
+import jaunt
+
+
+class TaskBoard:
+    """A simple in-memory task board."""
+
+    def __init__(self) -> None:
+        self._tasks: list[dict[str, object]] = []
+
+    @jaunt.magic()
+    def add(self, title: str, priority: int) -> dict[str, object]:
+        """
+        Add a task and return it.
+
+        - Assign an auto-incrementing integer id (starting at 1).
+        - priority must be 1-5 (raise ValueError otherwise).
+        - Return {"id": int, "title": str, "priority": int}.
+        """
+        raise RuntimeError("spec stub (generated at build time)")
+
+    @jaunt.magic()
+    def list_by_priority(self) -> list[dict[str, object]]:
+        """
+        Return all tasks sorted by priority (1 = highest), then by id.
+        """
+        raise RuntimeError("spec stub (generated at build time)")
+```
+
+Non-decorated members (`__init__`, attributes, plain methods) are preserved as-is in the generated output. Only the `@magic`-decorated methods are implemented by the LLM.
+
+### `@classmethod` and `@staticmethod`
+
+Both work with `@magic()`. The rule: **`@magic()` must be the innermost decorator** (closest to `def`). Place `@classmethod` or `@staticmethod` above it:
+
+```python
+class TaskBoard:
+    # ...
+
+    @classmethod
+    @jaunt.magic()
+    def from_dict(cls, data: dict[str, object]) -> TaskBoard:
+        """
+        Factory: reconstruct a TaskBoard from a serialized dict.
+
+        Expected shape: {"tasks": [{"id": int, "title": str, "priority": int}, ...]}.
+        Raise ValueError if `data` is missing the "tasks" key.
+        """
+        raise RuntimeError("spec stub (generated at build time)")
+
+    @staticmethod
+    @jaunt.magic()
+    def validate_priority(value: int) -> int:
+        """
+        Return `value` if it is an int in [1, 5], else raise ValueError.
+        """
+        raise RuntimeError("spec stub (generated at build time)")
+```
+
+Async methods work the same way — just use `async def` inside the class.
+
+### Whole-Class vs Method-Level
+
+You **cannot** mix both styles on the same class. Choose one:
+
+| Style | When to use |
+|-------|-------------|
+| `@magic` on the class | Simple data structures and algorithms. You want the LLM to decide internals. |
+| `@magic` on methods | You control the class shape — `__init__`, attributes, inheritance. Only specific methods are generated. |
 
 ## Async Functions
 

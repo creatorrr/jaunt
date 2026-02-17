@@ -22,6 +22,7 @@ Jaunt is a small Python library + CLI for **spec-driven code generation**:
 - Optionally write test intent as stubs decorated with `@jaunt.test(...)`.
 - Jaunt generates real modules under `__generated__/` using an LLM backend (OpenAI, Anthropic, or Cerebras).
 - Async support is available for both implementation and test specs through `async def` plus the `build.async_runner` setting.
+- `@magic` works on individual class methods too — decorate instance methods, `@classmethod`, `@staticmethod`, or `@abstractmethod` stubs and Jaunt generates only those methods while preserving the rest of the class.
 
 ## Installation
 

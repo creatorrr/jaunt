@@ -25,6 +25,7 @@ All example projects live here. Each subfolder is a standalone Jaunt project wit
 | `lru`      | `02_lru_cache/`            | LRU cache implementation           |
 | `dice`     | `03_dice_roller/`          | Dice expression parser + roller    |
 | `pydantic` | `04_pydantic_validation/`  | Pydantic model validation          |
+| `taskboard`| `05_task_board/`           | Per-method `@magic` on a service class |
 
 ### Minimal
 
