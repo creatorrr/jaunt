@@ -39,8 +39,7 @@ def _classify_qualname(obj: object) -> str | None:
     if len(parts) == 2:
         return parts[0]  # ClassName.method_name → class name
     raise JauntError(
-        f"Jaunt specs support at most one level of nesting (class methods), "
-        f"got {qualname!r}."
+        f"Jaunt specs support at most one level of nesting (class methods), got {qualname!r}."
     )
 
 

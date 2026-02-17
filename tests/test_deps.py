@@ -361,8 +361,7 @@ def test_infer_deps_for_method_referencing_external_spec(tmp_path: Path) -> None
     )
     mod_b = tmp_path / "mod_b.py"
     mod_b.write_text(
-        "class Helper:\n"
-        "    pass\n",
+        "class Helper:\n    pass\n",
         encoding="utf-8",
     )
 

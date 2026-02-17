@@ -34,9 +34,7 @@ def extract_source_segment(entry: SpecEntry) -> str:
                 node = top
                 break
         if node is None:
-            raise ValueError(
-                f"Enclosing class {class_name!r} not found for {entry.spec_ref!s}"
-            )
+            raise ValueError(f"Enclosing class {class_name!r} not found for {entry.spec_ref!s}")
     else:
         for top in tree.body:
             if (

@@ -222,18 +222,14 @@ class TestMethodRegistration:
 
         wrapped = magic()(_raw_regular)
         reg = get_magic_registry()
-        expected_ref = normalize_spec_ref(
-            f"{_raw_regular.__module__}:{_raw_regular.__qualname__}"
-        )
+        expected_ref = normalize_spec_ref(f"{_raw_regular.__module__}:{_raw_regular.__qualname__}")
         assert expected_ref in reg
         entry = reg[expected_ref]
         assert entry.class_name == "HostClass"
         assert entry.qualname == "HostClass.regular_method"
         assert callable(wrapped)
 
-    def test_top_level_function_has_no_class_name(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_top_level_function_has_no_class_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _import(_name: str) -> Any:
             raise ModuleNotFoundError(_name)
 
@@ -241,14 +237,10 @@ class TestMethodRegistration:
 
         magic()(top_level_fn)
         reg = get_magic_registry()
-        expected_ref = normalize_spec_ref(
-            f"{top_level_fn.__module__}:{top_level_fn.__qualname__}"
-        )
+        expected_ref = normalize_spec_ref(f"{top_level_fn.__module__}:{top_level_fn.__qualname__}")
         assert reg[expected_ref].class_name is None
 
-    def test_classmethod_function_registers(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_classmethod_function_registers(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _import(_name: str) -> Any:
             raise ModuleNotFoundError(_name)
 
@@ -256,15 +248,11 @@ class TestMethodRegistration:
 
         magic()(_raw_cls)
         reg = get_magic_registry()
-        expected_ref = normalize_spec_ref(
-            f"{_raw_cls.__module__}:{_raw_cls.__qualname__}"
-        )
+        expected_ref = normalize_spec_ref(f"{_raw_cls.__module__}:{_raw_cls.__qualname__}")
         assert expected_ref in reg
         assert reg[expected_ref].class_name == "HostClass"
 
-    def test_staticmethod_function_registers(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_staticmethod_function_registers(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _import(_name: str) -> Any:
             raise ModuleNotFoundError(_name)
 
@@ -272,9 +260,7 @@ class TestMethodRegistration:
 
         magic()(_raw_static)
         reg = get_magic_registry()
-        expected_ref = normalize_spec_ref(
-            f"{_raw_static.__module__}:{_raw_static.__qualname__}"
-        )
+        expected_ref = normalize_spec_ref(f"{_raw_static.__module__}:{_raw_static.__qualname__}")
         assert expected_ref in reg
         assert reg[expected_ref].class_name == "HostClass"
 
@@ -292,9 +278,7 @@ class TestMethodRegistration:
 class TestMethodWrapper:
     """Tests for @magic() on class methods — runtime wrapper behavior."""
 
-    def test_unbuilt_method_raises_not_built_error(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_unbuilt_method_raises_not_built_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _import(_name: str) -> Any:
             raise ModuleNotFoundError(_name)
 
@@ -333,9 +317,7 @@ class TestMethodWrapper:
         wrapped = magic()(_raw_async)
         assert inspect.iscoroutinefunction(wrapped)
 
-    def test_async_method_delegates_when_built(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_async_method_delegates_when_built(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import asyncio
 
         class GenClass:
@@ -351,7 +333,6 @@ class TestMethodWrapper:
         instance = object.__new__(HostClass)
         result = asyncio.run(wrapped(instance, 7))
         assert result == {"id": 7, "async_generated": True}
-
 
     def test_classmethod_delegates_correctly_when_generated_uses_classmethod(
         self, monkeypatch: pytest.MonkeyPatch
@@ -471,5 +452,7 @@ class TestAbstractMethodSupport:
         wrapper.__isabstractmethod__ = True
 
         # Call it — should succeed and clear the flag
-        wrapper(object(), )
+        wrapper(
+            object(),
+        )
         assert getattr(wrapper, "__isabstractmethod__", False) is False
