@@ -21,6 +21,7 @@ class SpecEntry:
     source_file: str
     obj: object
     decorator_kwargs: dict[str, object]
+    class_name: str | None = None
 
 
 _MAGIC_REGISTRY: dict[SpecRef, SpecEntry] = {}

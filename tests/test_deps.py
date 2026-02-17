@@ -341,3 +341,78 @@ def test_toposort_cycle_raises_with_participants() -> None:
         assert "a" in msg and "b" in msg and "c" in msg
     else:  # pragma: no cover
         raise AssertionError("expected cycle error")
+
+
+# ---------------------------------------------------------------------------
+# Method spec dependency inference
+# ---------------------------------------------------------------------------
+
+
+def test_infer_deps_for_method_referencing_external_spec(tmp_path: Path) -> None:
+    """A method body referencing a spec from another module should be inferred."""
+    mod_a = tmp_path / "mod_a.py"
+    mod_a.write_text(
+        "from mod_b import Helper\n"
+        "\n"
+        "class ServiceA:\n"
+        "    def do_thing(self) -> None:\n"
+        "        Helper()\n",
+        encoding="utf-8",
+    )
+    mod_b = tmp_path / "mod_b.py"
+    mod_b.write_text(
+        "class Helper:\n    pass\n",
+        encoding="utf-8",
+    )
+
+    a_method = _entry(
+        kind="magic",
+        spec_ref="mod_a:ServiceA.do_thing",
+        module="mod_a",
+        qualname="ServiceA.do_thing",
+        source_file=str(mod_a),
+    )
+    b_class = _entry(
+        kind="magic",
+        spec_ref="mod_b:Helper",
+        module="mod_b",
+        qualname="Helper",
+        source_file=str(mod_b),
+    )
+
+    specs = {a_method.spec_ref: a_method, b_class.spec_ref: b_class}
+    g = build_spec_graph(specs, infer_default=True)
+    assert b_class.spec_ref in g[a_method.spec_ref]
+
+
+def test_infer_deps_between_methods_of_same_module(tmp_path: Path) -> None:
+    """A method referencing a sibling top-level spec should infer the dep."""
+    mod = tmp_path / "mod.py"
+    mod.write_text(
+        "def helper() -> int:\n"
+        "    return 1\n"
+        "\n"
+        "class ServiceA:\n"
+        "    def do_thing(self) -> int:\n"
+        "        return helper()\n",
+        encoding="utf-8",
+    )
+
+    fn = _entry(
+        kind="magic",
+        spec_ref="mod:helper",
+        module="mod",
+        qualname="helper",
+        source_file=str(mod),
+    )
+    method = _entry(
+        kind="magic",
+        spec_ref="mod:ServiceA.do_thing",
+        module="mod",
+        qualname="ServiceA.do_thing",
+        source_file=str(mod),
+    )
+
+    specs = {fn.spec_ref: fn, method.spec_ref: method}
+    g = build_spec_graph(specs, infer_default=True)
+    assert fn.spec_ref in g[method.spec_ref]

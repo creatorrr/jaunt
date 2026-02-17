@@ -23,11 +23,24 @@ from jaunt.spec_ref import SpecRef, spec_ref_from_object
 F = TypeVar("F", bound=Callable[..., object])
 
 
-def _reject_non_top_level(obj: object) -> None:
+def _classify_qualname(obj: object) -> str | None:
+    """Classify an object by its qualname.
+
+    Returns the owning class name for a method (one level of nesting), or
+    ``None`` for a top-level definition.  Raises for closures or deeper nesting.
+    """
     o = cast(Any, obj)
-    qualname = o.__qualname__ if hasattr(o, "__qualname__") else ""
-    if "<locals>" in qualname or "." in qualname:
-        raise JauntError("Jaunt specs must be top-level (no nested/inner objects).")
+    qualname: str = o.__qualname__ if hasattr(o, "__qualname__") else ""
+    if "<locals>" in qualname:
+        raise JauntError("Jaunt specs must not be nested inside functions (closures).")
+    parts = qualname.split(".")
+    if len(parts) == 1:
+        return None  # top-level function/class
+    if len(parts) == 2:
+        return parts[0]  # ClassName.method_name → class name
+    raise JauntError(
+        f"Jaunt specs support at most one level of nesting (class methods), got {qualname!r}."
+    )
 
 
 def _source_file(obj: object) -> str:
@@ -71,7 +84,17 @@ def magic(
     """Decorator factory for declaring magic specs."""
 
     def _decorate(obj: object):
-        _reject_non_top_level(obj)
+        # Guard: reject classmethod/staticmethod descriptors (wrong decorator order).
+        if isinstance(obj, (classmethod, staticmethod)):
+            raise JauntError(
+                "@magic() must be the innermost decorator (closest to `def`). "
+                "Place @classmethod/@staticmethod above @magic(), e.g.:\n"
+                "    @classmethod\n"
+                "    @jaunt.magic()\n"
+                "    def my_method(cls): ..."
+            )
+
+        class_name = _classify_qualname(obj)
 
         spec_ref = spec_ref_from_object(obj)
         o = cast(Any, obj)
@@ -95,8 +118,13 @@ def magic(
             source_file=_source_file(obj),
             obj=obj,
             decorator_kwargs=decorator_kwargs,
+            class_name=class_name,
         )
         register_magic(entry)
+
+        # Method spec: wrapper delegates to generated_module.ClassName.method_name.
+        if class_name is not None:
+            return _make_method_wrapper(obj, module, class_name, name, spec_ref)
 
         if isinstance(obj, type):
             # Reject metaclass != type (MVP constraint).
@@ -159,6 +187,64 @@ def magic(
     return _decorate
 
 
+def _unwrap_from_class(cls: type, name: str) -> Callable[..., object]:
+    """Get the raw function from a class, bypassing the descriptor protocol.
+
+    ``getattr(cls, name)`` invokes descriptors — ``@classmethod`` would return
+    a bound method with ``cls`` already injected, double-passing it when the
+    wrapper also receives ``cls`` from the original class's descriptor.  Access
+    via ``__dict__`` and unwrap ``classmethod`` / ``staticmethod`` to get the
+    underlying function.
+    """
+    raw = cls.__dict__[name]
+    if isinstance(raw, (classmethod, staticmethod)):
+        return cast(Callable[..., object], raw.__func__)
+    return cast(Callable[..., object], raw)
+
+
+def _make_method_wrapper(
+    obj: object,
+    module: str,
+    class_name: str,
+    method_name: str,
+    spec_ref: SpecRef,
+) -> Callable[..., object]:
+    """Create a wrapper that delegates to the generated class's method."""
+    fn = cast(Callable[..., object], obj)
+
+    if inspect.iscoroutinefunction(fn):
+
+        @functools.wraps(fn)
+        async def _async_method_wrapper(*args: Any, **kwargs: Any) -> object:
+            try:
+                mod = _import_generated_module(module)
+                gen_cls = getattr(mod, class_name)
+                gen_fn = _unwrap_from_class(gen_cls, method_name)
+            except (ModuleNotFoundError, AttributeError, KeyError):
+                raise _not_built_error(spec_ref) from None
+            # Clear @abstractmethod flag once the implementation is available.
+            if getattr(_async_method_wrapper, "__isabstractmethod__", False):
+                object.__setattr__(_async_method_wrapper, "__isabstractmethod__", False)
+            return await cast(Callable[..., Awaitable[object]], gen_fn)(*args, **kwargs)
+
+        return _async_method_wrapper
+
+    @functools.wraps(fn)
+    def _method_wrapper(*args: Any, **kwargs: Any) -> object:
+        try:
+            mod = _import_generated_module(module)
+            gen_cls = getattr(mod, class_name)
+            gen_fn = _unwrap_from_class(gen_cls, method_name)
+        except (ModuleNotFoundError, AttributeError, KeyError):
+            raise _not_built_error(spec_ref) from None
+        # Clear @abstractmethod flag once the implementation is available.
+        if getattr(_method_wrapper, "__isabstractmethod__", False):
+            object.__setattr__(_method_wrapper, "__isabstractmethod__", False)
+        return gen_fn(*args, **kwargs)
+
+    return _method_wrapper
+
+
 def test(
     *,
     deps: object | None = None,
@@ -168,7 +254,7 @@ def test(
     """Decorator factory for declaring test specs."""
 
     def _decorate(fn: F) -> F:
-        _reject_non_top_level(fn)
+        _classify_qualname(fn)  # rejects closures/deep nesting
 
         spec_ref = spec_ref_from_object(fn)
         f = cast(Any, fn)

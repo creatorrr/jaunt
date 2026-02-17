@@ -306,6 +306,44 @@ def _ty_error_context(
         return [f"ty check failed for {module_name}: {snippet}"]
 
 
+def _build_expected_names(entries: list[SpecEntry]) -> tuple[list[str], list[str]]:
+    """Compute expected top-level names for generated module output.
+
+    Method specs (``class_name is not None``) are grouped by their owning class
+    so that ``expected_names`` contains the class name, not individual method
+    qualnames.  Returns ``(expected_names, errors)`` — errors is non-empty when
+    a module has both whole-class ``@magic`` and per-method ``@magic`` on the
+    same class.
+    """
+    expected: list[str] = []
+    seen_classes: set[str] = set()
+    class_level_specs: set[str] = set()
+    method_level_classes: set[str] = set()
+
+    for e in entries:
+        if e.class_name is not None:
+            method_level_classes.add(e.class_name)
+            if e.class_name not in seen_classes:
+                expected.append(e.class_name)
+                seen_classes.add(e.class_name)
+        else:
+            expected.append(e.qualname)
+            # Track classes that have a whole-class @magic spec.
+            if "." not in e.qualname:
+                class_level_specs.add(e.qualname)
+
+    # Detect conflict: whole-class @magic + per-method @magic on the same class.
+    conflicts = class_level_specs & method_level_classes
+    if conflicts:
+        names = ", ".join(sorted(conflicts))
+        return expected, [
+            f"Conflicting @magic: class(es) {names} have both whole-class @magic "
+            f"and per-method @magic decorators. Use one or the other."
+        ]
+
+    return expected, []
+
+
 async def run_build(
     *,
     package_dir: Path,
@@ -396,7 +434,10 @@ async def run_build(
 
     async def build_one(module_name: str) -> tuple[bool, list[str]]:
         entries = module_specs.get(module_name, [])
-        expected = [e.qualname for e in entries]
+
+        expected, conflict_errs = _build_expected_names(entries)
+        if conflict_errs:
+            return False, conflict_errs
 
         spec_sources: dict[SpecRef, str] = {}
         decorator_prompts: dict[SpecRef, str] = {}

@@ -18,6 +18,7 @@ from pathlib import Path
 
 from jaunt import paths
 from jaunt.agent_docs import ensure_agent_docs
+from jaunt.builder import _build_expected_names
 from jaunt.cache import CacheEntry, ResponseCache, cache_key_from_context
 from jaunt.cost import CostTracker
 from jaunt.digest import extract_source_segment, module_digest
@@ -256,7 +257,9 @@ async def run_test_generation(
 
     async def gen_one(module_name: str) -> tuple[bool, list[str], Path | None]:
         entries = module_specs.get(module_name, [])
-        expected = [e.qualname for e in entries]
+        expected, conflict_errs = _build_expected_names(entries)
+        if conflict_errs:
+            return False, conflict_errs, None
 
         spec_sources: dict[SpecRef, str] = {}
         decorator_prompts: dict[SpecRef, str] = {}

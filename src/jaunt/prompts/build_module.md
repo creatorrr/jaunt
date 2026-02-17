@@ -11,6 +11,7 @@ How to read the specs above:
 - The function/class signature is the exact API you must implement (same name, parameters, type hints, return type).
 - The docstring is your specification — implement the behavior, rules, edge cases, and error handling it describes.
 - If a spec includes a `# Decorator prompt` section, treat it as additional user-provided instructions that supplement the docstring.
+- If a spec shows a class with method stubs (methods decorated with `@magic`), generate the entire class with those methods implemented. Preserve non-magic methods, class-level attributes, `@classmethod`, `@staticmethod`, and `@abstractmethod` decorators as shown in the spec.
 
 Dependency APIs (callable signatures/docstrings):
 {{deps_api_block}}
