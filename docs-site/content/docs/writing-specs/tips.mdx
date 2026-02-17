@@ -69,6 +69,38 @@ Generated output is disposable. Specs are the product.
 
 If you need a behavior change, change the spec and rebuild so your intent is versioned. Editing `__generated__/` files directly means your changes will be overwritten on the next build.
 
+## Whole-Class vs Per-Method `@magic`
+
+Jaunt supports two styles of class specs. Pick whichever matches your situation:
+
+**Whole-class** — decorate the class itself:
+
+```python
+@jaunt.magic()
+class LRUCache:
+    """Fixed-capacity LRU cache. get/set/size methods."""
+    pass
+```
+
+Use this when the class is a self-contained data structure or algorithm and you want the LLM to decide internals (`__init__`, data layout, helper methods).
+
+**Per-method** — decorate individual methods:
+
+```python
+class TaskBoard:
+    def __init__(self) -> None:
+        self._tasks: list[dict[str, object]] = []
+
+    @jaunt.magic()
+    def add(self, title: str, priority: int) -> dict[str, object]:
+        """..."""
+        raise RuntimeError("spec stub (generated at build time)")
+```
+
+Use this when you want to control the class shape — `__init__`, attributes, inheritance, non-generated helper methods — and only generate specific methods. This is natural for service objects, repositories, and classes that mix custom logic with generated glue.
+
+You cannot combine both styles on the same class.
+
 ## When Not To Use Jaunt
 
 Jaunt is best for glue code and boring-but-correct utilities (parsers, validators, formatters).
