@@ -14,22 +14,39 @@ from jaunt.spec_ref import SpecRef, normalize_spec_ref, spec_ref_from_object
 
 
 def extract_source_segment(entry: SpecEntry) -> str:
-    """Extract a normalized source segment for the entry's top-level definition."""
+    """Extract a normalized source segment for the entry's definition.
+
+    For top-level definitions, extracts the function/class node.
+    For method specs (dotted qualname), extracts the **entire enclosing class**
+    so that the digest covers sibling changes and the LLM gets full context.
+    """
 
     src = Path(entry.source_file).read_text(encoding="utf-8")
     tree = ast.parse(src, filename=entry.source_file)
 
     node: ast.AST | None = None
-    for top in tree.body:
-        if (
-            isinstance(top, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-            and top.name == entry.qualname
-        ):
-            node = top
-            break
 
-    if node is None:
-        raise ValueError(f"Top-level definition not found for {entry.spec_ref!s}")
+    if "." in entry.qualname:
+        # Method spec: extract the enclosing class.
+        class_name = entry.qualname.split(".")[0]
+        for top in tree.body:
+            if isinstance(top, ast.ClassDef) and top.name == class_name:
+                node = top
+                break
+        if node is None:
+            raise ValueError(
+                f"Enclosing class {class_name!r} not found for {entry.spec_ref!s}"
+            )
+    else:
+        for top in tree.body:
+            if (
+                isinstance(top, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                and top.name == entry.qualname
+            ):
+                node = top
+                break
+        if node is None:
+            raise ValueError(f"Top-level definition not found for {entry.spec_ref!s}")
 
     seg = ast.get_source_segment(src, node)
     if seg is None:

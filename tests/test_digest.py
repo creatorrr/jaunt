@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 from jaunt.deps import build_spec_graph
-from jaunt.digest import graph_digest, local_digest, module_digest
+from jaunt.digest import extract_source_segment, graph_digest, local_digest, module_digest
 from jaunt.registry import SpecEntry
 from jaunt.spec_ref import normalize_spec_ref
 
@@ -156,3 +156,95 @@ def B():
     m2 = module_digest("m", [a, b], specs, spec_graph)
     assert m1 == m2
     assert re.fullmatch(r"[0-9a-f]{64}", m1) is not None
+
+
+# ---------------------------------------------------------------------------
+# Method spec digest tests
+# ---------------------------------------------------------------------------
+
+
+def test_extract_source_segment_for_method_returns_class_source(tmp_path: Path) -> None:
+    """For a method spec, extract_source_segment should return the entire class source."""
+    p = tmp_path / "m.py"
+    _write(
+        p,
+        "class MyService:\n"
+        "    x: int = 0\n"
+        "\n"
+        "    def get_user(self, uid: int) -> dict:\n"
+        '        """Get a user by ID."""\n'
+        "        ...\n"
+        "\n"
+        "    def helper(self) -> None:\n"
+        "        pass\n",
+    )
+    e = _entry(
+        kind="magic",
+        spec_ref="m:MyService.get_user",
+        module="m",
+        qualname="MyService.get_user",
+        source_file=str(p),
+    )
+    seg = extract_source_segment(e)
+    assert "class MyService:" in seg
+    assert "def get_user" in seg
+    assert "def helper" in seg
+    assert "x: int = 0" in seg
+
+
+def test_local_digest_for_method_changes_when_sibling_method_changes(
+    tmp_path: Path,
+) -> None:
+    """Changing a non-magic sibling method should change the method spec's digest."""
+    p = tmp_path / "m.py"
+    _write(
+        p,
+        "class MyService:\n"
+        "    def get_user(self, uid: int) -> dict:\n"
+        "        ...\n"
+        "\n"
+        "    def helper(self) -> str:\n"
+        '        return "v1"\n',
+    )
+    e = _entry(
+        kind="magic",
+        spec_ref="m:MyService.get_user",
+        module="m",
+        qualname="MyService.get_user",
+        source_file=str(p),
+    )
+    d1 = local_digest(e)
+
+    _write(
+        p,
+        "class MyService:\n"
+        "    def get_user(self, uid: int) -> dict:\n"
+        "        ...\n"
+        "\n"
+        "    def helper(self) -> str:\n"
+        '        return "v2"\n',
+    )
+    d2 = local_digest(e)
+    assert d1 != d2
+
+
+def test_local_digest_for_method_stable_when_unchanged(tmp_path: Path) -> None:
+    """Digest should be stable when the class source doesn't change."""
+    p = tmp_path / "m.py"
+    _write(
+        p,
+        "class MyService:\n"
+        "    def get_user(self, uid: int) -> dict:\n"
+        "        ...\n",
+    )
+    e = _entry(
+        kind="magic",
+        spec_ref="m:MyService.get_user",
+        module="m",
+        qualname="MyService.get_user",
+        source_file=str(p),
+    )
+    d1 = local_digest(e)
+    d2 = local_digest(e)
+    assert d1 == d2
+    assert re.fullmatch(r"[0-9a-f]{64}", d1) is not None

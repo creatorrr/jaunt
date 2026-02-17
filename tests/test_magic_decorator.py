@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import abc
+import inspect
 from collections.abc import Generator
 from types import SimpleNamespace
 from typing import Any
@@ -19,6 +21,28 @@ def top_level_fn(x: int) -> int:
 class TopLevelClass:
     def __init__(self, x: int) -> None:
         self.x = x
+
+
+class HostClass:
+    """A top-level class whose raw methods are used for method decorator tests."""
+
+    def regular_method(self, uid: int) -> dict:
+        """Get a user by ID."""
+        ...
+
+    async def async_method(self, uid: int) -> dict:
+        """Async method stub."""
+        ...
+
+    @classmethod
+    def cls_method(cls, config: dict) -> HostClass:
+        """Create from config."""
+        ...
+
+    @staticmethod
+    def static_method(value: int) -> bool:
+        """Validate a value."""
+        ...
 
 
 @pytest.fixture(autouse=True)
@@ -172,3 +196,240 @@ def test_runtime_respects_generated_dir_env_var(monkeypatch: pytest.MonkeyPatch)
     assert any("__custom_gen__" in c for c in import_calls), (
         f"Expected import to use __custom_gen__, got: {import_calls}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Method decorator tests
+# ---------------------------------------------------------------------------
+
+# Grab raw functions from the class dict (before descriptor wrapping).
+_raw_regular = HostClass.__dict__["regular_method"]
+_raw_async = HostClass.__dict__["async_method"]
+_raw_cls = HostClass.__dict__["cls_method"].__func__  # unwrap classmethod
+_raw_static = HostClass.__dict__["static_method"].__func__  # unwrap staticmethod
+
+
+class TestMethodRegistration:
+    """Tests for @magic() on class methods — registration and metadata."""
+
+    def test_regular_method_registers_with_class_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _import(_name: str) -> Any:
+            raise ModuleNotFoundError(_name)
+
+        monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+        wrapped = magic()(_raw_regular)
+        reg = get_magic_registry()
+        expected_ref = normalize_spec_ref(
+            f"{_raw_regular.__module__}:{_raw_regular.__qualname__}"
+        )
+        assert expected_ref in reg
+        entry = reg[expected_ref]
+        assert entry.class_name == "HostClass"
+        assert entry.qualname == "HostClass.regular_method"
+        assert callable(wrapped)
+
+    def test_top_level_function_has_no_class_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _import(_name: str) -> Any:
+            raise ModuleNotFoundError(_name)
+
+        monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+        magic()(top_level_fn)
+        reg = get_magic_registry()
+        expected_ref = normalize_spec_ref(
+            f"{top_level_fn.__module__}:{top_level_fn.__qualname__}"
+        )
+        assert reg[expected_ref].class_name is None
+
+    def test_classmethod_function_registers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _import(_name: str) -> Any:
+            raise ModuleNotFoundError(_name)
+
+        monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+        magic()(_raw_cls)
+        reg = get_magic_registry()
+        expected_ref = normalize_spec_ref(
+            f"{_raw_cls.__module__}:{_raw_cls.__qualname__}"
+        )
+        assert expected_ref in reg
+        assert reg[expected_ref].class_name == "HostClass"
+
+    def test_staticmethod_function_registers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _import(_name: str) -> Any:
+            raise ModuleNotFoundError(_name)
+
+        monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+        magic()(_raw_static)
+        reg = get_magic_registry()
+        expected_ref = normalize_spec_ref(
+            f"{_raw_static.__module__}:{_raw_static.__qualname__}"
+        )
+        assert expected_ref in reg
+        assert reg[expected_ref].class_name == "HostClass"
+
+    def test_method_preserves_metadata(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _import(_name: str) -> Any:
+            raise ModuleNotFoundError(_name)
+
+        monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+        wrapped = magic()(_raw_regular)
+        assert wrapped.__name__ == "regular_method"
+        assert wrapped.__wrapped__ is _raw_regular
+
+
+class TestMethodWrapper:
+    """Tests for @magic() on class methods — runtime wrapper behavior."""
+
+    def test_unbuilt_method_raises_not_built_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _import(_name: str) -> Any:
+            raise ModuleNotFoundError(_name)
+
+        monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+        wrapped = magic()(_raw_regular)
+        instance = object.__new__(HostClass)
+        with pytest.raises(JauntNotBuiltError, match="jaunt build"):
+            wrapped(instance, 1)
+
+    def test_built_method_delegates_to_generated_class(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class GenClass:
+            def regular_method(self, uid: int) -> dict:
+                return {"id": uid, "generated": True}
+
+        def _import(_name: str) -> Any:
+            return SimpleNamespace(HostClass=GenClass)
+
+        monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+        wrapped = magic()(_raw_regular)
+        instance = object.__new__(HostClass)
+        result = wrapped(instance, 42)
+        assert result == {"id": 42, "generated": True}
+
+    def test_async_method_registers_and_is_coroutine_function(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _import(_name: str) -> Any:
+            raise ModuleNotFoundError(_name)
+
+        monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+        wrapped = magic()(_raw_async)
+        assert inspect.iscoroutinefunction(wrapped)
+
+    def test_async_method_delegates_when_built(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import asyncio
+
+        class GenClass:
+            async def async_method(self, uid: int) -> dict:
+                return {"id": uid, "async_generated": True}
+
+        def _import(_name: str) -> Any:
+            return SimpleNamespace(HostClass=GenClass)
+
+        monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+        wrapped = magic()(_raw_async)
+        instance = object.__new__(HostClass)
+        result = asyncio.run(wrapped(instance, 7))
+        assert result == {"id": 7, "async_generated": True}
+
+
+class TestMethodEdgeCases:
+    """Edge cases and error conditions for method decoration."""
+
+    def test_still_rejects_closures(self) -> None:
+        def outer():
+            def inner():
+                return None
+
+            return inner
+
+        fn = outer()
+        with pytest.raises(JauntError):
+            magic()(fn)
+
+    def test_rejects_classmethod_descriptor(self) -> None:
+        """Passing a classmethod descriptor (wrong order) should raise."""
+        raw_descriptor = HostClass.__dict__["cls_method"]
+        assert isinstance(raw_descriptor, classmethod)
+        with pytest.raises(JauntError, match="classmethod|staticmethod|decorator order"):
+            magic()(raw_descriptor)
+
+    def test_rejects_staticmethod_descriptor(self) -> None:
+        """Passing a staticmethod descriptor (wrong order) should raise."""
+        raw_descriptor = HostClass.__dict__["static_method"]
+        assert isinstance(raw_descriptor, staticmethod)
+        with pytest.raises(JauntError, match="classmethod|staticmethod|decorator order"):
+            magic()(raw_descriptor)
+
+
+class TestAbstractMethodSupport:
+    """Tests for @abstractmethod @magic() stacking."""
+
+    def test_abstract_wrapper_stays_abstract_when_unbuilt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _import(_name: str) -> Any:
+            raise ModuleNotFoundError(_name)
+
+        monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+        # Simulate: @abstractmethod @magic() def process(self): ...
+        # Step 1: magic() wraps the raw function
+        def process(self) -> None:
+            """Abstract method stub."""
+            ...
+
+        process.__qualname__ = "AbstractHost.process"
+        process.__module__ = __name__
+
+        wrapper = magic()(process)
+        # Step 2: abstractmethod marks it
+        abstract_wrapper = abc.abstractmethod(wrapper)
+        assert getattr(abstract_wrapper, "__isabstractmethod__", False) is True
+
+    def test_abstract_flag_cleared_after_successful_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class GenClass:
+            def process(self) -> None:
+                pass
+
+        def _import(_name: str) -> Any:
+            return SimpleNamespace(AbstractHost=GenClass)
+
+        monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+        def process(self) -> None:
+            """Abstract method stub."""
+            ...
+
+        process.__qualname__ = "AbstractHost.process"
+        process.__module__ = __name__
+
+        wrapper = magic()(process)
+        # Mark as abstract
+        wrapper.__isabstractmethod__ = True
+
+        # Call it — should succeed and clear the flag
+        wrapper(object(), )
+        assert getattr(wrapper, "__isabstractmethod__", False) is False
