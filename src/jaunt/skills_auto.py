@@ -22,6 +22,7 @@ _HEADER_PREFIX = "<!-- jaunt:skill=pypi"
 class SkillsAutoResult:
     skills_block: str
     warnings: list[str]
+    generation_failures: int = 0
 
 
 def skill_md_path(*, project_root: Path, dist: str) -> Path:
@@ -95,9 +96,10 @@ async def ensure_pypi_skills_and_block(
     )
     warnings.extend(scan_warnings)
 
+    generation_failures = 0
     if dists:
         # Phase 1+2: generate skills for PyPI dists that need it.
-        await _generate_pypi_skills(
+        generation_failures = await _generate_pypi_skills(
             project_root=project_root, dists=dists, llm=llm, warnings=warnings
         )
 
@@ -105,7 +107,9 @@ async def ensure_pypi_skills_and_block(
     from jaunt.skill_manager import build_skills_block
 
     skills_block = build_skills_block(project_root, pypi_dists=dists)
-    return SkillsAutoResult(skills_block=skills_block, warnings=warnings)
+    return SkillsAutoResult(
+        skills_block=skills_block, warnings=warnings, generation_failures=generation_failures
+    )
 
 
 async def _generate_pypi_skills(
@@ -114,10 +118,15 @@ async def _generate_pypi_skills(
     dists: dict[str, str],
     llm: LLMConfig,
     warnings: list[str],
-) -> None:
-    """Phase 1+2: identify stale PyPI dists and generate skills concurrently."""
+) -> int:
+    """Phase 1+2: identify stale PyPI dists and generate skills concurrently.
+
+    Returns the number of dists that failed to generate.
+    """
 
     import asyncio
+
+    failures = 0
 
     # Phase 1: identify which dists need (re)generation.
     to_generate: list[tuple[str, str, Path]] = []  # (dist, version, path)
@@ -159,21 +168,23 @@ async def _generate_pypi_skills(
             generator = OpenAISkillGenerator(llm)
         except Exception as e:  # noqa: BLE001
             warnings.append(f"Failed initializing OpenAI skill generator: {type(e).__name__}: {e}")
+            failures += len(to_generate)
 
         if generator is not None:
 
-            async def _generate_one(dist: str, version: str, path: Path) -> None:
+            async def _generate_one(dist: str, version: str, path: Path) -> bool:
+                """Returns True on success, False on failure."""
                 try:
                     readme, readme_type = fetch_readme(dist, version)
                 except PyPIReadmeError as e:
                     warnings.append(str(e))
-                    return
+                    return False
                 except Exception as e:  # noqa: BLE001
                     warnings.append(
                         f"Failed fetching PyPI README for {dist}=={version}: "
                         f"{type(e).__name__}: {e}"
                     )
-                    return
+                    return False
 
                 try:
                     md = await generator.generate_skill_markdown(dist, version, readme, readme_type)
@@ -181,7 +192,7 @@ async def _generate_pypi_skills(
                     warnings.append(
                         f"Failed generating skill for {dist}=={version}: {type(e).__name__}: {e}"
                     )
-                    return
+                    return False
 
                 try:
                     content = _format_generated_skill_file(dist=dist, version=version, body_md=md)
@@ -191,6 +202,14 @@ async def _generate_pypi_skills(
                         f"Failed writing skill for {dist}=={version} to {path}: "
                         f"{type(e).__name__}: {e}"
                     )
+                    return False
+
+                return True
 
             tasks = [_generate_one(dist, version, path) for dist, version, path in to_generate]
-            await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for r in results:
+                if r is not True:
+                    failures += 1
+
+    return failures

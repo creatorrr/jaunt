@@ -1230,6 +1230,9 @@ def cmd_skill(args: argparse.Namespace) -> int:
             )
             for w in res.warnings:
                 _eprint(f"warn: {w}")
+            if res.generation_failures > 0:
+                refresh_ok = False
+                refresh_error = f"{res.generation_failures} skill(s) failed to generate"
         except Exception as e:  # noqa: BLE001
             refresh_ok = False
             refresh_error = f"{type(e).__name__}: {e}"
@@ -1249,7 +1252,7 @@ def cmd_skill(args: argparse.Namespace) -> int:
             if refresh_ok:
                 print(f"Refreshed. {len(skills)} skill(s) on disk.")
             else:
-                _eprint(f"Refresh failed. {len(skills)} skill(s) remain on disk.")
+                _eprint(f"Refresh failed: {refresh_error}")
         return EXIT_OK if refresh_ok else EXIT_GENERATION_ERROR
 
     if subcmd == "import":
