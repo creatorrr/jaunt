@@ -159,6 +159,10 @@ def tool_spec_info(
             exclude=[],
             generated_dir=cfg.paths.generated_dir,
         )
+        discovery.evict_modules_for_import(
+            module_names=modules,
+            roots=[d for d in source_dirs if d.exists()],
+        )
         discovery.import_and_collect(modules, kind="magic")
 
         specs = dict(registry.get_magic_registry())

@@ -34,7 +34,7 @@ def test_sync_generated_dir_env_sets_default(monkeypatch) -> None:
     monkeypatch.delenv("JAUNT_GENERATED_DIR", raising=False)
 
 
-def test_sync_generated_dir_env_does_not_override(monkeypatch) -> None:
+def test_sync_generated_dir_env_updates_current_project(monkeypatch) -> None:
     monkeypatch.setenv("JAUNT_GENERATED_DIR", "already_set")
 
     from jaunt.cli import _sync_generated_dir_env
@@ -57,5 +57,4 @@ def test_sync_generated_dir_env_does_not_override(monkeypatch) -> None:
     )
 
     _sync_generated_dir_env(cfg)
-    # Should NOT override.
-    assert os.environ.get("JAUNT_GENERATED_DIR") == "already_set"
+    assert os.environ.get("JAUNT_GENERATED_DIR") == "other"

@@ -24,7 +24,7 @@ from jaunt.cost import CostTracker
 from jaunt.digest import extract_source_segment, module_digest
 from jaunt.errors import JauntGenerationError
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
-from jaunt.header import format_header
+from jaunt.header import extract_module_digest, format_header
 from jaunt.registry import SpecEntry
 from jaunt.spec_ref import SpecRef
 from jaunt.validation import validate_generated_source
@@ -75,20 +75,64 @@ def run_pytest(
     return int(proc.returncode)
 
 
-def _generated_test_relpath(module_name: str, *, tests_package: str, generated_dir: str) -> Path:
-    # Expect test specs to live under `tests_package.*` and write only into
-    # `<project>/<tests_package>/__generated__/...`.
-    if module_name.split(".", 1)[0] != tests_package:
-        raise ValueError(f"Test module {module_name!r} is not under {tests_package!r}.")
+def _normalize_digest(digest: str | None) -> str | None:
+    if not digest:
+        return None
+    if digest.startswith("sha256:"):
+        return digest.split(":", 1)[1]
+    return digest
 
-    gen_mod = paths.spec_module_to_generated_module(module_name, generated_dir=generated_dir)
-    rel = paths.generated_module_to_relpath(gen_mod, generated_dir=generated_dir)
 
-    # Safety check: must be tests/<generated_dir>/...
-    parts = rel.parts
-    if len(parts) < 2 or parts[0] != tests_package or parts[1] != generated_dir:
-        raise ValueError(f"Refusing to write outside {tests_package}/{generated_dir}: {rel!s}")
-    return rel
+def _resolve_test_roots(
+    *,
+    project_dir: Path,
+    tests_package: str,
+    test_roots: Sequence[Path] | None,
+) -> list[Path]:
+    if test_roots is None:
+        candidates = [(project_dir / tests_package).resolve()]
+    else:
+        candidates = [Path(root).resolve() for root in test_roots]
+
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for root in candidates:
+        if root in seen:
+            continue
+        unique.append(root)
+        seen.add(root)
+
+    return sorted(unique, key=lambda root: (-len(root.parts), str(root)))
+
+
+def _match_test_root(source_file: str, *, test_roots: Sequence[Path]) -> tuple[Path, Path]:
+    source_path = Path(source_file).resolve()
+    for root in test_roots:
+        try:
+            return root, source_path.relative_to(root)
+        except ValueError:
+            continue
+    raise ValueError(f"Could not match test source {source_file!r} to any configured test root.")
+
+
+def _generated_test_relpath_from_source(rel_source: Path, *, generated_dir: str) -> Path:
+    if rel_source.name == "__init__.py":
+        suffix = rel_source.parent / "__init__.py" if rel_source.parent.parts else Path("__init__.py")
+        return Path(generated_dir) / suffix
+    return Path(generated_dir) / rel_source
+
+
+def _resolve_test_output_path(
+    *,
+    project_dir: Path,
+    source_file: str,
+    generated_dir: str,
+    tests_package: str,
+    test_roots: Sequence[Path] | None,
+) -> Path:
+    roots = _resolve_test_roots(project_dir=project_dir, tests_package=tests_package, test_roots=test_roots)
+    matched_root, rel_source = _match_test_root(source_file, test_roots=roots)
+    return matched_root / _generated_test_relpath_from_source(rel_source, generated_dir=generated_dir)
 
 
 def _ensure_init_files(project_dir: Path, relpath: Path) -> None:
@@ -107,25 +151,36 @@ def _ensure_init_files(project_dir: Path, relpath: Path) -> None:
 def _write_generated_test_module(
     *,
     project_dir: Path,
-    tests_package: str,
     generated_dir: str,
-    module_name: str,
     source: str,
     header_fields: dict[str, object],
+    out_path: Path | None = None,
+    tests_package: str | None = None,
+    module_name: str | None = None,
 ) -> Path:
-    relpath = _generated_test_relpath(
-        module_name, tests_package=tests_package, generated_dir=generated_dir
-    )
-    out_path = (project_dir / relpath).resolve()
+    if out_path is None:
+        if not tests_package or not module_name:
+            raise TypeError(
+                "_write_generated_test_module() requires either out_path or "
+                "tests_package + module_name"
+            )
+        if module_name.split(".", 1)[0] != tests_package:
+            raise ValueError(f"Test module {module_name!r} is not under {tests_package!r}.")
+        gen_mod = paths.spec_module_to_generated_module(module_name, generated_dir=generated_dir)
+        rel = paths.generated_module_to_relpath(gen_mod, generated_dir=generated_dir)
+        parts = rel.parts
+        if len(parts) < 2 or parts[0] != tests_package or parts[1] != generated_dir:
+            raise ValueError(f"Refusing to write outside {tests_package}/{generated_dir}: {rel!s}")
+        out_path = project_dir / rel
+
+    out_path = out_path.resolve()
 
     root = project_dir.resolve()
     if root not in out_path.parents and out_path != root:
         raise ValueError("Refusing to write outside project_dir.")
 
-    # Enforce "only under tests/__generated__".
-    tests_root = (project_dir / tests_package).resolve()
-    gen_root = (tests_root / generated_dir).resolve()
-    if gen_root not in out_path.parents:
+    relpath = out_path.relative_to(root)
+    if generated_dir not in relpath.parts:
         raise ValueError("Refusing to write outside tests generated dir.")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -159,6 +214,83 @@ def _write_generated_test_module(
         except FileNotFoundError:
             pass
     return out_path
+
+
+def detect_stale_test_modules(
+    *,
+    project_dir: Path,
+    generated_dir: str,
+    module_specs: dict[str, list[SpecEntry]],
+    specs: dict[SpecRef, SpecEntry],
+    spec_graph: dict[SpecRef, set[SpecRef]],
+    tests_package: str = "tests",
+    test_roots: Sequence[Path] | None = None,
+    force: bool = False,
+) -> set[str]:
+    if force:
+        return set(module_specs.keys())
+
+    stale: set[str] = set()
+    for module_name, entries in module_specs.items():
+        if not entries:
+            stale.add(module_name)
+            continue
+
+        try:
+            out_path = _resolve_test_output_path(
+                project_dir=project_dir,
+                source_file=entries[0].source_file,
+                generated_dir=generated_dir,
+                tests_package=tests_package,
+                test_roots=test_roots,
+            )
+        except Exception:
+            stale.add(module_name)
+            continue
+
+        if not out_path.exists():
+            stale.add(module_name)
+            continue
+
+        try:
+            existing = out_path.read_text(encoding="utf-8")
+        except Exception:
+            stale.add(module_name)
+            continue
+
+        on_disk = _normalize_digest(extract_module_digest(existing))
+        computed = _normalize_digest(module_digest(module_name, entries, specs, spec_graph))
+        if on_disk is None or computed is None or on_disk != computed:
+            stale.add(module_name)
+
+    return stale
+
+
+def _collect_existing_generated_test_files(
+    *,
+    project_dir: Path,
+    tests_package: str,
+    generated_dir: str,
+    module_specs: dict[str, list[SpecEntry]],
+    test_roots: Sequence[Path] | None,
+) -> list[Path]:
+    found: set[Path] = set()
+    for entries in module_specs.values():
+        if not entries:
+            continue
+        try:
+            out_path = _resolve_test_output_path(
+                project_dir=project_dir,
+                source_file=entries[0].source_file,
+                generated_dir=generated_dir,
+                tests_package=tests_package,
+                test_roots=test_roots,
+            )
+        except Exception:
+            continue
+        if out_path.exists():
+            found.add(out_path)
+    return sorted(found, key=lambda path: str(path))
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,6 +340,7 @@ async def run_test_generation(
     project_dir: Path,
     tests_package: str,
     generated_dir: str,
+    test_roots: Sequence[Path] | None = None,
     dependency_apis: dict[SpecRef, str] | None = None,
     module_specs: dict[str, list[SpecEntry]],
     specs: dict[SpecRef, SpecEntry],
@@ -244,6 +377,10 @@ async def run_test_generation(
         for d in deps:
             dependents.setdefault(d, set()).add(m)
 
+    from jaunt.deps import toposort
+
+    toposort(deps_in_stale)
+
     prio = _critical_path_lengths(stale, module_dag)
     ready: list[tuple[int, str]] = []
     for m, n in indeg.items():
@@ -257,6 +394,8 @@ async def run_test_generation(
 
     async def gen_one(module_name: str) -> tuple[bool, list[str], Path | None]:
         entries = module_specs.get(module_name, [])
+        if not entries:
+            return False, ["No test specs found for module."], None
         expected, conflict_errs = _build_expected_names(entries)
         if conflict_errs:
             return False, conflict_errs, None
@@ -334,11 +473,17 @@ async def run_test_generation(
             "spec_refs": [str(e.spec_ref) for e in entries],
         }
 
+        out_path = _resolve_test_output_path(
+            project_dir=project_dir,
+            source_file=entries[0].source_file,
+            generated_dir=generated_dir,
+            tests_package=tests_package,
+            test_roots=test_roots,
+        )
         out = _write_generated_test_module(
             project_dir=project_dir,
-            tests_package=tests_package,
+            out_path=out_path,
             generated_dir=generated_dir,
-            module_name=module_name,
             source=result_source,
             header_fields=header_fields,
         )
@@ -425,6 +570,12 @@ async def run_test_generation(
         except Exception:
             pass
 
+    remaining = stale - completed
+    if remaining:
+        sub = {m: {d for d in deps_in_stale.get(m, set()) if d in remaining} for m in remaining}
+        toposort(sub)
+        raise JauntGenerationError("Test generation scheduler deadlock.")
+
     return TestGenerationReport(
         generated=generated,
         skipped=skipped,
@@ -438,6 +589,7 @@ async def run_tests(
     project_dir: Path,
     tests_package: str = "tests",
     generated_dir: str = "__generated__",
+    test_roots: Sequence[Path] | None = None,
     dependency_apis: dict[SpecRef, str] | None = None,
     module_specs: dict[str, list[SpecEntry]] | None = None,
     specs: dict[SpecRef, SpecEntry] | None = None,
@@ -476,6 +628,7 @@ async def run_tests(
             project_dir=project_dir,
             tests_package=tests_package,
             generated_dir=generated_dir,
+            test_roots=test_roots,
             dependency_apis=dependency_apis,
             module_specs=module_specs,
             specs=specs,
@@ -491,21 +644,36 @@ async def run_tests(
         )
         generated_files = report.generated_files
         gen_failed = report.failed
+    elif module_specs is not None:
+        generated_files = _collect_existing_generated_test_files(
+            project_dir=project_dir,
+            tests_package=tests_package,
+            generated_dir=generated_dir,
+            module_specs=module_specs,
+            test_roots=test_roots,
+        )
 
     if no_run:
+        exit_code = 3 if gen_failed else 0
         return PytestResult(
-            exit_code=0,
-            passed=True,
-            failed=False,
+            exit_code=exit_code,
+            passed=exit_code == 0,
+            failed=exit_code != 0,
             failures=[],
             generation_failed=gen_failed,
         )
 
-    exit_code = run_pytest(generated_files, pytest_args=pytest_args, pythonpath=pythonpath, cwd=cwd)
+    pytest_exit_code = run_pytest(
+        generated_files,
+        pytest_args=pytest_args,
+        pythonpath=pythonpath,
+        cwd=cwd,
+    )
+    exit_code = 3 if gen_failed else pytest_exit_code
     return PytestResult(
         exit_code=exit_code,
         passed=exit_code == 0,
-        failed=exit_code != 0,
+        failed=bool(gen_failed) or pytest_exit_code != 0,
         failures=[],
         generation_failed=gen_failed,
     )

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import fnmatch
 import importlib
+import sys
 from pathlib import Path
 from typing import Literal
 
@@ -30,6 +31,68 @@ def _is_excluded(rel_posix: str, *, exclude: list[str]) -> bool:
                 return True
 
     return False
+
+
+def _is_under_roots(path_str: str, *, roots: list[Path]) -> bool:
+    try:
+        path = Path(path_str).resolve()
+    except Exception:
+        return False
+
+    for root in roots:
+        try:
+            if path.is_relative_to(root):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def evict_modules_for_import(*, module_names: list[str], roots: list[Path]) -> None:
+    """Drop cached modules that would interfere with fresh project imports."""
+
+    resolved_roots: list[Path] = []
+    for root in roots:
+        try:
+            resolved_roots.append(root.resolve())
+        except Exception:
+            continue
+
+    exact = set(module_names)
+    prefixes = tuple(f"{name}." for name in exact)
+    to_delete: set[str] = set()
+
+    for name, module in list(sys.modules.items()):
+        if exact and (name in exact or name.startswith(prefixes)):
+            to_delete.add(name)
+            continue
+
+        if module is None:
+            continue
+
+        mod_file = getattr(module, "__file__", None)
+        if isinstance(mod_file, str) and _is_under_roots(mod_file, roots=resolved_roots):
+            to_delete.add(name)
+            continue
+
+        mod_path = getattr(module, "__path__", None)
+        if mod_path is None:
+            continue
+
+        try:
+            candidates = list(mod_path)
+        except TypeError:
+            candidates = []
+
+        for candidate in candidates:
+            if isinstance(candidate, str) and _is_under_roots(candidate, roots=resolved_roots):
+                to_delete.add(name)
+                break
+
+    for name in to_delete:
+        sys.modules.pop(name, None)
+
+    importlib.invalidate_caches()
 
 
 def discover_modules(

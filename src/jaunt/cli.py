@@ -339,7 +339,7 @@ def _emit_json(data: dict[str, object]) -> None:
 
 def _sync_generated_dir_env(cfg: JauntConfig) -> None:
     """Propagate generated_dir to env so runtime forwarding uses the right path."""
-    os.environ.setdefault("JAUNT_GENERATED_DIR", cfg.paths.generated_dir)
+    os.environ["JAUNT_GENERATED_DIR"] = cfg.paths.generated_dir
 
 
 def _maybe_load_dotenv(root: Path) -> None:
@@ -468,6 +468,10 @@ def cmd_status(args: argparse.Namespace) -> int:
             exclude=[],
             generated_dir=cfg.paths.generated_dir,
         )
+        discovery.evict_modules_for_import(
+            module_names=modules,
+            roots=[d for d in source_dirs if d.exists()],
+        )
         discovery.import_and_collect(modules, kind="magic")
 
         specs = dict(registry.get_magic_registry())
@@ -581,6 +585,10 @@ def cmd_build(args: argparse.Namespace) -> int:
             roots=[d for d in source_dirs if d.exists()],
             exclude=[],
             generated_dir=cfg.paths.generated_dir,
+        )
+        discovery.evict_modules_for_import(
+            module_names=modules,
+            roots=[d for d in source_dirs if d.exists()],
         )
         discovery.import_and_collect(modules, kind="magic")
 
@@ -709,6 +717,7 @@ def cmd_test(args: argparse.Namespace) -> int:
         _sync_generated_dir_env(cfg)
 
         source_dirs = [root / sr for sr in cfg.paths.source_roots]
+        test_dirs = [root / tr for tr in cfg.paths.test_roots]
         # Test modules are expected to be importable as `tests.*` (or another
         # package under the project root). Add the project root, not the tests/
         # directory itself, so module discovery can prefix correctly.
@@ -734,6 +743,10 @@ def cmd_test(args: argparse.Namespace) -> int:
                 exclude=[],
                 generated_dir=cfg.paths.generated_dir,
             )
+            discovery.evict_modules_for_import(
+                module_names=src_mods,
+                roots=[d for d in source_dirs if d.exists()],
+            )
             discovery.import_and_collect(src_mods, kind="magic")
             magic_dependency_apis = {
                 ref: extract_source_segment(entry)
@@ -748,8 +761,8 @@ def cmd_test(args: argparse.Namespace) -> int:
 
         registry.clear_registries()
         modules_set: set[str] = set()
-        for tr in cfg.paths.test_roots:
-            test_dir = root / tr
+        existing_test_dirs = [d for d in test_dirs if d.exists()]
+        for tr, test_dir in zip(cfg.paths.test_roots, test_dirs, strict=False):
             if not test_dir.exists():
                 continue
             prefix = ".".join(Path(tr).parts)
@@ -761,6 +774,7 @@ def cmd_test(args: argparse.Namespace) -> int:
             )
             modules_set.update(mods)
         modules = sorted(modules_set)
+        discovery.evict_modules_for_import(module_names=modules, roots=existing_test_dirs)
         discovery.import_and_collect(modules, kind="test")
 
         specs = dict(registry.get_test_registry())
@@ -780,9 +794,10 @@ def cmd_test(args: argparse.Namespace) -> int:
         jobs = int(args.jobs) if args.jobs is not None else int(cfg.test.jobs)
         pytest_args = [*cfg.test.pytest_args, *list(args.pytest_args or [])]
 
-        stale = builder.detect_stale_modules(
-            package_dir=root,
+        stale = tester.detect_stale_test_modules(
+            project_dir=root,
             generated_dir=cfg.paths.generated_dir,
+            test_roots=existing_test_dirs,
             module_specs=module_specs,
             specs=specs,
             spec_graph=spec_graph,
@@ -811,6 +826,7 @@ def cmd_test(args: argparse.Namespace) -> int:
         result = tester.run_tests(
             project_dir=root,
             generated_dir=cfg.paths.generated_dir,
+            test_roots=existing_test_dirs,
             dependency_apis=magic_dependency_apis,
             module_specs=module_specs,
             specs=specs,
@@ -843,14 +859,17 @@ def cmd_test(args: argparse.Namespace) -> int:
             _emit_json(
                 {
                     "command": "test",
-                    "ok": exit_code == 0,
+                    "ok": exit_code == 0 and not gen_failed,
                     "exit_code": exit_code,
+                    "generation_failed": {k: v for k, v in sorted(gen_failed.items())},
                 }
             )
 
+        if gen_failed or exit_code == EXIT_GENERATION_ERROR:
+            return EXIT_GENERATION_ERROR
         if exit_code == 0:
             return EXIT_OK
-        return EXIT_PYTEST_FAILURE if not bool(args.no_run) else EXIT_GENERATION_ERROR
+        return EXIT_PYTEST_FAILURE
     except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError, KeyError) as e:
         _print_error(e)
         if json_mode:
@@ -1031,6 +1050,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 on_error=on_error,
                 source_roots=source_roots,
                 test_roots=test_roots,
+                generated_dir=cfg.paths.generated_dir,
             )
         )
     except KeyboardInterrupt:

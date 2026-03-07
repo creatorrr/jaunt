@@ -57,6 +57,7 @@ def _parse_module_once(
     path: str,
     *,
     cache: dict[str, _ModuleParse],
+    module_name: str | None = None,
     persistent_cache: ParseCache | None = None,
 ) -> _ModuleParse | None:
     if path in cache:
@@ -84,12 +85,17 @@ def _parse_module_once(
                 bound = alias.asname or alias.name.split(".", 1)[0]
                 import_aliases[bound] = alias.name
         elif isinstance(node, ast.ImportFrom):
-            if not node.module:
+            resolved_module = _resolve_import_from_module(
+                module_name=module_name,
+                source_path=path,
+                node=node,
+            )
+            if not resolved_module:
                 continue
             for alias in node.names:
                 bound = alias.asname or alias.name
                 # Store "pkg.mod:Name" style for easy comparison with SpecRef.
-                from_imports[bound] = f"{node.module}:{alias.name}"
+                from_imports[bound] = f"{resolved_module}:{alias.name}"
 
     parsed = _ModuleParse(
         source=src,
@@ -179,7 +185,10 @@ def _resolve_reexport(
         init_path = root / Path(*parts) / "__init__.py"
         if init_path.is_file():
             parsed = _parse_module_once(
-                str(init_path), cache=cache, persistent_cache=persistent_cache
+                str(init_path),
+                cache=cache,
+                module_name=module,
+                persistent_cache=persistent_cache,
             )
             if parsed is not None and name in parsed.from_imports:
                 try:
@@ -187,6 +196,31 @@ def _resolve_reexport(
                 except ValueError:
                     pass
     return None
+
+
+def _resolve_import_from_module(
+    *,
+    module_name: str | None,
+    source_path: str,
+    node: ast.ImportFrom,
+) -> str | None:
+    if node.level == 0:
+        return node.module
+
+    if not module_name:
+        return node.module
+
+    is_package_module = Path(source_path).name == "__init__.py"
+    current_package = module_name if is_package_module else module_name.rsplit(".", 1)[0]
+    package_parts = [part for part in current_package.split(".") if part]
+    ascend = node.level - 1
+    if ascend > len(package_parts):
+        return node.module
+
+    base_parts = package_parts[: len(package_parts) - ascend]
+    if node.module:
+        return ".".join([*base_parts, node.module]) if base_parts else node.module
+    return ".".join(base_parts) if base_parts else None
 
 
 def build_spec_graph(
@@ -246,7 +280,10 @@ def build_spec_graph(
         # cannot parse or resolve names.
         try:
             parsed = _parse_module_once(
-                entry.source_file, cache=parse_cache, persistent_cache=persistent_cache
+                entry.source_file,
+                cache=parse_cache,
+                module_name=entry.module,
+                persistent_cache=persistent_cache,
             )
             if parsed is None:
                 continue

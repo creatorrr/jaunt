@@ -45,6 +45,7 @@ def filter_spec_files(
     *,
     source_roots: list[Path],
     test_roots: list[Path],
+    generated_dir: str = "__generated__",
 ) -> frozenset[Path]:
     """Filter changed paths to .py files under source/test roots, excluding __generated__."""
     roots = [*source_roots, *test_roots]
@@ -52,7 +53,7 @@ def filter_spec_files(
     for p in changed_paths:
         if p.suffix != ".py":
             continue
-        if "__generated__" in p.parts:
+        if generated_dir and generated_dir in p.parts:
             continue
         if any(p.is_relative_to(r) for r in roots):
             kept.add(p)
@@ -68,11 +69,17 @@ async def run_watch_loop(
     on_error: Callable[[BaseException], None],
     source_roots: list[Path],
     test_roots: list[Path],
+    generated_dir: str = "__generated__",
 ) -> None:
     """Main watch loop. Consumes changes_iter, filters, and calls run_cycle."""
     async for raw_changes in changes_iter:
         paths = frozenset(Path(p) for _, p in raw_changes)
-        relevant = filter_spec_files(paths, source_roots=source_roots, test_roots=test_roots)
+        relevant = filter_spec_files(
+            paths,
+            source_roots=source_roots,
+            test_roots=test_roots,
+            generated_dir=generated_dir,
+        )
         if not relevant:
             continue
 
@@ -121,6 +128,7 @@ def build_cycle_runner(
         target=list(getattr(args, "target", [])),
         no_infer_deps=bool(getattr(args, "no_infer_deps", False)),
         no_progress=bool(getattr(args, "no_progress", False)),
+        no_cache=bool(getattr(args, "no_cache", False)),
         json_output=False,
     )
 
@@ -132,6 +140,7 @@ def build_cycle_runner(
         target=list(getattr(args, "target", [])),
         no_infer_deps=bool(getattr(args, "no_infer_deps", False)),
         no_progress=bool(getattr(args, "no_progress", False)),
+        no_cache=bool(getattr(args, "no_cache", False)),
         json_output=False,
         no_build=True,
         no_run=False,
