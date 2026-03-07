@@ -89,16 +89,35 @@ async def ensure_pypi_skills_and_block(
     Returns a single concatenated injection block to pass to the code generator.
     """
 
-    import asyncio
-
     warnings: list[str] = []
     dists, scan_warnings = discover_external_distributions_with_warnings(
         source_roots, generated_dir=generated_dir
     )
     warnings.extend(scan_warnings)
 
-    if not dists:
-        return SkillsAutoResult(skills_block="", warnings=warnings)
+    if dists:
+        # Phase 1+2: generate skills for PyPI dists that need it.
+        await _generate_pypi_skills(
+            project_root=project_root, dists=dists, llm=llm, warnings=warnings
+        )
+
+    # Phase 3: Build injection block from ALL skills on disk (auto + user).
+    from jaunt.skill_manager import build_skills_block
+
+    skills_block = build_skills_block(project_root, pypi_dists=dists)
+    return SkillsAutoResult(skills_block=skills_block, warnings=warnings)
+
+
+async def _generate_pypi_skills(
+    *,
+    project_root: Path,
+    dists: dict[str, str],
+    llm: LLMConfig,
+    warnings: list[str],
+) -> None:
+    """Phase 1+2: identify stale PyPI dists and generate skills concurrently."""
+
+    import asyncio
 
     # Phase 1: identify which dists need (re)generation.
     to_generate: list[tuple[str, str, Path]] = []  # (dist, version, path)
@@ -175,29 +194,3 @@ async def ensure_pypi_skills_and_block(
 
             tasks = [_generate_one(dist, version, path) for dist, version, path in to_generate]
             await asyncio.gather(*tasks, return_exceptions=True)
-
-    # Build injection block from whatever is on disk.
-    sections: list[str] = []
-    for dist, version in sorted(dists.items(), key=lambda kv: pep503_normalize(kv[0])):
-        path = skill_md_path(project_root=project_root, dist=dist)
-        if not path.exists():
-            continue
-        try:
-            txt = path.read_text(encoding="utf-8")
-        except Exception as e:  # noqa: BLE001
-            warnings.append(f"failed reading skill for {dist}: {type(e).__name__}: {e}")
-            continue
-
-        lines = txt.splitlines()
-        if lines and _parse_generated_header(lines[0]) is not None:
-            body = "\n".join(lines[1:]).lstrip("\n")
-        else:
-            body = txt
-
-        body = (body or "").strip()
-        if not body:
-            continue
-        sections.append(f"## {dist}=={version}\n{body}\n")
-
-    skills_block = "\n".join(sections).strip()
-    return SkillsAutoResult(skills_block=skills_block, warnings=warnings)

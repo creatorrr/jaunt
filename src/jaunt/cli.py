@@ -239,6 +239,50 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Emit structured JSON output to stdout.",
     )
 
+    # --- skill subcommand ---
+    skill_p = subparsers.add_parser("skill", help="Manage skills.")
+    skill_sub = skill_p.add_subparsers(dest="skill_command", required=True)
+
+    skill_list_p = skill_sub.add_parser("list", help="List all skills.")
+    skill_list_p.add_argument("--root", type=str, default=None)
+    skill_list_p.add_argument(
+        "--json", action="store_true", dest="json_output", help="JSON output."
+    )
+
+    skill_add_p = skill_sub.add_parser("add", help="Add a new user skill.")
+    skill_add_p.add_argument("name", help="Skill name.")
+    skill_add_p.add_argument("--root", type=str, default=None)
+    skill_add_p.add_argument("--json", action="store_true", dest="json_output", help="JSON output.")
+
+    skill_remove_p = skill_sub.add_parser("remove", help="Remove a skill.")
+    skill_remove_p.add_argument("name", help="Skill name.")
+    skill_remove_p.add_argument("--root", type=str, default=None)
+    skill_remove_p.add_argument(
+        "--json", action="store_true", dest="json_output", help="JSON output."
+    )
+
+    skill_show_p = skill_sub.add_parser("show", help="Show a skill's content.")
+    skill_show_p.add_argument("name", help="Skill name.")
+    skill_show_p.add_argument("--root", type=str, default=None)
+
+    skill_refresh_p = skill_sub.add_parser("refresh", help="Refresh auto-generated skills.")
+    skill_refresh_p.add_argument("--root", type=str, default=None)
+    skill_refresh_p.add_argument("--config", type=str, default=None)
+    skill_refresh_p.add_argument("--force", action="store_true", help="Remove and regenerate all.")
+    skill_refresh_p.add_argument(
+        "--json", action="store_true", dest="json_output", help="JSON output."
+    )
+
+    skill_import_p = skill_sub.add_parser("import", help="Import skills from ancestor dirs.")
+    skill_import_p.add_argument("--root", type=str, default=None)
+    skill_import_p.add_argument(
+        "--from", type=str, default=None, dest="from_dir", help="Import from specific directory."
+    )
+    skill_import_p.add_argument("--dry-run", action="store_true", help="Show what would import.")
+    skill_import_p.add_argument(
+        "--json", action="store_true", dest="json_output", help="JSON output."
+    )
+
     return parser
 
 
@@ -1060,6 +1104,179 @@ def cmd_watch(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _resolve_skill_root(args: argparse.Namespace) -> Path:
+    if getattr(args, "root", None):
+        return Path(args.root).resolve()
+    from jaunt.config import find_project_root
+
+    try:
+        return find_project_root(Path.cwd())
+    except JauntConfigError:
+        return Path.cwd().resolve()
+
+
+def cmd_skill(args: argparse.Namespace) -> int:
+    json_mode = _is_json_mode(args)
+    subcmd = args.skill_command
+
+    from jaunt.skill_manager import (
+        add_skill,
+        discover_all_skills,
+        import_skills,
+        remove_auto_skills,
+        remove_skill,
+        show_skill,
+    )
+
+    if subcmd == "list":
+        root = _resolve_skill_root(args)
+        skills = discover_all_skills(root)
+        if json_mode:
+            _emit_json(
+                {
+                    "command": "skill list",
+                    "ok": True,
+                    "skills": [
+                        {
+                            "name": s.name,
+                            "source": s.source,
+                            "dist": s.dist,
+                            "version": s.version,
+                            "path": str(s.path),
+                        }
+                        for s in skills
+                    ],
+                }
+            )
+        else:
+            if not skills:
+                print("No skills found.")
+            else:
+                for s in skills:
+                    tag = f" ({s.source})" if s.source == "auto" else ""
+                    print(f"  {s.name}{tag}")
+        return EXIT_OK
+
+    if subcmd == "add":
+        root = _resolve_skill_root(args)
+        try:
+            path = add_skill(root, args.name)
+        except (FileExistsError, ValueError) as e:
+            _eprint(f"error: {e}")
+            if json_mode:
+                _emit_json({"command": "skill add", "ok": False, "error": str(e)})
+            return EXIT_CONFIG_OR_DISCOVERY
+        if json_mode:
+            _emit_json({"command": "skill add", "ok": True, "path": str(path)})
+        else:
+            print(f"Created skill: {path}")
+        return EXIT_OK
+
+    if subcmd == "remove":
+        root = _resolve_skill_root(args)
+        try:
+            path = remove_skill(root, args.name)
+        except (FileNotFoundError, ValueError) as e:
+            _eprint(f"error: {e}")
+            if json_mode:
+                _emit_json({"command": "skill remove", "ok": False, "error": str(e)})
+            return EXIT_CONFIG_OR_DISCOVERY
+        if json_mode:
+            _emit_json({"command": "skill remove", "ok": True, "removed": str(path)})
+        else:
+            print(f"Removed skill: {path}")
+        return EXIT_OK
+
+    if subcmd == "show":
+        root = _resolve_skill_root(args)
+        try:
+            content = show_skill(root, args.name)
+        except (FileNotFoundError, ValueError) as e:
+            _eprint(f"error: {e}")
+            return EXIT_CONFIG_OR_DISCOVERY
+        print(content, end="")
+        return EXIT_OK
+
+    if subcmd == "refresh":
+        try:
+            root, cfg = _load_config(args)
+        except (JauntConfigError, KeyError) as e:
+            _print_error(e)
+            if json_mode:
+                _emit_json({"command": "skill refresh", "ok": False, "error": str(e)})
+            return EXIT_CONFIG_OR_DISCOVERY
+
+        _maybe_load_dotenv(root)
+
+        if getattr(args, "force", False):
+            removed = remove_auto_skills(root)
+            if not json_mode:
+                for name in removed:
+                    _eprint(f"removed auto-skill: {name}")
+
+        source_dirs = [root / sr for sr in cfg.paths.source_roots]
+        refresh_ok = True
+        refresh_error: str | None = None
+        try:
+            from jaunt import skills_auto
+
+            res = asyncio.run(
+                skills_auto.ensure_pypi_skills_and_block(
+                    project_root=root,
+                    source_roots=[d for d in source_dirs if d.exists()],
+                    generated_dir=cfg.paths.generated_dir,
+                    llm=cfg.llm,
+                )
+            )
+            for w in res.warnings:
+                _eprint(f"warn: {w}")
+        except Exception as e:  # noqa: BLE001
+            refresh_ok = False
+            refresh_error = f"{type(e).__name__}: {e}"
+            _eprint(f"error: {refresh_error}")
+
+        skills = discover_all_skills(root)
+        if json_mode:
+            payload: dict[str, object] = {
+                "command": "skill refresh",
+                "ok": refresh_ok,
+                "skills": [s.name for s in skills],
+            }
+            if refresh_error:
+                payload["error"] = refresh_error
+            _emit_json(payload)
+        else:
+            if refresh_ok:
+                print(f"Refreshed. {len(skills)} skill(s) on disk.")
+            else:
+                _eprint(f"Refresh failed. {len(skills)} skill(s) remain on disk.")
+        return EXIT_OK if refresh_ok else EXIT_GENERATION_ERROR
+
+    if subcmd == "import":
+        root = _resolve_skill_root(args)
+        from_dir = Path(args.from_dir).resolve() if getattr(args, "from_dir", None) else None
+        dry_run = bool(getattr(args, "dry_run", False))
+        results = import_skills(root, from_dir=from_dir, dry_run=dry_run)
+        if json_mode:
+            _emit_json(
+                {
+                    "command": "skill import",
+                    "ok": True,
+                    "dry_run": dry_run,
+                    "results": [{"name": n, "source": str(p), "status": s} for n, p, s in results],
+                }
+            )
+        else:
+            if not results:
+                print("No importable skills found.")
+            else:
+                for name, source, status in results:
+                    print(f"  {name}: {status} (from {source})")
+        return EXIT_OK
+
+    return EXIT_CONFIG_OR_DISCOVERY
+
+
 def cmd_mcp(args: argparse.Namespace) -> int:
     try:
         from jaunt.mcp_server import run_server
@@ -1098,6 +1315,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_mcp(args)
     if args.command == "cache":
         return cmd_cache(args)
+    if args.command == "skill":
+        return cmd_skill(args)
 
     return EXIT_CONFIG_OR_DISCOVERY
 
