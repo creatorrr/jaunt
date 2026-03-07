@@ -133,11 +133,14 @@ def _resolve_test_output_path(
     test_roots: Sequence[Path] | None,
 ) -> Path:
     roots = _resolve_test_roots(
-        project_dir=project_dir, tests_package=tests_package, test_roots=test_roots,
+        project_dir=project_dir,
+        tests_package=tests_package,
+        test_roots=test_roots,
     )
     matched_root, rel_source = _match_test_root(source_file, test_roots=roots)
     return matched_root / _generated_test_relpath_from_source(
-        rel_source, generated_dir=generated_dir,
+        rel_source,
+        generated_dir=generated_dir,
     )
 
 

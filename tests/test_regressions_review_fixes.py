@@ -280,11 +280,13 @@ def test_build_cycle_runner_propagates_no_cache(monkeypatch) -> None:
     calls: list[tuple[str, bool]] = []
 
     monkeypatch.setattr(
-        jaunt.cli, "cmd_build",
+        jaunt.cli,
+        "cmd_build",
         lambda args: calls.append(("build", bool(args.no_cache))) or 0,
     )
     monkeypatch.setattr(
-        jaunt.cli, "cmd_test",
+        jaunt.cli,
+        "cmd_test",
         lambda args: calls.append(("test", bool(args.no_cache))) or 0,
     )
 
