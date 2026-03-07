@@ -117,7 +117,9 @@ def _match_test_root(source_file: str, *, test_roots: Sequence[Path]) -> tuple[P
 
 def _generated_test_relpath_from_source(rel_source: Path, *, generated_dir: str) -> Path:
     if rel_source.name == "__init__.py":
-        suffix = rel_source.parent / "__init__.py" if rel_source.parent.parts else Path("__init__.py")
+        suffix = (
+            rel_source.parent / "__init__.py" if rel_source.parent.parts else Path("__init__.py")
+        )
         return Path(generated_dir) / suffix
     return Path(generated_dir) / rel_source
 
@@ -130,9 +132,13 @@ def _resolve_test_output_path(
     tests_package: str,
     test_roots: Sequence[Path] | None,
 ) -> Path:
-    roots = _resolve_test_roots(project_dir=project_dir, tests_package=tests_package, test_roots=test_roots)
+    roots = _resolve_test_roots(
+        project_dir=project_dir, tests_package=tests_package, test_roots=test_roots,
+    )
     matched_root, rel_source = _match_test_root(source_file, test_roots=roots)
-    return matched_root / _generated_test_relpath_from_source(rel_source, generated_dir=generated_dir)
+    return matched_root / _generated_test_relpath_from_source(
+        rel_source, generated_dir=generated_dir,
+    )
 
 
 def _ensure_init_files(project_dir: Path, relpath: Path) -> None:

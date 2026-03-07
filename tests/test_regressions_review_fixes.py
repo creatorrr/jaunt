@@ -37,7 +37,7 @@ def _restore_modules(prefixes: list[str], *, before: dict[str, object | None]) -
             sys.modules.pop(name, None)
     for name, module in before.items():
         if module is not None:
-            sys.modules[name] = module
+            sys.modules[name] = module  # type: ignore[assignment]
 
 
 def _entry(*, module: str, qualname: str, source_file: str) -> SpecEntry:
@@ -113,7 +113,10 @@ def _make_cli_test_project(root: Path, *, test_root: str = "tests") -> tuple[Pat
 
 def test_cli_test_json_reports_generation_failures(tmp_path: Path, monkeypatch, capsys) -> None:
     project, prefix = _make_cli_test_project(tmp_path)
-    before = {prefix: sys.modules.get(prefix), f"{prefix}.specs_mod": sys.modules.get(f"{prefix}.specs_mod")}
+    before = {
+        prefix: sys.modules.get(prefix),
+        f"{prefix}.specs_mod": sys.modules.get(f"{prefix}.specs_mod"),
+    }
     orig_sys_path = list(sys.path)
     monkeypatch.setattr(jaunt.cli, "_build_backend", lambda cfg: BadBackend())
 
@@ -141,7 +144,10 @@ def test_cli_test_json_reports_generation_failures(tmp_path: Path, monkeypatch, 
 
 def test_cli_test_honors_nondefault_test_root(tmp_path: Path, monkeypatch) -> None:
     project, prefix = _make_cli_test_project(tmp_path, test_root="t")
-    before = {prefix: sys.modules.get(prefix), f"{prefix}.specs_mod": sys.modules.get(f"{prefix}.specs_mod")}
+    before = {
+        prefix: sys.modules.get(prefix),
+        f"{prefix}.specs_mod": sys.modules.get(f"{prefix}.specs_mod"),
+    }
     orig_sys_path = list(sys.path)
     monkeypatch.setattr(jaunt.cli, "_build_backend", lambda cfg: GoodBackend())
 
@@ -247,13 +253,13 @@ def test_evict_modules_for_import_reloads_same_named_module_from_new_project(
     before = {"pkg": sys.modules.get("pkg"), "pkg.mod": sys.modules.get("pkg.mod")}
 
     monkeypatch.syspath_prepend(str(first_root))
-    import pkg.mod as first_mod
+    import pkg.mod as first_mod  # type: ignore[import-not-found]
 
     assert first_mod.VALUE == 1
 
     monkeypatch.syspath_prepend(str(second_root))
     evict_modules_for_import(module_names=["pkg", "pkg.mod"], roots=[second_root])
-    import pkg.mod as second_mod
+    import pkg.mod as second_mod  # type: ignore[import-not-found]
 
     assert second_mod.VALUE == 2
     _restore_modules(["pkg"], before=before)
@@ -273,8 +279,14 @@ def test_filter_spec_files_honors_custom_generated_dir() -> None:
 def test_build_cycle_runner_propagates_no_cache(monkeypatch) -> None:
     calls: list[tuple[str, bool]] = []
 
-    monkeypatch.setattr(jaunt.cli, "cmd_build", lambda args: calls.append(("build", bool(args.no_cache))) or 0)
-    monkeypatch.setattr(jaunt.cli, "cmd_test", lambda args: calls.append(("test", bool(args.no_cache))) or 0)
+    monkeypatch.setattr(
+        jaunt.cli, "cmd_build",
+        lambda args: calls.append(("build", bool(args.no_cache))) or 0,
+    )
+    monkeypatch.setattr(
+        jaunt.cli, "cmd_test",
+        lambda args: calls.append(("test", bool(args.no_cache))) or 0,
+    )
 
     args = jaunt.cli.parse_args(["watch", "--test", "--no-cache"])
     runner = build_cycle_runner(args, run_tests=True)
