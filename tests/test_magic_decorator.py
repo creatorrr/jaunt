@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import abc
+import importlib.util
 import inspect
+import sys
+import textwrap
 from collections.abc import Generator
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -196,6 +200,86 @@ def test_runtime_respects_generated_dir_env_var(monkeypatch: pytest.MonkeyPatch)
     assert any("__custom_gen__" in c for c in import_calls), (
         f"Expected import to use __custom_gen__, got: {import_calls}"
     )
+
+
+def _import_module_from_source(tmp_path: Path, module_name: str, source: str):
+    path = tmp_path / f"{module_name}.py"
+    path.write_text(textwrap.dedent(source), encoding="utf-8")
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_nested_decorators_capture_app_and_post_metadata(tmp_path: Path) -> None:
+    module_name = "tmp_nested_magic_metadata"
+    src = """
+    import functools
+    import jaunt
+
+    class App:
+        def post(self, fn):
+            @functools.wraps(fn)
+            def wrapped(*args, **kwargs):
+                return fn(*args, **kwargs)
+            return wrapped
+
+    app = App()
+
+    def logger(fn):
+        @functools.wraps(fn)
+        def wrapped(*args, **kwargs):
+            return fn(*args, **kwargs)
+        return wrapped
+
+    @logger
+    @jaunt.magic()
+    @app.post
+    def handler(req: str) -> str:
+        return req
+    """
+    try:
+        _import_module_from_source(tmp_path, module_name, src)
+        ref = normalize_spec_ref(f"{module_name}:handler")
+        entry = get_magic_registry()[ref]
+        seen = {r.symbol_path for r in entry.decorator_api_records}
+        assert "app" in seen
+        assert "app.post" in seen
+        assert entry.effective_signature is not None
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_magic_source_fallback_for_closure_wrapped_decorators(tmp_path: Path) -> None:
+    module_name = "tmp_nested_magic_source_fallback"
+    src = """
+    import jaunt
+
+    class App:
+        def post(self, fn):
+            def wrapped(*args, **kwargs):
+                return fn(*args, **kwargs)
+            return wrapped
+
+    app = App()
+
+    @jaunt.magic()
+    @app.post
+    def handler(req: str) -> str:
+        return req
+    """
+    try:
+        _import_module_from_source(tmp_path, module_name, src)
+        ref = normalize_spec_ref(f"{module_name}:handler")
+        entry = get_magic_registry()[ref]
+        assert entry.qualname == "handler"
+        assert entry.effective_signature == "(req: str) -> str"
+        assert entry.effective_signature_source == "original"
+        assert any("weak decorator type metadata" in w for w in entry.decorator_warnings)
+    finally:
+        sys.modules.pop(module_name, None)
 
 
 # ---------------------------------------------------------------------------

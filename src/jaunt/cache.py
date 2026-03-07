@@ -75,6 +75,13 @@ def cache_key_from_context(
         json.dumps(dict(sorted(ctx.dependency_generated_modules.items())), sort_keys=True).encode()
     )
     h.update(b"\x00")
+    h.update(
+        json.dumps(
+            {str(k): v for k, v in sorted(ctx.decorator_apis.items(), key=lambda x: str(x[0]))},
+            sort_keys=True,
+        ).encode()
+    )
+    h.update(b"\x00")
     h.update((ctx.skills_block or "").encode())
     return h.hexdigest()
 

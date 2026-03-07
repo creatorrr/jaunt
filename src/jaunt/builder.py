@@ -441,11 +441,27 @@ async def run_build(
 
         spec_sources: dict[SpecRef, str] = {}
         decorator_prompts: dict[SpecRef, str] = {}
+        decorator_apis: dict[SpecRef, str] = {}
         for e in entries:
             spec_sources[e.spec_ref] = extract_source_segment(e)
             p = e.decorator_kwargs.get("prompt")
             if isinstance(p, str) and p:
                 decorator_prompts[e.spec_ref] = p
+            lines: list[str] = []
+            if e.effective_signature is not None:
+                src = e.effective_signature_source or "unknown"
+                lines.append(f"effective_signature[{src}]: {e.effective_signature}")
+            for rec in e.decorator_api_records:
+                lines.append(
+                    f"{rec.symbol_path} ({rec.position}) "
+                    f"target={rec.resolved_target or '<unknown>'} "
+                    f"signature={rec.signature or '<missing>'} "
+                    f"quality={rec.annotation_quality}"
+                )
+            for w in e.decorator_warnings:
+                lines.append(f"warning: {w}")
+            if lines:
+                decorator_apis[e.spec_ref] = "\n".join(lines)
 
         dep_apis, dep_gen = _collect_dependency_context(module_name)
 
@@ -460,6 +476,7 @@ async def run_build(
             decorator_prompts=decorator_prompts,
             dependency_apis=dep_apis,
             dependency_generated_modules=dep_gen,
+            decorator_apis=decorator_apis,
             skills_block=skills_block,
             async_runner=async_runner,
         )

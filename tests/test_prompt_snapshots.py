@@ -46,6 +46,13 @@ def _ctx(kind: str) -> ModuleSpecContext:
         decorator_prompts={foo_ref: "Prefer straightforward, readable code."},
         dependency_apis={dep_ref: "def normalize(s: str) -> str: ...\n"},
         dependency_generated_modules={"pkg.deps": "def normalize(s: str) -> str:\n    return s\n"},
+        decorator_apis={
+            foo_ref: (
+                "effective_signature[original]: (x: int) -> int\n"
+                "app.post (below_magic) target=framework.App.post "
+                "signature=(fn: object) -> object quality=good"
+            )
+        },
     )
 
 

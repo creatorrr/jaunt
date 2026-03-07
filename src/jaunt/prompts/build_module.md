@@ -16,9 +16,14 @@ How to read the specs above:
 Dependency APIs (callable signatures/docstrings):
 {{deps_api_block}}
 
+Decorator Dependency APIs (reference only):
+{{decorator_apis_block}}
+
 How to use dependencies:
 - Each Dependency API entry key is like `<module>:<qualname>`. Import the name from `<module>`.
 - Only import dependencies listed above — do not guess or fabricate module paths.
+- Decorator Dependency APIs are extra typing/behavior context; do not import those keys directly.
+- If a spec includes `effective_signature[...]`, treat that as the strongest signature guidance.
 
 Previously generated dependency modules (for reference only):
 {{deps_generated_block}}

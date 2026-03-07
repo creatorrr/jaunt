@@ -107,6 +107,15 @@ def test_build_module_import_guidance(monkeypatch) -> None:
     assert "<module>" in text or "module" in text
 
 
+def test_build_module_decorator_api_guidance(monkeypatch) -> None:
+    """Build user prompt should explain decorator-derived API context."""
+    backend = _backend(monkeypatch)
+    _system, user = _render(backend, _build_ctx())
+    text = user.lower()
+    assert "decorator dependency apis" in text
+    assert "effective_signature" in text
+
+
 def test_build_module_spec_reading_guidance(monkeypatch) -> None:
     """Build user prompt should tell the LLM how to read specs (docstrings, signatures)."""
     backend = _backend(monkeypatch)

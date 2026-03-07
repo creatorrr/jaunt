@@ -56,6 +56,76 @@ def test_build_spec_graph_explicit_deps_normalizes_and_ignores_missing() -> None
     assert g[b.spec_ref] == set()
 
 
+def test_build_spec_graph_includes_auto_deps_when_inference_enabled() -> None:
+    a = _entry(
+        kind="magic",
+        spec_ref="pkg.a:SpecA",
+        module="pkg.a",
+        qualname="SpecA",
+    )
+    b = _entry(kind="magic", spec_ref="pkg.b:SpecB", module="pkg.b", qualname="SpecB")
+    a = SpecEntry(
+        kind=a.kind,
+        spec_ref=a.spec_ref,
+        module=a.module,
+        qualname=a.qualname,
+        source_file=a.source_file,
+        obj=a.obj,
+        decorator_kwargs=a.decorator_kwargs,
+        auto_deps=(b.spec_ref,),
+    )
+    specs = {a.spec_ref: a, b.spec_ref: b}
+    g = build_spec_graph(specs, infer_default=True)
+    assert b.spec_ref in g[a.spec_ref]
+
+
+def test_build_spec_graph_ignores_auto_deps_when_inference_disabled() -> None:
+    a = _entry(
+        kind="magic",
+        spec_ref="pkg.a:SpecA",
+        module="pkg.a",
+        qualname="SpecA",
+        decorator_kwargs={"infer_deps": False},
+    )
+    b = _entry(kind="magic", spec_ref="pkg.b:SpecB", module="pkg.b", qualname="SpecB")
+    a = SpecEntry(
+        kind=a.kind,
+        spec_ref=a.spec_ref,
+        module=a.module,
+        qualname=a.qualname,
+        source_file=a.source_file,
+        obj=a.obj,
+        decorator_kwargs=a.decorator_kwargs,
+        auto_deps=(b.spec_ref,),
+    )
+    specs = {a.spec_ref: a, b.spec_ref: b}
+    g = build_spec_graph(specs, infer_default=True)
+    assert b.spec_ref not in g[a.spec_ref]
+
+
+def test_build_spec_graph_collects_decorator_warnings() -> None:
+    a = _entry(
+        kind="magic",
+        spec_ref="pkg.a:SpecA",
+        module="pkg.a",
+        qualname="SpecA",
+    )
+    a = SpecEntry(
+        kind=a.kind,
+        spec_ref=a.spec_ref,
+        module=a.module,
+        qualname=a.qualname,
+        source_file=a.source_file,
+        obj=a.obj,
+        decorator_kwargs=a.decorator_kwargs,
+        decorator_warnings=("weak decorator type metadata",),
+    )
+    specs = {a.spec_ref: a}
+    warnings: list[str] = []
+    build_spec_graph(specs, infer_default=True, warnings=warnings)
+    assert any("weak decorator type metadata" in w for w in warnings)
+
+
 def test_collapse_to_module_dag_no_self_edges_and_all_keys_present() -> None:
     a = normalize_spec_ref("m.one:A")
     b = normalize_spec_ref("m.one:B")

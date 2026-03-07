@@ -59,9 +59,17 @@
         def normalize(s: str) -> str: ...
         
         
+        Decorator Dependency APIs (reference only):
+        # pkg.specs:foo
+        effective_signature[original]: (x: int) -> int
+        app.post (below_magic) target=framework.App.post signature=(fn: object) -> object quality=good
+        
+        
         How to use dependencies:
         - Each Dependency API entry key is like `<module>:<qualname>`. Import the name from `<module>`.
         - Only import dependencies listed above — do not guess or fabricate module paths.
+        - Decorator Dependency APIs are extra typing/behavior context; do not import those keys directly.
+        - If a spec includes `effective_signature[...]`, treat that as the strongest signature guidance.
         
         Previously generated dependency modules (for reference only):
         # pkg.deps

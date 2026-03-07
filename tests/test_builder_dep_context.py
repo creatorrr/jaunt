@@ -7,7 +7,7 @@ import textwrap
 from pathlib import Path
 
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
-from jaunt.registry import SpecEntry
+from jaunt.registry import DecoratorApiRecord, SpecEntry
 from jaunt.spec_ref import SpecRef
 
 
@@ -75,6 +75,18 @@ def test_dependency_apis_populated_for_downstream_modules(tmp_path) -> None:
         source_file=file_b,
         obj=lambda: None,
         decorator_kwargs={},
+        decorator_api_records=(
+            DecoratorApiRecord(
+                symbol_path="app.post",
+                expression="app.post",
+                position="below_magic",
+                resolved_target="pkg.decorators.App.post",
+                signature="(fn: object) -> object",
+                annotation_quality="good",
+            ),
+        ),
+        effective_signature="(req: str) -> str",
+        effective_signature_source="original",
     )
 
     specs = {ref_a: entry_a, ref_b: entry_b}
@@ -118,3 +130,8 @@ def test_dependency_apis_populated_for_downstream_modules(tmp_path) -> None:
 
     # dependency_generated_modules should contain generated source for pkg.alpha.
     assert "pkg.alpha" in beta_ctx.dependency_generated_modules
+
+    # decorator_apis should include per-spec decorator metadata for downstream prompting.
+    assert ref_b in beta_ctx.decorator_apis
+    assert "effective_signature" in beta_ctx.decorator_apis[ref_b]
+    assert "app.post" in beta_ctx.decorator_apis[ref_b]

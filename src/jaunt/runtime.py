@@ -12,15 +12,27 @@ import importlib
 import inspect
 import os
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from types import ModuleType
 from typing import Any, TypeVar, cast
 
+from jaunt.decorator_analysis import analyze_magic_decorators, resolve_qualname_for_line
 from jaunt.errors import JauntError, JauntNotBuiltError
 from jaunt.paths import spec_module_to_generated_module
 from jaunt.registry import SpecEntry, register_magic, register_test
-from jaunt.spec_ref import SpecRef, spec_ref_from_object
+from jaunt.spec_ref import SpecRef, normalize_spec_ref, spec_ref_from_object
 
 F = TypeVar("F", bound=Callable[..., object])
+
+
+@dataclass(frozen=True, slots=True)
+class _MagicIdentity:
+    spec_ref: SpecRef
+    module: str
+    qualname: str
+    name: str
+    source_file: str
+    class_name: str | None
 
 
 def _classify_qualname(obj: object) -> str | None:
@@ -59,6 +71,69 @@ def _source_file(obj: object) -> str:
     return "<unknown>"
 
 
+def _resolve_magic_identity_from_callsite() -> _MagicIdentity | None:
+    frame = inspect.currentframe()
+    if (
+        frame is None
+        or frame.f_back is None
+        or frame.f_back.f_back is None
+        or frame.f_back.f_back.f_back is None
+    ):
+        return None
+    callsite = frame.f_back.f_back.f_back
+
+    # Fallback is only for decorator evaluation at module/class body scope.
+    if callsite.f_code.co_name != "<module>" and "__module__" not in callsite.f_locals:
+        return None
+
+    source_file = callsite.f_code.co_filename
+    module = callsite.f_globals.get("__name__")
+    if not isinstance(module, str) or not module:
+        return None
+
+    mapped = resolve_qualname_for_line(source_file=source_file, line=callsite.f_lineno)
+    if mapped is None:
+        return None
+    qualname, class_name = mapped
+    try:
+        spec_ref = normalize_spec_ref(f"{module}:{qualname}")
+    except Exception:
+        return None
+    return _MagicIdentity(
+        spec_ref=spec_ref,
+        module=module,
+        qualname=qualname,
+        name=qualname.rsplit(".", 1)[-1],
+        source_file=source_file,
+        class_name=class_name,
+    )
+
+
+def _resolve_magic_identity(obj: object) -> _MagicIdentity:
+    try:
+        class_name = _classify_qualname(obj)
+        spec_ref = spec_ref_from_object(obj)
+        o = cast(Any, obj)
+        module = cast(str, o.__module__)
+        qualname = cast(str, o.__qualname__)
+        name = cast(str, o.__name__) if hasattr(o, "__name__") else qualname
+        return _MagicIdentity(
+            spec_ref=spec_ref,
+            module=module,
+            qualname=qualname,
+            name=name,
+            source_file=_source_file(obj),
+            class_name=class_name,
+        )
+    except Exception:
+        fallback = _resolve_magic_identity_from_callsite()
+        if fallback is not None:
+            return fallback
+        # Re-run classifier for consistent error messaging.
+        _classify_qualname(obj)
+        raise
+
+
 def _get_generated_dir() -> str:
     """Return the generated directory name, respecting JAUNT_GENERATED_DIR env var."""
     return os.environ.get("JAUNT_GENERATED_DIR", "__generated__")
@@ -94,13 +169,12 @@ def magic(
                 "    def my_method(cls): ..."
             )
 
-        class_name = _classify_qualname(obj)
-
-        spec_ref = spec_ref_from_object(obj)
-        o = cast(Any, obj)
-        module = cast(str, o.__module__)
-        qualname = cast(str, o.__qualname__)
-        name = cast(str, o.__name__) if hasattr(o, "__name__") else qualname
+        ident = _resolve_magic_identity(obj)
+        spec_ref = ident.spec_ref
+        module = ident.module
+        qualname = ident.qualname
+        name = ident.name
+        class_name = ident.class_name
 
         decorator_kwargs: dict[str, object] = {}
         if deps is not None:
@@ -110,15 +184,27 @@ def magic(
         if infer_deps is not None:
             decorator_kwargs["infer_deps"] = infer_deps
 
+        analysis = analyze_magic_decorators(
+            module=module,
+            qualname=qualname,
+            source_file=ident.source_file,
+            decorated_obj=obj,
+        )
+
         entry = SpecEntry(
             kind="magic",
             spec_ref=spec_ref,
             module=module,
             qualname=qualname,
-            source_file=_source_file(obj),
+            source_file=ident.source_file,
             obj=obj,
             decorator_kwargs=decorator_kwargs,
             class_name=class_name,
+            auto_deps=analysis.auto_deps,
+            decorator_api_records=analysis.records,
+            effective_signature=analysis.effective_signature,
+            effective_signature_source=analysis.effective_signature_source,
+            decorator_warnings=analysis.warnings,
         )
         register_magic(entry)
 

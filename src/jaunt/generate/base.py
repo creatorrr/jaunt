@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from jaunt.spec_ref import SpecRef
@@ -21,6 +21,7 @@ class ModuleSpecContext:
     decorator_prompts: dict[SpecRef, str]
     dependency_apis: dict[SpecRef, str]
     dependency_generated_modules: dict[str, str]
+    decorator_apis: dict[SpecRef, str] = field(default_factory=dict)
     skills_block: str = ""
     async_runner: str = "asyncio"
 

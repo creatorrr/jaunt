@@ -226,6 +226,10 @@ class AnthropicBackend(GeneratorBackend):
         for mod, src in sorted(ctx.dependency_generated_modules.items(), key=lambda kv: kv[0]):
             deps_gen_items.append((mod, src))
 
+        decorator_api_items: list[tuple[str, str]] = []
+        for ref, api in sorted(ctx.decorator_apis.items(), key=lambda kv: str(kv[0])):
+            decorator_api_items.append((str(ref), api))
+
         err_items: list[tuple[str, str]] = []
         if extra_error_context:
             for i, line in enumerate(extra_error_context, start=1):
@@ -238,6 +242,7 @@ class AnthropicBackend(GeneratorBackend):
             "specs_block": fmt_kv_block(spec_items),
             "deps_api_block": fmt_kv_block(deps_api_items),
             "deps_generated_block": fmt_kv_block(deps_gen_items),
+            "decorator_apis_block": fmt_kv_block(decorator_api_items),
             "error_context_block": fmt_kv_block(err_items),
             "async_test_info": async_test_info(ctx.async_runner),
         }

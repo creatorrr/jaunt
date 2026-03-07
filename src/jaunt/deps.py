@@ -232,6 +232,16 @@ def build_spec_graph(
         if not infer_enabled:
             continue
 
+        # Runtime decorator analysis can contribute extra inferred deps.
+        for dep_ref in entry.auto_deps:
+            if dep_ref == spec_ref:
+                continue
+            if dep_ref in specs:
+                deps_out.add(dep_ref)
+
+        if warnings is not None and entry.decorator_warnings:
+            warnings.extend(entry.decorator_warnings)
+
         # Inference is strictly best-effort; never fail the build because it
         # cannot parse or resolve names.
         try:

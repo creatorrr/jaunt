@@ -13,6 +13,16 @@ from jaunt.spec_ref import SpecRef
 
 
 @dataclass(frozen=True, slots=True)
+class DecoratorApiRecord:
+    symbol_path: str
+    expression: str
+    position: Literal["above_magic", "below_magic"]
+    resolved_target: str | None = None
+    signature: str | None = None
+    annotation_quality: Literal["good", "weak", "missing", "unknown"] = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
 class SpecEntry:
     kind: Literal["magic", "test"]
     spec_ref: SpecRef
@@ -22,6 +32,11 @@ class SpecEntry:
     obj: object
     decorator_kwargs: dict[str, object]
     class_name: str | None = None
+    auto_deps: tuple[SpecRef, ...] = ()
+    decorator_api_records: tuple[DecoratorApiRecord, ...] = ()
+    effective_signature: str | None = None
+    effective_signature_source: Literal["decorated", "original"] | None = None
+    decorator_warnings: tuple[str, ...] = ()
 
 
 _MAGIC_REGISTRY: dict[SpecRef, SpecEntry] = {}
