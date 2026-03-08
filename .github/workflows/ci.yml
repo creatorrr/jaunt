@@ -21,7 +21,7 @@ jobs:
         with:
           ref: ${{ github.head_ref || github.ref_name }}
       - uses: astral-sh/setup-uv@v5
-      - run: uv sync --frozen
+      - run: uv sync --frozen --all-extras
       - name: Ruff fix
         run: uv run ruff check --fix --unsafe-fixes .
       - name: Ruff format
@@ -41,7 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - run: uv sync --frozen
+      - run: uv sync --frozen --all-extras
       - name: ty
         run: uv run ty check
 
@@ -50,7 +50,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - run: uv sync --frozen
+      - run: uv sync --frozen --all-extras
       - name: Pytest
         run: uv run pytest
 
@@ -74,7 +74,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - run: uv sync --frozen
+      - run: uv sync --frozen --all-extras
       - name: Build ${{ matrix.example }}
         working-directory: ${{ matrix.example }}
         run: uv run --project ${{ github.workspace }} jaunt build

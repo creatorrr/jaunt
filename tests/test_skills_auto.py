@@ -210,6 +210,35 @@ def test_skill_generation_runs_concurrently(tmp_path: Path, monkeypatch) -> None
     )
 
 
+def test_skills_block_includes_non_pypi_user_skills(tmp_path: Path, monkeypatch) -> None:
+    """Regression: user skills should appear in skills_block even with zero PyPI dists."""
+    # Create a user skill (NOT matching any detected PyPI dist)
+    _write(
+        tmp_path / ".agents" / "skills" / "my-internal-api" / "SKILL.md",
+        "# my-internal-api\nInternal API docs\n",
+    )
+
+    import jaunt.skills_auto as sa
+
+    # No PyPI dists detected at all
+    monkeypatch.setattr(
+        sa,
+        "discover_external_distributions_with_warnings",
+        lambda *_a, **_k: ({}, []),
+    )
+
+    res = asyncio.run(
+        ensure_pypi_skills_and_block(
+            project_root=tmp_path,
+            source_roots=[],
+            generated_dir="__generated__",
+            llm=LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY"),
+        )
+    )
+    assert "Internal API docs" in res.skills_block
+    assert "my-internal-api" in res.skills_block
+
+
 def test_user_managed_skill_never_overwritten(tmp_path: Path, monkeypatch) -> None:
     dist = "external-lib"
     version = "9.9.9"

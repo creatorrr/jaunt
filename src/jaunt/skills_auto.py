@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import os
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from jaunt.external_imports import discover_external_distributions_with_warnings, pep503_normalize
 from jaunt.pypi import PyPIReadmeError, fetch_readme
+from jaunt.skill_manager import _atomic_write_text
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Sequence
@@ -22,6 +21,7 @@ _HEADER_PREFIX = "<!-- jaunt:skill=pypi"
 class SkillsAutoResult:
     skills_block: str
     warnings: list[str]
+    generation_failures: int = 0
 
 
 def skill_md_path(*, project_root: Path, dist: str) -> Path:
@@ -56,27 +56,6 @@ def _format_generated_skill_file(*, dist: str, version: str, body_md: str) -> st
     return hdr + "\n" + body + "\n"
 
 
-def _atomic_write_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(
-        dir=str(path.parent),
-        prefix=".jaunt-tmp-",
-        suffix=".md",
-        text=True,
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    finally:
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
-
-
 async def ensure_pypi_skills_and_block(
     *,
     project_root: Path,
@@ -89,16 +68,43 @@ async def ensure_pypi_skills_and_block(
     Returns a single concatenated injection block to pass to the code generator.
     """
 
-    import asyncio
-
     warnings: list[str] = []
     dists, scan_warnings = discover_external_distributions_with_warnings(
         source_roots, generated_dir=generated_dir
     )
     warnings.extend(scan_warnings)
 
-    if not dists:
-        return SkillsAutoResult(skills_block="", warnings=warnings)
+    generation_failures = 0
+    if dists:
+        # Phase 1+2: generate skills for PyPI dists that need it.
+        generation_failures = await _generate_pypi_skills(
+            project_root=project_root, dists=dists, llm=llm, warnings=warnings
+        )
+
+    # Phase 3: Build injection block from ALL skills on disk (auto + user).
+    from jaunt.skill_manager import build_skills_block
+
+    skills_block = build_skills_block(project_root, pypi_dists=dists)
+    return SkillsAutoResult(
+        skills_block=skills_block, warnings=warnings, generation_failures=generation_failures
+    )
+
+
+async def _generate_pypi_skills(
+    *,
+    project_root: Path,
+    dists: dict[str, str],
+    llm: LLMConfig,
+    warnings: list[str],
+) -> int:
+    """Phase 1+2: identify stale PyPI dists and generate skills concurrently.
+
+    Returns the number of dists that failed to generate.
+    """
+
+    import asyncio
+
+    failures = 0
 
     # Phase 1: identify which dists need (re)generation.
     to_generate: list[tuple[str, str, Path]] = []  # (dist, version, path)
@@ -140,21 +146,23 @@ async def ensure_pypi_skills_and_block(
             generator = OpenAISkillGenerator(llm)
         except Exception as e:  # noqa: BLE001
             warnings.append(f"Failed initializing OpenAI skill generator: {type(e).__name__}: {e}")
+            failures += len(to_generate)
 
         if generator is not None:
 
-            async def _generate_one(dist: str, version: str, path: Path) -> None:
+            async def _generate_one(dist: str, version: str, path: Path) -> bool:
+                """Returns True on success, False on failure."""
                 try:
                     readme, readme_type = fetch_readme(dist, version)
                 except PyPIReadmeError as e:
                     warnings.append(str(e))
-                    return
+                    return False
                 except Exception as e:  # noqa: BLE001
                     warnings.append(
                         f"Failed fetching PyPI README for {dist}=={version}: "
                         f"{type(e).__name__}: {e}"
                     )
-                    return
+                    return False
 
                 try:
                     md = await generator.generate_skill_markdown(dist, version, readme, readme_type)
@@ -162,7 +170,7 @@ async def ensure_pypi_skills_and_block(
                     warnings.append(
                         f"Failed generating skill for {dist}=={version}: {type(e).__name__}: {e}"
                     )
-                    return
+                    return False
 
                 try:
                     content = _format_generated_skill_file(dist=dist, version=version, body_md=md)
@@ -172,32 +180,14 @@ async def ensure_pypi_skills_and_block(
                         f"Failed writing skill for {dist}=={version} to {path}: "
                         f"{type(e).__name__}: {e}"
                     )
+                    return False
+
+                return True
 
             tasks = [_generate_one(dist, version, path) for dist, version, path in to_generate]
-            await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for r in results:
+                if r is not True:
+                    failures += 1
 
-    # Build injection block from whatever is on disk.
-    sections: list[str] = []
-    for dist, version in sorted(dists.items(), key=lambda kv: pep503_normalize(kv[0])):
-        path = skill_md_path(project_root=project_root, dist=dist)
-        if not path.exists():
-            continue
-        try:
-            txt = path.read_text(encoding="utf-8")
-        except Exception as e:  # noqa: BLE001
-            warnings.append(f"failed reading skill for {dist}: {type(e).__name__}: {e}")
-            continue
-
-        lines = txt.splitlines()
-        if lines and _parse_generated_header(lines[0]) is not None:
-            body = "\n".join(lines[1:]).lstrip("\n")
-        else:
-            body = txt
-
-        body = (body or "").strip()
-        if not body:
-            continue
-        sections.append(f"## {dist}=={version}\n{body}\n")
-
-    skills_block = "\n".join(sections).strip()
-    return SkillsAutoResult(skills_block=skills_block, warnings=warnings)
+    return failures
