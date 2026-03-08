@@ -83,7 +83,7 @@ class AnthropicBackend(GeneratorBackend):
             }
 
         try:
-            from anthropic import AsyncAnthropic  # type: ignore[import-untyped]
+            from anthropic import AsyncAnthropic
         except ImportError as e:
             raise JauntConfigError(
                 "The 'anthropic' package is required for provider='anthropic'. "
