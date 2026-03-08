@@ -54,10 +54,7 @@ def _ctx(kind: str) -> ModuleSpecContext:
             )
         },
         module_contract_block=(
-            "# Mark\n"
-            "kind: class\n"
-            "signature: class Mark(StrEnum)\n"
-            "doc: Player mark.\n"
+            "# Mark\nkind: class\nsignature: class Mark(StrEnum)\ndoc: Player mark.\n"
         ),
         module_context_digest="facefeed",
     )

@@ -156,11 +156,7 @@ def detect_stale_modules(
 
         on_disk = _normalize_digest(extract_module_digest(existing))
         computed = _normalize_digest(module_digest(module_name, entries, specs, spec_graph))
-        if (
-            on_disk is None
-            or computed is None
-            or on_disk != computed
-        ):
+        if on_disk is None or computed is None or on_disk != computed:
             stale.add(module_name)
             continue
         if generation_fingerprint:
@@ -619,14 +615,14 @@ async def run_build(
 
         digest = module_digest(module_name, entries, specs, spec_graph)
         header_fields = {
-                "tool_version": _tool_version(),
-                "kind": "build",
-                "source_module": module_name,
-                "module_digest": digest,
-                "generation_fingerprint": generation_fingerprint,
-                "module_context_digest": module_contract.digest,
-                "spec_refs": [str(e.spec_ref) for e in entries],
-            }
+            "tool_version": _tool_version(),
+            "kind": "build",
+            "source_module": module_name,
+            "module_digest": digest,
+            "generation_fingerprint": generation_fingerprint,
+            "module_context_digest": module_contract.digest,
+            "spec_refs": [str(e.spec_ref) for e in entries],
+        }
 
         write_generated_module(
             package_dir=package_dir,

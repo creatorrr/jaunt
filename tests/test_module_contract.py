@@ -57,18 +57,14 @@ def test_module_contract_digest_changes_when_handwritten_helper_changes(tmp_path
     source = tmp_path / "specs.py"
     _write(
         source,
-        "HELPER = 1\n\n"
-        "def play() -> str:\n"
-        "    raise RuntimeError\n",
+        "HELPER = 1\n\ndef play() -> str:\n    raise RuntimeError\n",
     )
     entry = _entry(module="pkg.specs", qualname="play", source_file=str(source))
     first = build_module_contract(entries=[entry], expected_names=["play"])
 
     _write(
         source,
-        "HELPER = 2\n\n"
-        "def play() -> str:\n"
-        "    raise RuntimeError\n",
+        "HELPER = 2\n\ndef play() -> str:\n    raise RuntimeError\n",
     )
     second = build_module_contract(entries=[entry], expected_names=["play"])
 

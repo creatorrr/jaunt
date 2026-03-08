@@ -270,8 +270,7 @@ def _validate_public_api_only_test(
             for alias in child.names:
                 mod_name = alias.name
                 if any(
-                    mod_name == mod or mod_name.startswith(mod + ".")
-                    for mod in forbidden_modules
+                    mod_name == mod or mod_name.startswith(mod + ".") for mod in forbidden_modules
                 ):
                     errors.append(
                         f"{node.name}: public_api_only tests must not import {mod_name!r}."

@@ -52,11 +52,7 @@ def generation_fingerprint_from_config(
         mode = cfg.aider.test_mode if cfg.agent.engine == "aider" else ""
     editor_model = cfg.aider.editor_model if cfg.agent.engine == "aider" else ""
     reasoning_effort = cfg.llm.reasoning_effort if cfg.agent.engine == "aider" else ""
-    runtime_parts = (
-        aider_generation_fingerprint_parts(kind)
-        if cfg.agent.engine == "aider"
-        else []
-    )
+    runtime_parts = aider_generation_fingerprint_parts(kind) if cfg.agent.engine == "aider" else []
 
     return build_generation_fingerprint(
         engine=cfg.agent.engine,

@@ -874,8 +874,7 @@ def cmd_test(args: argparse.Namespace) -> int:
             )
             build_magic_module_dag = collapse_to_module_dag(build_magic_spec_graph)
             magic_dependency_apis = {
-                ref: extract_source_segment(entry)
-                for ref, entry in build_magic_specs.items()
+                ref: extract_source_segment(entry) for ref, entry in build_magic_specs.items()
             }
         else:
             # cmd_build() already imported and registered magic specs.
@@ -887,8 +886,7 @@ def cmd_test(args: argparse.Namespace) -> int:
             )
             build_magic_module_dag = collapse_to_module_dag(build_magic_spec_graph)
             magic_dependency_apis = {
-                ref: extract_source_segment(entry)
-                for ref, entry in build_magic_specs.items()
+                ref: extract_source_segment(entry) for ref, entry in build_magic_specs.items()
             }
 
         registry.clear_registries()

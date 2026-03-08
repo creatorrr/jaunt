@@ -198,6 +198,5 @@ def test_generated():
     assert backend.extra_contexts[0] is None
     assert backend.extra_contexts[1] is not None
     assert any(
-        "assert False" in line or "FAILED" in line
-        for line in backend.extra_contexts[1] or []
+        "assert False" in line or "FAILED" in line for line in backend.extra_contexts[1] or []
     )
