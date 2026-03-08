@@ -13,6 +13,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from jaunt.eval_agent_cases import (
+    BuiltinAgentEvalCase,
+    BuiltinAgentEvalStep,
+    get_builtin_agent_eval_cases,
+)
 from jaunt.eval_cases import BuiltinEvalCase, get_builtin_eval_cases
 
 _BUILD_TIMEOUT_S = 300.0
@@ -20,6 +25,7 @@ _ASSERT_TIMEOUT_S = 120.0
 _TYPECHECK_TIMEOUT_S = 120.0
 _EXIT_TYPECHECK_MISSING = 127
 _EXIT_TIMEOUT = 124
+_VALID_EVAL_SUITES = ("codegen", "agent")
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +110,62 @@ class CompareResult:
         return all(t.failed == 0 for t in self.targets)
 
 
+@dataclass(frozen=True, slots=True)
+class AgentEvalCaseResult:
+    case_id: str
+    description: str
+    status: str
+    duration_sec: float
+    skip_reason: str | None
+    steps: dict[str, StepResult]
+    generated_sources: dict[str, str]
+    skill_sources: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class AgentEvalSuiteResult:
+    target: EvalTarget
+    started_at: str
+    finished_at: str
+    duration_sec: float
+    cases: list[AgentEvalCaseResult]
+
+    @property
+    def total(self) -> int:
+        return len(self.cases)
+
+    @property
+    def passed(self) -> int:
+        return sum(1 for c in self.cases if c.status == "passed")
+
+    @property
+    def failed(self) -> int:
+        return sum(1 for c in self.cases if c.status == "failed")
+
+    @property
+    def skipped(self) -> int:
+        return sum(1 for c in self.cases if c.status == "skipped")
+
+    @property
+    def pass_rate(self) -> float:
+        scored = self.passed + self.failed
+        if scored == 0:
+            return 0.0
+        return self.passed / scored
+
+
+@dataclass(frozen=True, slots=True)
+class AgentCompareResult:
+    started_at: str
+    finished_at: str
+    duration_sec: float
+    targets: list[AgentEvalSuiteResult]
+
+    @property
+    def ok(self) -> bool:
+        return all(t.failed == 0 for t in self.targets)
+
+
 def parse_compare_targets(raw_values: list[str]) -> list[EvalTarget]:
     targets: list[EvalTarget] = []
     for value in raw_values:
@@ -164,6 +226,25 @@ def load_cases(selected_case_ids: list[str]) -> list[BuiltinEvalCase]:
     return [by_id[c.case_id] for c in cases if c.case_id in wanted]
 
 
+def load_agent_cases(selected_case_ids: list[str]) -> list[BuiltinAgentEvalCase]:
+    cases = get_builtin_agent_eval_cases()
+    if not selected_case_ids:
+        return cases
+
+    wanted = {case_id.strip() for case_id in selected_case_ids if case_id.strip()}
+    by_id = {c.case_id: c for c in cases}
+    missing = sorted(wanted - set(by_id))
+    if missing:
+        raise ValueError(
+            "Unknown agent eval case(s): "
+            + ", ".join(missing)
+            + ". Use --case with one of: "
+            + ", ".join(sorted(by_id))
+        )
+
+    return [by_id[c.case_id] for c in cases if c.case_id in wanted]
+
+
 def run_eval_suite(
     *,
     target: EvalTarget,
@@ -200,6 +281,49 @@ def run_compare(
     finished_at = _iso_utc_now()
     duration_sec = round(time.perf_counter() - started, 3)
     return CompareResult(
+        started_at=started_at,
+        finished_at=finished_at,
+        duration_sec=duration_sec,
+        targets=suites,
+    )
+
+
+def run_agent_eval_suite(
+    *,
+    target: EvalTarget,
+    cases: list[BuiltinAgentEvalCase],
+) -> AgentEvalSuiteResult:
+    started = time.perf_counter()
+    started_at = _iso_utc_now()
+
+    results = [run_agent_eval_case(target=target, case=case) for case in cases]
+
+    finished_at = _iso_utc_now()
+    duration_sec = round(time.perf_counter() - started, 3)
+    return AgentEvalSuiteResult(
+        target=target,
+        started_at=started_at,
+        finished_at=finished_at,
+        duration_sec=duration_sec,
+        cases=results,
+    )
+
+
+def run_agent_compare(
+    *,
+    targets: list[EvalTarget],
+    cases: list[BuiltinAgentEvalCase],
+) -> AgentCompareResult:
+    started = time.perf_counter()
+    started_at = _iso_utc_now()
+
+    with ThreadPoolExecutor(max_workers=max(1, len(targets))) as pool:
+        futures = [pool.submit(run_agent_eval_suite, target=t, cases=cases) for t in targets]
+        suites = [f.result() for f in futures]
+
+    finished_at = _iso_utc_now()
+    duration_sec = round(time.perf_counter() - started, 3)
+    return AgentCompareResult(
         started_at=started_at,
         finished_at=finished_at,
         duration_sec=duration_sec,
@@ -264,6 +388,52 @@ def run_eval_case(*, target: EvalTarget, case: BuiltinEvalCase) -> EvalCaseResul
         )
 
 
+def run_agent_eval_case(*, target: EvalTarget, case: BuiltinAgentEvalCase) -> AgentEvalCaseResult:
+    started = time.perf_counter()
+
+    missing_pkgs = [pkg for pkg in case.required_packages if _module_missing(pkg)]
+    if missing_pkgs:
+        return AgentEvalCaseResult(
+            case_id=case.case_id,
+            description=case.description,
+            status="skipped",
+            duration_sec=round(time.perf_counter() - started, 3),
+            skip_reason=f"Missing required package(s): {', '.join(missing_pkgs)}",
+            steps={},
+            generated_sources={},
+            skill_sources={},
+        )
+
+    with tempfile.TemporaryDirectory(prefix=f"jaunt-agent-eval-{case.case_id}-") as tmp:
+        project_root = Path(tmp).resolve()
+        _materialize_agent_case_project(project_root=project_root, target=target, case=case)
+
+        steps: dict[str, StepResult] = {}
+        for step in case.steps:
+            if step.kind == "jaunt":
+                result = _run_jaunt_step(project_root, step)
+            else:
+                result = _run_python_step(project_root, step)
+            steps[step.name] = result
+            if not result.ok:
+                break
+
+        generated_sources = _collect_generated_sources(project_root)
+        skill_sources = _collect_skill_sources(project_root)
+
+        status = "passed" if all(step.ok for step in steps.values()) else "failed"
+        return AgentEvalCaseResult(
+            case_id=case.case_id,
+            description=case.description,
+            status=status,
+            duration_sec=round(time.perf_counter() - started, 3),
+            skip_reason=None,
+            steps=steps,
+            generated_sources=generated_sources,
+            skill_sources=skill_sources,
+        )
+
+
 def write_single_target_results(*, suite: EvalSuiteResult, run_dir: Path) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     cases_dir = run_dir / "cases"
@@ -274,6 +444,19 @@ def write_single_target_results(*, suite: EvalSuiteResult, run_dir: Path) -> Non
 
     for case in suite.cases:
         payload = _case_to_dict(case)
+        (cases_dir / f"{case.case_id}.json").write_text(_json(payload), encoding="utf-8")
+
+
+def write_agent_single_target_results(*, suite: AgentEvalSuiteResult, run_dir: Path) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    cases_dir = run_dir / "cases"
+    cases_dir.mkdir(parents=True, exist_ok=True)
+
+    summary = _agent_suite_summary_dict(suite)
+    (run_dir / "summary.json").write_text(_json(summary), encoding="utf-8")
+
+    for case in suite.cases:
+        payload = _agent_case_to_dict(case)
         (cases_dir / f"{case.case_id}.json").write_text(_json(payload), encoding="utf-8")
 
 
@@ -306,9 +489,54 @@ def write_compare_results(*, compare: CompareResult, run_dir: Path) -> None:
     (run_dir / "summary.json").write_text(_json(summary_payload), encoding="utf-8")
 
 
+def write_agent_compare_results(*, compare: AgentCompareResult, run_dir: Path) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    targets_dir = run_dir / "targets"
+    targets_dir.mkdir(parents=True, exist_ok=True)
+
+    for suite in compare.targets:
+        target_dir = targets_dir / suite.target.slug
+        write_agent_single_target_results(suite=suite, run_dir=target_dir)
+
+    comparison_rows = [_agent_comparison_row(s) for s in compare.targets]
+    comparison_payload = {
+        "suite": "agent",
+        "started_at": compare.started_at,
+        "finished_at": compare.finished_at,
+        "duration_sec": compare.duration_sec,
+        "targets": comparison_rows,
+    }
+    (run_dir / "comparison.json").write_text(_json(comparison_payload), encoding="utf-8")
+
+    summary_payload = {
+        "mode": "compare",
+        "suite": "agent",
+        "ok": compare.ok,
+        "started_at": compare.started_at,
+        "finished_at": compare.finished_at,
+        "duration_sec": compare.duration_sec,
+        "targets": comparison_rows,
+    }
+    (run_dir / "summary.json").write_text(_json(summary_payload), encoding="utf-8")
+
+
 def format_suite_table(suite: EvalSuiteResult) -> str:
     lines = [
         f"Eval target: {suite.target.label}",
+        "Cases: "
+        f"{suite.total}  Passed: {suite.passed}  Failed: {suite.failed}  Skipped: {suite.skipped}",
+        "",
+        "case_id                        status   duration_s",
+        "--------------------------------------------------",
+    ]
+    for case in suite.cases:
+        lines.append(f"{case.case_id:<30} {case.status:<8} {case.duration_sec:>10.3f}")
+    return "\n".join(lines)
+
+
+def format_agent_suite_table(suite: AgentEvalSuiteResult) -> str:
+    lines = [
+        f"Agent eval target: {suite.target.label}",
         "Cases: "
         f"{suite.total}  Passed: {suite.passed}  Failed: {suite.failed}  Skipped: {suite.skipped}",
         "",
@@ -336,6 +564,22 @@ def format_compare_table(compare: CompareResult) -> str:
     return "\n".join(lines)
 
 
+def format_agent_compare_table(compare: AgentCompareResult) -> str:
+    lines = [
+        "Agent model comparison",
+        "",
+        "target                              passed failed skipped total pass_rate",
+        "--------------------------------------------------------------------------",
+    ]
+    for suite in compare.targets:
+        lines.append(
+            f"{suite.target.label:<35} "
+            f"{suite.passed:>6} {suite.failed:>6} "
+            f"{suite.skipped:>7} {suite.total:>5} {suite.pass_rate:>8.1%}"
+        )
+    return "\n".join(lines)
+
+
 def make_run_dir(base_out: Path) -> Path:
     stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
     return base_out / stamp
@@ -346,9 +590,22 @@ def suite_to_cli_json(*, suite: EvalSuiteResult, run_dir: Path) -> dict[str, Any
         "command": "eval",
         "ok": suite.failed == 0,
         "mode": "single",
+        "suite": "codegen",
         "run_dir": str(run_dir),
         "summary": _suite_summary_dict(suite),
         "cases": [_case_to_dict(c) for c in suite.cases],
+    }
+
+
+def agent_suite_to_cli_json(*, suite: AgentEvalSuiteResult, run_dir: Path) -> dict[str, Any]:
+    return {
+        "command": "eval",
+        "ok": suite.failed == 0,
+        "mode": "single",
+        "suite": "agent",
+        "run_dir": str(run_dir),
+        "summary": _agent_suite_summary_dict(suite),
+        "cases": [_agent_case_to_dict(c) for c in suite.cases],
     }
 
 
@@ -357,6 +614,7 @@ def compare_to_cli_json(*, compare: CompareResult, run_dir: Path) -> dict[str, A
         "command": "eval",
         "ok": compare.ok,
         "mode": "compare",
+        "suite": "codegen",
         "run_dir": str(run_dir),
         "started_at": compare.started_at,
         "finished_at": compare.finished_at,
@@ -365,8 +623,39 @@ def compare_to_cli_json(*, compare: CompareResult, run_dir: Path) -> dict[str, A
     }
 
 
+def agent_compare_to_cli_json(*, compare: AgentCompareResult, run_dir: Path) -> dict[str, Any]:
+    return {
+        "command": "eval",
+        "ok": compare.ok,
+        "mode": "compare",
+        "suite": "agent",
+        "run_dir": str(run_dir),
+        "started_at": compare.started_at,
+        "finished_at": compare.finished_at,
+        "duration_sec": compare.duration_sec,
+        "targets": [_agent_comparison_row(s) for s in compare.targets],
+    }
+
+
 def _suite_summary_dict(suite: EvalSuiteResult) -> dict[str, Any]:
     return {
+        "target": asdict(suite.target),
+        "started_at": suite.started_at,
+        "finished_at": suite.finished_at,
+        "duration_sec": suite.duration_sec,
+        "totals": {
+            "total": suite.total,
+            "passed": suite.passed,
+            "failed": suite.failed,
+            "skipped": suite.skipped,
+            "pass_rate": suite.pass_rate,
+        },
+    }
+
+
+def _agent_suite_summary_dict(suite: AgentEvalSuiteResult) -> dict[str, Any]:
+    return {
+        "suite": "agent",
         "target": asdict(suite.target),
         "started_at": suite.started_at,
         "finished_at": suite.finished_at,
@@ -395,7 +684,32 @@ def _case_to_dict(case: EvalCaseResult) -> dict[str, Any]:
     }
 
 
+def _agent_case_to_dict(case: AgentEvalCaseResult) -> dict[str, Any]:
+    return {
+        "case_id": case.case_id,
+        "description": case.description,
+        "status": case.status,
+        "duration_sec": case.duration_sec,
+        "skip_reason": case.skip_reason,
+        "steps": {name: asdict(step) for name, step in sorted(case.steps.items())},
+        "generated_sources": case.generated_sources,
+        "skill_sources": case.skill_sources,
+    }
+
+
 def _comparison_row(suite: EvalSuiteResult) -> dict[str, Any]:
+    return {
+        "target": asdict(suite.target),
+        "passed": suite.passed,
+        "failed": suite.failed,
+        "skipped": suite.skipped,
+        "total": suite.total,
+        "pass_rate": suite.pass_rate,
+        "duration_sec": suite.duration_sec,
+    }
+
+
+def _agent_comparison_row(suite: AgentEvalSuiteResult) -> dict[str, Any]:
     return {
         "target": asdict(suite.target),
         "passed": suite.passed,
@@ -416,6 +730,17 @@ def _materialize_case_project(
         _write_text(project_root / relpath, content)
 
     # Keep this importable for any assertion script that uses pytest helpers.
+    _write_text(project_root / "tests" / "__init__.py", "")
+
+
+def _materialize_agent_case_project(
+    *, project_root: Path, target: EvalTarget, case: BuiltinAgentEvalCase
+) -> None:
+    _write_text(project_root / "jaunt.toml", _render_agent_jaunt_toml(target))
+
+    for relpath, content in case.files.items():
+        _write_text(project_root / relpath, content)
+
     _write_text(project_root / "tests" / "__init__.py", "")
 
 
@@ -448,6 +773,44 @@ def _render_jaunt_toml(target: EvalTarget) -> str:
     )
 
 
+def _render_agent_jaunt_toml(target: EvalTarget) -> str:
+    api_key_env = _default_api_key_env(target.provider)
+    return "\n".join(
+        [
+            "version = 1",
+            "",
+            "[paths]",
+            'source_roots = ["src"]',
+            'test_roots = ["tests"]',
+            'generated_dir = "__generated__"',
+            "",
+            "[llm]",
+            f'provider = "{target.provider}"',
+            f'model = "{target.model}"',
+            f'api_key_env = "{api_key_env}"',
+            "",
+            "[build]",
+            "jobs = 1",
+            "infer_deps = true",
+            "",
+            "[test]",
+            "jobs = 1",
+            "infer_deps = true",
+            'pytest_args = ["-q"]',
+            "",
+            "[agent]",
+            'engine = "aider"',
+            "",
+            "[aider]",
+            'build_mode = "architect"',
+            'test_mode = "code"',
+            'skill_mode = "code"',
+            f'editor_model = "{target.model}"',
+            "",
+        ]
+    )
+
+
 def _default_api_key_env(provider: str) -> str:
     p = provider.strip().lower()
     if p == "openai":
@@ -472,6 +835,30 @@ def _run_build(project_root: Path) -> StepResult:
     ]
     return _run_subprocess(
         cmd=cmd, cwd=project_root, env=_build_env(project_root), timeout_sec=_BUILD_TIMEOUT_S
+    )
+
+
+def _run_jaunt_step(project_root: Path, step: BuiltinAgentEvalStep) -> StepResult:
+    cmd = [sys.executable, "-m", "jaunt", *step.args, "--root", str(project_root)]
+    if "--no-progress" not in step.args and step.args[:2] not in (
+        ("skill", "build"),
+        ("skill", "refresh"),
+    ):
+        cmd.append("--no-progress")
+    return _run_subprocess(
+        cmd=cmd,
+        cwd=project_root,
+        env=_build_env(project_root),
+        timeout_sec=_BUILD_TIMEOUT_S,
+    )
+
+
+def _run_python_step(project_root: Path, step: BuiltinAgentEvalStep) -> StepResult:
+    return _run_subprocess(
+        cmd=[sys.executable, "-c", step.code],
+        cwd=project_root,
+        env=_build_env(project_root),
+        timeout_sec=_ASSERT_TIMEOUT_S,
     )
 
 
@@ -584,6 +971,20 @@ def _collect_generated_sources(project_root: Path) -> dict[str, str]:
         rel = py.relative_to(project_root)
         try:
             out[str(rel)] = py.read_text(encoding="utf-8")
+        except Exception:
+            continue
+    return out
+
+
+def _collect_skill_sources(project_root: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    skills_root = project_root / ".agents" / "skills"
+    if not skills_root.exists():
+        return out
+    for md in skills_root.rglob("SKILL.md"):
+        rel = md.relative_to(project_root)
+        try:
+            out[str(rel)] = md.read_text(encoding="utf-8")
         except Exception:
             continue
     return out

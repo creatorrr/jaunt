@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from jaunt.validation import validate_generated_source
+from jaunt.validation import (
+    validate_build_generated_source,
+    validate_generated_source,
+    validate_test_generated_source,
+)
 
 
 def test_validate_ok_with_expected_names() -> None:
@@ -30,3 +34,46 @@ def test_validate_class_and_assignment_count_as_defined() -> None:
 
 def test_validate_empty_expected_names_with_empty_source_ok() -> None:
     assert validate_generated_source("", []) == []
+
+
+def test_build_validation_rejects_shadowing_handwritten_symbols() -> None:
+    src = "class Mark:\n    pass\n\ndef play() -> str:\n    return 'ok'\n"
+    errs = validate_build_generated_source(
+        src,
+        ["play"],
+        spec_module="pkg.specs",
+        handwritten_names={"Mark", "WIN_LINES"},
+    )
+    assert any("Mark" in err and "pkg.specs" in err for err in errs)
+
+
+def test_test_validation_rejects_wrapper_introspection_by_default() -> None:
+    src = (
+        "def test_game_flow() -> None:\n"
+        "    value = target.__globals__['Mark']\n"
+        "    assert value is not None\n"
+    )
+    errs = validate_test_generated_source(
+        src,
+        ["test_game_flow"],
+        spec_module="tests.specs",
+        generated_module="tests.__generated__.specs",
+        public_api_only_by_name={"test_game_flow": True},
+    )
+    assert any("__globals__" in err for err in errs)
+
+
+def test_test_validation_allows_white_box_opt_out() -> None:
+    src = (
+        "def test_game_flow() -> None:\n"
+        "    value = target.__globals__['Mark']\n"
+        "    assert value is not None\n"
+    )
+    errs = validate_test_generated_source(
+        src,
+        ["test_game_flow"],
+        spec_module="tests.specs",
+        generated_module="tests.__generated__.specs",
+        public_api_only_by_name={"test_game_flow": False},
+    )
+    assert errs == []

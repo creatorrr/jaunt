@@ -163,3 +163,45 @@ def A():
         spec_graph=spec_graph2,
     )
     assert stale == {"m"}
+
+
+def test_detect_stale_modules_generation_fingerprint_change(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    spec_path = tmp_path / "m.py"
+    _write(
+        spec_path,
+        """
+def A():
+    return 1
+""".lstrip(),
+    )
+    e = _entry(module="m", qualname="A", source_file=str(spec_path))
+    specs = {e.spec_ref: e}
+    spec_graph = build_spec_graph(specs, infer_default=False)
+    module_specs = {"m": [e]}
+    digest = module_digest("m", [e], specs, spec_graph)
+
+    write_generated_module(
+        package_dir=src,
+        generated_dir="__generated__",
+        module_name="m",
+        source="def A():\n    return 1\n",
+        header_fields={
+            "tool_version": "0",
+            "kind": "build",
+            "source_module": "m",
+            "module_digest": digest,
+            "generation_fingerprint": "legacy-build",
+            "spec_refs": [str(e.spec_ref)],
+        },
+    )
+
+    stale = detect_stale_modules(
+        package_dir=src,
+        generated_dir="__generated__",
+        module_specs=module_specs,
+        specs=specs,
+        spec_graph=spec_graph,
+        generation_fingerprint="aider-build",
+    )
+    assert stale == {"m"}

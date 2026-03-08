@@ -81,6 +81,7 @@ def test_parse_eval_defaults() -> None:
     assert ns.model is None
     assert ns.compare == []
     assert ns.case == []
+    assert ns.suite == "codegen"
     assert ns.out is None
 
 
@@ -103,6 +104,8 @@ def test_parse_eval_flags() -> None:
             "simple_function",
             "--case",
             "module_with_deps",
+            "--suite",
+            "agent",
             "--out",
             "/tmp/evals",
         ]
@@ -114,6 +117,7 @@ def test_parse_eval_flags() -> None:
     assert ns.model == "gpt-4o"
     assert ns.compare == [["openai:gpt-4o", "anthropic:claude-sonnet-4-5-20250929"]]
     assert ns.case == ["simple_function", "module_with_deps"]
+    assert ns.suite == "agent"
     assert ns.out == "/tmp/evals"
 
 

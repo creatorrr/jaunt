@@ -35,6 +35,7 @@ def cache_key_from_context(
     *,
     model: str,
     provider: str,
+    generation_fingerprint: str = "",
 ) -> str:
     """Compute deterministic SHA-256 cache key from generation context."""
     h = hashlib.sha256()
@@ -83,6 +84,12 @@ def cache_key_from_context(
     )
     h.update(b"\x00")
     h.update((ctx.skills_block or "").encode())
+    h.update(b"\x00")
+    h.update((ctx.module_contract_block or "").encode())
+    h.update(b"\x00")
+    h.update((ctx.module_context_digest or "").encode())
+    h.update(b"\x00")
+    h.update(generation_fingerprint.encode())
     return h.hexdigest()
 
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -23,6 +25,8 @@ class ModuleSpecContext:
     dependency_generated_modules: dict[str, str]
     decorator_apis: dict[SpecRef, str] = field(default_factory=dict)
     skills_block: str = ""
+    module_contract_block: str = ""
+    module_context_digest: str = ""
     async_runner: str = "asyncio"
 
 
@@ -58,6 +62,14 @@ class GeneratorBackend(ABC):
     def provider_name(self) -> str:
         return ""
 
+    def generation_fingerprint(self, ctx: ModuleSpecContext) -> str:
+        """Stable fingerprint for freshness invalidation and cache partitioning."""
+        payload = {
+            "engine": self.provider_name,
+            "kind": ctx.kind,
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
     @abstractmethod
     async def generate_module(
         self, ctx: ModuleSpecContext, *, extra_error_context: list[str] | None = None
@@ -73,13 +85,14 @@ class GeneratorBackend(ABC):
         *,
         max_attempts: int = 2,
         extra_validator: Callable[[str], list[str]] | None = None,
+        initial_error_context: list[str] | None = None,
     ) -> GenerationResult:
         """Generate code, validate, and retry with error context (deterministic)."""
 
         attempts = 0
         last_source: str | None = None
         last_errors: list[str] = []
-        extra_ctx: list[str] | None = None
+        extra_ctx: list[str] | None = list(initial_error_context) if initial_error_context else None
         total_prompt = 0
         total_completion = 0
 

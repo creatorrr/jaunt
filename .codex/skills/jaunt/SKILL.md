@@ -9,6 +9,10 @@ description: "Use when working with the Jaunt spec-driven code generation framew
 
 Jaunt is a Python framework where humans write **intent** as decorator-marked stubs and Jaunt generates **implementations** via an LLM backend. The core loop: write specs, write tests, run `jaunt build`, review generated code, iterate.
 
+Jaunt has two internal runtimes:
+- `legacy`: Jaunt talks to the provider SDK directly.
+- `aider`: Jaunt runs generation tasks through Aider, while Jaunt still owns discovery, validation, retries, freshness, and final writes.
+
 Your role as an AI assistant: help author and refine spec stubs and test specs. **Do not** hand-write implementations for `@jaunt.magic` symbols unless the user explicitly asks to bypass Jaunt.
 
 ## Repo Triage (Do First)
@@ -16,8 +20,9 @@ Your role as an AI assistant: help author and refine spec stubs and test specs. 
 1. Check for `jaunt.toml` at the project root. If missing, the project needs `jaunt init`.
 2. Identify `[paths]` in `jaunt.toml`: `source_roots` (where specs live), `test_roots` (where test specs live), `generated_dir` (output directory name, usually `__generated__`).
 3. Identify the LLM provider: `[llm].provider` is `"openai"`, `"anthropic"`, or `"cerebras"`. The API key env var is in `[llm].api_key_env`.
-4. Check for existing `__generated__/` directories to see what has already been built.
-5. Run `jaunt status` to see which modules are stale vs fresh.
+4. Identify the internal runtime: `[agent].engine` is `"legacy"` or `"aider"`. If it is `"aider"`, also inspect `[aider]`.
+5. Check for existing `__generated__/` directories to see what has already been built.
+6. Run `jaunt status` to see which modules are stale vs fresh.
 
 ## Core Workflow
 
@@ -115,6 +120,7 @@ def test_slugify_rejects_empty() -> None:
 - Black-box behavior: test the contract, not implementation details.
 - Include negative tests: errors and invalid input paths.
 - Name must start with `test_`.
+- In Aider mode, Jaunt may generate 1-2 obvious contract-adjacent extra cases. Still spell out every required behavior explicitly in the spec.
 
 ### 3) Build and Test
 
@@ -134,6 +140,12 @@ jaunt build --target my_app.specs
 # Generate tests without running them
 jaunt test --no-run
 
+# Elaborate a checked-in skill scaffold
+jaunt skill build rich
+
+# Refresh Jaunt-managed auto-generated skills
+jaunt skill refresh
+
 # See stale vs fresh modules
 jaunt status
 ```
@@ -145,6 +157,30 @@ jaunt status
 - If output is wrong, refine the spec stub or test spec and regenerate.
 - Use `prompt=` decorator kwarg for extra LLM instructions on a specific spec.
 
+## Aider Runtime Notes
+
+- Install the runtime with `pip install jaunt[aider]` or `uv sync --extra aider`.
+- Enable it with:
+
+```toml
+[agent]
+engine = "aider"
+
+[aider]
+build_mode = "architect"
+test_mode = "code"
+skill_mode = "code"
+editor_model = ""
+map_tokens = 0
+save_traces = false
+```
+
+- The CLI commands stay the same in Aider mode: `jaunt build`, `jaunt test`, `jaunt skill build`, `jaunt skill refresh`, and `jaunt watch`.
+- `jaunt watch` uses the configured runtime too. Watch cycles stay sequential, but the build/test work inside a cycle can still use normal Jaunt parallelism.
+- For best parallelism in Aider mode, keep `[llm].api_key_env` on the provider's canonical name (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `CEREBRAS_API_KEY`).
+- If `llm.api_key_env` uses a custom name, Aider tasks still work, but Jaunt has to remap the key under a process-wide lock, so those Aider tasks serialize.
+- Aider-generated tests stay public-API-first and may add 1-2 direct contract-adjacent cases, not a large speculative matrix.
+
 ## Decorator Reference
 
 ### `@jaunt.magic(*deps, prompt=None, infer_deps=None)`
@@ -153,9 +189,12 @@ jaunt status
 - `prompt`: Extra text appended to the LLM prompt for this spec.
 - `infer_deps`: Per-spec override of AST-based dependency inference (`True`/`False`).
 
-### `@jaunt.test(*deps, prompt=None, infer_deps=None)`
+### `@jaunt.test(*deps, prompt=None, infer_deps=None, public_api_only=True)`
 
 Same kwargs as `@magic`. Test function names must start with `test_`.
+
+- `public_api_only=True` is the default. Generated tests should exercise the production API contract, not wrapper internals or generated-module internals.
+- Use `public_api_only=False` only when the user intentionally wants white-box tests.
 
 ## Configuration (`jaunt.toml`)
 
@@ -176,6 +215,17 @@ api_key_env = "OPENAI_API_KEY"   # Env var holding the API key
 reasoning_effort = "medium"                    # OpenAI/Cerebras: "low"|"medium"|"high"
 anthropic_thinking_budget_tokens = 1024        # Anthropic extended thinking
 max_cost_per_build = 10.0                      # Cost budget in USD
+
+[agent]
+engine = "legacy"               # or "aider"
+
+[aider]
+build_mode = "architect"
+test_mode = "code"
+skill_mode = "code"
+editor_model = ""
+map_tokens = 0
+save_traces = false
 
 [build]
 jobs = 8                         # Parallel generation jobs
@@ -205,6 +255,8 @@ test_module = ""
 | `jaunt status` | Show stale vs fresh modules |
 | `jaunt watch` | Auto-rebuild on file changes (`--test` to also run tests) |
 | `jaunt eval` | Benchmark LLM providers on built-in cases |
+| `jaunt skill build <name>` | Elaborate a checked-in user skill using the configured runtime |
+| `jaunt skill refresh` | Refresh Jaunt-managed auto-generated skills |
 | `jaunt cache info` | Show LLM response cache stats |
 | `jaunt cache clear` | Clear cached LLM responses |
 
@@ -237,8 +289,9 @@ def higher_func() -> str:
 2. **Stale modules not rebuilding**: Check `jaunt status`. Use `--force` to force regeneration.
 3. **Dependency cycle error**: Check `deps=` declarations for circular references. Restructure specs to break the cycle.
 4. **Generation error (exit 3)**: Review the spec docstring for ambiguity. Add `prompt=` for extra guidance. Check LLM API key and quota.
-5. **Test failures (exit 4)**: Review generated tests in `__generated__/`. Refine test spec docstrings for clarity.
+5. **Test failures (exit 4)**: Review generated tests in `__generated__/`. Refine test spec docstrings for clarity. If Aider mode added a direct extra edge case, decide whether the spec should explicitly keep or forbid that scenario.
 6. **Missing API key**: Set the env var from `[llm].api_key_env` or add it to a `.env` file in the project root.
+7. **Aider feels single-threaded**: Check whether `llm.api_key_env` is using a custom variable name. In Aider mode that forces a serialized env-var remap path.
 
 ## Anti-patterns to Avoid
 
@@ -248,6 +301,7 @@ def higher_func() -> str:
 - Over-constraining: forcing implementation details not required by the product.
 - Writing implementations inside `@jaunt.magic` stubs (the body should just `raise RuntimeError`).
 - Skipping test specs: always pair implementation specs with test specs.
+- Expecting Aider mode to infer a large test matrix from a sparse test spec. It may add 1-2 obvious contract-adjacent cases, not broad unstated coverage.
 
 ## Reference
 

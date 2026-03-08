@@ -7,13 +7,19 @@ Jaunt is an MVP. These are the sharp edges you should know about.
 
 ## Provider Support
 
-The CLI supports `llm.provider = "openai"` and `llm.provider = "anthropic"`.
+The CLI supports `llm.provider = "openai"`, `llm.provider = "anthropic"`, and
+`llm.provider = "cerebras"`.
 
 Practical gotcha: provider SDKs are optional dependencies. You need the matching extra installed in the environment that runs Jaunt:
 
 - `pip install jaunt[openai]`
 - `pip install jaunt[anthropic]`
+- `pip install jaunt[cerebras]`
 - or `pip install jaunt[all]`
+
+If you use `agent.engine = "aider"`, install the extra for that runtime too:
+
+- `pip install jaunt[aider]`
 
 ## Hardcoded `__generated__` Dir Name
 
@@ -38,5 +44,24 @@ In practice, this means you may need to be more explicit in docstrings (or add `
 The skills system adds extra network calls (to PyPI for README fetches) and extra OpenAI calls (to generate skill docs) during `jaunt build`. These are best-effort: failures emit a warning and the build continues without the missing skills.
 
 This means build output can vary based on your environment, network connectivity, and what's installed in the active venv. If reproducibility matters, commit the generated `.agents/skills/` directory.
+
+## Aider + Custom API Key Env Names
+
+The Aider runtime currently expects the provider's canonical API key env var
+name (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `CEREBRAS_API_KEY`).
+
+Jaunt supports `llm.api_key_env` pointing at a different variable name, but for
+`agent.engine = "aider"` it has to remap that key through `os.environ` while
+the task runs. To keep concurrent Aider tasks from clobbering each other's
+credentials, Jaunt protects that remap with a process-wide lock.
+
+Effectively:
+
+- canonical provider env var name: parallel Aider tasks can run concurrently
+- custom `llm.api_key_env` name: Aider tasks stay correct, but they serialize
+
+This is a known limitation, not the intended long-term design. The follow-up is
+to pass the resolved API key directly into the Aider/litellm model path so the
+global env remap can be removed.
 
 Next: [Development](/docs/development/contributing).

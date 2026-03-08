@@ -7,7 +7,7 @@ from jaunt.deps import build_spec_graph
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
 from jaunt.registry import SpecEntry
 from jaunt.spec_ref import normalize_spec_ref
-from jaunt.tester import run_pytest, run_test_generation
+from jaunt.tester import run_pytest, run_test_generation, run_tests
 
 
 def _write(path: Path, text: str) -> None:
@@ -142,3 +142,62 @@ def test_generated():
     )
 
     assert report.failed == {}
+
+
+def test_run_tests_repairs_failing_generated_test_once(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    (project / "src").mkdir(parents=True, exist_ok=True)
+    (project / "tests").mkdir(parents=True, exist_ok=True)
+
+    spec_path = project / "tests" / "specs_mod.py"
+    _write(
+        spec_path,
+        """
+def test_generated():
+    raise AssertionError("should not run")
+""".lstrip(),
+    )
+
+    e = _entry(module="tests.specs_mod", qualname="test_generated", source_file=str(spec_path))
+    specs = {e.spec_ref: e}
+    spec_graph = build_spec_graph(specs, infer_default=False)
+    module_specs = {"tests.specs_mod": [e]}
+    module_dag = {"tests.specs_mod": set()}
+
+    class RepairingBackend(GeneratorBackend):
+        def __init__(self) -> None:
+            self.extra_contexts: list[list[str] | None] = []
+
+        async def generate_module(
+            self, ctx: ModuleSpecContext, *, extra_error_context: list[str] | None = None
+        ) -> tuple[str, None]:
+            self.extra_contexts.append(extra_error_context)
+            if extra_error_context:
+                return "def test_generated():\n    assert True\n", None
+            return "def test_generated():\n    assert False\n", None
+
+    backend = RepairingBackend()
+    result = asyncio.run(
+        run_tests(
+            project_dir=project,
+            tests_package="tests",
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"tests.specs_mod"},
+            backend=backend,
+            jobs=1,
+            pythonpath=[project / "tests"],
+            cwd=project,
+        )
+    )
+
+    assert result.exit_code == 0
+    assert backend.extra_contexts[0] is None
+    assert backend.extra_contexts[1] is not None
+    assert any(
+        "assert False" in line or "FAILED" in line
+        for line in backend.extra_contexts[1] or []
+    )

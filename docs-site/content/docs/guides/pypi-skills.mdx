@@ -7,6 +7,14 @@ This exists for one reason: **better generated code when your specs use third-pa
 
 Jaunt adds a pre-build step to `jaunt build` that (best-effort) generates and injects **skills** for the external libraries your project imports.
 
+There are two related skill workflows in Jaunt:
+
+- automatic PyPI skill generation during `jaunt build`
+- explicit user-managed skill authoring through `jaunt skill build <name>`
+
+Both respect `[agent].engine`, so if you switch to `agent.engine = "aider"`,
+Jaunt uses the Aider runtime for those skill-generation steps too.
+
 ## What It Does
 
 On every `jaunt build`:
@@ -70,5 +78,7 @@ PyPI READMEs are treated as **untrusted input**. The skill generator is instruct
 
 - "It didn't generate a skill": the import might be stdlib or internal, the dist might not be installed, or the README fetch/generation might have failed. Jaunt should emit a warning but still proceed with the build.
 - "Wrong version": skills are keyed to what's installed in the environment running `jaunt build`. Update your environment, rerun build, and Jaunt should refresh generated skills.
+- "I want to edit a checked-in skill directly": use `jaunt skill build <name>` on a
+  user-managed skill directory under `.agents/skills/<name>/`.
 
 Next: [Limitations](/docs/reference/limitations).

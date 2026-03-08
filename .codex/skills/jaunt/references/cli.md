@@ -51,11 +51,21 @@ jaunt watch --test                       # Also run tests after build
 
 ### eval — Benchmark LLM providers
 ```bash
-jaunt eval                               # Run eval suite
+jaunt eval                               # Run default codegen suite
+jaunt eval --suite codegen               # Built-in codegen evals
+jaunt eval --suite agent                 # End-to-end Aider/skills evals
 jaunt eval --provider anthropic          # Override provider
 jaunt eval --model gpt-4o               # Override model
 jaunt eval --compare openai:gpt-4o anthropic:claude-sonnet-4-5-20250929
 jaunt eval --case case_id                # Run specific case(s)
+```
+
+### skill — Manage skills
+```bash
+jaunt skill list                         # Show available skills
+jaunt skill show rich                    # Print a skill
+jaunt skill build rich                   # Elaborate a checked-in skill scaffold
+jaunt skill refresh                      # Refresh Jaunt-managed auto skills
 ```
 
 ### cache — Manage LLM response cache
@@ -92,3 +102,11 @@ jaunt cache clear                        # Clear all cached responses
 - API key: set env var from `[llm].api_key_env` in `jaunt.toml`
 - `.env` file in project root is auto-loaded
 - `JAUNT_GENERATED_DIR`: override the generated directory name at runtime
+
+## Aider Runtime Notes
+
+- Enable with `[agent].engine = "aider"` and install `jaunt[aider]`.
+- The same commands are used in both runtimes; `jaunt watch` also respects the configured runtime.
+- Watch cycles are sequential. Build/test work inside a cycle still uses normal Jaunt concurrency.
+- For best Aider parallelism, keep `llm.api_key_env` on the canonical provider env var name.
+- With a custom `llm.api_key_env`, Aider tasks stay correct but serialize while Jaunt remaps the key for Aider/litellm.

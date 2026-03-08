@@ -11,6 +11,7 @@ Jaunt works when you can picture the loop: specs in, generated modules out, and 
 You write specs
   -> Jaunt discovers them (source_roots / test_roots)
   -> builds a dependency graph (explicit deps + best-effort inference)
+  -> picks a generation runtime (legacy backend or Aider)
   -> for each module:
        - build prompt = system template + your spec source segment (+ extras)
        - LLM generates Python
@@ -29,11 +30,31 @@ At build time, Jaunt sends the backend a prompt composed of:
 
 The job is simple: implement the contract implied by your spec.
 
+## Agent Runtimes
+
+Jaunt now has two internal ways to execute generation:
+
+- `legacy`: Jaunt calls the provider SDK directly
+- `aider`: Jaunt creates an isolated temp workspace, lets Aider edit the target
+  file, then validates the result before writing it back
+
+This changes the planning and editing loop, but not the rest of the product
+surface. Discovery, staleness, validators, generated file locations, and the
+runtime forwarding model are the same either way.
+
+See: [Aider Runtime](/docs/reference/aider-runtime).
+
 ## Incremental Rebuilds (Digests)
 
-Jaunt hashes the spec source for each module and writes the digest into the generated file header. On the next run, Jaunt skips modules whose digest still matches.
+Jaunt hashes the spec source for each module and writes the digest into the
+generated file header. On the next run, Jaunt skips modules whose digest still
+matches.
 
 You change a spec, Jaunt regenerates just what’s stale.
+
+Jaunt also fingerprints the generation runtime. Switching from `legacy` to
+`aider`, changing Aider mode, or changing relevant prompt/runtime settings can
+also mark generated files stale.
 
 See: [Output Locations](/docs/reference/output).
 

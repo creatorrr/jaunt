@@ -77,6 +77,13 @@
             return s
         
         
+        Handwritten source-module symbols already available for reuse:
+        # Mark
+        kind: class
+        signature: class Mark(StrEnum)
+        doc: Player mark.
+        
+        
         Extra error context (fix these issues):
         # error_context[1]
         missing import for math
@@ -85,6 +92,7 @@
         Rules:
         - Do not generate tests.
         - Do not edit user files; only output generated module source code.
+        - Reuse handwritten symbols from `pkg.specs` when they already exist there; do not redefine them.
         - Include type annotations on all function signatures.
         - Ensure every non-Optional return type has explicit return/raise on all code paths.
         - If a spec uses `async def`, the generated implementation MUST also be `async def`. Use `await` for any async calls within.
@@ -153,6 +161,13 @@
             return s
         
         
+        Handwritten source-module symbols already available for reuse:
+        # Mark
+        kind: class
+        signature: class Mark(StrEnum)
+        doc: Player mark.
+        
+        
         Extra error context (fix these issues):
         # error_context[1]
         missing pytest import
@@ -167,6 +182,7 @@
         - Generate tests only (no production implementation).
         - Do not import from `pkg.__generated__.specs` (that would be a circular import).
         - Do not edit user files; only output test module source code.
+        - Public API only by default: test behavior through the production module contract, not wrapper internals or generated module internals, unless a spec explicitly opts out.
         - Do not guess or search for application modules like `app`, `main`, `token`, etc.
         - Import the production APIs under test from the modules listed in Dependency APIs above.
           - Each Dependency API entry key is like `<module>:<qualname>`; import from `<module>`.

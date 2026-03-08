@@ -19,6 +19,8 @@ def _make_ctx(**overrides: object) -> ModuleSpecContext:
         dependency_apis=overrides.get("dependency_apis", {}),  # type: ignore[arg-type]
         dependency_generated_modules=overrides.get("dependency_generated_modules", {}),  # type: ignore[arg-type]
         decorator_apis=overrides.get("decorator_apis", {}),  # type: ignore[arg-type]
+        module_contract_block=overrides.get("module_contract_block", ""),  # type: ignore[arg-type]
+        module_context_digest=overrides.get("module_context_digest", ""),  # type: ignore[arg-type]
     )
 
 
@@ -133,6 +135,22 @@ def test_cache_key_differs_by_context() -> None:
 def test_cache_key_differs_by_decorator_apis() -> None:
     ctx1 = _make_ctx(decorator_apis={})
     ctx2 = _make_ctx(decorator_apis={"pkg.specs:foo": "app.post signature=(x: int) -> int"})
+    k1 = cache_key_from_context(ctx1, model="m", provider="p")
+    k2 = cache_key_from_context(ctx2, model="m", provider="p")
+    assert k1 != k2
+
+
+def test_cache_key_differs_by_module_contract_context() -> None:
+    ctx1 = _make_ctx(module_contract_block="# Mark\nkind: class\n")
+    ctx2 = _make_ctx(module_contract_block="# WIN_LINES\nkind: assignment\n")
+    k1 = cache_key_from_context(ctx1, model="m", provider="p")
+    k2 = cache_key_from_context(ctx2, model="m", provider="p")
+    assert k1 != k2
+
+
+def test_cache_key_differs_by_module_context_digest() -> None:
+    ctx1 = _make_ctx(module_context_digest="abc")
+    ctx2 = _make_ctx(module_context_digest="def")
     k1 = cache_key_from_context(ctx1, model="m", provider="p")
     k2 = cache_key_from_context(ctx2, model="m", provider="p")
     assert k1 != k2

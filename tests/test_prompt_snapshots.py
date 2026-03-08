@@ -53,6 +53,13 @@ def _ctx(kind: str) -> ModuleSpecContext:
                 "signature=(fn: object) -> object quality=good"
             )
         },
+        module_contract_block=(
+            "# Mark\n"
+            "kind: class\n"
+            "signature: class Mark(StrEnum)\n"
+            "doc: Player mark.\n"
+        ),
+        module_context_digest="facefeed",
     )
 
 

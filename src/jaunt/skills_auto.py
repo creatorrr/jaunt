@@ -11,7 +11,7 @@ from jaunt.skill_manager import _atomic_write_text
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Sequence
 
-    from jaunt.config import LLMConfig
+    from jaunt.config import AgentConfig, AiderConfig, LLMConfig
 
 
 _HEADER_PREFIX = "<!-- jaunt:skill=pypi"
@@ -62,6 +62,8 @@ async def ensure_pypi_skills_and_block(
     source_roots: Sequence[Path],
     generated_dir: str,
     llm: LLMConfig,
+    agent: AgentConfig | None = None,
+    aider: AiderConfig | None = None,
 ) -> SkillsAutoResult:
     """Best-effort: ensure skills exist for imported external PyPI libs.
 
@@ -78,7 +80,12 @@ async def ensure_pypi_skills_and_block(
     if dists:
         # Phase 1+2: generate skills for PyPI dists that need it.
         generation_failures = await _generate_pypi_skills(
-            project_root=project_root, dists=dists, llm=llm, warnings=warnings
+            project_root=project_root,
+            dists=dists,
+            llm=llm,
+            agent=agent,
+            aider=aider,
+            warnings=warnings,
         )
 
     # Phase 3: Build injection block from ALL skills on disk (auto + user).
@@ -95,6 +102,8 @@ async def _generate_pypi_skills(
     project_root: Path,
     dists: dict[str, str],
     llm: LLMConfig,
+    agent: AgentConfig | None,
+    aider: AiderConfig | None,
     warnings: list[str],
 ) -> int:
     """Phase 1+2: identify stale PyPI dists and generate skills concurrently.
@@ -141,11 +150,17 @@ async def _generate_pypi_skills(
     if to_generate:
         generator = None
         try:
-            from jaunt.skillgen import OpenAISkillGenerator
+            from jaunt.config import AgentConfig, AiderConfig
+            from jaunt.skillgen import AiderSkillGenerator, OpenAISkillGenerator
 
-            generator = OpenAISkillGenerator(llm)
+            resolved_agent = agent or AgentConfig()
+            resolved_aider = aider or AiderConfig()
+            if resolved_agent.engine == "aider":
+                generator = AiderSkillGenerator(llm, resolved_agent, resolved_aider)
+            else:
+                generator = OpenAISkillGenerator(llm)
         except Exception as e:  # noqa: BLE001
-            warnings.append(f"Failed initializing OpenAI skill generator: {type(e).__name__}: {e}")
+            warnings.append(f"Failed initializing skill generator: {type(e).__name__}: {e}")
             failures += len(to_generate)
 
         if generator is not None:

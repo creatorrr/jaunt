@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from jaunt.config import LLMConfig
+from jaunt.config import AgentConfig, AiderConfig, LLMConfig
 from jaunt.external_imports import discover_external_distributions
 from jaunt.skills_auto import ensure_pypi_skills_and_block, skill_md_path
 
@@ -266,3 +266,60 @@ def test_user_managed_skill_never_overwritten(tmp_path: Path, monkeypatch) -> No
     )
     assert path.read_text(encoding="utf-8") == "USER SKILL\n"
     assert "USER SKILL" in res.skills_block
+
+
+def test_aider_skill_generator_selected_when_agent_engine_is_aider(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import jaunt.skillgen as sg
+    import jaunt.skills_auto as sa
+
+    dist = "external-lib"
+    version = "1.2.3"
+    monkeypatch.setattr(
+        sa,
+        "discover_external_distributions_with_warnings",
+        lambda *_a, **_k: ({dist: version}, []),
+    )
+    monkeypatch.setattr(sa, "fetch_readme", lambda *_a, **_k: ("README", "text/markdown"))
+
+    calls: list[tuple[str, str]] = []
+
+    class DummyAiderGen:
+        def __init__(self, llm, agent, aider):  # noqa: ANN001
+            calls.append(("init", agent.engine))
+
+        async def generate_skill_markdown(self, dist, version, readme, readme_type):  # noqa: ANN001
+            calls.append((dist, version))
+            return "\n".join(
+                [
+                    "# skill",
+                    "## What it is",
+                    "x",
+                    "## Core concepts",
+                    "y",
+                    "## Common patterns",
+                    "z",
+                    "## Gotchas",
+                    "g",
+                    "## Testing notes",
+                    "t",
+                    "",
+                ]
+            )
+
+    monkeypatch.setattr(sg, "AiderSkillGenerator", DummyAiderGen)
+
+    res = asyncio.run(
+        ensure_pypi_skills_and_block(
+            project_root=tmp_path,
+            source_roots=[],
+            generated_dir="__generated__",
+            llm=LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY"),
+            agent=AgentConfig(engine="aider"),
+            aider=AiderConfig(),
+        )
+    )
+    assert res.warnings == []
+    assert calls[0] == ("init", "aider")
+    assert calls[1] == (dist, version)

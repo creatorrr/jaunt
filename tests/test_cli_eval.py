@@ -133,3 +133,44 @@ def test_cmd_eval_compare_failure_exit_code(monkeypatch, tmp_path: Path) -> None
     rc = jaunt.cli.cmd_eval(args)
 
     assert rc == jaunt.cli.EXIT_GENERATION_ERROR
+
+
+def test_cmd_eval_agent_suite_json(monkeypatch, tmp_path: Path, capsys) -> None:
+    root = _make_project(tmp_path)
+
+    target = jaunt_eval.EvalTarget(provider="openai", model="gpt-4o")
+    suite = jaunt_eval.AgentEvalSuiteResult(
+        target=target,
+        started_at="2026-02-15T10:00:00Z",
+        finished_at="2026-02-15T10:00:02Z",
+        duration_sec=2.0,
+        cases=[],
+    )
+    run_dir = tmp_path / "evals" / "2026-02-15T10-00-00Z"
+
+    monkeypatch.setattr(jaunt_eval, "resolve_eval_targets", lambda **kwargs: [target])
+    monkeypatch.setattr(jaunt_eval, "load_agent_cases", lambda selected_case_ids: [])
+    monkeypatch.setattr(jaunt_eval, "run_agent_eval_suite", lambda **kwargs: suite)
+    monkeypatch.setattr(jaunt_eval, "make_run_dir", lambda base_out: run_dir)
+
+    wrote: dict[str, Path] = {}
+
+    def _write_agent_single_target_results(*, suite, run_dir):
+        wrote["run_dir"] = run_dir
+
+    monkeypatch.setattr(
+        jaunt_eval,
+        "write_agent_single_target_results",
+        _write_agent_single_target_results,
+    )
+
+    args = jaunt.cli.parse_args(["eval", "--root", str(root), "--suite", "agent", "--json"])
+    rc = jaunt.cli.cmd_eval(args)
+
+    assert rc == jaunt.cli.EXIT_OK
+    assert wrote["run_dir"] == run_dir
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["suite"] == "agent"
+    assert payload["mode"] == "single"
+    assert payload["ok"] is True

@@ -26,10 +26,16 @@ from jaunt.cost import CostTracker
 from jaunt.digest import extract_source_segment, module_digest
 from jaunt.errors import JauntDependencyCycleError, JauntGenerationError
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
-from jaunt.header import extract_module_digest, format_header
+from jaunt.header import (
+    extract_generation_fingerprint,
+    extract_module_context_digest,
+    extract_module_digest,
+    format_header,
+)
+from jaunt.module_contract import build_module_contract
 from jaunt.registry import SpecEntry
 from jaunt.spec_ref import SpecRef
-from jaunt.validation import validate_generated_source
+from jaunt.validation import validate_build_contract_only, validate_build_generated_source
 
 _TY_CHECK_TIMEOUT_S = 20.0
 
@@ -127,6 +133,8 @@ def detect_stale_modules(
     module_specs: dict[str, list[SpecEntry]],
     specs: dict[SpecRef, SpecEntry],
     spec_graph: dict[SpecRef, set[SpecRef]],
+    generation_fingerprint: str = "",
+    module_context_digests: dict[str, str] | None = None,
     force: bool = False,
 ) -> set[str]:
     if force:
@@ -148,8 +156,32 @@ def detect_stale_modules(
 
         on_disk = _normalize_digest(extract_module_digest(existing))
         computed = _normalize_digest(module_digest(module_name, entries, specs, spec_graph))
-        if on_disk is None or computed is None or on_disk != computed:
+        if (
+            on_disk is None
+            or computed is None
+            or on_disk != computed
+        ):
             stale.add(module_name)
+            continue
+        if generation_fingerprint:
+            on_disk_generation = _normalize_digest(extract_generation_fingerprint(existing))
+            computed_generation = _normalize_digest(generation_fingerprint)
+            if (
+                on_disk_generation is None
+                or computed_generation is None
+                or on_disk_generation != computed_generation
+            ):
+                stale.add(module_name)
+                continue
+        if module_context_digests is not None:
+            on_disk_context = _normalize_digest(extract_module_context_digest(existing))
+            computed_context = _normalize_digest(module_context_digests.get(module_name))
+            if (
+                on_disk_context is None
+                or computed_context is None
+                or on_disk_context != computed_context
+            ):
+                stale.add(module_name)
 
     return stale
 
@@ -354,6 +386,7 @@ async def run_build(
     module_dag: dict[str, set[str]],
     stale_modules: set[str],
     backend: GeneratorBackend,
+    generation_fingerprint: str = "",
     skills_block: str = "",
     jobs: int = 4,
     progress: object | None = None,
@@ -361,6 +394,7 @@ async def run_build(
     cost_tracker: CostTracker | None = None,
     ty_retry_attempts: int | None = None,
     async_runner: str = "asyncio",
+    initial_error_context_by_module: dict[str, list[str]] | None = None,
 ) -> BuildReport:
     jobs = max(1, int(jobs))
     ty_attempts = max(0, int(ty_retry_attempts)) if ty_retry_attempts is not None else None
@@ -464,6 +498,7 @@ async def run_build(
                 decorator_apis[e.spec_ref] = "\n".join(lines)
 
         dep_apis, dep_gen = _collect_dependency_context(module_name)
+        module_contract = build_module_contract(entries=entries, expected_names=expected)
 
         ctx = ModuleSpecContext(
             kind="build",
@@ -478,6 +513,8 @@ async def run_build(
             dependency_generated_modules=dep_gen,
             decorator_apis=decorator_apis,
             skills_block=skills_block,
+            module_contract_block=module_contract.prompt_block,
+            module_context_digest=module_contract.digest,
             async_runner=async_runner,
         )
 
@@ -497,7 +534,25 @@ async def run_build(
             ty_validator = _local_ty_validator
 
         def _validate_candidate(source: str) -> list[str]:
-            errs = validate_generated_source(source, expected)
+            errs = validate_build_generated_source(
+                source,
+                expected,
+                spec_module=module_name,
+                handwritten_names=module_contract.handwritten_names,
+            )
+            if errs:
+                return errs
+            if ty_validator is None:
+                return []
+            return ty_validator(source)
+
+        def _retry_validator(source: str) -> list[str]:
+            errs = validate_build_contract_only(
+                source,
+                expected_names=expected,
+                spec_module=module_name,
+                handwritten_names=module_contract.handwritten_names,
+            )
             if errs:
                 return errs
             if ty_validator is None:
@@ -509,7 +564,10 @@ async def run_build(
         ck: str | None = None
         if response_cache is not None:
             ck = cache_key_from_context(
-                ctx, model=backend.model_name, provider=backend.provider_name
+                ctx,
+                model=backend.model_name,
+                provider=backend.provider_name,
+                generation_fingerprint=generation_fingerprint,
             )
             cached = response_cache.get(ck)
             if cached is not None:
@@ -524,7 +582,10 @@ async def run_build(
         if result_source is None:
             max_attempts = (2 + (ty_attempts or 0)) if ty_validator is not None else 2
             result = await backend.generate_with_retry(
-                ctx, max_attempts=max_attempts, extra_validator=ty_validator
+                ctx,
+                max_attempts=max_attempts,
+                extra_validator=_retry_validator,
+                initial_error_context=(initial_error_context_by_module or {}).get(module_name),
             )
             if result.source is None:
                 return False, result.errors or ["No source returned."]
@@ -533,6 +594,9 @@ async def run_build(
                 return False, result.errors
 
             result_source = result.source
+            validation_errors = _validate_candidate(result_source)
+            if validation_errors:
+                return False, validation_errors
 
             if cost_tracker is not None and result.usage is not None:
                 cost_tracker.record(module_name, result.usage)
@@ -555,12 +619,14 @@ async def run_build(
 
         digest = module_digest(module_name, entries, specs, spec_graph)
         header_fields = {
-            "tool_version": _tool_version(),
-            "kind": "build",
-            "source_module": module_name,
-            "module_digest": digest,
-            "spec_refs": [str(e.spec_ref) for e in entries],
-        }
+                "tool_version": _tool_version(),
+                "kind": "build",
+                "source_module": module_name,
+                "module_digest": digest,
+                "generation_fingerprint": generation_fingerprint,
+                "module_context_digest": module_contract.digest,
+                "spec_refs": [str(e.spec_ref) for e in entries],
+            }
 
         write_generated_module(
             package_dir=package_dir,

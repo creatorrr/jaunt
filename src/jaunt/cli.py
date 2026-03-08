@@ -185,6 +185,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Run only selected eval case id(s) (repeatable).",
     )
     eval_p.add_argument(
+        "--suite",
+        type=str,
+        default="codegen",
+        choices=("codegen", "agent"),
+        help="Eval suite to run.",
+    )
+    eval_p.add_argument(
         "--out",
         type=str,
         default=None,
@@ -365,6 +372,11 @@ def _prepend_sys_path(dirs: Sequence[Path]) -> None:
 
 
 def _build_backend(cfg: JauntConfig):
+    if cfg.agent.engine == "aider":
+        from jaunt.generate.aider_backend import AiderGeneratorBackend
+
+        return AiderGeneratorBackend(cfg.llm, cfg.aider, cfg.prompts)
+
     provider = cfg.llm.provider
     if provider == "openai":
         from jaunt.generate.openai_backend import OpenAIBackend
@@ -428,6 +440,17 @@ api_key_env = "OPENAI_API_KEY"
 # Optional: Anthropic thinking budget; when set Jaunt sends
 # thinking = { type = "enabled", budget_tokens = ... }.
 # anthropic_thinking_budget_tokens = 1024
+
+[agent]
+engine = "legacy"
+
+[aider]
+build_mode = "architect"
+test_mode = "code"
+skill_mode = "code"
+editor_model = ""
+map_tokens = 0
+save_traces = false
 """
 
 
@@ -563,13 +586,25 @@ def cmd_status(args: argparse.Namespace) -> int:
             raise JauntConfigError("No existing source_roots to check.")
 
         from jaunt import builder
+        from jaunt.generation_fingerprint import generation_fingerprint
+        from jaunt.module_contract import build_module_contract
 
+        build_generation_fingerprint = generation_fingerprint(cfg, kind="build")
+        build_module_context_digests: dict[str, str] = {}
+        for module_name, entries in module_specs.items():
+            expected, _errs = builder._build_expected_names(entries)
+            build_module_context_digests[module_name] = build_module_contract(
+                entries=entries,
+                expected_names=expected,
+            ).digest
         stale = builder.detect_stale_modules(
             package_dir=package_dir,
             generated_dir=cfg.paths.generated_dir,
             module_specs=module_specs,
             specs=specs,
             spec_graph=spec_graph,
+            generation_fingerprint=build_generation_fingerprint,
+            module_context_digests=build_module_context_digests,
             force=bool(args.force),
         )
 
@@ -630,6 +665,8 @@ def cmd_build(args: argparse.Namespace) -> int:
                     source_roots=[d for d in source_dirs if d.exists()],
                     generated_dir=cfg.paths.generated_dir,
                     llm=cfg.llm,
+                    agent=cfg.agent,
+                    aider=cfg.aider,
                 )
             )
             for w in skills_res.warnings:
@@ -688,13 +725,25 @@ def cmd_build(args: argparse.Namespace) -> int:
 
         # Lazy import so other work can land independently.
         from jaunt import builder
+        from jaunt.generation_fingerprint import generation_fingerprint
+        from jaunt.module_contract import build_module_contract
 
+        build_generation_fingerprint = generation_fingerprint(cfg, kind="build")
+        build_module_context_digests: dict[str, str] = {}
+        for module_name, entries in module_specs.items():
+            expected, _errs = builder._build_expected_names(entries)
+            build_module_context_digests[module_name] = build_module_contract(
+                entries=entries,
+                expected_names=expected,
+            ).digest
         stale = builder.detect_stale_modules(
             package_dir=package_dir,
             generated_dir=cfg.paths.generated_dir,
             module_specs=module_specs,
             specs=specs,
             spec_graph=spec_graph,
+            generation_fingerprint=build_generation_fingerprint,
+            module_context_digests=build_module_context_digests,
             force=bool(args.force),
         )
 
@@ -728,6 +777,7 @@ def cmd_build(args: argparse.Namespace) -> int:
                 module_dag=module_dag,
                 stale_modules=stale,
                 backend=_build_backend(cfg),
+                generation_fingerprint=build_generation_fingerprint,
                 skills_block=skills_block,
                 jobs=jobs,
                 progress=progress,
@@ -794,11 +844,16 @@ def cmd_test(args: argparse.Namespace) -> int:
         from jaunt import discovery, registry
         from jaunt.deps import build_spec_graph, collapse_to_module_dag
         from jaunt.digest import extract_source_segment
+        from jaunt.module_contract import build_module_contract
         from jaunt.spec_ref import SpecRef
 
         # Provide production API reference material (from @jaunt.magic) so
         # test generation can import the real APIs instead of guessing module names.
         magic_dependency_apis: dict[SpecRef, str] = {}
+        build_magic_specs: dict[SpecRef, registry.SpecEntry] = {}
+        build_module_specs: dict[str, list[registry.SpecEntry]] = {}
+        build_magic_spec_graph: dict[SpecRef, set[SpecRef]] = {}
+        build_magic_module_dag: dict[str, set[str]] = {}
         if bool(args.no_build):
             registry.clear_registries()
             src_mods = discovery.discover_modules(
@@ -811,15 +866,29 @@ def cmd_test(args: argparse.Namespace) -> int:
                 roots=[d for d in source_dirs if d.exists()],
             )
             discovery.import_and_collect(src_mods, kind="magic")
+            build_magic_specs = dict(registry.get_magic_registry())
+            build_module_specs = registry.get_specs_by_module("magic")
+            build_magic_spec_graph = build_spec_graph(
+                build_magic_specs,
+                infer_default=bool(cfg.build.infer_deps) and (not bool(args.no_infer_deps)),
+            )
+            build_magic_module_dag = collapse_to_module_dag(build_magic_spec_graph)
             magic_dependency_apis = {
                 ref: extract_source_segment(entry)
-                for ref, entry in registry.get_magic_registry().items()
+                for ref, entry in build_magic_specs.items()
             }
         else:
             # cmd_build() already imported and registered magic specs.
+            build_magic_specs = dict(registry.get_magic_registry())
+            build_module_specs = registry.get_specs_by_module("magic")
+            build_magic_spec_graph = build_spec_graph(
+                build_magic_specs,
+                infer_default=bool(cfg.build.infer_deps) and (not bool(args.no_infer_deps)),
+            )
+            build_magic_module_dag = collapse_to_module_dag(build_magic_spec_graph)
             magic_dependency_apis = {
                 ref: extract_source_segment(entry)
-                for ref, entry in registry.get_magic_registry().items()
+                for ref, entry in build_magic_specs.items()
             }
 
         registry.clear_registries()
@@ -853,9 +922,18 @@ def cmd_test(args: argparse.Namespace) -> int:
 
         # Lazy imports (these are layered; keep CLI import-time minimal).
         from jaunt import builder, tester
+        from jaunt.generation_fingerprint import generation_fingerprint
 
         jobs = int(args.jobs) if args.jobs is not None else int(cfg.test.jobs)
         pytest_args = [*cfg.test.pytest_args, *list(args.pytest_args or [])]
+        test_generation_fingerprint = generation_fingerprint(cfg, kind="test")
+        test_module_context_digests: dict[str, str] = {}
+        for module_name, entries in module_specs.items():
+            expected, _errs = builder._build_expected_names(entries)
+            test_module_context_digests[module_name] = build_module_contract(
+                entries=entries,
+                expected_names=expected,
+            ).digest
 
         stale = tester.detect_stale_test_modules(
             project_dir=root,
@@ -864,6 +942,8 @@ def cmd_test(args: argparse.Namespace) -> int:
             module_specs=module_specs,
             specs=specs,
             spec_graph=spec_graph,
+            generation_fingerprint=test_generation_fingerprint,
+            module_context_digests=test_module_context_digests,
             force=bool(args.force),
         )
         stale = builder.expand_stale_modules(module_dag, stale)
@@ -885,6 +965,30 @@ def cmd_test(args: argparse.Namespace) -> int:
         no_cache = bool(getattr(args, "no_cache", False))
         response_cache = ResponseCache(cache_dir, enabled=not no_cache)
         cost_tracker = CostTracker(max_cost=cfg.llm.max_cost_per_build)
+        backend = _build_backend(cfg)
+        package_dir = next((d for d in source_dirs if d.exists()), root)
+        build_skills_block = ""
+        try:
+            from jaunt.skill_manager import build_skills_block as _build_skills_block
+
+            build_skills_block = _build_skills_block(root)
+        except Exception:
+            build_skills_block = ""
+
+        build_generation_fingerprint = generation_fingerprint(cfg, kind="build")
+        repair_build_context = tester.RepairBuildContext(
+            package_dir=package_dir,
+            generated_dir=cfg.paths.generated_dir,
+            module_specs=build_module_specs,
+            specs=build_magic_specs,
+            spec_graph=build_magic_spec_graph,
+            module_dag=build_magic_module_dag,
+            backend=backend,
+            generation_fingerprint=build_generation_fingerprint,
+            skills_block=build_skills_block,
+            jobs=int(cfg.build.jobs),
+            async_runner=cfg.build.async_runner,
+        )
 
         result = tester.run_tests(
             project_dir=root,
@@ -896,7 +1000,8 @@ def cmd_test(args: argparse.Namespace) -> int:
             spec_graph=spec_graph,
             module_dag=module_dag,
             stale_modules=stale,
-            backend=_build_backend(cfg),
+            backend=backend,
+            generation_fingerprint=test_generation_fingerprint,
             jobs=jobs,
             no_generate=False,
             no_run=bool(args.no_run),
@@ -907,6 +1012,7 @@ def cmd_test(args: argparse.Namespace) -> int:
             response_cache=response_cache,
             cost_tracker=cost_tracker,
             async_runner=cfg.build.async_runner,
+            repair_build_context=repair_build_context,
         )
 
         if asyncio.iscoroutine(result):
@@ -961,10 +1067,38 @@ def cmd_eval(args: argparse.Namespace) -> int:
             config_provider=cfg.llm.provider,
             config_model=cfg.llm.model,
         )
-        cases = jaunt_eval.load_cases(list(args.case or []))
+        suite_name = getattr(args, "suite", "codegen")
+        if suite_name == "agent":
+            cases = jaunt_eval.load_agent_cases(list(args.case or []))
+        else:
+            cases = jaunt_eval.load_cases(list(args.case or []))
 
         out_root = Path(args.out).resolve() if args.out else (root / ".jaunt" / "evals")
         run_dir = jaunt_eval.make_run_dir(out_root)
+
+        if suite_name == "agent":
+            if len(targets) == 1:
+                suite = jaunt_eval.run_agent_eval_suite(target=targets[0], cases=cases)
+                jaunt_eval.write_agent_single_target_results(suite=suite, run_dir=run_dir)
+
+                if json_mode:
+                    _emit_json(jaunt_eval.agent_suite_to_cli_json(suite=suite, run_dir=run_dir))
+                else:
+                    print(jaunt_eval.format_agent_suite_table(suite))
+                    print(f"\nResults written to: {run_dir}")
+
+                return EXIT_OK if suite.failed == 0 else EXIT_GENERATION_ERROR
+
+            compare = jaunt_eval.run_agent_compare(targets=targets, cases=cases)
+            jaunt_eval.write_agent_compare_results(compare=compare, run_dir=run_dir)
+
+            if json_mode:
+                _emit_json(jaunt_eval.agent_compare_to_cli_json(compare=compare, run_dir=run_dir))
+            else:
+                print(jaunt_eval.format_agent_compare_table(compare))
+                print(f"\nResults written to: {run_dir}")
+
+            return EXIT_OK if compare.ok else EXIT_GENERATION_ERROR
 
         if len(targets) == 1:
             suite = jaunt_eval.run_eval_suite(target=targets[0], cases=cases)
@@ -1290,6 +1424,8 @@ def cmd_skill(args: argparse.Namespace) -> int:
                     source_roots=[d for d in source_dirs if d.exists()],
                     generated_dir=cfg.paths.generated_dir,
                     llm=cfg.llm,
+                    agent=cfg.agent,
+                    aider=cfg.aider,
                 )
             )
             for w in res.warnings:
@@ -1429,7 +1565,7 @@ def cmd_skill(args: argparse.Namespace) -> int:
         try:
             from jaunt.skill_builder import SkillBuilder
 
-            builder = SkillBuilder(cfg.llm)
+            builder = SkillBuilder(cfg.llm, cfg.agent, cfg.aider)
             updated = asyncio.run(builder.build_skill(existing, lib_contents))
         except Exception as e:  # noqa: BLE001
             msg = f"{type(e).__name__}: {e}"

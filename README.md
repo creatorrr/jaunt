@@ -30,8 +30,21 @@ Jaunt is a small Python library + CLI for **spec-driven code generation**:
 pip install jaunt[openai]      # for OpenAI
 pip install jaunt[anthropic]   # for Anthropic/Claude
 pip install jaunt[cerebras]    # for Cerebras
-pip install jaunt[all]         # both providers
+pip install jaunt[aider]       # Aider-backed agent runtime
+pip install jaunt[all]         # all bundled backends/tools
 ```
+
+## Aider Runtime
+
+Jaunt also supports `agent.engine = "aider"` for its internal build/test/skill
+agent workflows.
+
+Practical limitation today: if you use Aider with a custom
+`llm.api_key_env` name that differs from the provider's canonical variable
+(`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `CEREBRAS_API_KEY`), Jaunt currently
+remaps that key through `os.environ` under a global lock. That keeps auth
+stable, but it serializes concurrent Aider tasks for that config. For full
+parallelism today, prefer the canonical provider env var name.
 
 ## Quickstart (This Repo)
 

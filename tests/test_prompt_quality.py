@@ -32,6 +32,7 @@ def _build_ctx(**overrides) -> ModuleSpecContext:
         decorator_prompts={},
         dependency_apis={},
         dependency_generated_modules={},
+        module_contract_block="# Mark\nkind: class\nsignature: class Mark(StrEnum)\n",
     )
     defaults.update(overrides)
     return ModuleSpecContext(**defaults)
@@ -47,6 +48,7 @@ def _test_ctx(**overrides) -> ModuleSpecContext:
         decorator_prompts={},
         dependency_apis={},
         dependency_generated_modules={},
+        module_contract_block="# Mark\nkind: class\nsignature: class Mark(StrEnum)\n",
     )
     defaults.update(overrides)
     return ModuleSpecContext(**defaults)
@@ -125,6 +127,14 @@ def test_build_module_spec_reading_guidance(monkeypatch) -> None:
     assert "signature" in text or "parameter" in text
 
 
+def test_build_module_mentions_handwritten_symbol_reuse(monkeypatch) -> None:
+    backend = _backend(monkeypatch)
+    _system, user = _render(backend, _build_ctx())
+    text = user.lower()
+    assert "handwritten source-module symbols" in text
+    assert "do not redefine" in text
+
+
 # ---------------------------------------------------------------------------
 # Test system prompt
 # ---------------------------------------------------------------------------
@@ -159,6 +169,14 @@ def test_test_module_import_path_guidance(monkeypatch) -> None:
     backend = _backend(monkeypatch)
     _system, user = _render(backend, _test_ctx())
     assert "<module>:<qualname>" in user or "<module>" in user
+
+
+def test_test_module_mentions_public_api_only_policy(monkeypatch) -> None:
+    backend = _backend(monkeypatch)
+    _system, user = _render(backend, _test_ctx())
+    text = user.lower()
+    assert "public api only" in text
+    assert "wrapper internals" in text or "generated module internals" in text
 
 
 # ---------------------------------------------------------------------------

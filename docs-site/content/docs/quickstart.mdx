@@ -46,7 +46,15 @@ uv add pytest
 export OPENAI_API_KEY=...
 ```
 
-If you install Jaunt from a local editable path, also install the provider SDK (`openai` or `anthropic`) in that environment.
+If you install Jaunt from a local editable path, also install the provider SDK
+you plan to use in that environment (`openai`, `anthropic`, or `cerebras`).
+
+If you want Jaunt's Aider-backed runtime instead of the default legacy runtime,
+install the extra too:
+
+```bash
+uv add "jaunt[aider]"
+```
 
 ## 2) Create `jaunt.toml`
 
@@ -152,11 +160,41 @@ Jaunt writes generated tests under:
 
 - `tests/__generated__/specs_email.py`
 
+## 7) Optional: Switch To Aider Mode
+
+The commands stay the same. You only change the internal runtime in
+`jaunt.toml`:
+
+```toml
+[agent]
+engine = "aider"
+
+[aider]
+build_mode = "architect"
+test_mode = "code"
+skill_mode = "code"
+editor_model = ""
+map_tokens = 0
+save_traces = false
+```
+
+Then keep using:
+
+```bash
+jaunt build
+PYTHONPATH=src jaunt test
+```
+
+If you use Aider, the safest high-throughput setup is to leave
+`llm.api_key_env` on the provider's canonical env var name, such as
+`OPENAI_API_KEY`.
+
 ## What Next
 
 <Cards>
   <Card title="How It Works" href="/docs/how-it-works" />
   <Card title="Writing Better Specs" href="/docs/writing-specs/tips" />
+  <Card title="Aider Runtime" href="/docs/reference/aider-runtime" />
   <Card title="JWT Walkthrough (Hero Demo)" href="/docs/guides/jwt-walkthrough" />
 </Cards>
 
