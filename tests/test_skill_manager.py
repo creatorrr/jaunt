@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from jaunt.skill_manager import (
+    SkillMeta,
     add_skill,
     build_skills_block,
     discover_all_skills,
     import_skills,
+    read_skill_meta,
     remove_auto_skills,
     remove_skill,
     show_skill,
     validate_skill_name,
+    write_skill_meta,
 )
 
 
@@ -312,3 +316,91 @@ def test_build_skills_block_no_filter_without_pypi_dists(tmp_path: Path) -> None
     block = build_skills_block(tmp_path)
     assert "Requests body" in block
     assert "User content" in block
+
+
+# --- add_skill with description ---
+
+
+def test_add_skill_with_description(tmp_path: Path) -> None:
+    path = add_skill(tmp_path, "my-tool", description="HTTP client wrapper")
+    content = path.read_text(encoding="utf-8")
+    assert "HTTP client wrapper" in content
+    assert "## What it is" in content
+
+
+# --- add_skill backward compat ---
+
+
+def test_add_skill_backward_compat(tmp_path: Path) -> None:
+    """Existing no-arg behavior unchanged."""
+    path = add_skill(tmp_path, "plain")
+    content = path.read_text(encoding="utf-8")
+    assert "# plain" in content
+    assert "<!-- Describe what this tool/library/API does -->" in content
+
+
+# --- add_skill with libs ---
+
+
+def test_add_skill_with_libs(tmp_path: Path) -> None:
+    from jaunt.lib_inspect import LibRef
+
+    # Create a fake local lib
+    lib_dir = tmp_path / "mylib"
+    lib_dir.mkdir()
+    (lib_dir / "__init__.py").write_text('__version__ = "0.1.0"\n')
+    (lib_dir / "core.py").write_text(
+        'def greet(name: str) -> str:\n    """Say hello."""\n    return f"Hi {name}"\n'
+    )
+
+    ref = LibRef(type="path", name="mylib", path=str(lib_dir), version=None, import_roots=[])
+    path = add_skill(tmp_path, "my-tool", description="My tool", libs=[ref])
+    content = path.read_text(encoding="utf-8")
+    assert "# my-tool" in content
+    assert "My tool" in content
+    assert "## Libraries" in content
+    # META.json should be created
+    meta_path = tmp_path / ".agents/skills/my-tool/META.json"
+    assert meta_path.exists()
+    meta_data = json.loads(meta_path.read_text())
+    assert meta_data["description"] == "My tool"
+    assert len(meta_data["libs"]) == 1
+
+
+# --- read/write skill meta ---
+
+
+def test_read_write_skill_meta(tmp_path: Path) -> None:
+    _write(tmp_path / ".agents/skills/s/SKILL.md", "# s\n")
+    meta = SkillMeta(
+        libs=[{"type": "pypi", "name": "requests", "path": None, "version": "2.31.0"}],
+        description="HTTP lib",
+    )
+    write_skill_meta(tmp_path, "s", meta)
+
+    read_back = read_skill_meta(tmp_path, "s")
+    assert read_back is not None
+    assert read_back.description == "HTTP lib"
+    assert len(read_back.libs) == 1
+    assert read_back.libs[0]["name"] == "requests"
+
+
+def test_read_skill_meta_missing(tmp_path: Path) -> None:
+    assert read_skill_meta(tmp_path, "nonexistent") is None
+
+
+def test_add_skill_stores_relative_path(tmp_path: Path) -> None:
+    """Local lib paths should be stored relative to project root in META.json."""
+    from jaunt.lib_inspect import LibRef
+
+    lib_dir = tmp_path / "libs" / "mylib"
+    lib_dir.mkdir(parents=True)
+    (lib_dir / "__init__.py").write_text("")
+
+    ref = LibRef(type="path", name="mylib", path=str(lib_dir), version=None, import_roots=[])
+    add_skill(tmp_path, "my-tool", libs=[ref])
+    meta_data = json.loads((tmp_path / ".agents/skills/my-tool/META.json").read_text())
+    stored_path = meta_data["libs"][0]["path"]
+    # Should be relative, not absolute
+    assert not Path(stored_path).is_absolute()
+    assert stored_path == "libs/mylib"

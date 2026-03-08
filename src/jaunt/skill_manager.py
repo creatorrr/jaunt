@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import subprocess
-from dataclasses import dataclass
+import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from jaunt.lib_inspect import LibRef
 
 _SKILL_TEMPLATE = """\
 # {name}
@@ -26,6 +32,62 @@ _SKILL_TEMPLATE = """\
 ## Testing notes
 <!-- How to test code that uses this -->
 """
+
+_BOOTSTRAPPED_TEMPLATE = """\
+# {name}
+
+## What it is
+{description}
+
+## Libraries
+{lib_info}
+
+## Module structure
+{module_structure}
+
+## Public API
+{public_api}
+
+## Core concepts
+<!-- Fill in after running `jaunt skill build {name}` -->
+
+## Common patterns
+<!-- Fill in after running `jaunt skill build {name}` -->
+
+## Gotchas
+<!-- Fill in after running `jaunt skill build {name}` -->
+
+## Testing notes
+<!-- Fill in after running `jaunt skill build {name}` -->
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class SkillMeta:
+    libs: list[dict[str, str | None]] = field(default_factory=list)
+    description: str | None = None
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Write text to a file atomically via temp file + os.replace()."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        dir=str(path.parent),
+        prefix=".jaunt-tmp-",
+        suffix=".md",
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,14 +200,102 @@ def build_skills_block(project_root: Path, *, pypi_dists: dict[str, str] | None 
     return "\n".join(sections).strip()
 
 
-def add_skill(project_root: Path, name: str) -> Path:
+def read_skill_meta(project_root: Path, name: str) -> SkillMeta | None:
+    """Read .agents/skills/<name>/META.json. Returns None if missing."""
+    name = validate_skill_name(name)
+    meta_path = skills_dir(project_root) / name / "META.json"
+    if not meta_path.exists():
+        return None
+    try:
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
+        return SkillMeta(
+            libs=data.get("libs", []),
+            description=data.get("description"),
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def write_skill_meta(project_root: Path, name: str, meta: SkillMeta) -> Path:
+    """Write META.json alongside SKILL.md."""
+    name = validate_skill_name(name)
+    meta_path = skills_dir(project_root) / name / "META.json"
+    data = {
+        "libs": meta.libs,
+        "description": meta.description,
+    }
+    content = json.dumps(data, indent=2, sort_keys=True) + "\n"
+    _atomic_write_text(meta_path, content)
+    return meta_path
+
+
+def add_skill(
+    project_root: Path,
+    name: str,
+    *,
+    description: str | None = None,
+    libs: list[LibRef] | None = None,
+) -> Path:
     """Create a new user skill from template. Raises FileExistsError if exists."""
     name = validate_skill_name(name)
     path = skills_dir(project_root) / name / "SKILL.md"
     if path.exists():
         raise FileExistsError(f"Skill already exists: {path}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_SKILL_TEMPLATE.format(name=name), encoding="utf-8")
+
+    if libs:
+        from jaunt.lib_inspect import inspect_lib
+
+        lib_contents = [inspect_lib(ref) for ref in libs]
+
+        # Build template sections
+        desc = description or " / ".join(lc.summary for lc in lib_contents if lc.summary) or name
+        lib_info_parts = []
+        module_parts = []
+        api_parts = []
+        for lc in lib_contents:
+            ver = lc.version or "unknown"
+            summary = lc.summary or ""
+            lib_info_parts.append(f"- {lc.ref.name}=={ver} — {summary}")
+            if lc.module_structure:
+                module_parts.append(lc.module_structure)
+            if lc.public_api:
+                api_parts.append(lc.public_api)
+
+        content = _BOOTSTRAPPED_TEMPLATE.format(
+            name=name,
+            description=desc,
+            lib_info="\n".join(lib_info_parts) or "None",
+            module_structure="\n".join(module_parts) or "None",
+            public_api="\n".join(api_parts) or "None",
+        )
+
+        _atomic_write_text(path, content)
+
+        # Write META.json — store local paths relative to project_root for portability
+        lib_dicts = []
+        for ref in libs:
+            stored_path = ref.path
+            if stored_path is not None:
+                try:
+                    stored_path = str(
+                        Path(stored_path).resolve().relative_to(project_root.resolve())
+                    )
+                except ValueError:
+                    pass  # outside project root — store absolute as fallback
+            lib_dicts.append(
+                {"type": ref.type, "name": ref.name, "path": stored_path, "version": ref.version}
+            )
+        write_skill_meta(project_root, name, SkillMeta(libs=lib_dicts, description=description))
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        content = _SKILL_TEMPLATE.format(name=name)
+        if description:
+            content = content.replace(
+                "<!-- Describe what this tool/library/API does -->",
+                description,
+            )
+        path.write_text(content, encoding="utf-8")
+
     return path
 
 

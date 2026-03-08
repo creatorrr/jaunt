@@ -240,7 +240,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     # --- skill subcommand ---
-    skill_p = subparsers.add_parser("skill", help="Manage skills.")
+    skill_p = subparsers.add_parser("skill", aliases=["skills"], help="Manage skills.")
     skill_sub = skill_p.add_subparsers(dest="skill_command", required=True)
 
     skill_list_p = skill_sub.add_parser("list", help="List all skills.")
@@ -251,11 +251,20 @@ def _build_parser() -> argparse.ArgumentParser:
 
     skill_add_p = skill_sub.add_parser("add", help="Add a new user skill.")
     skill_add_p.add_argument("name", help="Skill name.")
+    skill_add_p.add_argument(
+        "--description", "-d", type=str, default=None, help="Short description of the skill."
+    )
+    skill_add_p.add_argument(
+        "--lib", "-l", action="append", default=[], dest="libs", help="PyPI package or local path."
+    )
     skill_add_p.add_argument("--root", type=str, default=None)
     skill_add_p.add_argument("--json", action="store_true", dest="json_output", help="JSON output.")
 
-    skill_remove_p = skill_sub.add_parser("remove", help="Remove a skill.")
+    skill_remove_p = skill_sub.add_parser(
+        "remove", aliases=["rm"], help="Remove a skill (requires -f)."
+    )
     skill_remove_p.add_argument("name", help="Skill name.")
+    skill_remove_p.add_argument("-f", "--force", action="store_true", help="Actually remove.")
     skill_remove_p.add_argument("--root", type=str, default=None)
     skill_remove_p.add_argument(
         "--json", action="store_true", dest="json_output", help="JSON output."
@@ -280,6 +289,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     skill_import_p.add_argument("--dry-run", action="store_true", help="Show what would import.")
     skill_import_p.add_argument(
+        "--json", action="store_true", dest="json_output", help="JSON output."
+    )
+
+    skill_build_p = skill_sub.add_parser(
+        "build", help="Elaborate a skill using LLM (requires --lib metadata)."
+    )
+    skill_build_p.add_argument("name", help="Skill name.")
+    skill_build_p.add_argument("--root", type=str, default=None)
+    skill_build_p.add_argument("--config", type=str, default=None)
+    skill_build_p.add_argument(
         "--json", action="store_true", dest="json_output", help="JSON output."
     )
 
@@ -1159,8 +1178,28 @@ def cmd_skill(args: argparse.Namespace) -> int:
 
     if subcmd == "add":
         root = _resolve_skill_root(args)
+        lib_refs = None
+        if getattr(args, "libs", None):
+            from jaunt.lib_inspect import resolve_lib
+
+            try:
+                # Resolve relative lib paths against --root, not CWD
+                resolved_libs = []
+                for lib in args.libs:
+                    lib = lib.strip()
+                    if not Path(lib).is_absolute() and ("/" in lib or Path(root / lib).is_dir()):
+                        lib = str(root / lib)
+                    resolved_libs.append(lib)
+                lib_refs = [resolve_lib(lib) for lib in resolved_libs]
+            except ValueError as e:
+                _eprint(f"error: {e}")
+                if json_mode:
+                    _emit_json({"command": "skill add", "ok": False, "error": str(e)})
+                return EXIT_CONFIG_OR_DISCOVERY
         try:
-            path = add_skill(root, args.name)
+            path = add_skill(
+                root, args.name, description=getattr(args, "description", None), libs=lib_refs
+            )
         except (FileExistsError, ValueError) as e:
             _eprint(f"error: {e}")
             if json_mode:
@@ -1172,8 +1211,33 @@ def cmd_skill(args: argparse.Namespace) -> int:
             print(f"Created skill: {path}")
         return EXIT_OK
 
-    if subcmd == "remove":
+    if subcmd in ("remove", "rm"):
         root = _resolve_skill_root(args)
+        if not getattr(args, "force", False):
+            # Without -f: show info, do NOT delete
+            try:
+                content = show_skill(root, args.name)
+            except (FileNotFoundError, ValueError) as e:
+                _eprint(f"error: {e}")
+                if json_mode:
+                    _emit_json({"command": "skill remove", "ok": False, "error": str(e)})
+                return EXIT_CONFIG_OR_DISCOVERY
+            from jaunt.skill_manager import skills_dir
+
+            skill_path = skills_dir(root) / args.name
+            if json_mode:
+                _emit_json(
+                    {
+                        "command": "skill remove",
+                        "ok": True,
+                        "dry_run": True,
+                        "name": args.name,
+                        "path": str(skill_path),
+                    }
+                )
+            else:
+                print(f"Skill '{args.name}' exists at {skill_path}. Rerun with -f to remove.")
+            return EXIT_OK
         try:
             path = remove_skill(root, args.name)
         except (FileNotFoundError, ValueError) as e:
@@ -1277,6 +1341,115 @@ def cmd_skill(args: argparse.Namespace) -> int:
                     print(f"  {name}: {status} (from {source})")
         return EXIT_OK
 
+    if subcmd == "build":
+        from jaunt.skill_manager import _atomic_write_text, read_skill_meta
+
+        root = _resolve_skill_root(args)
+        # Verify skill exists
+        try:
+            existing = show_skill(root, args.name)
+        except (FileNotFoundError, ValueError):
+            msg = f"Skill not found. Create it with `jaunt skill add {args.name}`"
+            _eprint(f"error: {msg}")
+            if json_mode:
+                _emit_json({"command": "skill build", "ok": False, "error": msg})
+            return EXIT_CONFIG_OR_DISCOVERY
+
+        # Read metadata
+        meta = read_skill_meta(root, args.name)
+        if meta is None or not meta.libs:
+            msg = (
+                f"No library references found for skill '{args.name}'. "
+                f"Recreate it with `jaunt skill add {args.name} --lib <LIB>`."
+            )
+            _eprint(f"error: {msg}")
+            if json_mode:
+                _emit_json({"command": "skill build", "ok": False, "error": msg})
+            return EXIT_CONFIG_OR_DISCOVERY
+
+        # Load config for LLM settings
+        try:
+            _root, cfg = _load_config(args)
+        except (JauntConfigError, KeyError) as e:
+            _print_error(e)
+            if json_mode:
+                _emit_json({"command": "skill build", "ok": False, "error": str(e)})
+            return EXIT_CONFIG_OR_DISCOVERY
+
+        _maybe_load_dotenv(_root)
+
+        # Resolve lib refs from META.json and inspect
+        from jaunt.lib_inspect import LibRef, inspect_lib
+
+        lib_contents = []
+        for lib_dict in meta.libs:
+            lib_type = lib_dict.get("type", "pypi")
+            if lib_type not in ("pypi", "path"):
+                lib_type = "pypi"
+            # Resolve stored relative paths back to absolute
+            stored_path = lib_dict.get("path")
+            if (
+                stored_path is not None
+                and lib_type == "path"
+                and not Path(stored_path).is_absolute()
+            ):
+                stored_path = str((root / stored_path).resolve())
+            ref = LibRef(
+                type=lib_type,  # type: ignore[arg-type]
+                name=lib_dict.get("name") or "",
+                path=stored_path,
+                version=lib_dict.get("version"),
+                import_roots=[],
+            )
+            # Re-resolve import roots at build time
+            if ref.type == "pypi":
+                from jaunt.lib_inspect import _resolve_pypi_import_roots
+
+                roots = _resolve_pypi_import_roots(ref.name)
+                ref = LibRef(
+                    type=ref.type,
+                    name=ref.name,
+                    path=ref.path,
+                    version=ref.version,
+                    import_roots=roots,
+                )
+            try:
+                lib_contents.append(inspect_lib(ref))
+            except Exception as e:  # noqa: BLE001
+                _eprint(f"warn: failed inspecting {ref.name}: {e}")
+
+        if not lib_contents:
+            msg = "Could not inspect any libraries."
+            _eprint(f"error: {msg}")
+            if json_mode:
+                _emit_json({"command": "skill build", "ok": False, "error": msg})
+            return EXIT_CONFIG_OR_DISCOVERY
+
+        # Run LLM
+        try:
+            from jaunt.skill_builder import SkillBuilder
+
+            builder = SkillBuilder(cfg.llm)
+            updated = asyncio.run(builder.build_skill(existing, lib_contents))
+        except Exception as e:  # noqa: BLE001
+            msg = f"{type(e).__name__}: {e}"
+            _eprint(f"error: {msg}")
+            if json_mode:
+                _emit_json({"command": "skill build", "ok": False, "error": msg})
+            return EXIT_GENERATION_ERROR
+
+        # Write updated SKILL.md atomically
+        from jaunt.skill_manager import skills_dir
+
+        skill_md = skills_dir(root) / args.name / "SKILL.md"
+        _atomic_write_text(skill_md, updated + "\n")
+
+        if json_mode:
+            _emit_json({"command": "skill build", "ok": True, "path": str(skill_md)})
+        else:
+            print(f"Updated skill: {skill_md}")
+        return EXIT_OK
+
     return EXIT_CONFIG_OR_DISCOVERY
 
 
@@ -1318,7 +1491,7 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_mcp(args)
     if args.command == "cache":
         return cmd_cache(args)
-    if args.command == "skill":
+    if args.command in ("skill", "skills"):
         return cmd_skill(args)
 
     return EXIT_CONFIG_OR_DISCOVERY

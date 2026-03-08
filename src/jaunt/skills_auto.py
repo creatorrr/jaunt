@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import os
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from jaunt.external_imports import discover_external_distributions_with_warnings, pep503_normalize
 from jaunt.pypi import PyPIReadmeError, fetch_readme
+from jaunt.skill_manager import _atomic_write_text
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Sequence
@@ -55,27 +54,6 @@ def _format_generated_skill_file(*, dist: str, version: str, body_md: str) -> st
     hdr = f"{_HEADER_PREFIX} dist={dist} version={version} -->"
     body = (body_md or "").strip()
     return hdr + "\n" + body + "\n"
-
-
-def _atomic_write_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(
-        dir=str(path.parent),
-        prefix=".jaunt-tmp-",
-        suffix=".md",
-        text=True,
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    finally:
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
 
 
 async def ensure_pypi_skills_and_block(
