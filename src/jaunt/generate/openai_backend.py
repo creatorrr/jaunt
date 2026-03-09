@@ -76,6 +76,8 @@ class OpenAIBackend(GeneratorBackend):
             )
         self._model = llm.model
         self._reasoning_effort = llm.reasoning_effort
+        self._prompt_cache_enabled = bool(llm.prompt_cache)
+        self._prompt_cache_key = llm.prompt_cache_key.strip()
 
         try:
             from openai import AsyncOpenAI
@@ -117,7 +119,31 @@ class OpenAIBackend(GeneratorBackend):
             prompt_parts=prompt_parts,
         )
 
-    async def _call_openai(self, messages: list[dict[str, str]]) -> tuple[str, TokenUsage | None]:
+    def _resolved_prompt_cache_key(self, ctx: ModuleSpecContext | None) -> str | None:
+        if not self._prompt_cache_enabled:
+            return None
+        if self._prompt_cache_key:
+            return self._prompt_cache_key
+        if ctx is None:
+            return None
+        return f"jaunt:{self._model}:{ctx.kind}"
+
+    @staticmethod
+    def _cached_prompt_tokens(resp: Any) -> int:
+        usage = getattr(resp, "usage", None)
+        if usage is None:
+            return 0
+        details = getattr(usage, "prompt_tokens_details", None)
+        if details is None:
+            return 0
+        return int(getattr(details, "cached_tokens", 0) or 0)
+
+    async def _call_openai(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        ctx: ModuleSpecContext | None = None,
+    ) -> tuple[str, TokenUsage | None]:
         """Call OpenAI API with retry and exponential backoff for transient errors."""
         last_exc: BaseException | None = None
         for attempt in range(_MAX_API_RETRIES):
@@ -128,6 +154,9 @@ class OpenAIBackend(GeneratorBackend):
                 }
                 if self._reasoning_effort is not None:
                     request_kwargs["reasoning_effort"] = self._reasoning_effort
+                prompt_cache_key = self._resolved_prompt_cache_key(ctx)
+                if prompt_cache_key is not None:
+                    request_kwargs["prompt_cache_key"] = prompt_cache_key
                 resp: Any = await self._client.chat.completions.create(**request_kwargs)
                 content = resp.choices[0].message.content
                 if not isinstance(content, str):
@@ -139,6 +168,7 @@ class OpenAIBackend(GeneratorBackend):
                         completion_tokens=getattr(resp.usage, "completion_tokens", 0) or 0,
                         model=self._model,
                         provider="openai",
+                        cached_prompt_tokens=self._cached_prompt_tokens(resp),
                     )
                 return content, usage
             except Exception as exc:
@@ -158,7 +188,10 @@ class OpenAIBackend(GeneratorBackend):
         raise last_exc  # type: ignore[misc]
 
     async def _call_openai_structured(
-        self, messages: list[dict[str, str]]
+        self,
+        messages: list[dict[str, str]],
+        *,
+        ctx: ModuleSpecContext | None = None,
     ) -> tuple[str, TokenUsage | None]:
         """Call OpenAI API with structured output (json_schema response_format)."""
         last_exc: BaseException | None = None
@@ -171,6 +204,9 @@ class OpenAIBackend(GeneratorBackend):
                 }
                 if self._reasoning_effort is not None:
                     request_kwargs["reasoning_effort"] = self._reasoning_effort
+                prompt_cache_key = self._resolved_prompt_cache_key(ctx)
+                if prompt_cache_key is not None:
+                    request_kwargs["prompt_cache_key"] = prompt_cache_key
                 resp: Any = await self._client.chat.completions.create(**request_kwargs)
                 content = resp.choices[0].message.content
                 if not isinstance(content, str):
@@ -187,6 +223,7 @@ class OpenAIBackend(GeneratorBackend):
                         completion_tokens=getattr(resp.usage, "completion_tokens", 0) or 0,
                         model=self._model,
                         provider="openai",
+                        cached_prompt_tokens=self._cached_prompt_tokens(resp),
                     )
                 return source, usage
             except Exception as exc:
@@ -270,6 +307,6 @@ class OpenAIBackend(GeneratorBackend):
     ) -> tuple[str, TokenUsage | None]:
         messages = self._render_messages(ctx, extra_error_context=extra_error_context)
         if self.supports_structured_output:
-            return await self._call_openai_structured(messages)
-        raw, usage = await self._call_openai(messages)
+            return await self._call_openai_structured(messages, ctx=ctx)
+        raw, usage = await self._call_openai(messages, ctx=ctx)
         return _strip_markdown_fences(raw), usage

@@ -588,16 +588,19 @@ def cmd_status(args: argparse.Namespace) -> int:
 
         from jaunt import builder
         from jaunt.generation_fingerprint import generation_fingerprint
+        from jaunt.module_api import module_api_digest
         from jaunt.module_contract import build_module_contract
 
         build_generation_fingerprint = generation_fingerprint(cfg, kind="build")
         build_module_context_digests: dict[str, str] = {}
+        build_module_api_digests: dict[str, str] = {}
         for module_name, entries in module_specs.items():
             expected, _errs = builder._build_expected_names(entries)
             build_module_context_digests[module_name] = build_module_contract(
                 entries=entries,
                 expected_names=expected,
             ).digest
+            build_module_api_digests[module_name] = module_api_digest(entries)
         stale = builder.detect_stale_modules(
             package_dir=package_dir,
             generated_dir=cfg.paths.generated_dir,
@@ -608,15 +611,26 @@ def cmd_status(args: argparse.Namespace) -> int:
             module_context_digests=build_module_context_digests,
             force=bool(args.force),
         )
+        api_changed = builder.detect_api_changed_modules(
+            package_dir=package_dir,
+            generated_dir=cfg.paths.generated_dir,
+            module_specs=module_specs,
+            module_api_digests=build_module_api_digests,
+        )
 
         target_mods = _iter_target_modules(args.target)
         if target_mods:
             allowed = _deps_closure(target_mods, module_dag=module_dag)
             all_mods = {m for m in module_specs if m in allowed}
+            api_changed = {m for m in api_changed if m in allowed}
         else:
             all_mods = set(module_specs.keys())
 
-        stale = stale & all_mods
+        stale = builder.expand_stale_modules(
+            module_dag,
+            stale & all_mods,
+            changed_modules=api_changed,
+        )
         fresh = all_mods - stale
 
         if json_mode:
@@ -727,16 +741,19 @@ def cmd_build(args: argparse.Namespace) -> int:
         # Lazy import so other work can land independently.
         from jaunt import builder
         from jaunt.generation_fingerprint import generation_fingerprint
+        from jaunt.module_api import module_api_digest
         from jaunt.module_contract import build_module_contract
 
         build_generation_fingerprint = generation_fingerprint(cfg, kind="build")
         build_module_context_digests: dict[str, str] = {}
+        build_module_api_digests: dict[str, str] = {}
         for module_name, entries in module_specs.items():
             expected, _errs = builder._build_expected_names(entries)
             build_module_context_digests[module_name] = build_module_contract(
                 entries=entries,
                 expected_names=expected,
             ).digest
+            build_module_api_digests[module_name] = module_api_digest(entries)
         stale = builder.detect_stale_modules(
             package_dir=package_dir,
             generated_dir=cfg.paths.generated_dir,
@@ -747,17 +764,38 @@ def cmd_build(args: argparse.Namespace) -> int:
             module_context_digests=build_module_context_digests,
             force=bool(args.force),
         )
+        api_changed = builder.detect_api_changed_modules(
+            package_dir=package_dir,
+            generated_dir=cfg.paths.generated_dir,
+            module_specs=module_specs,
+            module_api_digests=build_module_api_digests,
+        )
 
         target_mods = _iter_target_modules(args.target)
         if target_mods:
             allowed = _deps_closure(target_mods, module_dag=module_dag)
             stale = {m for m in stale if m in allowed}
+            api_changed = {m for m in api_changed if m in allowed}
 
-        stale = builder.expand_stale_modules(module_dag, stale)
+        expanded_stale = builder.expand_stale_modules(
+            module_dag,
+            stale,
+            changed_modules=api_changed,
+        )
 
         progress = None
-        if stale and not json_mode and (not bool(args.no_progress)) and sys.stderr.isatty():
-            progress = ProgressBar(label="build", total=len(stale), enabled=True, stream=sys.stderr)
+        if (
+            expanded_stale
+            and not json_mode
+            and (not bool(args.no_progress))
+            and sys.stderr.isatty()
+        ):
+            progress = ProgressBar(
+                label="build",
+                total=len(expanded_stale),
+                enabled=True,
+                stream=sys.stderr,
+            )
 
         from jaunt.cache import ResponseCache
         from jaunt.cost import CostTracker
@@ -777,6 +815,7 @@ def cmd_build(args: argparse.Namespace) -> int:
                 spec_graph=spec_graph,
                 module_dag=module_dag,
                 stale_modules=stale,
+                changed_modules=api_changed,
                 backend=_build_backend(cfg),
                 generation_fingerprint=build_generation_fingerprint,
                 skills_block=skills_block,
@@ -844,7 +883,7 @@ def cmd_test(args: argparse.Namespace) -> int:
 
         from jaunt import discovery, registry
         from jaunt.deps import build_spec_graph, collapse_to_module_dag
-        from jaunt.digest import extract_source_segment
+        from jaunt.module_api import build_dependency_api_block
         from jaunt.module_contract import build_module_contract
         from jaunt.spec_ref import SpecRef
 
@@ -875,7 +914,7 @@ def cmd_test(args: argparse.Namespace) -> int:
             )
             build_magic_module_dag = collapse_to_module_dag(build_magic_spec_graph)
             magic_dependency_apis = {
-                ref: extract_source_segment(entry) for ref, entry in build_magic_specs.items()
+                ref: build_dependency_api_block(entry) for ref, entry in build_magic_specs.items()
             }
         else:
             # cmd_build() already imported and registered magic specs.
@@ -887,7 +926,7 @@ def cmd_test(args: argparse.Namespace) -> int:
             )
             build_magic_module_dag = collapse_to_module_dag(build_magic_spec_graph)
             magic_dependency_apis = {
-                ref: extract_source_segment(entry) for ref, entry in build_magic_specs.items()
+                ref: build_dependency_api_block(entry) for ref, entry in build_magic_specs.items()
             }
 
         registry.clear_registries()

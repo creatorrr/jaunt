@@ -58,6 +58,10 @@ class CostTracker:
         return sum(u.completion_tokens for _, u in self._records)
 
     @property
+    def total_cached_prompt_tokens(self) -> int:
+        return sum(u.cached_prompt_tokens for _, u in self._records)
+
+    @property
     def total_tokens(self) -> int:
         return self.total_prompt_tokens + self.total_completion_tokens
 
@@ -91,6 +95,7 @@ class CostTracker:
             "api_calls": self.api_calls,
             "cache_hits": self.cache_hits,
             "prompt_tokens": self.total_prompt_tokens,
+            "cached_prompt_tokens": self.total_cached_prompt_tokens,
             "completion_tokens": self.total_completion_tokens,
             "total_tokens": self.total_tokens,
             "estimated_cost_usd": round(self.estimated_cost, 6),
@@ -105,6 +110,11 @@ class CostTracker:
             f" = {self.total_tokens:,} total",
             f"  Estimated cost: ${self.estimated_cost:.4f}",
         ]
+        if self.total_cached_prompt_tokens:
+            lines.insert(
+                2,
+                f"  Cached prompt tokens: {self.total_cached_prompt_tokens:,}",
+            )
         if self.max_cost is not None:
             lines.append(f"  Budget limit: ${self.max_cost:.4f}")
         return "\n".join(lines)

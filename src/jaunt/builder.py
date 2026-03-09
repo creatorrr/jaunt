@@ -7,6 +7,7 @@ emerge on the other side.
 from __future__ import annotations
 
 import asyncio
+import ast
 import heapq
 import importlib.metadata
 import os
@@ -28,10 +29,12 @@ from jaunt.errors import JauntDependencyCycleError, JauntGenerationError
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
 from jaunt.header import (
     extract_generation_fingerprint,
+    extract_module_api_digest,
     extract_module_context_digest,
     extract_module_digest,
     format_header,
 )
+from jaunt.module_api import build_dependency_api_block, module_api_digest
 from jaunt.module_contract import build_module_contract
 from jaunt.registry import SpecEntry
 from jaunt.spec_ref import SpecRef
@@ -182,8 +185,43 @@ def detect_stale_modules(
     return stale
 
 
-def expand_stale_modules(module_dag: dict[str, set[str]], stale_modules: set[str]) -> set[str]:
-    """If a module is stale, all its dependents are stale (transitively)."""
+def detect_api_changed_modules(
+    *,
+    package_dir: Path,
+    generated_dir: str,
+    module_specs: dict[str, list[SpecEntry]],
+    module_api_digests: dict[str, str],
+) -> set[str]:
+    changed: set[str] = set()
+    for module_name, entries in module_specs.items():
+        if not entries:
+            continue
+        relpath = _generated_relpath(module_name, generated_dir=generated_dir)
+        out_path = package_dir / relpath
+        if not out_path.exists():
+            changed.add(module_name)
+            continue
+
+        try:
+            existing = out_path.read_text(encoding="utf-8")
+        except Exception:
+            changed.add(module_name)
+            continue
+
+        on_disk = _normalize_digest(extract_module_api_digest(existing))
+        computed = _normalize_digest(module_api_digests.get(module_name))
+        if on_disk is None or computed is None or on_disk != computed:
+            changed.add(module_name)
+    return changed
+
+
+def expand_stale_modules(
+    module_dag: dict[str, set[str]],
+    stale_modules: set[str],
+    *,
+    changed_modules: set[str] | None = None,
+) -> set[str]:
+    """If a module's exported API changed, its dependents are stale transitively."""
 
     dependents: dict[str, set[str]] = {}
     for mod, deps in module_dag.items():
@@ -191,7 +229,7 @@ def expand_stale_modules(module_dag: dict[str, set[str]], stale_modules: set[str
             dependents.setdefault(dep, set()).add(mod)
 
     expanded = set(stale_modules)
-    queue = list(stale_modules)
+    queue = list(changed_modules if changed_modules is not None else stale_modules)
     while queue:
         m = queue.pop()
         for dep in dependents.get(m, set()):
@@ -207,6 +245,12 @@ class BuildReport:
     generated: set[str]
     skipped: set[str]
     failed: dict[str, list[str]]
+
+
+@dataclass(frozen=True, slots=True)
+class _GeneratedComponent:
+    expected_names: tuple[str, ...]
+    source: str
 
 
 def _critical_path_lengths(modules: set[str], dag: dict[str, set[str]]) -> dict[str, int]:
@@ -372,6 +416,105 @@ def _build_expected_names(entries: list[SpecEntry]) -> tuple[list[str], list[str
     return expected, []
 
 
+def _component_entries(
+    *,
+    module_name: str,
+    entries: list[SpecEntry],
+    spec_graph: dict[SpecRef, set[SpecRef]],
+) -> list[list[SpecEntry]]:
+    by_ref = {entry.spec_ref: entry for entry in entries}
+    refs = set(by_ref)
+    if len(refs) <= 1:
+        return [list(entries)] if entries else []
+
+    adjacency: dict[SpecRef, set[SpecRef]] = {ref: set() for ref in refs}
+    for ref in refs:
+        for dep in spec_graph.get(ref, set()):
+            if dep in refs:
+                adjacency[ref].add(dep)
+                adjacency.setdefault(dep, set()).add(ref)
+
+    class_refs: dict[str, set[SpecRef]] = {}
+    for entry in entries:
+        if entry.class_name:
+            class_refs.setdefault(entry.class_name, set()).add(entry.spec_ref)
+    for refs_for_class in class_refs.values():
+        ordered = sorted(refs_for_class, key=str)
+        for left in ordered:
+            adjacency.setdefault(left, set()).update(ref for ref in ordered if ref != left)
+
+    components: list[list[SpecEntry]] = []
+    visited: set[SpecRef] = set()
+    for ref in sorted(refs, key=str):
+        if ref in visited:
+            continue
+        stack = [ref]
+        bucket: list[SpecEntry] = []
+        while stack:
+            cur = stack.pop()
+            if cur in visited:
+                continue
+            visited.add(cur)
+            bucket.append(by_ref[cur])
+            for nxt in sorted(adjacency.get(cur, set()), key=str, reverse=True):
+                if nxt not in visited:
+                    stack.append(nxt)
+        bucket.sort(key=lambda entry: (entry.qualname, str(entry.spec_ref)))
+        components.append(bucket)
+
+    components.sort(key=lambda bucket: (bucket[0].qualname, str(bucket[0].spec_ref)))
+    return components
+
+
+def _defined_top_level_names(node: ast.stmt) -> set[str]:
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return {node.name}
+    if isinstance(node, ast.Assign):
+        return {target.id for target in node.targets if isinstance(target, ast.Name)}
+    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+        return {node.target.id}
+    if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+        return {node.target.id}
+    return set()
+
+
+def _merge_generated_components(components: list[_GeneratedComponent]) -> tuple[str, list[str]]:
+    import_texts: list[str] = []
+    seen_imports: set[str] = set()
+    body_texts: list[str] = []
+    seen_names: set[str] = set()
+
+    for component in components:
+        try:
+            mod = ast.parse(component.source)
+        except SyntaxError as exc:
+            names = ", ".join(component.expected_names)
+            return "", [f"Failed to parse generated component for {names}: {exc.msg}"]
+
+        for node in mod.body:
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                rendered = ast.unparse(node).strip()
+                if rendered and rendered not in seen_imports:
+                    seen_imports.add(rendered)
+                    import_texts.append(rendered)
+                continue
+
+            names = _defined_top_level_names(node)
+            dupes = names & seen_names
+            if dupes:
+                dupes_str = ", ".join(sorted(dupes))
+                return "", [f"Component merge conflict: duplicate top-level name(s): {dupes_str}"]
+            seen_names.update(names)
+            rendered = ast.unparse(node).strip()
+            if rendered:
+                body_texts.append(rendered)
+
+    chunks = [*import_texts, *body_texts]
+    if not chunks:
+        return "", []
+    return "\n\n".join(chunks).rstrip() + "\n", []
+
+
 async def run_build(
     *,
     package_dir: Path,
@@ -381,6 +524,7 @@ async def run_build(
     spec_graph: dict[SpecRef, set[SpecRef]],
     module_dag: dict[str, set[str]],
     stale_modules: set[str],
+    changed_modules: set[str] | None = None,
     backend: GeneratorBackend,
     generation_fingerprint: str = "",
     skills_block: str = "",
@@ -396,7 +540,11 @@ async def run_build(
     ty_attempts = max(0, int(ty_retry_attempts)) if ty_retry_attempts is not None else None
 
     # Expand rebuild set and restrict to modules we actually have specs for.
-    expanded = expand_stale_modules(module_dag, set(stale_modules))
+    expanded = expand_stale_modules(
+        module_dag,
+        set(stale_modules),
+        changed_modules=(set(changed_modules) if changed_modules is not None else None),
+    )
     stale = expanded & set(module_specs.keys())
     skipped = set(module_specs.keys()) - stale
 
@@ -430,6 +578,7 @@ async def run_build(
     failed: dict[str, list[str]] = {}
     completed: set[str] = set()
     ty_cmd = _resolve_ty_cmd() if ty_attempts is not None else None
+    llm_slots = asyncio.Semaphore(jobs)
 
     def _collect_dependency_context(
         module_name: str,
@@ -443,7 +592,7 @@ async def run_build(
             # Collect spec API signatures from dependency modules.
             for dep_entry in module_specs.get(dep_mod, []):
                 try:
-                    dep_apis[dep_entry.spec_ref] = extract_source_segment(dep_entry)
+                    dep_apis[dep_entry.spec_ref] = build_dependency_api_block(dep_entry)
                 except Exception:
                     pass
 
@@ -462,100 +611,13 @@ async def run_build(
 
         return dep_apis, dep_gen
 
-    async def build_one(module_name: str) -> tuple[bool, list[str]]:
-        entries = module_specs.get(module_name, [])
-
-        expected, conflict_errs = _build_expected_names(entries)
-        if conflict_errs:
-            return False, conflict_errs
-
-        spec_sources: dict[SpecRef, str] = {}
-        decorator_prompts: dict[SpecRef, str] = {}
-        decorator_apis: dict[SpecRef, str] = {}
-        for e in entries:
-            spec_sources[e.spec_ref] = extract_source_segment(e)
-            p = e.decorator_kwargs.get("prompt")
-            if isinstance(p, str) and p:
-                decorator_prompts[e.spec_ref] = p
-            lines: list[str] = []
-            if e.effective_signature is not None:
-                src = e.effective_signature_source or "unknown"
-                lines.append(f"effective_signature[{src}]: {e.effective_signature}")
-            for rec in e.decorator_api_records:
-                lines.append(
-                    f"{rec.symbol_path} ({rec.position}) "
-                    f"target={rec.resolved_target or '<unknown>'} "
-                    f"signature={rec.signature or '<missing>'} "
-                    f"quality={rec.annotation_quality}"
-                )
-            for w in e.decorator_warnings:
-                lines.append(f"warning: {w}")
-            if lines:
-                decorator_apis[e.spec_ref] = "\n".join(lines)
-
-        dep_apis, dep_gen = _collect_dependency_context(module_name)
-        module_contract = build_module_contract(entries=entries, expected_names=expected)
-
-        ctx = ModuleSpecContext(
-            kind="build",
-            spec_module=module_name,
-            generated_module=paths.spec_module_to_generated_module(
-                module_name, generated_dir=generated_dir
-            ),
-            expected_names=expected,
-            spec_sources=spec_sources,
-            decorator_prompts=decorator_prompts,
-            dependency_apis=dep_apis,
-            dependency_generated_modules=dep_gen,
-            decorator_apis=decorator_apis,
-            skills_block=skills_block,
-            module_contract_block=module_contract.prompt_block,
-            module_context_digest=module_contract.digest,
-            async_runner=async_runner,
-        )
-
-        ty_validator: Callable[[str], list[str]] | None = None
-        if ty_cmd is not None:
-            ty_cmd_local = ty_cmd
-
-            def _local_ty_validator(source: str) -> list[str]:
-                return _ty_error_context(
-                    source=source,
-                    module_name=module_name,
-                    package_dir=package_dir,
-                    generated_dir=generated_dir,
-                    ty_cmd=ty_cmd_local,
-                )
-
-            ty_validator = _local_ty_validator
-
-        def _validate_candidate(source: str) -> list[str]:
-            errs = validate_build_generated_source(
-                source,
-                expected,
-                spec_module=module_name,
-                handwritten_names=module_contract.handwritten_names,
-            )
-            if errs:
-                return errs
-            if ty_validator is None:
-                return []
-            return ty_validator(source)
-
-        def _retry_validator(source: str) -> list[str]:
-            errs = validate_build_contract_only(
-                source,
-                expected_names=expected,
-                spec_module=module_name,
-                handwritten_names=module_contract.handwritten_names,
-            )
-            if errs:
-                return errs
-            if ty_validator is None:
-                return []
-            return ty_validator(source)
-
-        # Check response cache before calling LLM.
+    async def _generate_ctx(
+        module_name: str,
+        ctx: ModuleSpecContext,
+        *,
+        validate_candidate: Callable[[str], list[str]],
+        retry_validator: Callable[[str], list[str]],
+    ) -> tuple[bool, str | None, list[str]]:
         result_source: str | None = None
         ck: str | None = None
         if response_cache is not None:
@@ -567,32 +629,30 @@ async def run_build(
             )
             cached = response_cache.get(ck)
             if cached is not None:
-                # Re-validate cached output with current validators (including
-                # optional ty check) to avoid serving stale-bad cache entries.
-                cache_errors = _validate_candidate(cached.source)
+                cache_errors = validate_candidate(cached.source)
                 if not cache_errors:
                     result_source = cached.source
                     if cost_tracker is not None:
                         cost_tracker.record_cache_hit()
 
         if result_source is None:
-            max_attempts = (2 + (ty_attempts or 0)) if ty_validator is not None else 2
-            result = await backend.generate_with_retry(
-                ctx,
-                max_attempts=max_attempts,
-                extra_validator=_retry_validator,
-                initial_error_context=(initial_error_context_by_module or {}).get(module_name),
-            )
+            max_attempts = (2 + (ty_attempts or 0)) if ty_cmd is not None else 2
+            async with llm_slots:
+                result = await backend.generate_with_retry(
+                    ctx,
+                    max_attempts=max_attempts,
+                    extra_validator=retry_validator,
+                    initial_error_context=(initial_error_context_by_module or {}).get(module_name),
+                )
             if result.source is None:
-                return False, result.errors or ["No source returned."]
-
+                return False, None, result.errors or ["No source returned."]
             if result.errors:
-                return False, result.errors
+                return False, None, result.errors
 
             result_source = result.source
-            validation_errors = _validate_candidate(result_source)
+            validation_errors = validate_candidate(result_source)
             if validation_errors:
-                return False, validation_errors
+                return False, None, validation_errors
 
             if cost_tracker is not None and result.usage is not None:
                 cost_tracker.record(module_name, result.usage)
@@ -610,7 +670,216 @@ async def run_build(
                 )
                 response_cache.put(ck, entry)
 
-        # Store generated source for downstream dependents.
+        return True, result_source, []
+
+    async def build_one(module_name: str) -> tuple[bool, list[str]]:
+        entries = module_specs.get(module_name, [])
+
+        expected, conflict_errs = _build_expected_names(entries)
+        if conflict_errs:
+            return False, conflict_errs
+
+        dep_apis, dep_gen = _collect_dependency_context(module_name)
+        all_generated_names = list(expected)
+
+        ty_validator: Callable[[str], list[str]] | None = None
+        if ty_cmd is not None:
+            ty_cmd_local = ty_cmd
+
+            def _local_ty_validator(source: str) -> list[str]:
+                return _ty_error_context(
+                    source=source,
+                    module_name=module_name,
+                    package_dir=package_dir,
+                    generated_dir=generated_dir,
+                    ty_cmd=ty_cmd_local,
+                )
+
+            ty_validator = _local_ty_validator
+
+        def _component_payload(
+            component_entries: list[SpecEntry],
+        ) -> tuple[ModuleSpecContext, tuple[str, ...], tuple[str, ...]]:
+            component_expected, component_conflict_errs = _build_expected_names(component_entries)
+            if component_conflict_errs:
+                raise ValueError("\n".join(component_conflict_errs))
+
+            spec_sources: dict[SpecRef, str] = {}
+            decorator_prompts: dict[SpecRef, str] = {}
+            decorator_apis: dict[SpecRef, str] = {}
+            for entry in component_entries:
+                spec_sources[entry.spec_ref] = extract_source_segment(entry)
+                prompt = entry.decorator_kwargs.get("prompt")
+                if isinstance(prompt, str) and prompt:
+                    decorator_prompts[entry.spec_ref] = prompt
+                lines: list[str] = []
+                if entry.effective_signature is not None:
+                    src = entry.effective_signature_source or "unknown"
+                    lines.append(f"effective_signature[{src}]: {entry.effective_signature}")
+                for rec in entry.decorator_api_records:
+                    lines.append(
+                        f"{rec.symbol_path} ({rec.position}) "
+                        f"target={rec.resolved_target or '<unknown>'} "
+                        f"signature={rec.signature or '<missing>'} "
+                        f"quality={rec.annotation_quality}"
+                    )
+                for warning in entry.decorator_warnings:
+                    lines.append(f"warning: {warning}")
+                if lines:
+                    decorator_apis[entry.spec_ref] = "\n".join(lines)
+
+            component_contract = build_module_contract(
+                entries=entries,
+                expected_names=component_expected,
+                generated_names=all_generated_names,
+            )
+            ctx = ModuleSpecContext(
+                kind="build",
+                spec_module=module_name,
+                generated_module=paths.spec_module_to_generated_module(
+                    module_name, generated_dir=generated_dir
+                ),
+                expected_names=component_expected,
+                spec_sources=spec_sources,
+                decorator_prompts=decorator_prompts,
+                dependency_apis=dep_apis,
+                dependency_generated_modules=dep_gen,
+                decorator_apis=decorator_apis,
+                skills_block=skills_block,
+                module_contract_block=component_contract.prompt_block,
+                module_context_digest=component_contract.digest,
+                async_runner=async_runner,
+            )
+            return ctx, tuple(component_expected), component_contract.handwritten_names
+
+        def _make_validators(
+            *,
+            component_expected: list[str],
+            handwritten_names: tuple[str, ...],
+        ) -> tuple[Callable[[str], list[str]], Callable[[str], list[str]]]:
+            def _validate_candidate(source: str) -> list[str]:
+                errs = validate_build_generated_source(
+                    source,
+                    component_expected,
+                    spec_module=module_name,
+                    handwritten_names=handwritten_names,
+                )
+                if errs:
+                    return errs
+                if ty_validator is None:
+                    return []
+                return ty_validator(source)
+
+            def _retry_validator(source: str) -> list[str]:
+                errs = validate_build_contract_only(
+                    source,
+                    expected_names=component_expected,
+                    spec_module=module_name,
+                    handwritten_names=handwritten_names,
+                )
+                if errs:
+                    return errs
+                if ty_validator is None:
+                    return []
+                return ty_validator(source)
+
+            return _validate_candidate, _retry_validator
+
+        module_contract = build_module_contract(
+            entries=entries,
+            expected_names=expected,
+            generated_names=all_generated_names,
+        )
+
+        def _validate_module_candidate(source: str) -> list[str]:
+            errs = validate_build_generated_source(
+                source,
+                expected,
+                spec_module=module_name,
+                handwritten_names=module_contract.handwritten_names,
+            )
+            if errs:
+                return errs
+            if ty_validator is None:
+                return []
+            return ty_validator(source)
+
+        components = _component_entries(
+            module_name=module_name,
+            entries=entries,
+            spec_graph=spec_graph,
+        )
+        result_source: str | None = None
+        split_errors: list[str] = []
+
+        if len(components) > 1 and jobs > 1:
+
+            async def _build_component(
+                component_entries: list[SpecEntry],
+            ) -> tuple[bool, _GeneratedComponent | None, list[str]]:
+                try:
+                    ctx, component_expected, handwritten_names = _component_payload(
+                        component_entries
+                    )
+                except ValueError as exc:
+                    return False, None, [str(exc)]
+                validate_candidate, retry_validator = _make_validators(
+                    component_expected=list(component_expected),
+                    handwritten_names=handwritten_names,
+                )
+                ok, source, errs = await _generate_ctx(
+                    module_name,
+                    ctx,
+                    validate_candidate=validate_candidate,
+                    retry_validator=retry_validator,
+                )
+                if not ok or source is None:
+                    return False, None, errs
+                return (
+                    True,
+                    _GeneratedComponent(expected_names=component_expected, source=source),
+                    [],
+                )
+
+            component_results = await asyncio.gather(
+                *[asyncio.create_task(_build_component(component)) for component in components]
+            )
+            generated_components: list[_GeneratedComponent] = []
+            for ok, generated_component, errs in component_results:
+                if not ok or generated_component is None:
+                    split_errors.extend(errs)
+                else:
+                    generated_components.append(generated_component)
+
+            if not split_errors:
+                merged_source, merge_errors = _merge_generated_components(generated_components)
+                if merge_errors:
+                    split_errors.extend(merge_errors)
+                else:
+                    validation_errors = _validate_module_candidate(merged_source)
+                    if validation_errors:
+                        split_errors.extend(validation_errors)
+                    else:
+                        result_source = merged_source
+
+        if result_source is None:
+            ctx, _component_expected, handwritten_names = _component_payload(entries)
+            validate_candidate, retry_validator = _make_validators(
+                component_expected=expected,
+                handwritten_names=handwritten_names,
+            )
+            ok, source, errs = await _generate_ctx(
+                module_name,
+                ctx,
+                validate_candidate=validate_candidate,
+                retry_validator=retry_validator,
+            )
+            if not ok or source is None:
+                if split_errors:
+                    return False, [*split_errors, *errs]
+                return False, errs
+            result_source = source
+
         generated_sources[module_name] = result_source
 
         digest = module_digest(module_name, entries, specs, spec_graph)
@@ -621,6 +890,7 @@ async def run_build(
             "module_digest": digest,
             "generation_fingerprint": generation_fingerprint,
             "module_context_digest": module_contract.digest,
+            "module_api_digest": module_api_digest(entries),
             "spec_refs": [str(e.spec_ref) for e in entries],
         }
 

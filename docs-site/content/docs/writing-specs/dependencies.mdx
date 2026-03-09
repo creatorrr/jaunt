@@ -6,7 +6,7 @@ description: "Ordering and incremental rebuild behavior."
 Jaunt builds a spec-level dependency graph that is used for:
 
 - generation order (dependencies before dependents)
-- incremental rebuilds (a dependent becomes stale if a dependency changes)
+- incremental rebuilds (a dependent becomes stale if a dependency's exported API changes)
 
 ## Explicit Deps (`deps=...`)
 
@@ -37,7 +37,13 @@ Use explicit `deps=` when:
 ## What Happens During Generation
 
 - Dependencies are generated first.
-- If a dependency changes, dependents become stale on the next run.
+- If a dependency's exported API changes, dependents become stale on the next run.
+
+Dependency API changes include:
+
+- signature changes
+- edits anywhere in the cleaned docstring contract
+- for whole-class specs, adding/removing/changing declared members or method signatures
 
 Current limitation: dependency context plumbing is intentionally minimal in the MVP. Ordering and staleness propagation work, but the backend does not currently get rich "here is the generated dependency source" context for dependents.
 

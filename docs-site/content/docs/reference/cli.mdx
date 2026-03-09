@@ -34,6 +34,8 @@ uv run jaunt build --no-infer-deps
 uv run jaunt build --json
 ```
 
+If an upstream module's exported API changed, `jaunt build` also regenerates its stale dependents.
+
 ## Test
 
 Generate tests for `@jaunt.test` specs and run pytest:
@@ -71,6 +73,8 @@ uv run jaunt status
 uv run jaunt status --target my_app.specs
 uv run jaunt status --json
 ```
+
+`jaunt status` should reflect the same dependency-driven freshness model as `jaunt build`, including modules invalidated by an upstream dependency API change.
 
 ## Clean
 

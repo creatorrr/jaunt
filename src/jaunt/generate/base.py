@@ -38,6 +38,7 @@ class TokenUsage:
     completion_tokens: int
     model: str
     provider: str
+    cached_prompt_tokens: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +96,7 @@ class GeneratorBackend(ABC):
         extra_ctx: list[str] | None = list(initial_error_context) if initial_error_context else None
         total_prompt = 0
         total_completion = 0
+        total_cached_prompt = 0
 
         while attempts < max_attempts:
             attempts += 1
@@ -102,13 +104,20 @@ class GeneratorBackend(ABC):
             if usage is not None:
                 total_prompt += usage.prompt_tokens
                 total_completion += usage.completion_tokens
+                total_cached_prompt += usage.cached_prompt_tokens
 
             last_errors = validate_generated_source(last_source, ctx.expected_names)
             if not last_errors and extra_validator is not None:
                 last_errors = extra_validator(last_source)
             if not last_errors:
                 agg = (
-                    TokenUsage(total_prompt, total_completion, self.model_name, self.provider_name)
+                    TokenUsage(
+                        total_prompt,
+                        total_completion,
+                        self.model_name,
+                        self.provider_name,
+                        cached_prompt_tokens=total_cached_prompt,
+                    )
                     if total_prompt or total_completion
                     else None
                 )
@@ -122,7 +131,13 @@ class GeneratorBackend(ABC):
             extra_ctx = (extra_ctx or []) + retry_ctx
 
         agg = (
-            TokenUsage(total_prompt, total_completion, self.model_name, self.provider_name)
+            TokenUsage(
+                total_prompt,
+                total_completion,
+                self.model_name,
+                self.provider_name,
+                cached_prompt_tokens=total_cached_prompt,
+            )
             if total_prompt or total_completion
             else None
         )

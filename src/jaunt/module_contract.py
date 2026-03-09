@@ -33,7 +33,12 @@ class ModuleContract:
     symbols: tuple[HandwrittenSymbol, ...] = ()
 
 
-def build_module_contract(*, entries: list[SpecEntry], expected_names: list[str]) -> ModuleContract:
+def build_module_contract(
+    *,
+    entries: list[SpecEntry],
+    expected_names: list[str],
+    generated_names: list[str] | None = None,
+) -> ModuleContract:
     if not entries:
         empty_digest = hashlib.sha256(b"[]").hexdigest()
         return ModuleContract(
@@ -47,11 +52,11 @@ def build_module_contract(*, entries: list[SpecEntry], expected_names: list[str]
     source_file = entries[0].source_file
     source = Path(source_file).read_text(encoding="utf-8")
     tree = ast.parse(source, filename=source_file)
-    generated_names = set(expected_names)
+    generated = set(generated_names or expected_names)
 
     symbols: list[HandwrittenSymbol] = []
     for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name not in generated_names:
+        if isinstance(node, ast.FunctionDef) and node.name not in generated:
             symbols.append(
                 HandwrittenSymbol(
                     name=node.name,
@@ -63,7 +68,7 @@ def build_module_contract(*, entries: list[SpecEntry], expected_names: list[str]
             )
             continue
 
-        if isinstance(node, ast.AsyncFunctionDef) and node.name not in generated_names:
+        if isinstance(node, ast.AsyncFunctionDef) and node.name not in generated:
             symbols.append(
                 HandwrittenSymbol(
                     name=node.name,
@@ -75,7 +80,7 @@ def build_module_contract(*, entries: list[SpecEntry], expected_names: list[str]
             )
             continue
 
-        if isinstance(node, ast.ClassDef) and node.name not in generated_names:
+        if isinstance(node, ast.ClassDef) and node.name not in generated:
             symbols.append(
                 HandwrittenSymbol(
                     name=node.name,
@@ -90,7 +95,7 @@ def build_module_contract(*, entries: list[SpecEntry], expected_names: list[str]
 
         if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
             for name in _assignment_names(node):
-                if name in generated_names:
+                if name in generated:
                     continue
                 symbols.append(
                     HandwrittenSymbol(

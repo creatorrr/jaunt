@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from jaunt import paths
 from jaunt.builder import run_build
 from jaunt.deps import build_spec_graph
 from jaunt.errors import JauntDependencyCycleError
@@ -90,6 +91,42 @@ def test_scheduler_respects_dependency_order_jobs_1(tmp_path: Path) -> None:
     assert backend.calls == ["pkg.a", "pkg.b"]
 
 
+def test_dependents_rebuild_only_when_changed_module_api_changes(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+
+    a_path = tmp_path / "a.py"
+    b_path = tmp_path / "b.py"
+    _write(a_path, "def A() -> int:\n    return 1\n")
+    _write(b_path, "def B() -> int:\n    return A()\n")
+
+    a = _entry(module="pkg.a", qualname="A", source_file=str(a_path))
+    b = _entry(module="pkg.b", qualname="B", source_file=str(b_path), deps=["pkg.a:A"])
+    specs = {a.spec_ref: a, b.spec_ref: b}
+    spec_graph = build_spec_graph(specs, infer_default=False)
+    module_specs = {"pkg.a": [a], "pkg.b": [b]}
+    module_dag = {"pkg.a": set(), "pkg.b": {"pkg.a"}}
+
+    backend = FakeBackend()
+    report = asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"pkg.a"},
+            changed_modules=set(),
+            backend=backend,
+            jobs=2,
+        )
+    )
+
+    assert report.failed == {}
+    assert report.generated == {"pkg.a"}
+    assert backend.calls == ["pkg.a"]
+
+
 def test_non_stale_modules_are_skipped(tmp_path: Path) -> None:
     src = tmp_path / "src"
     a_path = tmp_path / "a.py"
@@ -163,7 +200,7 @@ def test_dependency_context_passed_to_backend(tmp_path: Path) -> None:
 
     # dependency_apis should contain the spec source for A
     assert a.spec_ref in b_ctx.dependency_apis
-    assert "def A():" in b_ctx.dependency_apis[a.spec_ref]
+    assert "signature: def A()" in b_ctx.dependency_apis[a.spec_ref]
 
     # dependency_generated_modules should contain the generated source for pkg.a
     assert "pkg.a" in b_ctx.dependency_generated_modules
@@ -201,6 +238,82 @@ def test_scheduler_cycle_raises(tmp_path: Path) -> None:
                 jobs=1,
             )
         )
+
+
+def test_scheduler_splits_disconnected_specs_within_module(tmp_path: Path) -> None:
+    spec_path = tmp_path / "mod.py"
+    _write(
+        spec_path,
+        "def A() -> int:\n    return 1\n\ndef B() -> int:\n    return 2\n",
+    )
+
+    a = _entry(module="pkg.mod", qualname="A", source_file=str(spec_path))
+    b = _entry(module="pkg.mod", qualname="B", source_file=str(spec_path))
+    specs = {a.spec_ref: a, b.spec_ref: b}
+    spec_graph = build_spec_graph(specs, infer_default=False)
+    module_specs = {"pkg.mod": [a, b]}
+    module_dag = {"pkg.mod": set()}
+
+    backend = FakeBackend()
+    report = asyncio.run(
+        run_build(
+            package_dir=tmp_path,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"pkg.mod"},
+            backend=backend,
+            jobs=2,
+        )
+    )
+
+    assert report.failed == {}
+    assert backend.calls == ["pkg.mod", "pkg.mod"]
+    assert sorted(ctx.expected_names for ctx in backend.contexts) == [["A"], ["B"]]
+
+    relpath = paths.generated_module_to_relpath(
+        paths.spec_module_to_generated_module("pkg.mod", generated_dir="__generated__"),
+        generated_dir="__generated__",
+    )
+    generated = (tmp_path / relpath).read_text(encoding="utf-8")
+    assert "def A():" in generated
+    assert "def B():" in generated
+
+
+def test_scheduler_keeps_connected_specs_in_same_module_together(tmp_path: Path) -> None:
+    spec_path = tmp_path / "mod.py"
+    _write(
+        spec_path,
+        "def A() -> int:\n    return B()\n\ndef B() -> int:\n    return 2\n",
+    )
+
+    a = _entry(module="pkg.mod", qualname="A", source_file=str(spec_path), deps=["pkg.mod:B"])
+    b = _entry(module="pkg.mod", qualname="B", source_file=str(spec_path))
+    specs = {a.spec_ref: a, b.spec_ref: b}
+    spec_graph = build_spec_graph(specs, infer_default=False)
+    module_specs = {"pkg.mod": [a, b]}
+    module_dag = {"pkg.mod": set()}
+
+    backend = FakeBackend()
+    report = asyncio.run(
+        run_build(
+            package_dir=tmp_path,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"pkg.mod"},
+            backend=backend,
+            jobs=2,
+        )
+    )
+
+    assert report.failed == {}
+    assert backend.calls == ["pkg.mod"]
+    assert backend.contexts[0].expected_names == ["A", "B"]
 
 
 def test_ty_error_context_timeout_returns_error(monkeypatch, tmp_path: Path) -> None:

@@ -22,7 +22,7 @@ Your role as an AI assistant: help author and refine spec stubs and test specs. 
 3. Identify the LLM provider: `[llm].provider` is `"openai"`, `"anthropic"`, or `"cerebras"`. The API key env var is in `[llm].api_key_env`.
 4. Identify the internal runtime: `[agent].engine` is `"legacy"` or `"aider"`. If it is `"aider"`, also inspect `[aider]`.
 5. Check for existing `__generated__/` directories to see what has already been built.
-6. Run `jaunt status` to see which modules are stale vs fresh.
+6. Run `jaunt status` to inspect stale vs fresh modules. Upstream API changes should make dependents stale too.
 
 ## Core Workflow
 
@@ -54,7 +54,8 @@ def slugify(title: str) -> str:
 - Constrain the solution when it matters: complexity, determinism, ordering.
 - Prefer pure logic: move I/O behind parameters (dependency injection).
 - Use full type annotations on all parameters and return types.
-- The docstring is the contract; make it decision-complete.
+- The full docstring is the contract; later lines matter just as much as the summary line.
+- For whole-class specs, the exported API includes declared members and method signatures, not just the class name.
 
 **Spec patterns:**
 
@@ -85,6 +86,8 @@ class LRUCache:
     def set(self, key: str, value: object) -> None: ...
     def size(self) -> int: ...
 ```
+
+For whole-class specs like this, changing `get`, `set`, `size`, or declared class attributes is a dependency-API change for downstream modules.
 
 Async function:
 ```python
@@ -289,7 +292,7 @@ def higher_func() -> str:
 ## Troubleshooting
 
 1. **`JauntNotBuiltError` at runtime**: Run `jaunt build` first.
-2. **Stale modules not rebuilding**: Check `jaunt status`. Use `--force` to force regeneration.
+2. **Stale modules not rebuilding**: Check `jaunt status`. Dependency API changes include signature edits, full docstring contract edits, and whole-class member/method changes. Use `--force` to force regeneration.
 3. **Dependency cycle error**: Check `deps=` declarations for circular references. Restructure specs to break the cycle.
 4. **Generation error (exit 3)**: Review the spec docstring for ambiguity. Add `prompt=` for extra guidance. Check LLM API key and quota.
 5. **Test failures (exit 4)**: Review generated tests in `__generated__/`. Refine test spec docstrings for clarity. If Aider mode added a direct extra edge case, decide whether the spec should explicitly keep or forbid that scenario.

@@ -35,7 +35,7 @@ def test_openai_backend_strips_fences(monkeypatch) -> None:
     # Force fallback (non-structured) path.
     monkeypatch.setattr(type(backend), "supports_structured_output", property(lambda self: False))
 
-    async def fake_call(messages):
+    async def fake_call(messages, **kwargs):
         assert isinstance(messages, list)
         return "```python\nprint('hi')\n```", None
 
@@ -52,7 +52,7 @@ def test_openai_backend_renders_expected_names_and_kind_specific_rules(monkeypat
 
     seen: list[list[dict[str, str]]] = []
 
-    async def fake_call(messages):
+    async def fake_call(messages, **kwargs):
         seen.append(messages)
         return "def foo():\n    return 1\n", None
 
@@ -118,7 +118,7 @@ def test_openai_backend_injects_skills_block_as_extra_user_message(monkeypatch) 
 
     seen: list[list[dict[str, str]]] = []
 
-    async def fake_call(messages):
+    async def fake_call(messages, **kwargs):
         seen.append(messages)
         return "def foo():\n    return 1\n", None
 
@@ -146,6 +146,88 @@ def test_openai_backend_injects_skills_block_as_extra_user_message(monkeypatch) 
     assert "External library skills (reference):" in msgs[1]["content"]
 
 
+def test_openai_backend_auto_prompt_cache_key_when_enabled(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    backend = OpenAIBackend(
+        LLMConfig(
+            provider="openai",
+            model="gpt-test",
+            api_key_env="OPENAI_API_KEY",
+            prompt_cache=True,
+        )
+    )
+
+    captured_kwargs: list[dict] = []
+
+    class _FakeResp:
+        class _Choice:
+            class _Message:
+                content = '{"python_source": "def foo():\\n    return 1\\n", "imports_used": []}'
+
+            message = _Message()
+
+        choices = [_Choice()]
+
+    class _FakeCompletions:
+        @staticmethod
+        async def create(**kwargs):
+            captured_kwargs.append(kwargs)
+            return _FakeResp()
+
+    monkeypatch.setattr(
+        backend,
+        "_client",
+        type("C", (), {"chat": type("Ch", (), {"completions": _FakeCompletions})()})(),
+    )
+
+    source, usage = asyncio.run(backend.generate_module(_ctx("build")))
+
+    assert "def foo" in source
+    assert len(captured_kwargs) == 1
+    assert captured_kwargs[0]["prompt_cache_key"] == "jaunt:gpt-test:build"
+
+
+def test_openai_backend_uses_configured_prompt_cache_key(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    backend = OpenAIBackend(
+        LLMConfig(
+            provider="openai",
+            model="gpt-test",
+            api_key_env="OPENAI_API_KEY",
+            prompt_cache=True,
+            prompt_cache_key="jaunt-shared-prefix",
+        )
+    )
+
+    captured_kwargs: list[dict] = []
+
+    class _FakeResp:
+        class _Choice:
+            class _Message:
+                content = '{"python_source": "def foo():\\n    return 1\\n", "imports_used": []}'
+
+            message = _Message()
+
+        choices = [_Choice()]
+
+    class _FakeCompletions:
+        @staticmethod
+        async def create(**kwargs):
+            captured_kwargs.append(kwargs)
+            return _FakeResp()
+
+    monkeypatch.setattr(
+        backend,
+        "_client",
+        type("C", (), {"chat": type("Ch", (), {"completions": _FakeCompletions})()})(),
+    )
+
+    source, usage = asyncio.run(backend.generate_module(_ctx("test")))
+
+    assert "def foo" in source
+    assert captured_kwargs[0]["prompt_cache_key"] == "jaunt-shared-prefix"
+
+
 # -- Structured output tests --
 
 
@@ -165,7 +247,7 @@ def test_openai_generate_module_uses_structured_output(monkeypatch) -> None:
 
     structured_called: list[list[dict[str, str]]] = []
 
-    async def fake_structured_call(messages):
+    async def fake_structured_call(messages, **kwargs):
         structured_called.append(messages)
         return "def foo():\n    return 42\n", None
 
@@ -184,7 +266,7 @@ def test_openai_generate_module_fallback_when_structured_disabled(monkeypatch) -
 
     monkeypatch.setattr(type(backend), "supports_structured_output", property(lambda self: False))
 
-    async def fake_call(messages):
+    async def fake_call(messages, **kwargs):
         return "```python\ndef foo():\n    return 99\n```", None
 
     monkeypatch.setattr(backend, "_call_openai", fake_call)
@@ -236,6 +318,58 @@ def test_openai_call_structured_sends_response_format(monkeypatch) -> None:
     assert "imports_used" in schema["properties"]
     assert schema["required"] == ["python_source", "imports_used"]
     assert "reasoning_effort" not in captured_kwargs[0]
+
+
+def test_openai_call_structured_records_cached_prompt_tokens(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    backend = OpenAIBackend(
+        LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY")
+    )
+
+    class _PromptTokenDetails:
+        cached_tokens = 321
+
+    class _Usage:
+        prompt_tokens = 1000
+        completion_tokens = 25
+        prompt_tokens_details = _PromptTokenDetails()
+
+    class _FakeResp:
+        class _Choice:
+            class _Message:
+                content = '{"python_source": "def foo():\\n    return 1\\n", "imports_used": []}'
+
+            message = _Message()
+
+        choices = [_Choice()]
+        usage = _Usage()
+
+    async def fake_create(**kwargs):
+        return _FakeResp()
+
+    monkeypatch.setattr(
+        backend,
+        "_client",
+        type(
+            "C",
+            (),
+            {
+                "chat": type(
+                    "Ch",
+                    (),
+                    {"completions": type("CC", (), {"create": staticmethod(fake_create)})()},
+                )()
+            },
+        )(),
+    )
+
+    source, usage = asyncio.run(
+        backend._call_openai_structured([{"role": "user", "content": "hi"}])
+    )
+
+    assert source == "def foo():\n    return 1\n"
+    assert usage is not None
+    assert usage.cached_prompt_tokens == 321
 
 
 def test_openai_call_structured_includes_reasoning_effort_when_set(monkeypatch) -> None:
