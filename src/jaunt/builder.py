@@ -19,6 +19,7 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from jaunt import paths
 from jaunt.agent_docs import ensure_agent_docs
@@ -432,31 +433,33 @@ def _component_entries(
         for dep in spec_graph.get(ref, set()):
             if dep in refs:
                 adjacency[ref].add(dep)
-                adjacency.setdefault(dep, set()).add(ref)
+                if dep not in adjacency:
+                    adjacency[dep] = set()
+                adjacency[dep].add(ref)
 
     class_refs: dict[str, set[SpecRef]] = {}
     for entry in entries:
         if entry.class_name:
             class_refs.setdefault(entry.class_name, set()).add(entry.spec_ref)
     for refs_for_class in class_refs.values():
-        ordered = sorted(refs_for_class, key=str)
+        ordered = _sorted_spec_refs(refs_for_class)
         for left in ordered:
-            adjacency.setdefault(left, set()).update(ref for ref in ordered if ref != left)
+            adjacency[left].update(ref for ref in ordered if ref != left)
 
     components: list[list[SpecEntry]] = []
     visited: set[SpecRef] = set()
-    for ref in sorted(refs, key=str):
+    for ref in _sorted_spec_refs(refs):
         if ref in visited:
             continue
-        stack = [ref]
+        stack: list[SpecRef] = [ref]
         bucket: list[SpecEntry] = []
         while stack:
-            cur = stack.pop()
+            cur: SpecRef = stack.pop()
             if cur in visited:
                 continue
             visited.add(cur)
             bucket.append(by_ref[cur])
-            for nxt in sorted(adjacency.get(cur, set()), key=str, reverse=True):
+            for nxt in _sorted_spec_refs(adjacency[cur], reverse=True):
                 if nxt not in visited:
                     stack.append(nxt)
         bucket.sort(key=lambda entry: (entry.qualname, str(entry.spec_ref)))
@@ -476,6 +479,10 @@ def _defined_top_level_names(node: ast.stmt) -> set[str]:
     if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
         return {node.target.id}
     return set()
+
+
+def _sorted_spec_refs(refs: set[SpecRef], *, reverse: bool = False) -> list[SpecRef]:
+    return cast(list[SpecRef], sorted(refs, key=str, reverse=reverse))
 
 
 def _merge_generated_components(components: list[_GeneratedComponent]) -> tuple[str, list[str]]:
