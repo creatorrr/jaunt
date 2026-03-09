@@ -35,7 +35,7 @@ def test_load_minimal_config_defaults_apply(tmp_path: Path) -> None:
     assert cfg.prompts.build_module == ""
     assert cfg.prompts.test_system == ""
     assert cfg.prompts.test_module == ""
-    assert cfg.agent.engine == "legacy"
+    assert cfg.agent.engine == "aider"
     assert cfg.aider.build_mode == "architect"
     assert cfg.aider.test_mode == "code"
     assert cfg.aider.skill_mode == "code"

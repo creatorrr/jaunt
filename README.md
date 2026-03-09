@@ -27,17 +27,18 @@ Jaunt is a small Python library + CLI for **spec-driven code generation**:
 ## Installation
 
 ```bash
-pip install jaunt[openai]      # for OpenAI
-pip install jaunt[anthropic]   # for Anthropic/Claude
-pip install jaunt[cerebras]    # for Cerebras
-pip install jaunt[aider]       # Aider-backed agent runtime
+pip install jaunt[openai]      # OpenAI + default Aider runtime
+pip install jaunt[anthropic]   # Anthropic/Claude + default Aider runtime
+pip install jaunt[cerebras]    # Cerebras + default Aider runtime
+pip install jaunt[aider]       # runtime-only extra for custom install setups
 pip install jaunt[all]         # all bundled backends/tools
 ```
 
 ## Aider Runtime
 
-Jaunt also supports `agent.engine = "aider"` for its internal build/test/skill
-agent workflows.
+Jaunt now defaults to `agent.engine = "aider"` for its internal
+build/test/skill workflows. Set `agent.engine = "legacy"` if you want the
+older direct-SDK runtime instead.
 
 Practical limitation today: if you use Aider with a custom
 `llm.api_key_env` name that differs from the provider's canonical variable

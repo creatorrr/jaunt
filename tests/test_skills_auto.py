@@ -79,6 +79,7 @@ def test_existing_generated_skill_same_version_skips_regen(tmp_path: Path, monke
             source_roots=[],
             generated_dir="__generated__",
             llm=LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY"),
+            agent=AgentConfig(engine="legacy"),
         )
     )
     assert res.warnings == []
@@ -121,6 +122,7 @@ def test_existing_generated_skill_version_change_regenerates(tmp_path: Path, mon
             source_roots=[],
             generated_dir="__generated__",
             llm=LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY"),
+            agent=AgentConfig(engine="legacy"),
         )
     )
     assert calls == [(dist, new_version)]
@@ -199,6 +201,7 @@ def test_skill_generation_runs_concurrently(tmp_path: Path, monkeypatch) -> None
             source_roots=[],
             generated_dir="__generated__",
             llm=LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY"),
+            agent=AgentConfig(engine="legacy"),
         )
     )
     assert res.warnings == []

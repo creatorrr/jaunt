@@ -1,6 +1,6 @@
 [project]
 name = "jaunt"
-version = "0.4.0rc1"
+version = "0.4.0"
 description = "Spec-driven code generation framework: write intent as decorated Python stubs, generate implementations and tests with LLMs."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -23,9 +23,9 @@ Repository = "https://github.com/creatorrr/jaunt"
 Issues = "https://github.com/creatorrr/jaunt/issues"
 
 [project.optional-dependencies]
-openai = ["openai>=1.0.0,<3"]
-anthropic = ["anthropic>=0.39.0,<1"]
-cerebras = ["cerebras-cloud-sdk>=1.0.0"]
+openai = ["openai>=1.0.0,<3", "aider-chat~=0.86.2"]
+anthropic = ["anthropic>=0.39.0,<1", "aider-chat~=0.86.2"]
+cerebras = ["cerebras-cloud-sdk>=1.0.0", "aider-chat~=0.86.2"]
 aider = ["aider-chat~=0.86.2"]
 watch = ["watchfiles>=1.0.0"]
 mcp = ["fastmcp>=2.0.0"]
@@ -52,10 +52,12 @@ dev = [
   "pytest>=8",
   "pytest-asyncio>=1.0",
   "syrupy>=4.8.0",
+  "aider-chat~=0.86.2",
   "rich>=13,<15",  # needed by examples/rich_tictactoe
   "ruff>=0.9",
   "ty",
   "openai>=1.0.0,<3",
+  "anthropic>=0.39.0,<1",
   "cerebras-cloud-sdk>=1.0.0",
   "fastmcp>=2.0.0",
 ]

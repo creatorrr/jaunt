@@ -17,9 +17,9 @@ Practical gotcha: provider SDKs are optional dependencies. You need the matching
 - `pip install jaunt[cerebras]`
 - or `pip install jaunt[all]`
 
-If you use `agent.engine = "aider"`, install the extra for that runtime too:
-
-- `pip install jaunt[aider]`
+Those provider extras now include Jaunt's default Aider runtime too. If you manage
+dependencies manually, make sure the environment includes both the provider SDK
+and `aider-chat`.
 
 ## Hardcoded `__generated__` Dir Name
 

@@ -21,7 +21,7 @@ def _make_lib_content(name: str = "mylib", summary: str = "A library") -> LibCon
 
 def test_skill_builder_prompt_includes_context(monkeypatch) -> None:
     """Verify the LLM prompt includes lib info and existing content."""
-    from jaunt.config import LLMConfig
+    from jaunt.config import AgentConfig, LLMConfig
 
     llm = LLMConfig(provider="openai", model="gpt-test", api_key_env="TEST_KEY")
     monkeypatch.setenv("TEST_KEY", "fake-key")
@@ -49,7 +49,7 @@ def test_skill_builder_prompt_includes_context(monkeypatch) -> None:
     with patch("jaunt.skill_builder.SkillBuilder._call_llm", mock_call):
         from jaunt.skill_builder import SkillBuilder
 
-        builder = SkillBuilder(llm)
+        builder = SkillBuilder(llm, AgentConfig(engine="legacy"))
         existing = "# my-skill\n## What it is\nOriginal.\n"
         lc = _make_lib_content()
         result = asyncio.run(builder.build_skill(existing, [lc]))
@@ -65,7 +65,7 @@ def test_skill_builder_prompt_includes_context(monkeypatch) -> None:
 
 
 def test_skill_builder_truncates_large_input(monkeypatch) -> None:
-    from jaunt.config import LLMConfig
+    from jaunt.config import AgentConfig, LLMConfig
 
     llm = LLMConfig(provider="openai", model="gpt-test", api_key_env="TEST_KEY")
     monkeypatch.setenv("TEST_KEY", "fake-key")
@@ -93,7 +93,7 @@ def test_skill_builder_truncates_large_input(monkeypatch) -> None:
     with patch("jaunt.skill_builder.SkillBuilder._call_llm", mock_call):
         from jaunt.skill_builder import SkillBuilder
 
-        builder = SkillBuilder(llm)
+        builder = SkillBuilder(llm, AgentConfig(engine="legacy"))
         # Make a large lib content
         lc = LibContent(
             ref=LibRef(type="pypi", name="big", path=None, version="1.0", import_roots=[]),
@@ -111,7 +111,7 @@ def test_skill_builder_truncates_large_input(monkeypatch) -> None:
 
 def test_skill_builder_preserves_user_text(monkeypatch) -> None:
     """Non-placeholder content should be preserved in output."""
-    from jaunt.config import LLMConfig
+    from jaunt.config import AgentConfig, LLMConfig
 
     llm = LLMConfig(provider="openai", model="gpt-test", api_key_env="TEST_KEY")
     monkeypatch.setenv("TEST_KEY", "fake-key")
@@ -138,7 +138,7 @@ def test_skill_builder_preserves_user_text(monkeypatch) -> None:
     with patch("jaunt.skill_builder.SkillBuilder._call_llm", mock_call):
         from jaunt.skill_builder import SkillBuilder
 
-        builder = SkillBuilder(llm)
+        builder = SkillBuilder(llm, AgentConfig(engine="legacy"))
         result = asyncio.run(builder.build_skill("# old\nUser text here.", [_make_lib_content()]))
 
     assert "Kept user text" in result

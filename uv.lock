@@ -1154,7 +1154,7 @@ wheels = [
 
 [[package]]
 name = "jaunt"
-version = "0.4.0rc1"
+version = "0.4.0"
 source = { editable = "." }
 
 [package.optional-dependencies]
@@ -1172,6 +1172,7 @@ all = [
     { name = "watchfiles" },
 ]
 anthropic = [
+    { name = "aider-chat" },
     { name = "anthropic" },
 ]
 anyio = [
@@ -1181,12 +1182,14 @@ async = [
     { name = "pytest-asyncio" },
 ]
 cerebras = [
+    { name = "aider-chat" },
     { name = "cerebras-cloud-sdk" },
 ]
 mcp = [
     { name = "fastmcp" },
 ]
 openai = [
+    { name = "aider-chat" },
     { name = "openai" },
 ]
 rich = [
@@ -1198,6 +1201,8 @@ watch = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "aider-chat" },
+    { name = "anthropic" },
     { name = "cerebras-cloud-sdk" },
     { name = "fastmcp" },
     { name = "openai" },
@@ -1213,6 +1218,9 @@ dev = [
 requires-dist = [
     { name = "aider-chat", marker = "extra == 'aider'", specifier = "~=0.86.2" },
     { name = "aider-chat", marker = "extra == 'all'", specifier = "~=0.86.2" },
+    { name = "aider-chat", marker = "extra == 'anthropic'", specifier = "~=0.86.2" },
+    { name = "aider-chat", marker = "extra == 'cerebras'", specifier = "~=0.86.2" },
+    { name = "aider-chat", marker = "extra == 'openai'", specifier = "~=0.86.2" },
     { name = "anthropic", marker = "extra == 'all'", specifier = ">=0.39.0,<1" },
     { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=0.39.0,<1" },
     { name = "anyio", marker = "extra == 'all'", specifier = ">=4.1" },
@@ -1233,6 +1241,8 @@ provides-extras = ["openai", "anthropic", "cerebras", "aider", "watch", "mcp", "
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "aider-chat", specifier = "~=0.86.2" },
+    { name = "anthropic", specifier = ">=0.39.0,<1" },
     { name = "cerebras-cloud-sdk", specifier = ">=1.0.0" },
     { name = "fastmcp", specifier = ">=2.0.0" },
     { name = "openai", specifier = ">=1.0.0,<3" },

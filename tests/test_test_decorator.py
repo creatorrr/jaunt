@@ -57,4 +57,4 @@ def test_stores_public_api_only_in_decorator_kwargs() -> None:
 
 def test_public_api_only_requires_boolean() -> None:
     with pytest.raises(Exception, match="public_api_only must be a boolean"):
-        jaunt_test(public_api_only="nope")(top_level_test_spec)  # type: ignore[arg-type]
+        jaunt_test(public_api_only="nope")(top_level_test_spec)

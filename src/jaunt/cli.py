@@ -431,7 +431,8 @@ test_roots = ["tests"]
 generated_dir = "__generated__"
 
 [llm]
-# Install your chosen provider: pip install jaunt[openai], jaunt[anthropic], or jaunt[cerebras]
+# Install your chosen provider/runtime bundle:
+# pip install jaunt[openai], jaunt[anthropic], or jaunt[cerebras]
 provider = "openai"
 model = "gpt-5.2"
 api_key_env = "OPENAI_API_KEY"
@@ -442,7 +443,7 @@ api_key_env = "OPENAI_API_KEY"
 # anthropic_thinking_budget_tokens = 1024
 
 [agent]
-engine = "legacy"
+engine = "aider"
 
 [aider]
 build_mode = "architect"
@@ -1067,16 +1068,12 @@ def cmd_eval(args: argparse.Namespace) -> int:
         )
         suite_name = getattr(args, "suite", "codegen")
         if suite_name == "agent":
-            cases = jaunt_eval.load_agent_cases(list(args.case or []))
-        else:
-            cases = jaunt_eval.load_cases(list(args.case or []))
+            agent_cases = jaunt_eval.load_agent_cases(list(args.case or []))
+            out_root = Path(args.out).resolve() if args.out else (root / ".jaunt" / "evals")
+            run_dir = jaunt_eval.make_run_dir(out_root)
 
-        out_root = Path(args.out).resolve() if args.out else (root / ".jaunt" / "evals")
-        run_dir = jaunt_eval.make_run_dir(out_root)
-
-        if suite_name == "agent":
             if len(targets) == 1:
-                suite = jaunt_eval.run_agent_eval_suite(target=targets[0], cases=cases)
+                suite = jaunt_eval.run_agent_eval_suite(target=targets[0], cases=agent_cases)
                 jaunt_eval.write_agent_single_target_results(suite=suite, run_dir=run_dir)
 
                 if json_mode:
@@ -1087,7 +1084,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
 
                 return EXIT_OK if suite.failed == 0 else EXIT_GENERATION_ERROR
 
-            compare = jaunt_eval.run_agent_compare(targets=targets, cases=cases)
+            compare = jaunt_eval.run_agent_compare(targets=targets, cases=agent_cases)
             jaunt_eval.write_agent_compare_results(compare=compare, run_dir=run_dir)
 
             if json_mode:
@@ -1097,6 +1094,10 @@ def cmd_eval(args: argparse.Namespace) -> int:
                 print(f"\nResults written to: {run_dir}")
 
             return EXIT_OK if compare.ok else EXIT_GENERATION_ERROR
+
+        cases = jaunt_eval.load_cases(list(args.case or []))
+        out_root = Path(args.out).resolve() if args.out else (root / ".jaunt" / "evals")
+        run_dir = jaunt_eval.make_run_dir(out_root)
 
         if len(targets) == 1:
             suite = jaunt_eval.run_eval_suite(target=targets[0], cases=cases)
