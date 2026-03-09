@@ -11,7 +11,7 @@ Jaunt works when you can picture the loop: specs in, generated modules out, and 
 You write specs
   -> Jaunt discovers them (source_roots / test_roots)
   -> builds a dependency graph (explicit deps + best-effort inference)
-  -> picks a generation runtime (legacy backend or Aider)
+  -> picks a generation runtime (Aider by default, or legacy)
   -> for each module:
        - build prompt = system template + your spec source segment (+ extras)
        - LLM generates Python
@@ -34,9 +34,9 @@ The job is simple: implement the contract implied by your spec.
 
 Jaunt now has two internal ways to execute generation:
 
-- `legacy`: Jaunt calls the provider SDK directly
 - `aider`: Jaunt creates an isolated temp workspace, lets Aider edit the target
   file, then validates the result before writing it back
+- `legacy`: Jaunt calls the provider SDK directly
 
 This changes the planning and editing loop, but not the rest of the product
 surface. Discovery, staleness, validators, generated file locations, and the

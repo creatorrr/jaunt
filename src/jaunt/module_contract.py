@@ -138,7 +138,7 @@ def test_public_api_only_by_name(entries: list[SpecEntry]) -> dict[str, bool]:
     return policies
 
 
-def test_target_modules_by_name(spec_sources: dict[SpecRef, str]) -> dict[str, tuple[str, ...]]:
+def target_modules_by_name(spec_sources: dict[SpecRef, str]) -> dict[str, tuple[str, ...]]:
     targets: dict[str, tuple[str, ...]] = {}
     for spec_ref, source in spec_sources.items():
         modules = _extract_target_modules_from_source(source)
@@ -147,9 +147,6 @@ def test_target_modules_by_name(spec_sources: dict[SpecRef, str]) -> dict[str, t
             if qualname:
                 targets[qualname] = modules
     return targets
-
-
-test_target_modules_by_name.__test__ = False
 
 
 def _signature_line(source: str, node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
@@ -177,7 +174,9 @@ def _class_notes(node: ast.ClassDef) -> str:
     return "decorators: " + ", ".join(decorators)
 
 
-def _first_doc_line(node: ast.AST) -> str:
+def _first_doc_line(
+    node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Module,
+) -> str:
     doc = ast.get_docstring(node, clean=True)
     if not doc:
         return ""

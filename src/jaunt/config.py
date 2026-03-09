@@ -64,7 +64,7 @@ class PromptsConfig:
 
 @dataclass(frozen=True)
 class AgentConfig:
-    engine: str = "legacy"
+    engine: str = "aider"
 
 
 @dataclass(frozen=True)
@@ -303,7 +303,7 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     if "engine" in agent_tbl:
         agent_engine = _as_str(agent_tbl["engine"], name="agent.engine").strip()
     else:
-        agent_engine = "legacy"
+        agent_engine = "aider"
 
     if "build_mode" in aider_tbl:
         aider_build_mode = _as_str(aider_tbl["build_mode"], name="aider.build_mode").strip()

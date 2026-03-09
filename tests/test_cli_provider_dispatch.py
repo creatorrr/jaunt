@@ -27,6 +27,8 @@ def _cfg(provider: str, api_key_env: str = "OPENAI_API_KEY") -> JauntConfig:
         build=BuildConfig(jobs=1, infer_deps=True),
         test=TestConfig(jobs=1, infer_deps=True, pytest_args=[]),
         prompts=PromptsConfig(build_system="", build_module="", test_system="", test_module=""),
+        agent=AgentConfig(engine="legacy"),
+        aider=AiderConfig(),
     )
 
 

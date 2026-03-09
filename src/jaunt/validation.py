@@ -317,11 +317,7 @@ def _validate_public_api_only_test(
                     f"attribute(s) on {forbidden_target!r}."
                 )
         elif isinstance(child, ast.Constant) and isinstance(child.value, str):
-            if (
-                "\x1b[" in child.value
-                or "\\x1b[" in child.value
-                or "\\x1b\\[" in child.value
-            ):
+            if "\x1b[" in child.value or "\\x1b[" in child.value or "\\x1b\\[" in child.value:
                 errors.append(
                     f"{node.name}: public_api_only tests must not assert exact ANSI/control-"
                     "sequence patterns."

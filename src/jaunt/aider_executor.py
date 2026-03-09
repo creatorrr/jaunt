@@ -48,7 +48,7 @@ class AiderExecutor(AgentExecutor):
         except ImportError as e:
             raise JauntConfigError(
                 "The 'aider-chat' package is required for agent.engine='aider'. "
-                "Install it with: pip install jaunt[aider]"
+                "Install a provider extra such as: pip install jaunt[openai]"
             ) from e
 
         return Coder, InputOutput, Model

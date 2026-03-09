@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from jaunt.module_contract import build_module_contract, test_target_modules_by_name
+from jaunt.module_contract import build_module_contract, target_modules_by_name
 from jaunt.registry import SpecEntry
 from jaunt.spec_ref import normalize_spec_ref
 
@@ -71,7 +71,7 @@ def test_module_contract_digest_changes_when_handwritten_helper_changes(tmp_path
     assert first.digest != second.digest
 
 
-def test_test_target_modules_by_name_extracts_modules_from_target_line() -> None:
+def test_target_modules_by_name_extracts_modules_from_target_line() -> None:
     spec_ref = normalize_spec_ref("tests.specs:test_render")
     spec_sources = {
         spec_ref: (
@@ -83,12 +83,12 @@ def test_test_target_modules_by_name_extracts_modules_from_target_line() -> None
         )
     }
 
-    targets = test_target_modules_by_name(spec_sources)
+    targets = target_modules_by_name(spec_sources)
 
     assert targets == {"test_render": ("pkg.ui",)}
 
 
-def test_test_target_modules_by_name_drops_class_segments_from_target() -> None:
+def test_target_modules_by_name_drops_class_segments_from_target() -> None:
     spec_ref = normalize_spec_ref("tests.specs:test_method")
     spec_sources = {
         spec_ref: (
@@ -100,6 +100,6 @@ def test_test_target_modules_by_name_drops_class_segments_from_target() -> None:
         )
     }
 
-    targets = test_target_modules_by_name(spec_sources)
+    targets = target_modules_by_name(spec_sources)
 
     assert targets == {"test_method": ("pkg.board",)}

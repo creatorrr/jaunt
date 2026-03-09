@@ -41,19 +41,22 @@ If you’re adding Jaunt to your own project, install it however you vend it (lo
 
 ```bash
 # Example (from package index):
-uv add "jaunt[openai]"   # or jaunt[anthropic]
+uv add "jaunt[openai]"   # or jaunt[anthropic], jaunt[cerebras]
 uv add pytest
 export OPENAI_API_KEY=...
 ```
 
 If you install Jaunt from a local editable path, also install the provider SDK
-you plan to use in that environment (`openai`, `anthropic`, or `cerebras`).
+and Aider runtime you plan to use in that environment. The package extras above
+already bundle both. For a manual local setup, add the matching provider SDK
+plus `aider-chat`.
 
-If you want Jaunt's Aider-backed runtime instead of the default legacy runtime,
-install the extra too:
+If you prefer Jaunt's legacy direct-SDK runtime instead of the default Aider runtime,
+set this in `jaunt.toml`:
 
-```bash
-uv add "jaunt[aider]"
+```toml
+[agent]
+engine = "legacy"
 ```
 
 ## 2) Create `jaunt.toml`

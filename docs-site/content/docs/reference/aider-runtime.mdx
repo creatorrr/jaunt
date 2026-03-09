@@ -1,6 +1,6 @@
 ---
 title: Aider Runtime
-description: "How to enable Jaunt's Aider-backed internal agent runtime."
+description: "How Jaunt's default Aider-backed internal agent runtime works."
 ---
 
 Jaunt has two internal generation runtimes:
@@ -14,21 +14,25 @@ executes the generation step internally.
 
 ## Install
 
-Install the Aider extra in the environment that runs Jaunt:
+The standard provider extras already include Aider:
 
 ```bash
-pip install jaunt[aider]
+pip install jaunt[openai]
+# or: pip install jaunt[anthropic]
+# or: pip install jaunt[cerebras]
 ```
 
 If you are working from this repo checkout:
 
 ```bash
-uv sync --extra aider
+uv sync
 ```
 
-## Enable It
+If you manage dependencies manually, add both the provider SDK and `aider-chat`.
 
-Add this to `jaunt.toml`:
+## Configure It
+
+`jaunt init` now writes the Aider runtime by default. A typical config looks like:
 
 ```toml
 [agent]

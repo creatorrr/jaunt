@@ -62,8 +62,8 @@ pytest_args = ["-q"]
 
 [agent]
 # Internal generation runtime.
-# "legacy" uses Jaunt's direct SDK backends, "aider" uses the Aider task runner.
-engine = "legacy"
+# "aider" is the default task-runner runtime, "legacy" uses Jaunt's direct SDK backends.
+engine = "aider"
 
 [aider]
 # Mode for build-module generation.
@@ -91,8 +91,8 @@ Notes:
 
 - `paths.source_roots`: the CLI picks the *first existing* source root as the output base for generated build modules.
 - `prompts.*` are treated as *file paths* and read at runtime by the configured backend.
-- Provider SDKs are optional extras. Install `jaunt[openai]`, `jaunt[anthropic]`, or `jaunt[cerebras]` (or `jaunt[all]`).
-- `agent.engine = "aider"` requires the Aider extra in the active environment: `jaunt[aider]`.
+- Provider extras include the default Aider runtime. Install `jaunt[openai]`, `jaunt[anthropic]`, or `jaunt[cerebras]` (or `jaunt[all]`).
+- `jaunt[aider]` is still available as a runtime-only extra for custom install layouts.
 - There is no `[mcp]` config section; MCP is started explicitly via `jaunt mcp serve`.
 - `build.async_runner` controls the pytest marker selected for generated async tests.
 - For Aider, using the provider's canonical API key env var name
