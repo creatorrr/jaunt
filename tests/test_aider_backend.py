@@ -412,6 +412,7 @@ def test_aider_backend_build_task_includes_dependency_snapshot(monkeypatch) -> N
     assert "Aider Test Coverage Policy" not in ro_files["context/contract.md"]
     assert "Aider Build Policy" in ro_files["context/contract.md"]
     assert "Do not use `importlib`" in ro_files["context/contract.md"]
+    assert "visible headings, prompts, help text" in ro_files["context/contract.md"]
 
 
 def test_aider_backend_test_task_includes_bounded_coverage_guidance(monkeypatch) -> None:
@@ -467,6 +468,8 @@ def test_aider_backend_test_task_includes_bounded_coverage_guidance(monkeypatch)
     assert "smallest ones that exercise nearby" in contract
     assert "Do not monkeypatch" in contract
     assert "Only assert a specific exception type" in contract
+    assert "formatted or styled output" in contract
+    assert "interactive input flows" in contract
     assert "public-API-first" in contract
     assert "context/retry_strategy.md" not in ro_files
 
@@ -821,6 +824,8 @@ def test_aider_test_guidance_stays_domain_agnostic() -> None:
     assert "smallest ones that exercise nearby" in guidance
     assert "Do not monkeypatch" in guidance
     assert "Only assert a specific exception type" in guidance
+    assert "formatted or styled output" in guidance
+    assert "interactive input flows" in guidance
     assert "Rich/CLI output" not in guidance
 
 

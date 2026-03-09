@@ -14,6 +14,9 @@ _AIDER_BUILD_GUIDANCE = """## Aider Build Policy
   enums, constants, or fields unless the written spec explicitly requires it.
 - Avoid helper wrappers that only rename, normalize, or proxy already-typed
   handwritten attributes or constants without adding real behavior.
+- When the written spec names visible headings, prompts, help text, labels, or
+  other user-facing output, preserve those requirements in the implementation
+  rather than dropping or renaming them away.
 - Keep implementations straightforward and type-check clean.
 """
 
@@ -33,6 +36,12 @@ _AIDER_TEST_COVERAGE_GUIDANCE = """## Aider Test Coverage Policy
 - Only assert a specific exception type when the test spec names one
   explicitly. If the spec only says a call should be rejected, assert rejection
   without inventing a stricter exception class.
+- For formatted or styled output, prefer semantic content and structure
+  assertions over exact control-sequence placement, padding, or wrapped spacing
+  unless the spec explicitly requires byte-exact formatting.
+- For interactive input flows, assert the visible transcript and behavior
+  rather than assuming all user-facing wording appears in the raw prompt string
+  passed to an input function.
 - Keep generated tests public-API-first.
 """
 

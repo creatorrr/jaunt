@@ -70,6 +70,7 @@ exclude = ["examples/**"]
 
 [tool.ruff.lint]
 select = ["E", "F", "B"]
+ignore = ["E741"]
 
 [tool.ty.src]
 exclude = ["examples/**"]

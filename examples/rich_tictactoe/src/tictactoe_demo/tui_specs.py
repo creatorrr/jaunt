@@ -13,7 +13,7 @@ import jaunt
 from rich.console import Console, Group
 from rich.table import Table
 
-from .core_specs import GameState, Mark, apply_ai_move, apply_human_move, available_moves, new_game
+from .core_specs import GameState, apply_ai_move, apply_human_move, available_moves, new_game
 
 
 @jaunt.magic(deps=[available_moves])
@@ -42,9 +42,12 @@ def render_screen(state: GameState, message: str | None = None) -> Group:
 
     Screen contents:
     - A title / subtitle area describing the demo.
+    - The title area must literally include the word "Rich" and "Tic-Tac-Toe".
     - The rendered board from render_board(state).
     - A status section that says whose turn it is, which side is human vs AI,
       and which move numbers are currently available.
+    - The screen itself, not only the side-selection screen, must explain that
+      moves are entered as 1..9 and q/quit exits.
     - If `message` is provided, show it prominently.
     - If the game is over, show a clear final banner for human win, AI win, or draw.
 

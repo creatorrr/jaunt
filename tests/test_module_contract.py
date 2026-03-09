@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from jaunt.module_contract import build_module_contract
+from jaunt.module_contract import build_module_contract, test_target_modules_by_name
 from jaunt.registry import SpecEntry
 from jaunt.spec_ref import normalize_spec_ref
 
@@ -69,3 +69,37 @@ def test_module_contract_digest_changes_when_handwritten_helper_changes(tmp_path
     second = build_module_contract(entries=[entry], expected_names=["play"])
 
     assert first.digest != second.digest
+
+
+def test_test_target_modules_by_name_extracts_modules_from_target_line() -> None:
+    spec_ref = normalize_spec_ref("tests.specs:test_render")
+    spec_sources = {
+        spec_ref: (
+            "def test_render() -> None:\n"
+            '    """\n'
+            "    Target: pkg.ui.render_screen and pkg.ui.play_cli\n"
+            '    """\n'
+            "    raise AssertionError\n"
+        )
+    }
+
+    targets = test_target_modules_by_name(spec_sources)
+
+    assert targets == {"test_render": ("pkg.ui",)}
+
+
+def test_test_target_modules_by_name_drops_class_segments_from_target() -> None:
+    spec_ref = normalize_spec_ref("tests.specs:test_method")
+    spec_sources = {
+        spec_ref: (
+            "def test_method() -> None:\n"
+            '    """\n'
+            "    Target: pkg.board.TaskBoard.validate_priority\n"
+            '    """\n'
+            "    raise AssertionError\n"
+        )
+    }
+
+    targets = test_target_modules_by_name(spec_sources)
+
+    assert targets == {"test_method": ("pkg.board",)}

@@ -30,7 +30,11 @@ from jaunt.header import (
     extract_module_digest,
     format_header,
 )
-from jaunt.module_contract import build_module_contract, test_public_api_only_by_name
+from jaunt.module_contract import (
+    build_module_contract,
+    test_public_api_only_by_name,
+    test_target_modules_by_name,
+)
 from jaunt.registry import SpecEntry
 from jaunt.spec_ref import SpecRef
 from jaunt.validation import validate_test_contract_only, validate_test_generated_source
@@ -590,6 +594,7 @@ async def run_test_generation(
             p = e.decorator_kwargs.get("prompt")
             if isinstance(p, str) and p:
                 decorator_prompts[e.spec_ref] = p
+        target_modules_by_name = test_target_modules_by_name(spec_sources)
         module_contract = build_module_contract(entries=entries, expected_names=expected)
 
         ctx = ModuleSpecContext(
@@ -615,6 +620,7 @@ async def run_test_generation(
                 spec_module=ctx.spec_module,
                 generated_module=ctx.generated_module,
                 public_api_only_by_name=public_api_only_by_name,
+                target_modules_by_name=target_modules_by_name,
             )
 
         def _retry_validator(source: str) -> list[str]:
@@ -623,6 +629,7 @@ async def run_test_generation(
                 spec_module=ctx.spec_module,
                 generated_module=ctx.generated_module,
                 public_api_only_by_name=public_api_only_by_name,
+                target_modules_by_name=target_modules_by_name,
             )
 
         # Check response cache before calling LLM.

@@ -5,11 +5,13 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 from jaunt.registry import SpecEntry
+from jaunt.spec_ref import SpecRef
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +138,20 @@ def test_public_api_only_by_name(entries: list[SpecEntry]) -> dict[str, bool]:
     return policies
 
 
+def test_target_modules_by_name(spec_sources: dict[SpecRef, str]) -> dict[str, tuple[str, ...]]:
+    targets: dict[str, tuple[str, ...]] = {}
+    for spec_ref, source in spec_sources.items():
+        modules = _extract_target_modules_from_source(source)
+        if modules:
+            _, _, qualname = str(spec_ref).partition(":")
+            if qualname:
+                targets[qualname] = modules
+    return targets
+
+
+test_target_modules_by_name.__test__ = False
+
+
 def _signature_line(source: str, node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     seg = ast.get_source_segment(source, node) or ""
     first = next((line.strip() for line in seg.splitlines() if line.strip()), "")
@@ -208,3 +224,45 @@ def _format_prompt_block(symbols: list[HandwrittenSymbol]) -> str:
             lines.append(f"notes: {symbol.excerpt}")
         chunks.append(f"# {symbol.name}\n" + "\n".join(lines))
     return "\n\n".join(chunks).rstrip() + "\n"
+
+
+def _extract_target_modules_from_source(source: str) -> tuple[str, ...]:
+    try:
+        node = ast.parse(source or "")
+    except SyntaxError:
+        return ()
+
+    fn = next(
+        (
+            child
+            for child in node.body
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ),
+        None,
+    )
+    if fn is None:
+        return ()
+
+    doc = ast.get_docstring(fn, clean=True) or ""
+    target_line = next(
+        (line.strip() for line in doc.splitlines() if line.strip().startswith("Target:")),
+        "",
+    )
+    if not target_line:
+        return ()
+
+    body = target_line.partition(":")[2]
+    candidates = re.findall(r"[A-Za-z_][A-Za-z0-9_\.]*", body)
+    modules: list[str] = []
+    for candidate in candidates:
+        parts = candidate.split(".")
+        if len(parts) >= 2:
+            module_parts = parts[:-1]
+            for index, part in enumerate(module_parts):
+                if part and part[0].isupper():
+                    module_parts = module_parts[:index]
+                    break
+            module = ".".join(module_parts)
+            if module and module not in modules:
+                modules.append(module)
+    return tuple(modules)

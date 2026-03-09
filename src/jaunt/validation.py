@@ -137,6 +137,7 @@ def validate_test_generated_source(
     spec_module: str,
     generated_module: str,
     public_api_only_by_name: dict[str, bool],
+    target_modules_by_name: dict[str, tuple[str, ...]] | None = None,
 ) -> list[str]:
     errors, mod = _base_validation(source, expected_names)
     if mod is None:
@@ -148,6 +149,7 @@ def validate_test_generated_source(
             spec_module=spec_module,
             generated_module=generated_module,
             public_api_only_by_name=public_api_only_by_name,
+            target_modules_by_name=target_modules_by_name or {},
         )
     )
     return errors
@@ -159,6 +161,7 @@ def validate_test_contract_only(
     spec_module: str,
     generated_module: str,
     public_api_only_by_name: dict[str, bool],
+    target_modules_by_name: dict[str, tuple[str, ...]] | None = None,
 ) -> list[str]:
     try:
         mod = ast.parse(source or "")
@@ -169,6 +172,7 @@ def validate_test_contract_only(
         spec_module=spec_module,
         generated_module=generated_module,
         public_api_only_by_name=public_api_only_by_name,
+        target_modules_by_name=target_modules_by_name or {},
     )
 
 
@@ -178,8 +182,10 @@ def _validate_test_contract_only(
     spec_module: str,
     generated_module: str,
     public_api_only_by_name: dict[str, bool],
+    target_modules_by_name: dict[str, tuple[str, ...]],
 ) -> list[str]:
     errors: list[str] = []
+    module_imported_modules, module_imported_symbols = _collect_import_aliases(mod)
     defs_by_name = {
         node.name: node
         for node in mod.body
@@ -196,6 +202,9 @@ def _validate_test_contract_only(
                 node,
                 spec_module=spec_module,
                 generated_module=generated_module,
+                target_modules=target_modules_by_name.get(test_name, ()),
+                imported_modules=module_imported_modules,
+                imported_symbols=module_imported_symbols,
             )
         )
     return errors
@@ -244,6 +253,9 @@ def _validate_public_api_only_test(
     *,
     spec_module: str,
     generated_module: str,
+    target_modules: tuple[str, ...],
+    imported_modules: dict[str, str],
+    imported_symbols: dict[str, str],
 ) -> list[str]:
     errors: list[str] = []
     forbidden_dunders = {"__globals__", "__dict__", "__code__", "__closure__", "__wrapped__"}
@@ -251,6 +263,8 @@ def _validate_public_api_only_test(
         spec_module,
         generated_module,
     }
+    imported_modules = dict(imported_modules)
+    imported_symbols = dict(imported_symbols)
 
     for child in ast.walk(node):
         if isinstance(child, ast.ImportFrom):
@@ -260,6 +274,7 @@ def _validate_public_api_only_test(
                     f"{node.name}: public_api_only tests must not import from {module!r}."
                 )
             for alias in child.names:
+                imported_symbols[alias.asname or alias.name] = module
                 if alias.name.startswith("_"):
                     errors.append(
                         f"{node.name}: public_api_only tests must not import underscore-prefixed "
@@ -269,6 +284,7 @@ def _validate_public_api_only_test(
         elif isinstance(child, ast.Import):
             for alias in child.names:
                 mod_name = alias.name
+                imported_modules[alias.asname or mod_name.split(".")[0]] = mod_name
                 if any(
                     mod_name == mod or mod_name.startswith(mod + ".") for mod in forbidden_modules
                 ):
@@ -276,7 +292,8 @@ def _validate_public_api_only_test(
                         f"{node.name}: public_api_only tests must not import {mod_name!r}."
                     )
 
-        elif isinstance(child, ast.Attribute):
+    for child in ast.walk(node):
+        if isinstance(child, ast.Attribute):
             if child.attr in forbidden_dunders:
                 errors.append(
                     f"{node.name}: public_api_only tests must not inspect {child.attr!r}."
@@ -287,7 +304,99 @@ def _validate_public_api_only_test(
                     f"attribute {child.attr!r}."
                 )
 
+        elif isinstance(child, ast.Call):
+            forbidden_target = _monkeypatched_target_module(
+                child,
+                imported_modules=imported_modules,
+                imported_symbols=imported_symbols,
+                target_modules=target_modules,
+            )
+            if forbidden_target:
+                errors.append(
+                    f"{node.name}: public_api_only tests must not monkeypatch target-module "
+                    f"attribute(s) on {forbidden_target!r}."
+                )
+        elif isinstance(child, ast.Constant) and isinstance(child.value, str):
+            if (
+                "\x1b[" in child.value
+                or "\\x1b[" in child.value
+                or "\\x1b\\[" in child.value
+            ):
+                errors.append(
+                    f"{node.name}: public_api_only tests must not assert exact ANSI/control-"
+                    "sequence patterns."
+                )
+
     return errors
+
+
+def _collect_import_aliases(node: ast.AST) -> tuple[dict[str, str], dict[str, str]]:
+    imported_modules: dict[str, str] = {}
+    imported_symbols: dict[str, str] = {}
+    for child in ast.walk(node):
+        if isinstance(child, ast.Import):
+            for alias in child.names:
+                mod_name = alias.name
+                imported_modules[alias.asname or mod_name.split(".")[0]] = mod_name
+        elif isinstance(child, ast.ImportFrom):
+            module = child.module or ""
+            for alias in child.names:
+                imported_symbols[alias.asname or alias.name] = module
+    return imported_modules, imported_symbols
+
+
+def _monkeypatched_target_module(
+    call: ast.Call,
+    *,
+    imported_modules: dict[str, str],
+    imported_symbols: dict[str, str],
+    target_modules: tuple[str, ...],
+) -> str | None:
+    func = call.func
+    if not isinstance(func, ast.Attribute) or func.attr not in {"setattr", "delattr"}:
+        return None
+
+    target_expr = call.args[0] if call.args else None
+    if target_expr is None:
+        for keyword in call.keywords:
+            if keyword.arg == "target":
+                target_expr = keyword.value
+                break
+    if target_expr is None:
+        return None
+
+    if isinstance(target_expr, ast.Name):
+        return _resolve_forbidden_target_module(
+            target_expr.id,
+            imported_modules=imported_modules,
+            imported_symbols=imported_symbols,
+            target_modules=target_modules,
+        )
+
+    if isinstance(target_expr, ast.Attribute) and isinstance(target_expr.value, ast.Name):
+        return _resolve_forbidden_target_module(
+            target_expr.value.id,
+            imported_modules=imported_modules,
+            imported_symbols=imported_symbols,
+            target_modules=target_modules,
+        )
+
+    return None
+
+
+def _resolve_forbidden_target_module(
+    name: str,
+    *,
+    imported_modules: dict[str, str],
+    imported_symbols: dict[str, str],
+    target_modules: tuple[str, ...],
+) -> str | None:
+    candidate = imported_modules.get(name) or imported_symbols.get(name)
+    if not candidate:
+        return None
+    if any(candidate == mod or candidate.startswith(mod + ".") for mod in target_modules):
+        return candidate
+    return None
 
 
 def compile_check(source: str, filename: str) -> list[str]:

@@ -59,6 +59,7 @@ def test_test_validation_rejects_wrapper_introspection_by_default() -> None:
         spec_module="tests.specs",
         generated_module="tests.__generated__.specs",
         public_api_only_by_name={"test_game_flow": True},
+        target_modules_by_name={},
     )
     assert any("__globals__" in err for err in errs)
 
@@ -75,5 +76,24 @@ def test_test_validation_allows_white_box_opt_out() -> None:
         spec_module="tests.specs",
         generated_module="tests.__generated__.specs",
         public_api_only_by_name={"test_game_flow": False},
+        target_modules_by_name={},
     )
     assert errs == []
+
+
+def test_test_validation_rejects_monkeypatching_target_module_attributes() -> None:
+    src = (
+        "import pkg.feature as feature\n\n"
+        "def test_game_flow(monkeypatch) -> None:\n"
+        "    monkeypatch.setattr(feature, 'helper', lambda: 1)\n"
+        "    assert True\n"
+    )
+    errs = validate_test_generated_source(
+        src,
+        ["test_game_flow"],
+        spec_module="tests.specs",
+        generated_module="tests.__generated__.specs",
+        public_api_only_by_name={"test_game_flow": True},
+        target_modules_by_name={"test_game_flow": ("pkg.feature",)},
+    )
+    assert any("monkeypatch target-module attribute" in err for err in errs)

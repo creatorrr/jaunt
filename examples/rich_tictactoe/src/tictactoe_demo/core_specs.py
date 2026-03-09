@@ -109,9 +109,10 @@ def apply_human_move(state: GameState, move: int) -> GameState:
     Apply a single human move and return the next immutable state.
 
     Rules:
-    - Reject moves if the game is already over.
-    - Reject moves when it is not the human's turn.
-    - `move` must be in the current available moves; otherwise raise ValueError.
+    - Reject moves if the game is already over by raising ValueError.
+    - Reject moves when it is not the human's turn by raising ValueError.
+    - `move` must be an integer 1..9 and must be in the current available moves;
+      otherwise raise ValueError.
     - Write the human mark into the chosen cell and leave all other cells unchanged.
     - Recompute `winner` and `is_draw`.
     - If the game continues, switch `next_mark` to the AI mark.
@@ -126,8 +127,8 @@ def best_ai_move(state: GameState) -> int:
     Return the AI's optimal move using full minimax search.
 
     Requirements:
-    - Reject calls if the game is already over.
-    - Reject calls when it is not the AI's turn.
+    - Reject calls if the game is already over by raising ValueError.
+    - Reject calls when it is not the AI's turn by raising ValueError.
     - Search the full game tree; the AI must never lose with perfect play.
     - Maximize for the AI and minimize for the human.
     - Prefer a forced win over a draw, and a draw over a forced loss.
@@ -144,8 +145,8 @@ def apply_ai_move(state: GameState) -> GameState:
     Compute and apply the AI's move, returning the next immutable state.
 
     Rules:
-    - Reject calls if the game is already over.
-    - Reject calls when it is not the AI's turn.
+    - Reject calls if the game is already over by raising ValueError.
+    - Reject calls when it is not the AI's turn by raising ValueError.
     - Use best_ai_move(state) to choose the move.
     - Recompute `winner` and `is_draw`.
     - If the game continues, switch `next_mark` back to the human mark.
