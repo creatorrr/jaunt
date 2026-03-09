@@ -9,6 +9,7 @@ from typing import Any
 from jaunt.config import LLMConfig, PromptsConfig
 from jaunt.errors import JauntConfigError
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext, TokenUsage
+from jaunt.generate.fingerprint import build_generation_fingerprint
 from jaunt.generate.shared import (
     async_test_info,
     fmt_kv_block,
@@ -101,6 +102,18 @@ class CerebrasBackend(GeneratorBackend):
     @property
     def provider_name(self) -> str:
         return "cerebras"
+
+    def generation_fingerprint(self, ctx: ModuleSpecContext) -> str:
+        prompt_parts = (
+            [self._build_system, self._build_module]
+            if ctx.kind == "build"
+            else [self._test_system, self._test_module]
+        )
+        return build_generation_fingerprint(
+            engine="legacy",
+            kind=ctx.kind,
+            prompt_parts=prompt_parts,
+        )
 
     async def _call_cerebras(self, messages: list[dict[str, str]]) -> tuple[str, TokenUsage | None]:
         """Call Cerebras API with retry and exponential backoff for transient errors."""
@@ -228,6 +241,7 @@ class CerebrasBackend(GeneratorBackend):
             "deps_api_block": _fmt_kv_block(deps_api_items),
             "deps_generated_block": _fmt_kv_block(deps_gen_items),
             "decorator_apis_block": _fmt_kv_block(decorator_api_items),
+            "module_contract_block": ctx.module_contract_block or "(none)\n",
             "error_context_block": _fmt_kv_block(err_items),
             "async_test_info": async_test_info(ctx.async_runner),
         }

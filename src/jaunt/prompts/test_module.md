@@ -18,6 +18,9 @@ Dependency APIs (callable signatures/docstrings):
 Previously generated dependency modules (reference only):
 {{deps_generated_block}}
 
+Handwritten source-module symbols already available for reuse:
+{{module_contract_block}}
+
 Extra error context (fix these issues):
 {{error_context_block}}
 
@@ -30,6 +33,7 @@ Rules:
 - Generate tests only (no production implementation).
 - Do not import from `{{generated_module}}` (that would be a circular import).
 - Do not edit user files; only output test module source code.
+- Public API only by default: test behavior through the production module contract, not wrapper internals or generated module internals, unless a spec explicitly opts out.
 - Do not guess or search for application modules like `app`, `main`, `token`, etc.
 - Import the production APIs under test from the modules listed in Dependency APIs above.
   - Each Dependency API entry key is like `<module>:<qualname>`; import from `<module>`.

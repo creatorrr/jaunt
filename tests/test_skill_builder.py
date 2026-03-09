@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 from unittest.mock import patch
 
+from jaunt.agent_runtime import AgentTask
 from jaunt.lib_inspect import LibContent, LibRef
 
 
@@ -29,7 +30,21 @@ def test_skill_builder_prompt_includes_context(monkeypatch) -> None:
 
     async def mock_call(self, system: str, user: str) -> str:
         captured_args.append((system, user))
-        return "# Updated skill\n## What it is\nUpdated content.\n"
+        return "\n".join(
+            [
+                "# Updated skill",
+                "## What it is",
+                "Updated content.",
+                "## Core concepts",
+                "Concepts.",
+                "## Common patterns",
+                "Patterns.",
+                "## Gotchas",
+                "Gotchas.",
+                "## Testing notes",
+                "Testing.",
+            ]
+        )
 
     with patch("jaunt.skill_builder.SkillBuilder._call_llm", mock_call):
         from jaunt.skill_builder import SkillBuilder
@@ -42,6 +57,7 @@ def test_skill_builder_prompt_includes_context(monkeypatch) -> None:
     assert len(captured_args) == 1
     system, user = captured_args[0]
     assert "untrusted" in system.lower()
+    assert "typing aliases" in system.lower()
     assert "Original." in user
     assert "mylib" in user
     assert "do_thing" in user
@@ -58,7 +74,21 @@ def test_skill_builder_truncates_large_input(monkeypatch) -> None:
 
     async def mock_call(self, system: str, user: str) -> str:
         captured_user.append(user)
-        return "# Result\n"
+        return "\n".join(
+            [
+                "# Result",
+                "## What it is",
+                "Result.",
+                "## Core concepts",
+                "Concepts.",
+                "## Common patterns",
+                "Patterns.",
+                "## Gotchas",
+                "Gotchas.",
+                "## Testing notes",
+                "Testing.",
+            ]
+        )
 
     with patch("jaunt.skill_builder.SkillBuilder._call_llm", mock_call):
         from jaunt.skill_builder import SkillBuilder
@@ -89,7 +119,21 @@ def test_skill_builder_preserves_user_text(monkeypatch) -> None:
     async def mock_call(self, system: str, user: str) -> str:
         # The LLM prompt instructs to preserve valid user-written content
         assert "Preserve valid user-written content" in system
-        return "# skill\n## What it is\nKept user text.\n"
+        return "\n".join(
+            [
+                "# skill",
+                "## What it is",
+                "Kept user text.",
+                "## Core concepts",
+                "Concepts.",
+                "## Common patterns",
+                "Patterns.",
+                "## Gotchas",
+                "Gotchas.",
+                "## Testing notes",
+                "Testing.",
+            ]
+        )
 
     with patch("jaunt.skill_builder.SkillBuilder._call_llm", mock_call):
         from jaunt.skill_builder import SkillBuilder
@@ -111,3 +155,57 @@ def test_skill_builder_atomic_write(tmp_path: Path) -> None:
     # Write again (simulates update)
     _atomic_write_text(target, "updated content\n")
     assert target.read_text() == "updated content\n"
+
+
+def test_skill_builder_aider_engine_uses_executor(monkeypatch) -> None:
+    from jaunt.aider_executor import AiderExecutor
+    from jaunt.config import AgentConfig, AiderConfig, LLMConfig
+    from jaunt.skill_builder import SkillBuilder
+
+    def _fake_aider_classes():
+        return (
+            type("Coder", (), {"create": staticmethod(lambda **_: object())}),
+            type("IO", (), {}),
+            type("Model", (), {}),
+        )
+
+    monkeypatch.setattr(
+        AiderExecutor,
+        "_load_aider_classes",
+        staticmethod(_fake_aider_classes),
+    )
+    monkeypatch.setenv("TEST_KEY", "test-key")
+
+    llm = LLMConfig(provider="openai", model="gpt-test", api_key_env="TEST_KEY")
+
+    builder = SkillBuilder(llm, AgentConfig(engine="aider"), AiderConfig())
+    seen: dict[str, AgentTask] = {}
+
+    async def fake_run_task(task):
+        seen["task"] = task
+        return type(
+            "Result",
+            (),
+            {
+                "output": "\n".join(
+                    [
+                        "# skill",
+                        "## What it is",
+                        "Updated.",
+                        "## Core concepts",
+                        "Concepts.",
+                        "## Common patterns",
+                        "Patterns.",
+                        "## Gotchas",
+                        "Gotchas.",
+                        "## Testing notes",
+                        "Testing.",
+                    ]
+                )
+            },
+        )()
+
+    monkeypatch.setattr(builder._executor, "run_task", fake_run_task)
+    result = asyncio.run(builder.build_skill("# old\n", [_make_lib_content()]))
+    assert "Updated." in result
+    assert seen["task"].kind == "skill_update"

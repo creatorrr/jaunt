@@ -28,12 +28,16 @@ How to use dependencies:
 Previously generated dependency modules (for reference only):
 {{deps_generated_block}}
 
+Handwritten source-module symbols already available for reuse:
+{{module_contract_block}}
+
 Extra error context (fix these issues):
 {{error_context_block}}
 
 Rules:
 - Do not generate tests.
 - Do not edit user files; only output generated module source code.
+- Reuse handwritten symbols from `{{spec_module}}` when they already exist there; do not redefine them.
 - Include type annotations on all function signatures.
 - Ensure every non-Optional return type has explicit return/raise on all code paths.
 - If a spec uses `async def`, the generated implementation MUST also be `async def`. Use `await` for any async calls within.

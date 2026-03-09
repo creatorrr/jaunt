@@ -15,6 +15,17 @@ generated_dir = "__generated__"
 provider = "openai"
 model = "gpt-5.2"
 api_key_env = "OPENAI_API_KEY"
+
+[agent]
+engine = "legacy"  # or "aider"
+
+[aider]
+build_mode = "architect"
+test_mode = "code"
+skill_mode = "code"
+editor_model = ""
+map_tokens = 0
+save_traces = false
 ```
 
 ## Example 1: Pure Function Spec
@@ -191,6 +202,19 @@ def test_wrong_secret_raises() -> None:
     - create_token("user-42", "s3cret")
     - verify_token(token, "different") raises ValueError("invalid signature")
     """
+    raise AssertionError("spec stub (generated at test time)")
+```
+
+If the project uses `agent.engine = "aider"`, generated tests may add 1-2
+obvious contract-adjacent cases. Still state every required scenario
+explicitly; do not rely on Aider to invent broad coverage from a sparse spec.
+
+If a test intentionally needs white-box behavior, opt out explicitly:
+
+```python
+@jaunt.test(public_api_only=False)
+def test_uses_wrapper_internals() -> None:
+    """Intentional white-box test for a wrapper-heavy adapter."""
     raise AssertionError("spec stub (generated at test time)")
 ```
 

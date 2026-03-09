@@ -16,6 +16,7 @@ All example projects live here. Each subfolder is a standalone Jaunt project wit
 | `csv`      | `csv_parser/`      | CSV coercion with strict vs lenient modes          |
 | `diff`     | `diff_engine/`     | Text diff engine                                   |
 | `expr`     | `expr_eval/`       | Expression evaluator                               |
+| `tictactoe`| `rich_tictactoe/`  | Rich TUI Tic-Tac-Toe vs optimal minimax AI         |
 
 ### Classic Demos
 
@@ -46,6 +47,22 @@ export OPENAI_API_KEY=...   # or ANTHROPIC_API_KEY for Claude
 .venv/bin/python examples/run_example.py slugify build
 .venv/bin/python examples/run_example.py csv build --force
 ```
+
+The `tictactoe` example is the heavy Aider demo and has an extra prep step:
+
+```bash
+uv sync --extra aider
+uv run jaunt skill build --root examples/rich_tictactoe rich
+.venv/bin/python examples/run_example.py tictactoe build
+PYTHONPATH=examples/rich_tictactoe/src uv run python -m tictactoe_demo
+.venv/bin/python examples/run_example.py tictactoe test
+```
+
+For Aider-backed examples, parallelism is best when your API key uses the
+provider's canonical env var name (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or
+`CEREBRAS_API_KEY`). If you point `llm.api_key_env` at a custom name, Jaunt
+currently remaps it through a global lock during Aider runs, which keeps auth
+correct but serializes those tasks.
 
 On-the-fly demo (creates a temp project, runs build + test):
 

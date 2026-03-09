@@ -22,7 +22,14 @@ uv add --editable /path/to/jaunt
 uv add pytest
 ```
 
-If you use an editable local path install, also install the matching provider SDK (`openai` or `anthropic`) in that environment.
+If you use an editable local path install, also install the matching provider
+SDK (`openai`, `anthropic`, or `cerebras`) in that environment.
+
+If you want the Aider-backed runtime, install that extra too:
+
+```bash
+uv add "jaunt[aider]"
+```
 
 ## 2) Add `jaunt.toml`
 
@@ -50,6 +57,26 @@ Avoid (for now):
 
 - high-performance hot paths
 - complex stateful systems with tight invariants
+
+## Optional: Switch The Internal Runtime To Aider
+
+If you want Jaunt's Aider-backed planning/editing loop, add this to
+`jaunt.toml`:
+
+```toml
+[agent]
+engine = "aider"
+
+[aider]
+build_mode = "architect"
+test_mode = "code"
+skill_mode = "code"
+editor_model = ""
+map_tokens = 0
+save_traces = false
+```
+
+You still run `jaunt build` and `jaunt test` the same way.
 
 ## 4) Write Spec Stubs In Your Normal Source Tree
 

@@ -1,0 +1,153 @@
+---
+title: Aider Runtime
+description: "How to enable Jaunt's Aider-backed internal agent runtime."
+---
+
+Jaunt has two internal generation runtimes:
+
+- `legacy`: direct provider SDK calls through Jaunt's built-in backends
+- `aider`: task execution through Aider, with Jaunt still owning discovery, validation, retries, freshness, and final writes
+
+The CLI surface stays the same. You still run `jaunt build`, `jaunt test`,
+`jaunt skill build`, and `jaunt skill refresh`. The difference is how Jaunt
+executes the generation step internally.
+
+## Install
+
+Install the Aider extra in the environment that runs Jaunt:
+
+```bash
+pip install jaunt[aider]
+```
+
+If you are working from this repo checkout:
+
+```bash
+uv sync --extra aider
+```
+
+## Enable It
+
+Add this to `jaunt.toml`:
+
+```toml
+[agent]
+engine = "aider"
+
+[aider]
+build_mode = "architect"
+test_mode = "code"
+skill_mode = "code"
+editor_model = ""
+map_tokens = 0
+save_traces = false
+```
+
+`build_mode`, `test_mode`, and `skill_mode` decide which Aider editing mode
+Jaunt uses for each task type.
+
+## What Uses Aider
+
+When `agent.engine = "aider"`:
+
+- `jaunt build` uses Aider for generated implementation modules
+- `jaunt test` uses Aider for generated pytest modules
+- `jaunt skill build <name>` uses Aider when expanding a checked-in skill scaffold
+- `jaunt skill refresh` uses Aider for Jaunt-managed auto-generated skills
+
+Jaunt still handles:
+
+- module discovery
+- dependency ordering
+- freshness checks and cache partitioning
+- generated-source validation
+- repair retries after validation or pytest failures
+- writing validated output back into the real project tree
+
+## Modes
+
+### `architect`
+
+This is usually the best fit for build modules. Jaunt lets Aider plan and edit
+inside a temp workspace, then validates the final target file before writing it
+back to your project.
+
+If you set `aider.editor_model`, Jaunt uses that as the editor model for
+architect mode. Otherwise it falls back to `llm.model`.
+
+On retries, Jaunt keeps the previous candidate source in the editable target
+file instead of starting from scratch again. If an architect retry fails because
+the editor could not apply a diff cleanly, Jaunt falls back to Aider's
+whole-file editor path for the next architect attempt.
+
+### `code`
+
+This is the simpler edit path. It is a good default for generated tests and
+skill workflows, where the target file is usually smaller and the contract is
+more direct.
+
+Jaunt also uses a whole-file `code` repair pass for narrow follow-up fixes such
+as type-check-only or small contract/public-API errors, so it can patch the
+current candidate without paying for another full architect cycle.
+
+## Test Generation Style
+
+In Aider mode, generated pytest modules still have to satisfy the literal test
+specs you wrote.
+
+Jaunt also gives Aider a bounded expansion policy for tests:
+
+- keep every explicit setup, call, and assertion from the test specs
+- stay public-API-first
+- add at most `1-2` extra cases per generated test module
+- only add those extras when they are direct, obvious extensions of the stated
+  contract
+
+The intended shape is small, useful coverage expansion such as one extra
+invalid-input symmetry case or one minimal stateful edge case. It is not meant
+to produce a large speculative matrix of unstated tests.
+
+## Reasoning And Freshness
+
+Jaunt's Aider path respects `llm.reasoning_effort` when the provider/model
+supports it.
+
+In architect mode, Jaunt keeps the main planner on your configured reasoning
+effort and uses a lower-effort editor by default. The goal is to keep planning
+quality high while making edit application retries cheaper.
+
+Jaunt also treats the effective Aider runtime as part of artifact freshness.
+Changing any of these can make generated files stale:
+
+- `agent.engine`
+- the relevant Aider mode for the task
+- `aider.editor_model` for architect-mode tasks
+- `llm.reasoning_effort`
+- the rendered prompt template content
+
+That means switching from legacy to Aider, or changing the Aider runtime
+settings, triggers regeneration without needing `--force`.
+
+## Traces
+
+Set `aider.save_traces = true` if you want to keep the temp Aider workspaces
+after a run for debugging.
+
+With the default `false`, Jaunt cleans those temp directories up automatically.
+
+## Practical Notes
+
+- `jaunt watch` uses the configured runtime too. Watch cycles themselves are
+  sequential, but the build/test work inside a cycle still uses normal Jaunt
+  concurrency.
+- For best parallelism, keep `llm.api_key_env` on the provider's canonical env
+  var name (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `CEREBRAS_API_KEY`).
+- Prompt overrides still work. `prompts.*` continue to replace the packaged
+  templates rather than merge with them.
+- The generated-file layout does not change when you switch runtimes.
+- Aider build tasks get extra guardrails beyond the shared prompts: Jaunt tells
+  Aider to prefer static imports from known dependency modules and to avoid
+  unnecessary dynamic imports or defensive introspection of handwritten symbols.
+
+See also: [Configuration](/docs/reference/config) and
+[Limitations](/docs/reference/limitations).

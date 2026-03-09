@@ -58,6 +58,11 @@ def test_load_cases_unknown_raises() -> None:
         jaunt_eval.load_cases(["does_not_exist"])
 
 
+def test_load_agent_cases_unknown_raises() -> None:
+    with pytest.raises(ValueError, match="Unknown agent eval case"):
+        jaunt_eval.load_agent_cases(["does_not_exist"])
+
+
 def test_make_run_dir_format(tmp_path: Path) -> None:
     out = jaunt_eval.make_run_dir(tmp_path)
     assert out.parent == tmp_path
@@ -128,6 +133,41 @@ def test_write_compare_results_layout(tmp_path: Path) -> None:
     assert (run_dir / "comparison.json").is_file()
     assert (run_dir / "targets" / openai.target.slug / "summary.json").is_file()
     assert (run_dir / "targets" / anthropic.target.slug / "summary.json").is_file()
+
+
+def test_write_agent_single_target_results_layout(tmp_path: Path) -> None:
+    target = jaunt_eval.EvalTarget(provider="openai", model="gpt-4o")
+    case = jaunt_eval.AgentEvalCaseResult(
+        case_id="aider_multimodule_build_test",
+        description="desc",
+        status="passed",
+        duration_sec=0.2,
+        skip_reason=None,
+        steps={
+            "build": jaunt_eval.StepResult(
+                ok=True,
+                exit_code=0,
+                stdout="",
+                stderr="",
+                duration_sec=0.1,
+            )
+        },
+        generated_sources={"src/app/__generated__/specs.py": "def add() -> int:\n    return 1\n"},
+        skill_sources={".agents/skills/rich/SKILL.md": "# rich\n"},
+    )
+    suite = jaunt_eval.AgentEvalSuiteResult(
+        target=target,
+        started_at="2026-02-15T10:00:00Z",
+        finished_at="2026-02-15T10:00:01Z",
+        duration_sec=1.0,
+        cases=[case],
+    )
+
+    run_dir = tmp_path / "out-agent"
+    jaunt_eval.write_agent_single_target_results(suite=suite, run_dir=run_dir)
+
+    assert (run_dir / "summary.json").is_file()
+    assert (run_dir / "cases" / "aider_multimodule_build_test.json").is_file()
 
 
 def test_run_eval_case_skips_when_required_package_missing(monkeypatch) -> None:

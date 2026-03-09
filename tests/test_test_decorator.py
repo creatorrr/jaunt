@@ -44,3 +44,17 @@ def test_stores_deps_in_decorator_kwargs() -> None:
     )
     got = get_test_registry()[expected_ref]
     assert got.decorator_kwargs == {"deps": ["a.b:One", "a.b:Two"]}
+
+
+def test_stores_public_api_only_in_decorator_kwargs() -> None:
+    jaunt_test(public_api_only=False)(top_level_test_spec)
+    expected_ref = normalize_spec_ref(
+        f"{top_level_test_spec.__module__}:{top_level_test_spec.__qualname__}"
+    )
+    got = get_test_registry()[expected_ref]
+    assert got.decorator_kwargs == {"public_api_only": False}
+
+
+def test_public_api_only_requires_boolean() -> None:
+    with pytest.raises(Exception, match="public_api_only must be a boolean"):
+        jaunt_test(public_api_only="nope")(top_level_test_spec)  # type: ignore[arg-type]

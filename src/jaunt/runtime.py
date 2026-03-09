@@ -336,6 +336,7 @@ def test(
     deps: object | None = None,
     prompt: object | None = None,
     infer_deps: object | None = None,
+    public_api_only: object | None = None,
 ):
     """Decorator factory for declaring test specs."""
 
@@ -354,6 +355,10 @@ def test(
             decorator_kwargs["prompt"] = prompt
         if infer_deps is not None:
             decorator_kwargs["infer_deps"] = infer_deps
+        if public_api_only is not None:
+            if not isinstance(public_api_only, bool):
+                raise JauntError("public_api_only must be a boolean when provided.")
+            decorator_kwargs["public_api_only"] = public_api_only
 
         entry = SpecEntry(
             kind="test",

@@ -40,6 +40,7 @@ def _example_map(repo_root: Path) -> dict[str, tuple[Path, str]]:
         "csv": (base / "csv_parser", "csv_demo"),
         "diff": (base / "diff_engine", "diff_demo"),
         "expr": (base / "expr_eval", "expr_demo"),
+        "tictactoe": (base / "rich_tictactoe", "tictactoe_demo"),
         "toy": (base / "toy_app", "toy_app"),
     }
 

@@ -1,3 +1,8 @@
+---
+name: aider
+description: Using and building atop aider-chat pypi lib
+---
+
 # Aider Internals -- Comprehensive Skill Reference
 
 ## Metadata
@@ -751,19 +756,25 @@ class AiderBackend(GeneratorBackend):
 
 ### Recommended Edit Format for Jaunt
 
-For **new file generation** (Jaunt's primary use case), use **`"whole"`** format:
-- The target file starts empty, so there is nothing to SEARCH/REPLACE against
-- Whole-file format is simpler and more reliable for greenfield generation
-- Less parsing complexity, fewer failure modes
+Follow Aider's model-default guidance first. Aider is generally configured to
+pick an appropriate default edit format per model, so do not assume `"whole"`
+is always best.
 
-For **incremental updates** to existing generated code, use **`"diff"`** (SEARCH/REPLACE):
-- More token-efficient for small changes to large files
-- Better at preserving unchanged code
+For **Jaunt build modules**:
+- First attempt: use the configured task mode.
+- If build mode is `"architect"`, start with architect planning plus
+  `"editor-diff"` editing.
+- If an architect retry fails because SEARCH/REPLACE style edits do not apply
+  cleanly, keep architect planning but switch the editor to `"editor-whole"`.
+- If the failure is a narrow type-check or small contract repair, prefer a
+  whole-file repair pass against the previous candidate rather than another full
+  architect cycle.
 
-For **complex multi-file refactoring**, use **`"architect"`** mode:
-- The architect model plans the changes
-- The editor model implements them with proper edit format
-- Best for tasks requiring cross-file reasoning
+For **incremental updates** where preserving most of the file matters and the
+model is already good at exact edits, `"diff"` is still efficient.
+
+For **reliability fallbacks**, `"whole"` or `"editor-whole"` is the preferred
+escape hatch when diff-style edits keep failing to apply.
 
 ### Multi-Provider Configuration
 

@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import json
 
-from jaunt.header import HEADER_MARKER, extract_module_digest, format_header, parse_header
+from jaunt.header import (
+    HEADER_MARKER,
+    extract_generation_fingerprint,
+    extract_module_context_digest,
+    extract_module_digest,
+    format_header,
+    parse_header,
+)
 
 
 def test_format_header_emits_exact_lines_and_parse_roundtrips() -> None:
@@ -51,3 +58,22 @@ def test_extract_module_digest() -> None:
     )
     assert extract_module_digest(hdr + "x=1\n") == "sha256:abc123"
     assert extract_module_digest("x=1\n") is None
+
+
+def test_format_header_includes_generation_fingerprint_when_provided() -> None:
+    hdr = format_header(
+        tool_version="0.1.0",
+        kind="build",
+        source_module="pkg.specs",
+        module_digest="sha256:abc123",
+        generation_fingerprint="deadbeef",
+        module_context_digest="facefeed",
+        spec_refs=[],
+    )
+
+    parsed = parse_header(hdr)
+    assert parsed is not None
+    assert parsed["generation_fingerprint"] == "sha256:deadbeef"
+    assert parsed["module_context_digest"] == "sha256:facefeed"
+    assert extract_generation_fingerprint(hdr + "x=1\n") == "sha256:deadbeef"
+    assert extract_module_context_digest(hdr + "x=1\n") == "sha256:facefeed"

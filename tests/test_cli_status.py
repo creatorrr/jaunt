@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 
 import jaunt.cli
+from jaunt.config import load_config
+from jaunt.generation_fingerprint import generation_fingerprint
 
 
 def test_parse_status_defaults() -> None:
@@ -49,6 +51,18 @@ def _make_spec_project(tmp_path: Path, *, pkg: str = "statuspkg") -> None:
             '    raise RuntimeError("stub")\n'
         ),
     )
+
+
+def _build_generation_fingerprint(project_root: Path) -> str:
+    return generation_fingerprint(load_config(root=project_root), kind="build")
+
+
+def _build_module_context_digest(entries) -> str:
+    from jaunt.builder import _build_expected_names
+    from jaunt.module_contract import build_module_contract
+
+    expected, _errs = _build_expected_names(entries)
+    return build_module_contract(entries=entries, expected_names=expected).digest
 
 
 def test_cmd_status_no_specs(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -172,6 +186,8 @@ def test_cmd_status_with_fresh_specs(tmp_path: Path, monkeypatch, capsys) -> Non
         module_specs = get_specs_by_module("magic")
         entries = module_specs[f"{pkg}.specs"]
         digest = module_digest(f"{pkg}.specs", entries, specs, spec_graph)
+        fingerprint = _build_generation_fingerprint(tmp_path)
+        module_context_digest = _build_module_context_digest(entries)
 
         # Write a generated file with matching digest
         write_generated_module(
@@ -184,6 +200,8 @@ def test_cmd_status_with_fresh_specs(tmp_path: Path, monkeypatch, capsys) -> Non
                 "kind": "build",
                 "source_module": f"{pkg}.specs",
                 "module_digest": digest,
+                "generation_fingerprint": fingerprint,
+                "module_context_digest": module_context_digest,
                 "spec_refs": [str(e.spec_ref) for e in entries],
             },
         )
@@ -237,6 +255,8 @@ def test_cmd_status_with_fresh_specs_non_json(tmp_path: Path, monkeypatch, capsy
         module_specs = get_specs_by_module("magic")
         entries = module_specs[f"{pkg}.specs"]
         digest = module_digest(f"{pkg}.specs", entries, specs, spec_graph)
+        fingerprint = _build_generation_fingerprint(tmp_path)
+        module_context_digest = _build_module_context_digest(entries)
 
         write_generated_module(
             package_dir=tmp_path / "src",
@@ -248,6 +268,8 @@ def test_cmd_status_with_fresh_specs_non_json(tmp_path: Path, monkeypatch, capsy
                 "kind": "build",
                 "source_module": f"{pkg}.specs",
                 "module_digest": digest,
+                "generation_fingerprint": fingerprint,
+                "module_context_digest": module_context_digest,
                 "spec_refs": [str(e.spec_ref) for e in entries],
             },
         )
@@ -307,6 +329,7 @@ def test_cmd_status_force_marks_all_stale(tmp_path: Path, monkeypatch, capsys) -
         module_specs = get_specs_by_module("magic")
         entries = module_specs[f"{pkg}.specs"]
         digest = module_digest(f"{pkg}.specs", entries, specs, spec_graph)
+        fingerprint = _build_generation_fingerprint(tmp_path)
 
         write_generated_module(
             package_dir=tmp_path / "src",
@@ -318,6 +341,7 @@ def test_cmd_status_force_marks_all_stale(tmp_path: Path, monkeypatch, capsys) -
                 "kind": "build",
                 "source_module": f"{pkg}.specs",
                 "module_digest": digest,
+                "generation_fingerprint": fingerprint,
                 "spec_refs": [str(e.spec_ref) for e in entries],
             },
         )
@@ -329,6 +353,86 @@ def test_cmd_status_force_marks_all_stale(tmp_path: Path, monkeypatch, capsys) -
                 del sys.modules[mod_name]
 
         ns = jaunt.cli.parse_args(["status", "--json", "--force"])
+        rc = jaunt.cli.cmd_status(ns)
+        assert rc == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert f"{pkg}.specs" in data["stale"]
+        assert data["fresh"] == []
+    finally:
+        clear_registries()
+        sys.path[:] = orig_path
+        for mod_name in list(sys.modules.keys()):
+            if mod_name not in before_modules:
+                del sys.modules[mod_name]
+
+
+def test_cmd_status_marks_engine_switch_as_stale(tmp_path: Path, monkeypatch, capsys) -> None:
+    from jaunt.builder import write_generated_module
+    from jaunt.deps import build_spec_graph
+    from jaunt.digest import module_digest
+    from jaunt.discovery import discover_modules, import_and_collect
+    from jaunt.registry import clear_registries, get_magic_registry, get_specs_by_module
+
+    pkg = "statuspkg_engine"
+    _make_spec_project(tmp_path, pkg=pkg)
+
+    monkeypatch.chdir(tmp_path)
+    orig_path = list(sys.path)
+    before_modules = set(sys.modules.keys())
+
+    try:
+        sys.path.insert(0, str(tmp_path / "src"))
+        clear_registries()
+
+        mods = discover_modules(roots=[tmp_path / "src"], exclude=[], generated_dir="__generated__")
+        import_and_collect(mods, kind="magic")
+        specs = dict(get_magic_registry())
+        spec_graph = build_spec_graph(specs, infer_default=False)
+        module_specs = get_specs_by_module("magic")
+        entries = module_specs[f"{pkg}.specs"]
+        digest = module_digest(f"{pkg}.specs", entries, specs, spec_graph)
+        fingerprint = _build_generation_fingerprint(tmp_path)
+
+        write_generated_module(
+            package_dir=tmp_path / "src",
+            generated_dir="__generated__",
+            module_name=f"{pkg}.specs",
+            source="def greet(name: str) -> str:\n    return 'hi'\n",
+            header_fields={
+                "tool_version": "0",
+                "kind": "build",
+                "source_module": f"{pkg}.specs",
+                "module_digest": digest,
+                "generation_fingerprint": fingerprint,
+                "spec_refs": [str(e.spec_ref) for e in entries],
+            },
+        )
+
+        (tmp_path / "jaunt.toml").write_text(
+            "\n".join(
+                [
+                    "version = 1",
+                    "",
+                    "[paths]",
+                    'source_roots = ["src"]',
+                    "",
+                    "[agent]",
+                    'engine = "aider"',
+                    "",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        clear_registries()
+        for mod_name in list(sys.modules.keys()):
+            if mod_name not in before_modules:
+                del sys.modules[mod_name]
+
+        ns = jaunt.cli.parse_args(["status", "--json"])
         rc = jaunt.cli.cmd_status(ns)
         assert rc == 0
 

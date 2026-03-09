@@ -3,6 +3,10 @@ title: OpenAI Backend
 description: "How the default backend calls OpenAI and how prompts are loaded."
 ---
 
+This page covers Jaunt's legacy direct OpenAI backend. If you are using
+`agent.engine = "aider"`, see [Aider Runtime](/docs/reference/aider-runtime)
+instead.
+
 The default backend is `jaunt.generate.openai_backend.OpenAIBackend`:
 
 - reads the API key from `os.environ[llm.api_key_env]`

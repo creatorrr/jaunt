@@ -1,4 +1,0 @@
-interface:
-  display_name: "GPT-5 Prompting (OpenAI)"
-  short_description: "Write prompts for GPT-5 series"
-  default_prompt: "Use $openai-gpt5-prompting to draft prompts for a GPT-5 series model."

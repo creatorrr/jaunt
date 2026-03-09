@@ -7,7 +7,8 @@ From the repo root:
 
 ```bash
 uv sync
-uv run ruff check .
+uv run ruff check --fix .
+uv run ruff format .
 uv run ty check
 uv run pytest
 ```
@@ -22,8 +23,10 @@ git config core.hooksPath .githooks
 
 The hook runs:
 
-- `ruff check .`
-- `ruff format --check .`
+- `ruff check --fix .`
+- `ruff format .`
 - `ty check`
+
+If Ruff rewrites files, the hook stops so you can review and re-stage them.
 
 Next: [Architecture Notes](/docs/development/architecture-notes).

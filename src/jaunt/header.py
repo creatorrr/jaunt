@@ -14,6 +14,8 @@ def format_header(
     kind: Literal["build", "test"],
     source_module: str,
     module_digest: str,
+    generation_fingerprint: str = "",
+    module_context_digest: str = "",
     spec_refs: list[str],
 ) -> str:
     digest = module_digest if module_digest.startswith("sha256:") else f"sha256:{module_digest}"
@@ -26,6 +28,20 @@ def format_header(
         f"# jaunt:module_digest={digest}",
         f"# jaunt:spec_refs={spec_refs_json}",
     ]
+    if module_context_digest:
+        context_digest = (
+            module_context_digest
+            if module_context_digest.startswith("sha256:")
+            else f"sha256:{module_context_digest}"
+        )
+        lines.insert(5, f"# jaunt:module_context_digest={context_digest}")
+    if generation_fingerprint:
+        fingerprint = (
+            generation_fingerprint
+            if generation_fingerprint.startswith("sha256:")
+            else f"sha256:{generation_fingerprint}"
+        )
+        lines.insert(5, f"# jaunt:generation_fingerprint={fingerprint}")
     return "\n".join(lines) + "\n"
 
 
@@ -58,3 +74,17 @@ def extract_module_digest(source: str) -> str | None:
     if parsed is None:
         return None
     return parsed.get("module_digest")
+
+
+def extract_generation_fingerprint(source: str) -> str | None:
+    parsed = parse_header(source)
+    if parsed is None:
+        return None
+    return parsed.get("generation_fingerprint")
+
+
+def extract_module_context_digest(source: str) -> str | None:
+    parsed = parse_header(source)
+    if parsed is None:
+        return None
+    return parsed.get("module_context_digest")

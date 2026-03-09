@@ -24,10 +24,20 @@ from jaunt.cost import CostTracker
 from jaunt.digest import extract_source_segment, module_digest
 from jaunt.errors import JauntGenerationError
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
-from jaunt.header import extract_module_digest, format_header
+from jaunt.header import (
+    extract_generation_fingerprint,
+    extract_module_context_digest,
+    extract_module_digest,
+    format_header,
+)
+from jaunt.module_contract import (
+    build_module_contract,
+    test_public_api_only_by_name,
+    test_target_modules_by_name,
+)
 from jaunt.registry import SpecEntry
 from jaunt.spec_ref import SpecRef
-from jaunt.validation import validate_generated_source
+from jaunt.validation import validate_test_contract_only, validate_test_generated_source
 
 
 def _tool_version() -> str:
@@ -44,8 +54,31 @@ def run_pytest(
     pythonpath: Sequence[Path] | None = None,
     cwd: Path | None = None,
 ) -> int:
+    result = _run_pytest_capture(
+        files,
+        pytest_args=pytest_args,
+        pythonpath=pythonpath,
+        cwd=cwd,
+    )
+    return result.exit_code
+
+
+@dataclass(frozen=True, slots=True)
+class PytestExecution:
+    exit_code: int
+    stdout: str
+    stderr: str
+
+
+def _run_pytest_capture(
+    files: list[Path],
+    *,
+    pytest_args: list[str] | None = None,
+    pythonpath: Sequence[Path] | None = None,
+    cwd: Path | None = None,
+) -> PytestExecution:
     if not files:
-        return 0
+        return PytestExecution(exit_code=0, stdout="", stderr="")
 
     args = [sys.executable, "-m", "pytest", *(pytest_args or []), *[str(p) for p in files]]
     env = os.environ.copy()
@@ -71,8 +104,23 @@ def run_pytest(
         if merged:
             env["PYTHONPATH"] = os.pathsep.join(merged)
 
-    proc = subprocess.run(args, check=False, cwd=str(cwd) if cwd else None, env=env)
-    return int(proc.returncode)
+    proc = subprocess.run(
+        args,
+        check=False,
+        cwd=str(cwd) if cwd else None,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    if proc.stdout:
+        sys.stdout.write(proc.stdout)
+    if proc.stderr:
+        sys.stderr.write(proc.stderr)
+    return PytestExecution(
+        exit_code=int(proc.returncode),
+        stdout=proc.stdout or "",
+        stderr=proc.stderr or "",
+    )
 
 
 def _normalize_digest(digest: str | None) -> str | None:
@@ -232,6 +280,8 @@ def detect_stale_test_modules(
     module_specs: dict[str, list[SpecEntry]],
     specs: dict[SpecRef, SpecEntry],
     spec_graph: dict[SpecRef, set[SpecRef]],
+    generation_fingerprint: str = "",
+    module_context_digests: dict[str, str] | None = None,
     tests_package: str = "tests",
     test_roots: Sequence[Path] | None = None,
     force: bool = False,
@@ -271,6 +321,26 @@ def detect_stale_test_modules(
         computed = _normalize_digest(module_digest(module_name, entries, specs, spec_graph))
         if on_disk is None or computed is None or on_disk != computed:
             stale.add(module_name)
+            continue
+        if generation_fingerprint:
+            on_disk_generation = _normalize_digest(extract_generation_fingerprint(existing))
+            computed_generation = _normalize_digest(generation_fingerprint)
+            if (
+                on_disk_generation is None
+                or computed_generation is None
+                or on_disk_generation != computed_generation
+            ):
+                stale.add(module_name)
+                continue
+        if module_context_digests is not None:
+            on_disk_context = _normalize_digest(extract_module_context_digest(existing))
+            computed_context = _normalize_digest(module_context_digests.get(module_name))
+            if (
+                on_disk_context is None
+                or computed_context is None
+                or on_disk_context != computed_context
+            ):
+                stale.add(module_name)
 
     return stale
 
@@ -302,6 +372,45 @@ def _collect_existing_generated_test_files(
     return sorted(found, key=lambda path: str(path))
 
 
+def _collect_generated_test_paths_by_module(
+    *,
+    project_dir: Path,
+    tests_package: str,
+    generated_dir: str,
+    module_specs: dict[str, list[SpecEntry]],
+    test_roots: Sequence[Path] | None,
+) -> dict[str, Path]:
+    out: dict[str, Path] = {}
+    for module_name, entries in module_specs.items():
+        if not entries:
+            continue
+        try:
+            out[module_name] = _resolve_test_output_path(
+                project_dir=project_dir,
+                source_file=entries[0].source_file,
+                generated_dir=generated_dir,
+                tests_package=tests_package,
+                test_roots=test_roots,
+            )
+        except Exception:
+            continue
+    return out
+
+
+def _collect_generated_build_paths_by_module(
+    *,
+    package_dir: Path,
+    generated_dir: str,
+    module_specs: dict[str, list[SpecEntry]],
+) -> dict[str, Path]:
+    out: dict[str, Path] = {}
+    for module_name in module_specs:
+        gen_mod = paths.spec_module_to_generated_module(module_name, generated_dir=generated_dir)
+        rel = paths.generated_module_to_relpath(gen_mod, generated_dir=generated_dir)
+        out[module_name] = (package_dir / rel).resolve()
+    return out
+
+
 @dataclass(frozen=True, slots=True)
 class TestGenerationReport:
     generated: set[str]
@@ -311,12 +420,70 @@ class TestGenerationReport:
 
 
 @dataclass(frozen=True, slots=True)
+class RepairBuildContext:
+    package_dir: Path
+    generated_dir: str
+    module_specs: dict[str, list[SpecEntry]]
+    specs: dict[SpecRef, SpecEntry]
+    spec_graph: dict[SpecRef, set[SpecRef]]
+    module_dag: dict[str, set[str]]
+    backend: GeneratorBackend
+    generation_fingerprint: str
+    skills_block: str = ""
+    jobs: int = 1
+    async_runner: str = "asyncio"
+
+
+@dataclass(frozen=True, slots=True)
 class PytestResult:
     exit_code: int
     passed: bool
     failed: bool
     failures: list[str]
     generation_failed: dict[str, list[str]] = field(default_factory=dict)
+
+
+def _compact_failure_context(stdout: str, stderr: str, *, max_lines: int = 28) -> list[str]:
+    lines = [line.rstrip() for line in f"{stdout}\n{stderr}".splitlines() if line.strip()]
+    if len(lines) <= max_lines:
+        return lines
+    head = lines[: max_lines // 2]
+    tail = lines[-(max_lines // 2) :]
+    return [*head, "... pytest failure context truncated ...", *tail]
+
+
+def _path_mentions(text: str, path: Path, *, cwd: Path | None) -> bool:
+    haystack = text.replace("\\", "/")
+    candidates = {str(path.resolve()).replace("\\", "/"), path.as_posix()}
+    if cwd is not None:
+        try:
+            rel = path.resolve().relative_to(cwd.resolve())
+            candidates.add(rel.as_posix())
+        except ValueError:
+            pass
+    return any(candidate in haystack for candidate in candidates)
+
+
+def _implicated_modules_from_pytest(
+    *,
+    stdout: str,
+    stderr: str,
+    test_paths_by_module: dict[str, Path],
+    build_paths_by_module: dict[str, Path],
+    cwd: Path | None,
+) -> tuple[set[str], set[str]]:
+    text = f"{stdout}\n{stderr}"
+    failed_tests = {
+        module_name
+        for module_name, path in test_paths_by_module.items()
+        if _path_mentions(text, path, cwd=cwd)
+    }
+    implicated_build = {
+        module_name
+        for module_name, path in build_paths_by_module.items()
+        if _path_mentions(text, path, cwd=cwd)
+    }
+    return failed_tests, implicated_build
 
 
 def _critical_path_lengths(modules: set[str], dag: dict[str, set[str]]) -> dict[str, int]:
@@ -357,11 +524,13 @@ async def run_test_generation(
     module_dag: dict[str, set[str]],
     stale_modules: set[str],
     backend: GeneratorBackend,
+    generation_fingerprint: str = "",
     jobs: int = 4,
     progress: object | None = None,
     response_cache: ResponseCache | None = None,
     cost_tracker: CostTracker | None = None,
     async_runner: str = "asyncio",
+    initial_error_context_by_module: dict[str, list[str]] | None = None,
 ) -> TestGenerationReport:
     jobs = max(1, int(jobs))
 
@@ -411,11 +580,22 @@ async def run_test_generation(
 
         spec_sources: dict[SpecRef, str] = {}
         decorator_prompts: dict[SpecRef, str] = {}
+        public_api_only_by_name = test_public_api_only_by_name(entries)
         for e in entries:
-            spec_sources[e.spec_ref] = extract_source_segment(e)
+            spec_source = extract_source_segment(e)
+            if not public_api_only_by_name.get(e.qualname, True):
+                spec_source = (
+                    f"{spec_source.rstrip()}\n\n"
+                    "# Test policy note\n"
+                    "White-box testing is explicitly allowed for this spec. "
+                    "Implementation details may be inspected when needed.\n"
+                )
+            spec_sources[e.spec_ref] = spec_source
             p = e.decorator_kwargs.get("prompt")
             if isinstance(p, str) and p:
                 decorator_prompts[e.spec_ref] = p
+        target_modules_by_name = test_target_modules_by_name(spec_sources)
+        module_contract = build_module_contract(entries=entries, expected_names=expected)
 
         ctx = ModuleSpecContext(
             kind="test",
@@ -428,30 +608,58 @@ async def run_test_generation(
             decorator_prompts=decorator_prompts,
             dependency_apis=dependency_apis or {},
             dependency_generated_modules={},
+            module_contract_block=module_contract.prompt_block,
+            module_context_digest=module_contract.digest,
             async_runner=async_runner,
         )
+
+        def _validate_candidate(source: str) -> list[str]:
+            return validate_test_generated_source(
+                source,
+                expected,
+                spec_module=ctx.spec_module,
+                generated_module=ctx.generated_module,
+                public_api_only_by_name=public_api_only_by_name,
+                target_modules_by_name=target_modules_by_name,
+            )
+
+        def _retry_validator(source: str) -> list[str]:
+            return validate_test_contract_only(
+                source,
+                spec_module=ctx.spec_module,
+                generated_module=ctx.generated_module,
+                public_api_only_by_name=public_api_only_by_name,
+                target_modules_by_name=target_modules_by_name,
+            )
 
         # Check response cache before calling LLM.
         result_source: str | None = None
         ck: str | None = None
         if response_cache is not None:
             ck = cache_key_from_context(
-                ctx, model=backend.model_name, provider=backend.provider_name
+                ctx,
+                model=backend.model_name,
+                provider=backend.provider_name,
+                generation_fingerprint=generation_fingerprint,
             )
             cached = response_cache.get(ck)
             if cached is not None:
-                cache_errors = validate_generated_source(cached.source, expected)
+                cache_errors = _validate_candidate(cached.source)
                 if not cache_errors:
                     result_source = cached.source
                     if cost_tracker is not None:
                         cost_tracker.record_cache_hit()
 
         if result_source is None:
-            result = await backend.generate_with_retry(ctx)
+            result = await backend.generate_with_retry(
+                ctx,
+                extra_validator=_retry_validator,
+                initial_error_context=(initial_error_context_by_module or {}).get(module_name),
+            )
             if result.source is None:
                 return False, result.errors or ["No source returned."], None
 
-            errors = validate_generated_source(result.source, expected)
+            errors = _validate_candidate(result.source)
             if errors:
                 return False, errors, None
 
@@ -479,6 +687,8 @@ async def run_test_generation(
             "kind": "test",
             "source_module": module_name,
             "module_digest": digest,
+            "generation_fingerprint": generation_fingerprint,
+            "module_context_digest": module_contract.digest,
             "spec_refs": [str(e.spec_ref) for e in entries],
         }
 
@@ -606,6 +816,7 @@ async def run_tests(
     module_dag: dict[str, set[str]] | None = None,
     stale_modules: set[str] | None = None,
     backend: GeneratorBackend | None = None,
+    generation_fingerprint: str = "",
     jobs: int = 4,
     pytest_args: list[str] | None = None,
     no_generate: bool = False,
@@ -616,6 +827,7 @@ async def run_tests(
     response_cache: ResponseCache | None = None,
     cost_tracker: CostTracker | None = None,
     async_runner: str = "asyncio",
+    repair_build_context: RepairBuildContext | None = None,
 ) -> PytestResult:
     generated_files: list[Path] = []
     gen_failed: dict[str, list[str]] = {}
@@ -645,6 +857,7 @@ async def run_tests(
             module_dag=module_dag,
             stale_modules=stale_modules,
             backend=backend,
+            generation_fingerprint=generation_fingerprint,
             jobs=jobs,
             progress=progress,
             response_cache=response_cache,
@@ -672,17 +885,138 @@ async def run_tests(
             generation_failed=gen_failed,
         )
 
-    pytest_exit_code = run_pytest(
+    pytest_result = _run_pytest_capture(
         generated_files,
         pytest_args=pytest_args,
         pythonpath=pythonpath,
         cwd=cwd,
     )
+    pytest_exit_code = pytest_result.exit_code
+
+    if (
+        pytest_exit_code != 0
+        and not gen_failed
+        and not no_generate
+        and module_specs is not None
+        and specs is not None
+        and spec_graph is not None
+        and module_dag is not None
+        and backend is not None
+    ):
+        repair_lines = _compact_failure_context(pytest_result.stdout, pytest_result.stderr)
+        test_paths_by_module = _collect_generated_test_paths_by_module(
+            project_dir=project_dir,
+            tests_package=tests_package,
+            generated_dir=generated_dir,
+            module_specs=module_specs,
+            test_roots=test_roots,
+        )
+        build_paths_by_module: dict[str, Path] = {}
+        if repair_build_context is not None:
+            build_paths_by_module = _collect_generated_build_paths_by_module(
+                package_dir=repair_build_context.package_dir,
+                generated_dir=repair_build_context.generated_dir,
+                module_specs=repair_build_context.module_specs,
+            )
+
+        failed_test_modules, implicated_build_modules = _implicated_modules_from_pytest(
+            stdout=pytest_result.stdout,
+            stderr=pytest_result.stderr,
+            test_paths_by_module=test_paths_by_module,
+            build_paths_by_module=build_paths_by_module,
+            cwd=cwd,
+        )
+
+        if implicated_build_modules and repair_build_context is not None:
+            from jaunt import builder
+
+            repaired_build = await builder.run_build(
+                package_dir=repair_build_context.package_dir,
+                generated_dir=repair_build_context.generated_dir,
+                module_specs=repair_build_context.module_specs,
+                specs=repair_build_context.specs,
+                spec_graph=repair_build_context.spec_graph,
+                module_dag=repair_build_context.module_dag,
+                stale_modules=builder.expand_stale_modules(
+                    repair_build_context.module_dag,
+                    implicated_build_modules,
+                ),
+                backend=repair_build_context.backend,
+                generation_fingerprint=repair_build_context.generation_fingerprint,
+                skills_block=repair_build_context.skills_block,
+                jobs=repair_build_context.jobs,
+                progress=None,
+                response_cache=None,
+                cost_tracker=cost_tracker,
+                async_runner=repair_build_context.async_runner,
+                initial_error_context_by_module={
+                    module_name: repair_lines for module_name in implicated_build_modules
+                },
+            )
+            if repaired_build.failed:
+                return PytestResult(
+                    exit_code=3,
+                    passed=False,
+                    failed=True,
+                    failures=repair_lines,
+                    generation_failed=repaired_build.failed,
+                )
+
+        if failed_test_modules:
+            repaired_tests = await run_test_generation(
+                project_dir=project_dir,
+                tests_package=tests_package,
+                generated_dir=generated_dir,
+                test_roots=test_roots,
+                dependency_apis=dependency_apis,
+                module_specs=module_specs,
+                specs=specs,
+                spec_graph=spec_graph,
+                module_dag=module_dag,
+                stale_modules=failed_test_modules,
+                backend=backend,
+                generation_fingerprint=generation_fingerprint,
+                jobs=jobs,
+                progress=None,
+                response_cache=None,
+                cost_tracker=cost_tracker,
+                async_runner=async_runner,
+                initial_error_context_by_module={
+                    module_name: repair_lines for module_name in failed_test_modules
+                },
+            )
+            if repaired_tests.failed:
+                return PytestResult(
+                    exit_code=3,
+                    passed=False,
+                    failed=True,
+                    failures=repair_lines,
+                    generation_failed=repaired_tests.failed,
+                )
+
+        if implicated_build_modules or failed_test_modules:
+            generated_files = _collect_existing_generated_test_files(
+                project_dir=project_dir,
+                tests_package=tests_package,
+                generated_dir=generated_dir,
+                module_specs=module_specs,
+                test_roots=test_roots,
+            )
+            pytest_result = _run_pytest_capture(
+                generated_files,
+                pytest_args=pytest_args,
+                pythonpath=pythonpath,
+                cwd=cwd,
+            )
+            pytest_exit_code = pytest_result.exit_code
+
     exit_code = 3 if gen_failed else pytest_exit_code
     return PytestResult(
         exit_code=exit_code,
         passed=exit_code == 0,
         failed=bool(gen_failed) or pytest_exit_code != 0,
-        failures=[],
+        failures=_compact_failure_context(pytest_result.stdout, pytest_result.stderr)
+        if pytest_exit_code != 0
+        else [],
         generation_failed=gen_failed,
     )

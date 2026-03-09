@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 
 from jaunt.config import (
+    AgentConfig,
+    AiderConfig,
     BuildConfig,
     JauntConfig,
     LLMConfig,
@@ -25,6 +27,14 @@ def _cfg(provider: str, api_key_env: str = "OPENAI_API_KEY") -> JauntConfig:
         build=BuildConfig(jobs=1, infer_deps=True),
         test=TestConfig(jobs=1, infer_deps=True, pytest_args=[]),
         prompts=PromptsConfig(build_system="", build_module="", test_system="", test_module=""),
+    )
+
+
+def _fake_aider_classes():
+    return (
+        type("Coder", (), {"create": staticmethod(lambda **_: object())}),
+        type("IO", (), {}),
+        type("Model", (), {}),
     )
 
 
@@ -71,3 +81,61 @@ def test_build_backend_unsupported() -> None:
 
     with pytest.raises(JauntConfigError, match="Unsupported llm.provider"):
         _build_backend(_cfg("unsupported-provider"))
+
+
+def test_build_backend_aider(monkeypatch) -> None:
+    from jaunt.cli import _build_backend
+    from jaunt.generate.aider_backend import AiderGeneratorBackend
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    cfg = _cfg("openai")
+    cfg = JauntConfig(
+        version=cfg.version,
+        paths=cfg.paths,
+        llm=cfg.llm,
+        build=cfg.build,
+        test=cfg.test,
+        prompts=cfg.prompts,
+        agent=AgentConfig(engine="aider"),
+        aider=AiderConfig(),
+    )
+
+    import jaunt.aider_executor as aider_executor
+
+    monkeypatch.setattr(
+        aider_executor.AiderExecutor,
+        "_load_aider_classes",
+        staticmethod(_fake_aider_classes),
+    )
+    backend = _build_backend(cfg)
+    assert isinstance(backend, AiderGeneratorBackend)
+
+
+def test_build_backend_aider_missing_dependency(monkeypatch) -> None:
+    from jaunt.cli import _build_backend
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    cfg = _cfg("openai")
+    cfg = JauntConfig(
+        version=cfg.version,
+        paths=cfg.paths,
+        llm=cfg.llm,
+        build=cfg.build,
+        test=cfg.test,
+        prompts=cfg.prompts,
+        agent=AgentConfig(engine="aider"),
+        aider=AiderConfig(),
+    )
+
+    import jaunt.aider_executor as aider_executor
+
+    def _boom():
+        raise JauntConfigError("The 'aider-chat' package is required for agent.engine='aider'.")
+
+    monkeypatch.setattr(
+        aider_executor.AiderExecutor,
+        "_load_aider_classes",
+        staticmethod(_boom),
+    )
+    with pytest.raises(JauntConfigError, match="aider-chat"):
+        _build_backend(cfg)
