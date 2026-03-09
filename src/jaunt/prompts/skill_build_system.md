@@ -10,6 +10,11 @@ Output:
 - Fill in empty or placeholder sections with concrete, actionable information.
 - Add real code examples derived from the source files.
 - Document actual API signatures, not guesses.
+- If the library exposes important public typing aliases, protocols, renderable
+  interfaces, or container element types, call them out explicitly where they
+  affect generated code or static type checking.
+- Prefer public typing guidance over examples that fall back to `object` or
+  dynamic loading when the source material shows a stronger typed API.
 - Keep the same section structure.
 - Output Markdown only. Do not wrap the whole document in code fences.
 - Keep it concise and actionable (2-4 pages).

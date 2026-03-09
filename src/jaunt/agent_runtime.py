@@ -26,6 +26,10 @@ class AgentTask:
     instruction: str
     target_file: AgentFile
     read_only_files: list[AgentFile] = field(default_factory=list)
+    edit_format: str | None = None
+    editor_edit_format: str | None = None
+    main_reasoning_effort: str | None = None
+    editor_reasoning_effort: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +37,19 @@ class AgentTaskResult:
     output: str
     usage: TokenUsage | None = None
     trace_dir: Path | None = None
+
+
+class AgentTaskExecutionError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        output: str = "",
+        usage: TokenUsage | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.output = output
+        self.usage = usage
 
 
 class AgentExecutor(ABC):

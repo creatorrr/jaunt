@@ -179,6 +179,9 @@ save_traces = false
 - `jaunt watch` uses the configured runtime too. Watch cycles stay sequential, but the build/test work inside a cycle can still use normal Jaunt parallelism.
 - For best parallelism in Aider mode, keep `[llm].api_key_env` on the provider's canonical name (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `CEREBRAS_API_KEY`).
 - If `llm.api_key_env` uses a custom name, Aider tasks still work, but Jaunt has to remap the key under a process-wide lock, so those Aider tasks serialize.
+- Architect-mode retries are stateful: Jaunt reuses the previous candidate source instead of starting from an empty file again.
+- When an architect retry fails because diff-style edits do not apply cleanly, Jaunt falls back to whole-file editor repairs rather than repeating the same fragile SEARCH/REPLACE path.
+- For narrow type-check or public-API contract fixes, Jaunt uses a smaller whole-file repair pass instead of paying for another full architect cycle.
 - Aider-generated tests stay public-API-first and may add 1-2 direct contract-adjacent cases, not a large speculative matrix.
 
 ## Decorator Reference

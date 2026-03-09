@@ -165,7 +165,17 @@ uv publish --check-url https://pypi.org/simple/
 ## Dev
 
 ```bash
+uv run ruff check --fix .
+uv run ruff format .
+uv run ty check
+uv run pytest
+```
+
+Final verification before pushing:
+
+```bash
 uv run ruff check .
+uv run ruff format --check .
 uv run ty check
 uv run pytest
 ```

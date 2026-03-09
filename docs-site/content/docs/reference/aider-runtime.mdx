@@ -75,11 +75,20 @@ back to your project.
 If you set `aider.editor_model`, Jaunt uses that as the editor model for
 architect mode. Otherwise it falls back to `llm.model`.
 
+On retries, Jaunt keeps the previous candidate source in the editable target
+file instead of starting from scratch again. If an architect retry fails because
+the editor could not apply a diff cleanly, Jaunt falls back to Aider's
+whole-file editor path for the next architect attempt.
+
 ### `code`
 
 This is the simpler edit path. It is a good default for generated tests and
 skill workflows, where the target file is usually smaller and the contract is
 more direct.
+
+Jaunt also uses a whole-file `code` repair pass for narrow follow-up fixes such
+as type-check-only or small contract/public-API errors, so it can patch the
+current candidate without paying for another full architect cycle.
 
 ## Test Generation Style
 
@@ -102,6 +111,10 @@ to produce a large speculative matrix of unstated tests.
 
 Jaunt's Aider path respects `llm.reasoning_effort` when the provider/model
 supports it.
+
+In architect mode, Jaunt keeps the main planner on your configured reasoning
+effort and uses a lower-effort editor by default. The goal is to keep planning
+quality high while making edit application retries cheaper.
 
 Jaunt also treats the effective Aider runtime as part of artifact freshness.
 Changing any of these can make generated files stale:
@@ -132,6 +145,9 @@ With the default `false`, Jaunt cleans those temp directories up automatically.
 - Prompt overrides still work. `prompts.*` continue to replace the packaged
   templates rather than merge with them.
 - The generated-file layout does not change when you switch runtimes.
+- Aider build tasks get extra guardrails beyond the shared prompts: Jaunt tells
+  Aider to prefer static imports from known dependency modules and to avoid
+  unnecessary dynamic imports or defensive introspection of handwritten symbols.
 
 See also: [Configuration](/docs/reference/config) and
 [Limitations](/docs/reference/limitations).

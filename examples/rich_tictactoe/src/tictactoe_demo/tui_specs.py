@@ -51,6 +51,10 @@ def render_screen(state: GameState, message: str | None = None) -> Group:
     Style goals:
     - Use Rich composition rather than plain strings.
     - Keep the layout polished but prompt-driven, not full-screen event driven.
+    - Use normal static imports from `.core_specs`; do not use `importlib`,
+      runtime loaders, or dynamic import helpers.
+    - If you build an intermediate collection before calling `Group(...)`, use
+      Rich's public renderable typing rather than `list[object]`.
     """
     raise RuntimeError("spec stub (generated at build time)")
 

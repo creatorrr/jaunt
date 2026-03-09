@@ -69,7 +69,7 @@ target-version = "py312"
 exclude = ["examples/**"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+select = ["E", "F", "B"]
 
 [tool.ty.src]
 exclude = ["examples/**"]

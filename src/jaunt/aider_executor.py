@@ -10,7 +10,12 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from jaunt.agent_runtime import AgentExecutor, AgentTask, AgentTaskResult
+from jaunt.agent_runtime import (
+    AgentExecutor,
+    AgentTask,
+    AgentTaskExecutionError,
+    AgentTaskResult,
+)
 from jaunt.config import AiderConfig, LLMConfig
 from jaunt.errors import JauntConfigError
 from jaunt.generate.base import TokenUsage
@@ -160,15 +165,19 @@ class AiderExecutor(AgentExecutor):
         if task.mode == "architect":
             editor_model = self._aider.editor_model.strip() or self._llm.model
             model_kwargs["editor_model"] = self._model_name(self._llm, editor_model)
-            model_kwargs["editor_edit_format"] = "editor-diff"
+            model_kwargs["editor_edit_format"] = task.editor_edit_format or "editor-diff"
 
         model = self._model_cls(self._model_name(self._llm, self._llm.model), **model_kwargs)
-        self._apply_reasoning_effort(model)
+        self._apply_reasoning_effort(
+            model,
+            main_effort=task.main_reasoning_effort,
+            editor_effort=task.editor_reasoning_effort,
+        )
         io = self._io_cls(yes=True, pretty=False, fancy_input=False)
 
         return self._coder_cls.create(
             main_model=model,
-            edit_format=self._edit_format_for_mode(task.mode),
+            edit_format=task.edit_format or self._edit_format_for_mode(task.mode),
             io=io,
             fnames=[str(target_path)],
             read_only_fnames=[str(p) for p in ro_paths],
@@ -182,15 +191,26 @@ class AiderExecutor(AgentExecutor):
             verbose=False,
         )
 
-    def _apply_reasoning_effort(self, model: Any) -> None:
-        effort = (self._llm.reasoning_effort or "").strip()
-        if not effort:
-            return
+    def _apply_reasoning_effort(
+        self,
+        model: Any,
+        *,
+        main_effort: str | None,
+        editor_effort: str | None,
+    ) -> None:
+        resolved_main = (
+            main_effort if main_effort is not None else (self._llm.reasoning_effort or "")
+        ).strip()
+        if resolved_main:
+            self._set_model_reasoning_effort(model, resolved_main)
 
-        self._set_model_reasoning_effort(model, effort)
         editor_model = getattr(model, "editor_model", None)
         if editor_model is not None and editor_model is not model:
-            self._set_model_reasoning_effort(editor_model, effort)
+            resolved_editor = (
+                editor_effort if editor_effort is not None else resolved_main
+            ).strip()
+            if resolved_editor:
+                self._set_model_reasoning_effort(editor_model, resolved_editor)
 
     @staticmethod
     def _set_model_reasoning_effort(model: Any, effort: str) -> None:
@@ -205,7 +225,7 @@ class AiderExecutor(AgentExecutor):
         extra_body = dict(extra_params.get("extra_body", None) or {})
         extra_body["reasoning_effort"] = effort
         extra_params["extra_body"] = extra_body
-        model.extra_params = extra_params  # type: ignore[attr-defined]
+        model.extra_params = extra_params
 
     @staticmethod
     def _usage_from_coder(coder: Any, llm: LLMConfig) -> TokenUsage | None:
@@ -226,7 +246,21 @@ class AiderExecutor(AgentExecutor):
             try:
                 target_path, ro_paths = self._write_workspace(root, task)
                 coder = self._build_coder(root, task, target_path, ro_paths)
-                await asyncio.to_thread(coder.run, task.instruction)
+                try:
+                    await asyncio.to_thread(coder.run, task.instruction)
+                except Exception as e:
+                    output = ""
+                    try:
+                        if target_path.exists():
+                            output = target_path.read_text(encoding="utf-8")
+                    except Exception:
+                        output = ""
+                    raise AgentTaskExecutionError(
+                        str(e),
+                        output=output,
+                        usage=self._usage_from_coder(coder, self._llm),
+                    ) from e
+
                 output = target_path.read_text(encoding="utf-8")
                 return AgentTaskResult(
                     output=output,

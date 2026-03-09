@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 from unittest.mock import patch
 
+from jaunt.agent_runtime import AgentTask
 from jaunt.lib_inspect import LibContent, LibRef
 
 
@@ -56,6 +57,7 @@ def test_skill_builder_prompt_includes_context(monkeypatch) -> None:
     assert len(captured_args) == 1
     system, user = captured_args[0]
     assert "untrusted" in system.lower()
+    assert "typing aliases" in system.lower()
     assert "Original." in user
     assert "mylib" in user
     assert "do_thing" in user
@@ -177,7 +179,7 @@ def test_skill_builder_aider_engine_uses_executor(monkeypatch) -> None:
     llm = LLMConfig(provider="openai", model="gpt-test", api_key_env="TEST_KEY")
 
     builder = SkillBuilder(llm, AgentConfig(engine="aider"), AiderConfig())
-    seen: dict[str, object] = {}
+    seen: dict[str, AgentTask] = {}
 
     async def fake_run_task(task):
         seen["task"] = task
