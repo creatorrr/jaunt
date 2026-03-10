@@ -32,7 +32,11 @@ pip install jaunt[openai]      # OpenAI + default Aider runtime
 pip install jaunt[anthropic]   # Anthropic/Claude + default Aider runtime
 pip install jaunt[cerebras]    # Cerebras + default Aider runtime
 pip install jaunt[aider]       # runtime-only extra for custom install setups
-pip install jaunt[all]         # all bundled backends/tools
+pip install jaunt[all]         # all bundled backends/tools, including Aider
+pip install jaunt[all-sdk]     # all provider/tooling extras, without Aider
+
+# For conflicting app environments, prefer running Jaunt as an isolated tool:
+uv tool run --from 'jaunt[all]' jaunt build --root .
 ```
 
 ## Aider Runtime
