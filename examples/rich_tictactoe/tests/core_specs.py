@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import jaunt
+from tictactoe_demo.core_specs import (
+    apply_ai_move,
+    apply_human_move,
+    available_moves,
+    best_ai_move,
+    new_game,
+    winner_for_board,
+)
 
 
-@jaunt.test()
+@jaunt.test(targets=[new_game, available_moves])
 def test_new_game_initial_state() -> None:
     """
-    Target: tictactoe_demo.core_specs.new_game and available_moves
-
     Test-authoring rules:
     - Import `Mark` directly from `tictactoe_demo.core_specs`.
     - Do not inspect `new_game.__globals__` or any wrapper internals.
@@ -24,11 +30,9 @@ def test_new_game_initial_state() -> None:
     raise AssertionError("spec stub (generated at test time)")
 
 
-@jaunt.test()
+@jaunt.test(targets=[winner_for_board])
 def test_winner_for_board_detects_rows_columns_and_diagonals() -> None:
     """
-    Target: tictactoe_demo.core_specs.winner_for_board
-
     Test-authoring rules:
     - Import `Mark` directly from `tictactoe_demo.core_specs`.
     - Use nine-cell boards only, except for one explicit ValueError case.
@@ -43,11 +47,9 @@ def test_winner_for_board_detects_rows_columns_and_diagonals() -> None:
     raise AssertionError("spec stub (generated at test time)")
 
 
-@jaunt.test()
+@jaunt.test(targets=[apply_human_move])
 def test_apply_human_move_rejects_invalid_and_occupied_moves() -> None:
     """
-    Target: tictactoe_demo.core_specs.apply_human_move
-
     Test-authoring rules:
     - Import `Mark` directly from `tictactoe_demo.core_specs`.
     - The GameState turn field is `next_mark`, not `next_turn`.
@@ -62,11 +64,9 @@ def test_apply_human_move_rejects_invalid_and_occupied_moves() -> None:
     raise AssertionError("spec stub (generated at test time)")
 
 
-@jaunt.test()
+@jaunt.test(targets=[apply_human_move])
 def test_apply_human_move_updates_turn_and_terminal_flags() -> None:
     """
-    Target: tictactoe_demo.core_specs.apply_human_move
-
     Test-authoring rules:
     - Import `Mark` directly from `tictactoe_demo.core_specs`.
     - Use the field name `next_mark`.
@@ -81,11 +81,9 @@ def test_apply_human_move_updates_turn_and_terminal_flags() -> None:
     raise AssertionError("spec stub (generated at test time)")
 
 
-@jaunt.test()
+@jaunt.test(targets=[best_ai_move])
 def test_best_ai_move_prefers_center_and_respects_tie_break_order() -> None:
     """
-    Target: tictactoe_demo.core_specs.best_ai_move
-
     Test-authoring rules:
     - Import `Mark` directly from `tictactoe_demo.core_specs`.
     - The deterministic tie-break order is exactly: 5, 1, 3, 7, 9, 2, 4, 6, 8.
@@ -98,11 +96,9 @@ def test_best_ai_move_prefers_center_and_respects_tie_break_order() -> None:
     raise AssertionError("spec stub (generated at test time)")
 
 
-@jaunt.test()
+@jaunt.test(targets=[best_ai_move])
 def test_best_ai_move_takes_wins_and_blocks_forced_losses() -> None:
     """
-    Target: tictactoe_demo.core_specs.best_ai_move
-
     Test-authoring rules:
     - Import `Mark` directly from `tictactoe_demo.core_specs`.
 
@@ -114,11 +110,9 @@ def test_best_ai_move_takes_wins_and_blocks_forced_losses() -> None:
     raise AssertionError("spec stub (generated at test time)")
 
 
-@jaunt.test()
+@jaunt.test(targets=[apply_ai_move])
 def test_apply_ai_move_uses_best_ai_move_and_keeps_state_immutable() -> None:
     """
-    Target: tictactoe_demo.core_specs.apply_ai_move
-
     Test-authoring rules:
     - Import `Mark` directly from `tictactoe_demo.core_specs`.
     - The field name is `next_mark`, not `next_turn`.

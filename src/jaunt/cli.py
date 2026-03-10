@@ -371,6 +371,26 @@ def _prepend_sys_path(dirs: Sequence[Path]) -> None:
         seen.add(s)
 
 
+def _discover_test_spec_modules(*, root: Path, cfg: JauntConfig) -> tuple[list[Path], list[str]]:
+    from jaunt import discovery
+
+    test_dirs = [root / tr for tr in cfg.paths.test_roots]
+    existing_test_dirs = [d for d in test_dirs if d.exists()]
+    modules_set: set[str] = set()
+    for tr, test_dir in zip(cfg.paths.test_roots, test_dirs, strict=False):
+        if not test_dir.exists():
+            continue
+        prefix = ".".join(Path(tr).parts)
+        mods = discovery.discover_modules(
+            roots=[test_dir],
+            exclude=[],
+            generated_dir=cfg.paths.generated_dir,
+            module_prefix=prefix or None,
+        )
+        modules_set.update(mods)
+    return existing_test_dirs, sorted(modules_set)
+
+
 def _build_backend(cfg: JauntConfig):
     if cfg.agent.engine == "aider":
         from jaunt.generate.aider_backend import AiderGeneratorBackend
@@ -544,7 +564,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         root, cfg = _load_config(args)
 
         source_dirs = [root / sr for sr in cfg.paths.source_roots]
-        _prepend_sys_path(source_dirs)
+        test_dirs = [root / tr for tr in cfg.paths.test_roots]
+        _prepend_sys_path([*source_dirs, *test_dirs, root])
 
         from jaunt import discovery, registry
         from jaunt.deps import build_spec_graph, collapse_to_module_dag
@@ -560,6 +581,9 @@ def cmd_status(args: argparse.Namespace) -> int:
             roots=[d for d in source_dirs if d.exists()],
         )
         discovery.import_and_collect(modules, kind="magic")
+        existing_test_dirs, test_modules = _discover_test_spec_modules(root=root, cfg=cfg)
+        discovery.evict_modules_for_import(module_names=test_modules, roots=existing_test_dirs)
+        discovery.import_and_collect(test_modules, kind="test")
 
         specs = dict(registry.get_magic_registry())
         if not specs:
@@ -589,16 +613,25 @@ def cmd_status(args: argparse.Namespace) -> int:
         from jaunt import builder
         from jaunt.generation_fingerprint import generation_fingerprint
         from jaunt.module_api import module_api_digest
-        from jaunt.module_contract import build_module_contract
+        from jaunt.module_contract import group_test_entries_by_target_module
 
         build_generation_fingerprint = generation_fingerprint(cfg, kind="build")
         build_module_context_digests: dict[str, str] = {}
         build_module_api_digests: dict[str, str] = {}
+        targeted_test_entries = group_test_entries_by_target_module(
+            list(registry.get_test_registry().values())
+        )
         for module_name, entries in module_specs.items():
             expected, _errs = builder._build_expected_names(entries)
-            build_module_context_digests[module_name] = build_module_contract(
+            build_module_context_digests[module_name] = builder.build_module_context_artifacts(
+                module_name=module_name,
                 entries=entries,
                 expected_names=expected,
+                module_specs=module_specs,
+                module_dag=module_dag,
+                package_dir=package_dir,
+                generated_dir=cfg.paths.generated_dir,
+                targeted_test_entries=targeted_test_entries,
             ).digest
             build_module_api_digests[module_name] = module_api_digest(entries)
         stale = builder.detect_stale_modules(
@@ -669,6 +702,7 @@ def cmd_build(args: argparse.Namespace) -> int:
         _sync_generated_dir_env(cfg)
 
         source_dirs = [root / sr for sr in cfg.paths.source_roots]
+        test_dirs = [root / tr for tr in cfg.paths.test_roots]
 
         skills_block = ""
         try:
@@ -690,7 +724,7 @@ def cmd_build(args: argparse.Namespace) -> int:
         except Exception as e:  # noqa: BLE001 - best-effort; never block build
             _eprint(f"warn: failed ensuring external library skills: {type(e).__name__}: {e}")
 
-        _prepend_sys_path(source_dirs)
+        _prepend_sys_path([*source_dirs, *test_dirs, root])
 
         from jaunt import discovery, registry
         from jaunt.deps import build_spec_graph, collapse_to_module_dag, find_cycles
@@ -706,6 +740,9 @@ def cmd_build(args: argparse.Namespace) -> int:
             roots=[d for d in source_dirs if d.exists()],
         )
         discovery.import_and_collect(modules, kind="magic")
+        existing_test_dirs, test_modules = _discover_test_spec_modules(root=root, cfg=cfg)
+        discovery.evict_modules_for_import(module_names=test_modules, roots=existing_test_dirs)
+        discovery.import_and_collect(test_modules, kind="test")
 
         specs = dict(registry.get_magic_registry())
         if not specs:
@@ -742,16 +779,25 @@ def cmd_build(args: argparse.Namespace) -> int:
         from jaunt import builder
         from jaunt.generation_fingerprint import generation_fingerprint
         from jaunt.module_api import module_api_digest
-        from jaunt.module_contract import build_module_contract
+        from jaunt.module_contract import group_test_entries_by_target_module
 
         build_generation_fingerprint = generation_fingerprint(cfg, kind="build")
         build_module_context_digests: dict[str, str] = {}
         build_module_api_digests: dict[str, str] = {}
+        targeted_test_entries = group_test_entries_by_target_module(
+            list(registry.get_test_registry().values())
+        )
         for module_name, entries in module_specs.items():
             expected, _errs = builder._build_expected_names(entries)
-            build_module_context_digests[module_name] = build_module_contract(
+            build_module_context_digests[module_name] = builder.build_module_context_artifacts(
+                module_name=module_name,
                 entries=entries,
                 expected_names=expected,
+                module_specs=module_specs,
+                module_dag=module_dag,
+                package_dir=package_dir,
+                generated_dir=cfg.paths.generated_dir,
+                targeted_test_entries=targeted_test_entries,
             ).digest
             build_module_api_digests[module_name] = module_api_digest(entries)
         stale = builder.detect_stale_modules(
@@ -825,6 +871,7 @@ def cmd_build(args: argparse.Namespace) -> int:
                 cost_tracker=cost_tracker,
                 ty_retry_attempts=cfg.build.ty_retry_attempts,
                 async_runner=cfg.build.async_runner,
+                targeted_test_entries=targeted_test_entries,
             )
         )
 
@@ -871,10 +918,10 @@ def cmd_test(args: argparse.Namespace) -> int:
 
         source_dirs = [root / sr for sr in cfg.paths.source_roots]
         test_dirs = [root / tr for tr in cfg.paths.test_roots]
-        # Test modules are expected to be importable as `tests.*` (or another
-        # package under the project root). Add the project root, not the tests/
-        # directory itself, so module discovery can prefix correctly.
-        _prepend_sys_path([*source_dirs, root])
+        # Include source roots, the project root, and raw test roots so both
+        # packaged tests (`tests.*`) and bare test modules (`core_specs`) can
+        # be imported during discovery.
+        _prepend_sys_path([*source_dirs, *test_dirs, root])
 
         if not bool(args.no_build):
             rc = cmd_build(args)
@@ -884,7 +931,7 @@ def cmd_test(args: argparse.Namespace) -> int:
         from jaunt import discovery, registry
         from jaunt.deps import build_spec_graph, collapse_to_module_dag
         from jaunt.module_api import build_dependency_api_block
-        from jaunt.module_contract import build_module_contract
+        from jaunt.module_contract import build_module_contract, group_test_entries_by_target_module
         from jaunt.spec_ref import SpecRef
 
         # Provide production API reference material (from @jaunt.magic) so
@@ -952,6 +999,7 @@ def cmd_test(args: argparse.Namespace) -> int:
             if json_mode:
                 _emit_json({"command": "test", "ok": True, "exit_code": 0})
             return EXIT_OK
+        targeted_test_entries = group_test_entries_by_target_module(list(specs.values()))
 
         infer_default = bool(cfg.test.infer_deps) and (not bool(args.no_infer_deps))
         spec_graph = build_spec_graph(specs, infer_default=infer_default)
@@ -1023,6 +1071,7 @@ def cmd_test(args: argparse.Namespace) -> int:
             module_dag=build_magic_module_dag,
             backend=backend,
             generation_fingerprint=build_generation_fingerprint,
+            targeted_test_entries=targeted_test_entries,
             skills_block=build_skills_block,
             jobs=int(cfg.build.jobs),
             async_runner=cfg.build.async_runner,

@@ -20,7 +20,7 @@ from jaunt.decorator_analysis import analyze_magic_decorators, resolve_qualname_
 from jaunt.errors import JauntError, JauntNotBuiltError
 from jaunt.paths import spec_module_to_generated_module
 from jaunt.registry import SpecEntry, register_magic, register_test
-from jaunt.spec_ref import SpecRef, normalize_spec_ref, spec_ref_from_object
+from jaunt.spec_ref import SpecRef, normalize_spec_ref, normalize_spec_refs, spec_ref_from_object
 
 F = TypeVar("F", bound=Callable[..., object])
 
@@ -334,6 +334,7 @@ def _make_method_wrapper(
 def test(
     *,
     deps: object | None = None,
+    targets: object | None = None,
     prompt: object | None = None,
     infer_deps: object | None = None,
     public_api_only: object | None = None,
@@ -351,6 +352,14 @@ def test(
         decorator_kwargs: dict[str, object] = {}
         if deps is not None:
             decorator_kwargs["deps"] = deps
+        if targets is not None:
+            try:
+                normalize_spec_refs(targets)
+            except Exception as exc:
+                raise JauntError(
+                    "targets must be a spec object, spec-ref string, or a collection of them."
+                ) from exc
+            decorator_kwargs["targets"] = targets
         if prompt is not None:
             decorator_kwargs["prompt"] = prompt
         if infer_deps is not None:

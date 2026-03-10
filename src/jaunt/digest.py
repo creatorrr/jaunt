@@ -10,7 +10,7 @@ from pathlib import Path
 
 from jaunt.errors import JauntDependencyCycleError
 from jaunt.registry import SpecEntry
-from jaunt.spec_ref import SpecRef, normalize_spec_ref, spec_ref_from_object
+from jaunt.spec_ref import SpecRef, normalize_spec_refs
 
 
 def extract_source_segment(entry: SpecEntry) -> str:
@@ -75,27 +75,20 @@ def _jsonable(value: object) -> object:
     return str(value)
 
 
-def _normalize_deps_for_kwargs(value: object) -> list[str]:
+def _normalize_spec_refs_for_kwargs(value: object) -> list[str]:
     if value is None:
         return []
+    try:
+        return [str(ref) for ref in normalize_spec_refs(value)]
+    except Exception:
+        pass
 
     items: list[object]
     if isinstance(value, (list, tuple, set, frozenset)):
         items = list(value)
     else:
         items = [value]
-
-    out: list[str] = []
-    for dep in items:
-        try:
-            # SpecRef is a NewType over str, so treat it as a str at runtime.
-            if isinstance(dep, str):
-                out.append(str(normalize_spec_ref(dep)))
-            else:
-                out.append(str(spec_ref_from_object(dep)))
-        except Exception:
-            out.append(str(dep))
-
+    out = [str(item) for item in items]
     out.sort()
     return out
 
@@ -107,8 +100,8 @@ def local_digest(entry: SpecEntry) -> str:
 
     kwargs: dict[str, object] = {}
     for k, v in entry.decorator_kwargs.items():
-        if k == "deps":
-            kwargs[k] = _normalize_deps_for_kwargs(v)
+        if k in {"deps", "targets"}:
+            kwargs[k] = _normalize_spec_refs_for_kwargs(v)
         else:
             kwargs[k] = _jsonable(v)
 

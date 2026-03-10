@@ -393,6 +393,16 @@ def test_aider_backend_build_task_includes_dependency_snapshot(monkeypatch) -> N
         dependency_apis={dep_ref: "def normalize(s: str) -> str: ...\n"},
         dependency_generated_modules={"pkg.dep": "def normalize(s: str) -> str:\n    return s\n"},
         skills_block="## requests\nUse requests.get\n",
+        blueprint_source=(
+            "# Reference-only blueprint for `pkg.specs`.\n"
+            "# from pkg.specs import Helper\n\n"
+            "# handwritten class already defined in `pkg.specs`: Helper\n"
+            "# reuse the existing definition from the source module; do not copy it here.\n\n"
+            "def foo() -> int:\n"
+            "    ...\n"
+        ),
+        attached_test_specs_block="# tests.specs:test_foo\nassert foo() == 1\n",
+        package_context_block="## Package tree\npkg/specs.py\n",
     )
 
     source, usage = asyncio.run(
@@ -409,10 +419,16 @@ def test_aider_backend_build_task_includes_dependency_snapshot(monkeypatch) -> N
     assert "pkg.dep" in ro_files["context/dependency_generated_modules.md"]
     assert "missing import for math" in ro_files["context/error_context.md"]
     assert "requests.get" in ro_files["context/external_skills.md"]
+    assert "Reference-only blueprint" in ro_files["context/blueprint.py"]
+    assert "tests.specs:test_foo" in ro_files["context/test_specs.md"]
+    assert "## Package tree" in ro_files["context/package_context.md"]
     assert "Aider Test Coverage Policy" not in ro_files["context/contract.md"]
     assert "Aider Build Policy" in ro_files["context/contract.md"]
     assert "Do not use `importlib`" in ro_files["context/contract.md"]
     assert "visible headings, prompts, help text" in ro_files["context/contract.md"]
+    assert "module shape only" in task.instruction
+    assert "reuse/import guidance only" in task.instruction
+    assert "Do not copy handwritten symbols" in task.instruction
 
 
 def test_aider_backend_test_task_includes_bounded_coverage_guidance(monkeypatch) -> None:

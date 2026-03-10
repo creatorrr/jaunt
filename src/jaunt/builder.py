@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import hashlib
 import heapq
 import importlib.metadata
 import os
@@ -28,6 +29,7 @@ from jaunt.cost import CostTracker
 from jaunt.digest import extract_source_segment, module_digest
 from jaunt.errors import JauntDependencyCycleError, JauntGenerationError
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
+from jaunt.generate.shared import fmt_kv_block
 from jaunt.header import (
     extract_generation_fingerprint,
     extract_module_api_digest,
@@ -36,7 +38,9 @@ from jaunt.header import (
     format_header,
 )
 from jaunt.module_api import build_dependency_api_block, module_api_digest
-from jaunt.module_contract import build_module_contract
+from jaunt.module_contract import (
+    build_module_contract,
+)
 from jaunt.registry import SpecEntry
 from jaunt.spec_ref import SpecRef
 from jaunt.validation import validate_build_contract_only, validate_build_generated_source
@@ -252,6 +256,360 @@ class BuildReport:
 class _GeneratedComponent:
     expected_names: tuple[str, ...]
     source: str
+
+
+@dataclass(frozen=True, slots=True)
+class BuildModuleContextArtifacts:
+    module_contract_block: str
+    blueprint_source: str
+    attached_test_specs_block: str
+    package_context_block: str
+    handwritten_names: tuple[str, ...]
+    digest: str
+
+
+def build_module_context_artifacts(
+    *,
+    module_name: str,
+    entries: list[SpecEntry],
+    expected_names: list[str],
+    generated_names: list[str] | None = None,
+    module_specs: dict[str, list[SpecEntry]],
+    module_dag: dict[str, set[str]],
+    package_dir: Path,
+    generated_dir: str,
+    targeted_test_entries: dict[str, list[SpecEntry]] | None = None,
+) -> BuildModuleContextArtifacts:
+    module_contract = build_module_contract(
+        entries=entries,
+        expected_names=expected_names,
+        generated_names=generated_names,
+    )
+    blueprint_source = _build_blueprint_source(
+        entries=entries,
+        generated_names=generated_names or expected_names,
+    )
+    attached_test_specs_block = _build_attached_test_specs_block(
+        targeted_test_entries.get(module_name, []) if targeted_test_entries else []
+    )
+    package_context_block = _build_package_context_block(
+        module_name=module_name,
+        entries=entries,
+        module_specs=module_specs,
+        module_dag=module_dag,
+        package_dir=package_dir,
+        generated_dir=generated_dir,
+    )
+    digest = _build_context_digest(
+        module_contract_block=module_contract.prompt_block,
+        blueprint_source=blueprint_source,
+        attached_test_specs_block=attached_test_specs_block,
+        package_context_block=package_context_block,
+    )
+    return BuildModuleContextArtifacts(
+        module_contract_block=module_contract.prompt_block,
+        blueprint_source=blueprint_source,
+        attached_test_specs_block=attached_test_specs_block,
+        package_context_block=package_context_block,
+        handwritten_names=module_contract.handwritten_names,
+        digest=digest,
+    )
+
+
+def _build_context_digest(
+    *,
+    module_contract_block: str,
+    blueprint_source: str,
+    attached_test_specs_block: str,
+    package_context_block: str,
+) -> str:
+    h = hashlib.sha256()
+    for block in (
+        module_contract_block,
+        blueprint_source,
+        attached_test_specs_block,
+        package_context_block,
+    ):
+        h.update((block or "").encode("utf-8"))
+        h.update(b"\x00")
+    return h.hexdigest()
+
+
+def _build_blueprint_source(*, entries: list[SpecEntry], generated_names: list[str]) -> str:
+    if not entries:
+        return ""
+
+    source_file = entries[0].source_file
+    spec_module = entries[0].module
+    source = Path(source_file).read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=source_file)
+    generated = set(generated_names)
+    chunks: list[str] = []
+    handwritten_names = _blueprint_handwritten_names(tree, generated=generated)
+    inserted_reference_header = False
+
+    for index, node in enumerate(tree.body):
+        if (
+            index == 0
+            and isinstance(node, ast.Expr)
+            and isinstance(getattr(node, "value", None), ast.Constant)
+            and isinstance(getattr(node.value, "value", None), str)
+        ):
+            rendered = _clean_source_segment(source, node)
+            if rendered:
+                chunks.append(rendered)
+            continue
+
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            rendered = _clean_source_segment(source, node)
+            if rendered:
+                chunks.append(rendered)
+            continue
+
+        if not inserted_reference_header and handwritten_names:
+            chunks.append(
+                _render_blueprint_reference_header(
+                    spec_module=spec_module,
+                    handwritten_names=handwritten_names,
+                )
+            )
+            inserted_reference_header = True
+
+        names = _defined_top_level_names(node)
+        if generated & names:
+            rendered = _render_blueprint_stub(node)
+            if rendered:
+                chunks.append(rendered)
+            continue
+
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            rendered = _render_blueprint_reference_marker(node, spec_module=spec_module)
+            if rendered:
+                chunks.append(rendered)
+            continue
+
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            rendered = _render_blueprint_reference_marker(node, spec_module=spec_module)
+            if rendered:
+                chunks.append(rendered)
+
+    if not chunks:
+        return ""
+    return "\n\n".join(chunk.rstrip() for chunk in chunks if chunk.strip()).rstrip() + "\n"
+
+
+def _render_blueprint_stub(node: ast.AST) -> str:
+    prepared = ast.fix_missing_locations(ast.copy_location(node, node))
+    transformed = _BlueprintTransformer().visit(prepared)
+    if transformed is None:
+        return ""
+    module = ast.Module(body=[transformed], type_ignores=[])
+    ast.fix_missing_locations(module)
+    return ast.unparse(module).strip()
+
+
+def _render_blueprint_reference_header(
+    *,
+    spec_module: str,
+    handwritten_names: list[str],
+) -> str:
+    lines = [
+        f"# Reference-only blueprint for `{spec_module}`.",
+        "# `context/contract.md` is the authoritative source for handwritten definitions.",
+        (
+            f"# Reuse handwritten symbols from `{spec_module}`; "
+            "do not copy them into generated output."
+        ),
+        "# Suggested import/reuse pattern:",
+    ]
+    if len(handwritten_names) == 1:
+        lines.append(f"# from {spec_module} import {handwritten_names[0]}")
+        return "\n".join(lines)
+
+    lines.append(f"# from {spec_module} import (")
+    lines.extend(f"#     {name}," for name in handwritten_names)
+    lines.append("# )")
+    return "\n".join(lines)
+
+
+def _render_blueprint_reference_marker(node: ast.AST, *, spec_module: str) -> str:
+    names = _top_level_names_in_order(cast(ast.stmt, node))
+    if not names:
+        return ""
+    kind = _blueprint_node_kind(cast(ast.stmt, node))
+    joined_names = ", ".join(names)
+    return "\n".join(
+        [
+            f"# handwritten {kind} already defined in `{spec_module}`: {joined_names}",
+            "# reuse the existing definition from the source module; do not copy it here.",
+        ]
+    )
+
+
+def _blueprint_handwritten_names(tree: ast.Module, *, generated: set[str]) -> list[str]:
+    names: list[str] = []
+    for node in tree.body:
+        if not isinstance(
+            node,
+            (
+                ast.FunctionDef,
+                ast.AsyncFunctionDef,
+                ast.ClassDef,
+                ast.Assign,
+                ast.AnnAssign,
+                ast.AugAssign,
+            ),
+        ):
+            continue
+        node_names = _top_level_names_in_order(node)
+        if not node_names or generated & set(node_names):
+            continue
+        names.extend(node_names)
+    return names
+
+
+def _blueprint_node_kind(node: ast.stmt) -> str:
+    if isinstance(node, ast.FunctionDef):
+        return "function"
+    if isinstance(node, ast.AsyncFunctionDef):
+        return "async function"
+    if isinstance(node, ast.ClassDef):
+        return "class"
+    return "assignment"
+
+
+class _BlueprintTransformer(ast.NodeTransformer):
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
+        node = cast(ast.FunctionDef, self.generic_visit(node))
+        node.decorator_list = [dec for dec in node.decorator_list if not _is_jaunt_decorator(dec)]
+        node.body = [ast.Expr(value=ast.Constant(value=Ellipsis))]
+        return node
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> ast.AST:
+        node = cast(ast.AsyncFunctionDef, self.generic_visit(node))
+        node.decorator_list = [dec for dec in node.decorator_list if not _is_jaunt_decorator(dec)]
+        node.body = [ast.Expr(value=ast.Constant(value=Ellipsis))]
+        return node
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> ast.AST:
+        node = cast(ast.ClassDef, self.generic_visit(node))
+        node.decorator_list = [dec for dec in node.decorator_list if not _is_jaunt_decorator(dec)]
+        cleaned_body: list[ast.stmt] = []
+        for child in node.body:
+            if (
+                isinstance(child, ast.Expr)
+                and isinstance(getattr(child, "value", None), ast.Constant)
+                and isinstance(getattr(child.value, "value", None), str)
+            ):
+                continue
+            cleaned_body.append(child)
+        node.body = cleaned_body or [ast.Pass()]
+        return node
+
+
+def _build_attached_test_specs_block(entries: list[SpecEntry]) -> str:
+    if not entries:
+        return ""
+
+    rendered: list[tuple[str, str]] = []
+    for entry in sorted(entries, key=lambda item: (item.module, item.qualname, str(item.spec_ref))):
+        rendered.append((str(entry.spec_ref), extract_source_segment(entry)))
+    return fmt_kv_block(rendered)
+
+
+def _build_package_context_block(
+    *,
+    module_name: str,
+    entries: list[SpecEntry],
+    module_specs: dict[str, list[SpecEntry]],
+    module_dag: dict[str, set[str]],
+    package_dir: Path,
+    generated_dir: str,
+) -> str:
+    if not entries:
+        return ""
+
+    package_root = Path(entries[0].source_file).resolve().parent
+    tree_lines: list[str] = []
+    for path in sorted(package_root.rglob("*.py")):
+        if generated_dir in path.parts or "__pycache__" in path.parts:
+            continue
+        try:
+            rel = path.resolve().relative_to(package_dir.resolve())
+        except ValueError:
+            rel = path.name
+        tree_lines.append(str(rel).replace("\\", "/"))
+
+    dep_lines = [dep for dep in sorted(module_dag.get(module_name, set())) if dep]
+
+    module_package, _, _module_leaf = module_name.rpartition(".")
+    sibling_items: list[tuple[str, str]] = []
+    for sibling_name, sibling_entries in sorted(module_specs.items()):
+        if sibling_name == module_name or sibling_name.rpartition(".")[0] != module_package:
+            continue
+        sibling_expected, sibling_errors = _build_expected_names(sibling_entries)
+        if sibling_errors:
+            continue
+        sibling_contract = build_module_contract(
+            entries=sibling_entries,
+            expected_names=sibling_expected,
+        )
+        sibling_source = Path(sibling_entries[0].source_file).read_text(encoding="utf-8")
+        sibling_tree = ast.parse(sibling_source, filename=sibling_entries[0].source_file)
+        summary_lines = [f"summary: {_first_module_doc_line(sibling_tree) or '(none)'}"]
+        generated = ", ".join(sibling_expected) if sibling_expected else "(none)"
+        summary_lines.append(f"generated: {generated}")
+        handwritten = (
+            ", ".join(sibling_contract.handwritten_names)
+            if sibling_contract.handwritten_names
+            else "(none)"
+        )
+        summary_lines.append(f"handwritten: {handwritten}")
+        sibling_items.append((sibling_name, "\n".join(summary_lines)))
+
+    sections: list[str] = []
+    if tree_lines:
+        sections.append("## Package tree\n" + "\n".join(tree_lines))
+    if dep_lines:
+        sections.append("## Direct dependency modules\n" + "\n".join(dep_lines))
+    if sibling_items:
+        sections.append("## Sibling module summaries\n" + fmt_kv_block(sibling_items))
+    block = "\n\n".join(section.rstrip() for section in sections if section.strip()).rstrip()
+    return block + ("\n" if block else "")
+
+
+def _clean_source_segment(source: str, node: ast.AST) -> str:
+    seg = ast.get_source_segment(source, node) or ""
+    if not seg:
+        return ""
+    lines = [line.rstrip() for line in seg.splitlines()]
+    while lines and lines[-1] == "":
+        lines.pop()
+    return "\n".join(lines)
+
+
+def _is_jaunt_decorator(dec: ast.expr) -> bool:
+    target = dec.func if isinstance(dec, ast.Call) else dec
+    if isinstance(target, ast.Attribute):
+        return (
+            isinstance(target.value, ast.Name)
+            and target.value.id == "jaunt"
+            and target.attr in {"magic", "test"}
+        )
+    if isinstance(target, ast.Name):
+        return target.id in {"magic", "test"}
+    return False
+
+
+def _first_module_doc_line(node: ast.Module) -> str:
+    doc = ast.get_docstring(node, clean=True)
+    if not doc:
+        return ""
+    for line in doc.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
 
 
 def _critical_path_lengths(modules: set[str], dag: dict[str, set[str]]) -> dict[str, int]:
@@ -470,15 +828,19 @@ def _component_entries(
 
 
 def _defined_top_level_names(node: ast.stmt) -> set[str]:
+    return set(_top_level_names_in_order(node))
+
+
+def _top_level_names_in_order(node: ast.stmt) -> list[str]:
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        return {node.name}
+        return [node.name]
     if isinstance(node, ast.Assign):
-        return {target.id for target in node.targets if isinstance(target, ast.Name)}
+        return [target.id for target in node.targets if isinstance(target, ast.Name)]
     if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-        return {node.target.id}
+        return [node.target.id]
     if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
-        return {node.target.id}
-    return set()
+        return [node.target.id]
+    return []
 
 
 def _sorted_spec_refs(refs: set[SpecRef], *, reverse: bool = False) -> list[SpecRef]:
@@ -542,6 +904,7 @@ async def run_build(
     ty_retry_attempts: int | None = None,
     async_runner: str = "asyncio",
     initial_error_context_by_module: dict[str, list[str]] | None = None,
+    targeted_test_entries: dict[str, list[SpecEntry]] | None = None,
 ) -> BuildReport:
     jobs = max(1, int(jobs))
     ty_attempts = max(0, int(ty_retry_attempts)) if ty_retry_attempts is not None else None
@@ -735,10 +1098,16 @@ async def run_build(
                 if lines:
                     decorator_apis[entry.spec_ref] = "\n".join(lines)
 
-            component_contract = build_module_contract(
+            component_contract = build_module_context_artifacts(
+                module_name=module_name,
                 entries=entries,
                 expected_names=component_expected,
                 generated_names=all_generated_names,
+                module_specs=module_specs,
+                module_dag=module_dag,
+                package_dir=package_dir,
+                generated_dir=generated_dir,
+                targeted_test_entries=targeted_test_entries,
             )
             ctx = ModuleSpecContext(
                 kind="build",
@@ -753,7 +1122,10 @@ async def run_build(
                 dependency_generated_modules=dep_gen,
                 decorator_apis=decorator_apis,
                 skills_block=skills_block,
-                module_contract_block=component_contract.prompt_block,
+                module_contract_block=component_contract.module_contract_block,
+                blueprint_source=component_contract.blueprint_source,
+                attached_test_specs_block=component_contract.attached_test_specs_block,
+                package_context_block=component_contract.package_context_block,
                 module_context_digest=component_contract.digest,
                 async_runner=async_runner,
             )
@@ -792,18 +1164,25 @@ async def run_build(
 
             return _validate_candidate, _retry_validator
 
-        module_contract = build_module_contract(
+        module_contract = build_module_context_artifacts(
+            module_name=module_name,
             entries=entries,
             expected_names=expected,
             generated_names=all_generated_names,
+            module_specs=module_specs,
+            module_dag=module_dag,
+            package_dir=package_dir,
+            generated_dir=generated_dir,
+            targeted_test_entries=targeted_test_entries,
         )
+        handwritten_names = module_contract.handwritten_names
 
         def _validate_module_candidate(source: str) -> list[str]:
             errs = validate_build_generated_source(
                 source,
                 expected,
                 spec_module=module_name,
-                handwritten_names=module_contract.handwritten_names,
+                handwritten_names=handwritten_names,
             )
             if errs:
                 return errs

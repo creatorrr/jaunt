@@ -107,6 +107,7 @@ def test_integration_discovery_and_registry_registration(tmp_path: Path) -> None
             generated_dir="__generated__",
         )
         assert "tests" in test_mods
+        sys.modules.pop("tests", None)
         import_and_collect(["tests"], kind="test")
 
         # Reload the package module to make sure repeated imports are safe.

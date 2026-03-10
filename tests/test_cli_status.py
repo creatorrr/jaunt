@@ -8,6 +8,7 @@ from pathlib import Path
 
 import jaunt.cli
 from jaunt.config import load_config
+from jaunt.deps import collapse_to_module_dag
 from jaunt.generation_fingerprint import generation_fingerprint
 
 
@@ -57,12 +58,27 @@ def _build_generation_fingerprint(project_root: Path) -> str:
     return generation_fingerprint(load_config(root=project_root), kind="build")
 
 
-def _build_module_context_digest(entries) -> str:
-    from jaunt.builder import _build_expected_names
-    from jaunt.module_contract import build_module_contract
+def _build_module_context_digest(
+    *,
+    module_name: str,
+    entries,
+    module_specs,
+    module_dag,
+    package_dir: Path,
+) -> str:
+    from jaunt.builder import _build_expected_names, build_module_context_artifacts
 
     expected, _errs = _build_expected_names(entries)
-    return build_module_contract(entries=entries, expected_names=expected).digest
+    return build_module_context_artifacts(
+        module_name=module_name,
+        entries=entries,
+        expected_names=expected,
+        module_specs=module_specs,
+        module_dag=module_dag,
+        package_dir=package_dir,
+        generated_dir="__generated__",
+        targeted_test_entries={},
+    ).digest
 
 
 def _build_module_api_digest(entries) -> str:
@@ -193,7 +209,13 @@ def test_cmd_status_with_fresh_specs(tmp_path: Path, monkeypatch, capsys) -> Non
         entries = module_specs[f"{pkg}.specs"]
         digest = module_digest(f"{pkg}.specs", entries, specs, spec_graph)
         fingerprint = _build_generation_fingerprint(tmp_path)
-        module_context_digest = _build_module_context_digest(entries)
+        module_context_digest = _build_module_context_digest(
+            module_name=f"{pkg}.specs",
+            entries=entries,
+            module_specs=module_specs,
+            module_dag=collapse_to_module_dag(spec_graph),
+            package_dir=tmp_path / "src",
+        )
         module_api_digest = _build_module_api_digest(entries)
 
         # Write a generated file with matching digest
@@ -264,7 +286,13 @@ def test_cmd_status_with_fresh_specs_non_json(tmp_path: Path, monkeypatch, capsy
         entries = module_specs[f"{pkg}.specs"]
         digest = module_digest(f"{pkg}.specs", entries, specs, spec_graph)
         fingerprint = _build_generation_fingerprint(tmp_path)
-        module_context_digest = _build_module_context_digest(entries)
+        module_context_digest = _build_module_context_digest(
+            module_name=f"{pkg}.specs",
+            entries=entries,
+            module_specs=module_specs,
+            module_dag=collapse_to_module_dag(spec_graph),
+            package_dir=tmp_path / "src",
+        )
         module_api_digest = _build_module_api_digest(entries)
 
         write_generated_module(
@@ -512,7 +540,13 @@ def test_cmd_status_marks_api_changed_dependents_as_stale(
 
         for module_name, entries in module_specs.items():
             digest = module_digest(module_name, entries, specs, spec_graph)
-            module_context_digest = _build_module_context_digest(entries)
+            module_context_digest = _build_module_context_digest(
+                module_name=module_name,
+                entries=entries,
+                module_specs=module_specs,
+                module_dag=collapse_to_module_dag(spec_graph),
+                package_dir=tmp_path / "src",
+            )
             module_api_digest = _build_module_api_digest(entries)
             source = (
                 "def parse_name(raw: str) -> str:\n    return raw.strip()\n"

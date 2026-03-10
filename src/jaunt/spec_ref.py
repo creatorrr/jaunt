@@ -8,6 +8,7 @@ format is:
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import NewType
 
 SpecRef = NewType("SpecRef", str)
@@ -87,3 +88,27 @@ def spec_ref_from_object(obj: object) -> SpecRef:
     module = getattr(obj, _MODULE_ATTR)
     qualname = getattr(obj, _QUALNAME_ATTR)
     return normalize_spec_ref(f"{module}:{qualname}")
+
+
+def normalize_spec_refs(value: object) -> tuple[SpecRef, ...]:
+    """Normalize an object/string/or-collection into sorted canonical spec refs."""
+
+    if value is None:
+        return ()
+
+    items: list[object]
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, Iterable):
+        items = list(value)
+    else:
+        items = [value]
+
+    refs: list[SpecRef] = []
+    for item in items:
+        if isinstance(item, str):
+            refs.append(normalize_spec_ref(item))
+        else:
+            refs.append(spec_ref_from_object(item))
+    refs.sort(key=str)
+    return tuple(refs)

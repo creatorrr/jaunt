@@ -338,11 +338,51 @@ class AiderGeneratorBackend(GeneratorBackend):
                     content=skills_block + "\n",
                 )
             )
+        if (ctx.blueprint_source or "").strip():
+            read_only_files.append(
+                AgentFile(
+                    relative_path="context/blueprint.py",
+                    content=ctx.blueprint_source.rstrip() + "\n",
+                )
+            )
+        if (ctx.attached_test_specs_block or "").strip():
+            read_only_files.append(
+                AgentFile(
+                    relative_path="context/test_specs.md",
+                    content=ctx.attached_test_specs_block.rstrip() + "\n",
+                )
+            )
+        if (ctx.package_context_block or "").strip():
+            read_only_files.append(
+                AgentFile(
+                    relative_path="context/package_context.md",
+                    content=ctx.package_context_block.rstrip() + "\n",
+                )
+            )
 
         instruction_lines = [
             "Edit only the target Python file.",
             "Read and follow `context/contract.md` first.",
         ]
+        if (ctx.blueprint_source or "").strip():
+            instruction_lines.append(
+                "Read `context/blueprint.py` for module shape only; it is reference-only."
+            )
+            instruction_lines.append(
+                "Treat handwritten names in `context/blueprint.py` as reuse/import guidance only."
+            )
+            instruction_lines.append(
+                "Do not copy handwritten symbols into generated output; "
+                "reuse them from the source module."
+            )
+        if (ctx.attached_test_specs_block or "").strip():
+            instruction_lines.append(
+                "Read `context/test_specs.md` for tests explicitly targeting this module."
+            )
+        if (ctx.package_context_block or "").strip():
+            instruction_lines.append(
+                "Read `context/package_context.md` for the local package/dependency view."
+            )
         if retry_addendum:
             instruction_lines.append(
                 "Read and follow `context/retry_strategy.md` before making changes."

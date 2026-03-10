@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from jaunt.discovery import discover_modules, import_and_collect
+from jaunt.discovery import discover_modules, evict_modules_for_import, import_and_collect
 from jaunt.errors import JauntDiscoveryError
 
 
@@ -80,6 +80,8 @@ def test_import_and_collect_for_prefixed_tests_package(
     had_tests = "tests" in sys.modules
     had_sub = "tests.specs_mod" in sys.modules
     try:
+        sys.modules.pop("tests.specs_mod", None)
+        sys.modules.pop("tests", None)
         import_and_collect(["tests.specs_mod"], kind="test")
     finally:
         sys.modules.pop("tests.specs_mod", None)
@@ -131,3 +133,40 @@ def test_import_and_collect_imports_modules(
     monkeypatch.syspath_prepend(str(tmp_path))
 
     import_and_collect(["okmod"], kind="test")
+
+
+def test_evict_modules_for_import_drops_parent_packages_of_target_modules(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    _write(first / "tests" / "__init__.py", "")
+    _write(first / "tests" / "specs_mod.py", "VALUE = 'first'\n")
+    _write(second / "tests" / "__init__.py", "")
+    _write(second / "tests" / "specs_mod.py", "VALUE = 'second'\n")
+
+    monkeypatch.syspath_prepend(str(first))
+    orig_tests = sys.modules.get("tests")
+    orig_specs = sys.modules.get("tests.specs_mod")
+    had_tests = "tests" in sys.modules
+    had_specs = "tests.specs_mod" in sys.modules
+    try:
+        sys.modules.pop("tests.specs_mod", None)
+        sys.modules.pop("tests", None)
+        import_and_collect(["tests.specs_mod"], kind="test")
+        assert sys.modules["tests.specs_mod"].VALUE == "first"
+
+        monkeypatch.syspath_prepend(str(second))
+        evict_modules_for_import(module_names=["tests.specs_mod"], roots=[second / "tests"])
+        import_and_collect(["tests.specs_mod"], kind="test")
+
+        assert sys.modules["tests.specs_mod"].VALUE == "second"
+    finally:
+        sys.modules.pop("tests.specs_mod", None)
+        sys.modules.pop("tests", None)
+        if had_specs:
+            assert orig_specs is not None
+            sys.modules["tests.specs_mod"] = orig_specs
+        if had_tests:
+            assert orig_tests is not None
+            sys.modules["tests"] = orig_tests

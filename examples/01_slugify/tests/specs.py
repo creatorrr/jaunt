@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import jaunt
+from slugify_demo import post_slug, slugify
 
 
-@jaunt.test()
+@jaunt.test(targets=[slugify])
 def test_slugify_basic_cases() -> None:
     """
-    Target: slugify_demo.slugify
-
     slugify should:
     - strip surrounding whitespace
     - lowercase
@@ -26,11 +25,9 @@ def test_slugify_basic_cases() -> None:
     assert slugify("C++ > Java") == "c-java"
 
 
-@jaunt.test()
+@jaunt.test(targets=[slugify])
 def test_slugify_rejects_empty() -> None:
     """
-    Target: slugify_demo.slugify
-
     slugify should raise ValueError for:
     - ""
     - "   "
@@ -44,11 +41,9 @@ def test_slugify_rejects_empty() -> None:
             slugify(raw)
 
 
-@jaunt.test()
+@jaunt.test(targets=[post_slug])
 def test_post_slug_appends_id_and_validates_post_id() -> None:
     """
-    Target: slugify_demo.post_slug
-
     post_slug should:
     - use slugify(title) for the base
     - append "-<post_id>"

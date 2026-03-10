@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import jaunt
+from toy_app.email_specs import is_corporate_email, normalize_email
 
 
-@jaunt.test()
+@jaunt.test(targets=[normalize_email])
 def test_normalize_email__lowercases_and_strips() -> None:
     """
-    Target: toy_app.email_specs.normalize_email
-
     Assert it strips and lowercases, preserving '+' and '.' in the local-part.
 
     Examples:
@@ -18,11 +17,9 @@ def test_normalize_email__lowercases_and_strips() -> None:
     assert normalize_email("  A.B+tag@Example.COM  ") == "a.b+tag@example.com"
 
 
-@jaunt.test()
+@jaunt.test(targets=[normalize_email])
 def test_normalize_email__rejects_invalid_inputs() -> None:
     """
-    Target: toy_app.email_specs.normalize_email
-
     Invalid inputs should raise ValueError:
     - "" (empty)
     - "no-at-sign"
@@ -47,11 +44,9 @@ def test_normalize_email__rejects_invalid_inputs() -> None:
             normalize_email(raw)
 
 
-@jaunt.test()
+@jaunt.test(targets=[is_corporate_email])
 def test_is_corporate_email__matches_domain() -> None:
     """
-    Target: toy_app.email_specs.is_corporate_email
-
     Assert it:
     - returns True for "user@example.com"
     - returns False for "user@other.com"
@@ -68,11 +63,9 @@ def test_is_corporate_email__matches_domain() -> None:
     assert is_corporate_email("user@example.com", domain="corp.example") is False
 
 
-@jaunt.test()
+@jaunt.test(targets=[is_corporate_email])
 def test_is_corporate_email__propagates_value_error() -> None:
     """
-    Target: toy_app.email_specs.is_corporate_email
-
     Assert invalid emails propagate ValueError from normalize_email:
     - is_corporate_email("not-an-email") raises ValueError
     """

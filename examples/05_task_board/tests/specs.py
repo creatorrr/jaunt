@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import jaunt
+from task_board_demo.specs import TaskBoard, summarize
 
 
-@jaunt.test()
+@jaunt.test(targets=[TaskBoard])
 def test_add_and_list() -> None:
     """
-    Target: task_board_demo.TaskBoard
-
     - Create a TaskBoard.
     - Add tasks with priorities 3, 1, 2.
     - list_by_priority() should return them ordered by priority (1, 2, 3).
@@ -25,11 +24,9 @@ def test_add_and_list() -> None:
     assert priorities == [1, 2, 3]
 
 
-@jaunt.test()
+@jaunt.test(targets=[TaskBoard.validate_priority])
 def test_validate_priority_rejects_out_of_range() -> None:
     """
-    Target: task_board_demo.TaskBoard.validate_priority
-
     - validate_priority(1) through validate_priority(5) should succeed.
     - validate_priority(0) and validate_priority(6) should raise ValueError.
     """
@@ -44,11 +41,9 @@ def test_validate_priority_rejects_out_of_range() -> None:
             TaskBoard.validate_priority(v)
 
 
-@jaunt.test()
+@jaunt.test(targets=[TaskBoard.from_dict])
 def test_from_dict_roundtrip() -> None:
     """
-    Target: task_board_demo.TaskBoard.from_dict
-
     - Create a board, add two tasks.
     - Serialize to dict via {"tasks": board._tasks}.
     - Reconstruct via TaskBoard.from_dict(data).
@@ -69,11 +64,9 @@ def test_from_dict_roundtrip() -> None:
     assert new_task["id"] == 3
 
 
-@jaunt.test()
+@jaunt.test(targets=[summarize])
 def test_summarize() -> None:
     """
-    Target: task_board_demo.summarize
-
     - Empty board: "0 tasks, highest priority: n/a".
     - Board with tasks of priorities 3 and 1: "2 task(s), highest priority: 1".
     """

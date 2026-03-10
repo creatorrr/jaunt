@@ -59,6 +59,11 @@ def evict_modules_for_import(*, module_names: list[str], roots: list[Path]) -> N
             continue
 
     exact = set(module_names)
+    for name in list(module_names):
+        parent = name.rpartition(".")[0]
+        while parent:
+            exact.add(parent)
+            parent = parent.rpartition(".")[0]
     prefixes = tuple(f"{name}." for name in exact)
     to_delete: set[str] = set()
 

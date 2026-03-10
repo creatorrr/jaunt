@@ -20,6 +20,9 @@ def _make_ctx(**overrides: object) -> ModuleSpecContext:
         dependency_generated_modules=overrides.get("dependency_generated_modules", {}),  # type: ignore[arg-type]
         decorator_apis=overrides.get("decorator_apis", {}),  # type: ignore[arg-type]
         module_contract_block=overrides.get("module_contract_block", ""),  # type: ignore[arg-type]
+        blueprint_source=overrides.get("blueprint_source", ""),  # type: ignore[arg-type]
+        attached_test_specs_block=overrides.get("attached_test_specs_block", ""),  # type: ignore[arg-type]
+        package_context_block=overrides.get("package_context_block", ""),  # type: ignore[arg-type]
         module_context_digest=overrides.get("module_context_digest", ""),  # type: ignore[arg-type]
     )
 
@@ -154,6 +157,30 @@ def test_cache_key_differs_by_module_context_digest() -> None:
     k1 = cache_key_from_context(ctx1, model="m", provider="p")
     k2 = cache_key_from_context(ctx2, model="m", provider="p")
     assert k1 != k2
+
+
+def test_cache_key_differs_by_blueprint_source() -> None:
+    ctx1 = _make_ctx(blueprint_source="def foo() -> int:\n    ...\n")
+    ctx2 = _make_ctx(blueprint_source="def foo() -> str:\n    ...\n")
+    assert cache_key_from_context(ctx1, model="m", provider="p") != cache_key_from_context(
+        ctx2, model="m", provider="p"
+    )
+
+
+def test_cache_key_differs_by_attached_test_specs() -> None:
+    ctx1 = _make_ctx(attached_test_specs_block="# tests.a:test_foo\n...")
+    ctx2 = _make_ctx(attached_test_specs_block="# tests.a:test_bar\n...")
+    assert cache_key_from_context(ctx1, model="m", provider="p") != cache_key_from_context(
+        ctx2, model="m", provider="p"
+    )
+
+
+def test_cache_key_differs_by_package_context() -> None:
+    ctx1 = _make_ctx(package_context_block="## Package tree\npkg/a.py\n")
+    ctx2 = _make_ctx(package_context_block="## Package tree\npkg/b.py\n")
+    assert cache_key_from_context(ctx1, model="m", provider="p") != cache_key_from_context(
+        ctx2, model="m", provider="p"
+    )
 
 
 def test_cache_corrupt_file_returns_none(tmp_path: Path) -> None:

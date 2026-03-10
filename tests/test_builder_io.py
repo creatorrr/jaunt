@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from jaunt.builder import detect_api_changed_modules, detect_stale_modules, write_generated_module
+from jaunt.builder import (
+    build_module_context_artifacts,
+    detect_api_changed_modules,
+    detect_stale_modules,
+    write_generated_module,
+)
 from jaunt.deps import build_spec_graph
 from jaunt.digest import module_digest
 from jaunt.module_api import module_api_digest
@@ -272,3 +277,67 @@ def A(x: str) -> int:
         module_api_digests={"m": module_api_digest([entry_sig_change])},
     )
     assert changed == {"m"}
+
+
+def test_build_module_context_blueprint_preserves_source_order(tmp_path: Path) -> None:
+    spec_path = tmp_path / "pkg" / "auth_specs.py"
+    _write(
+        spec_path,
+        (
+            '"""Authentication specs."""\n\n'
+            "from dataclasses import dataclass\n\n"
+            "@dataclass(frozen=True)\n"
+            "class Claims:\n"
+            "    subject: str\n\n"
+            "@magic\n"
+            "def create_token(subject: str) -> str:\n"
+            '    """Create a signed token."""\n'
+            "    raise NotImplementedError\n\n"
+            "DEFAULT_TTL = 3600\n\n"
+            "@magic\n"
+            "class AuthService:\n"
+            '    """Authenticate and issue tokens."""\n'
+            "    def issue(self, subject: str) -> str:\n"
+            "        raise NotImplementedError\n"
+        ),
+    )
+    create_token = _entry(
+        module="pkg.auth_specs",
+        qualname="create_token",
+        source_file=str(spec_path),
+    )
+    auth_service = _entry(
+        module="pkg.auth_specs",
+        qualname="AuthService",
+        source_file=str(spec_path),
+    )
+    artifacts = build_module_context_artifacts(
+        module_name="pkg.auth_specs",
+        entries=[create_token, auth_service],
+        expected_names=["create_token", "AuthService"],
+        module_specs={"pkg.auth_specs": [create_token, auth_service]},
+        module_dag={"pkg.auth_specs": set()},
+        package_dir=tmp_path,
+        generated_dir="__generated__",
+    )
+
+    blueprint = artifacts.blueprint_source
+
+    claims_idx = blueprint.index(
+        "# handwritten class already defined in `pkg.auth_specs`: Claims"
+    )
+    create_idx = blueprint.index("def create_token(subject: str) -> str:")
+    ttl_idx = blueprint.index(
+        "# handwritten assignment already defined in `pkg.auth_specs`: DEFAULT_TTL"
+    )
+    service_idx = blueprint.index("class AuthService:")
+
+    assert claims_idx < create_idx < ttl_idx < service_idx
+    assert "# Reference-only blueprint for `pkg.auth_specs`." in blueprint
+    assert "# from pkg.auth_specs import (" in blueprint
+    assert "#     Claims," in blueprint
+    assert "#     DEFAULT_TTL," in blueprint
+    assert "class Claims:" not in blueprint
+    assert "DEFAULT_TTL = 3600" not in blueprint
+    assert "raise NotImplementedError" not in blueprint
+    assert "def issue(self, subject: str) -> str:\n        ..." in blueprint

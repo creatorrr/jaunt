@@ -429,6 +429,7 @@ class RepairBuildContext:
     module_dag: dict[str, set[str]]
     backend: GeneratorBackend
     generation_fingerprint: str
+    targeted_test_entries: dict[str, list[SpecEntry]] = field(default_factory=dict)
     skills_block: str = ""
     jobs: int = 1
     async_runner: str = "asyncio"
@@ -594,7 +595,7 @@ async def run_test_generation(
             p = e.decorator_kwargs.get("prompt")
             if isinstance(p, str) and p:
                 decorator_prompts[e.spec_ref] = p
-        target_modules_map = target_modules_by_name(spec_sources)
+        target_modules_map = target_modules_by_name(entries)
         module_contract = build_module_contract(entries=entries, expected_names=expected)
 
         ctx = ModuleSpecContext(
@@ -952,6 +953,7 @@ async def run_tests(
                 initial_error_context_by_module={
                     module_name: repair_lines for module_name in implicated_build_modules
                 },
+                targeted_test_entries=repair_build_context.targeted_test_entries,
             )
             if repaired_build.failed:
                 return PytestResult(

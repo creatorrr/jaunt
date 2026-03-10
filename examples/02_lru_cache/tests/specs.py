@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import jaunt
+from cache_demo import LRUCache
 
 
-@jaunt.test()
+@jaunt.test(targets=[LRUCache])
 def test_lru_cache_eviction_order() -> None:
     """
-    Target: cache_demo.LRUCache
-
     With capacity=2:
     - set("a", 1), set("b", 2), set("c", 3) should evict "a".
     - get("a") is None
@@ -28,11 +27,9 @@ def test_lru_cache_eviction_order() -> None:
     assert cache.size() == 2
 
 
-@jaunt.test()
+@jaunt.test(targets=[LRUCache])
 def test_get_updates_recency() -> None:
     """
-    Target: cache_demo.LRUCache
-
     With capacity=2:
     - set("a", 1), set("b", 2)
     - get("a") (hit) makes "a" most-recent
@@ -51,11 +48,9 @@ def test_get_updates_recency() -> None:
     assert cache.get("c") == 3
 
 
-@jaunt.test()
+@jaunt.test(targets=[LRUCache])
 def test_overwrite_does_not_grow_size() -> None:
     """
-    Target: cache_demo.LRUCache
-
     Overwriting an existing key should not increase size:
     - capacity=2
     - set("a", 1), set("a", 99)
@@ -72,11 +67,9 @@ def test_overwrite_does_not_grow_size() -> None:
     assert cache.get("a") == 99
 
 
-@jaunt.test()
+@jaunt.test(targets=[LRUCache])
 def test_invalid_capacity_raises() -> None:
     """
-    Target: cache_demo.LRUCache
-
     Constructing with capacity < 1 should raise ValueError:
     - LRUCache(0) raises ValueError
     - LRUCache(-1) raises ValueError

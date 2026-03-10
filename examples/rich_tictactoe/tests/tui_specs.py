@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import jaunt
+from tictactoe_demo.tui_specs import main, play_cli, render_board, render_screen
 
 
-@jaunt.test()
+@jaunt.test(targets=[render_board])
 def test_render_board_shows_numbers_and_styled_marks() -> None:
     """
-    Target: tictactoe_demo.tui_specs.render_board
-
     Test-authoring rules:
     - Import `Mark` directly from `tictactoe_demo.core_specs`.
     - Do not inspect `new_game.__globals__` or wrapper internals.
@@ -22,11 +21,9 @@ def test_render_board_shows_numbers_and_styled_marks() -> None:
     raise AssertionError("spec stub (generated at test time)")
 
 
-@jaunt.test()
+@jaunt.test(targets=[render_screen])
 def test_render_screen_includes_title_status_help_and_optional_message() -> None:
     """
-    Target: tictactoe_demo.tui_specs.render_screen
-
     Test-authoring rules:
     - Import `Mark` directly from `tictactoe_demo.core_specs` if needed.
     - Use the public `GameState.next_mark` field name.
@@ -42,11 +39,9 @@ def test_render_screen_includes_title_status_help_and_optional_message() -> None
     raise AssertionError("spec stub (generated at test time)")
 
 
-@jaunt.test()
+@jaunt.test(targets=[play_cli])
 def test_play_cli_handles_invalid_input_then_quit() -> None:
     """
-    Target: tictactoe_demo.tui_specs.play_cli
-
     Test-authoring rules:
     - Import `Mark` directly from `tictactoe_demo.core_specs`.
     - Use a Rich Console with `record=True` and an explicit scripted input
@@ -66,11 +61,9 @@ def test_play_cli_handles_invalid_input_then_quit() -> None:
     raise AssertionError("spec stub (generated at test time)")
 
 
-@jaunt.test()
+@jaunt.test(targets=[play_cli])
 def test_play_cli_can_run_a_full_scripted_session() -> None:
     """
-    Target: tictactoe_demo.tui_specs.play_cli
-
     Test-authoring rules:
     - Import `Mark` directly from `tictactoe_demo.core_specs`.
     - Use a Rich Console with `record=True`.
@@ -91,11 +84,9 @@ def test_play_cli_can_run_a_full_scripted_session() -> None:
     raise AssertionError("spec stub (generated at test time)")
 
 
-@jaunt.test()
+@jaunt.test(targets=[main])
 def test_main_returns_zero_for_quit_or_completed_game() -> None:
     """
-    Target: tictactoe_demo.tui_specs.main
-
     Test-authoring rules:
     - Use public functions only.
     - Avoid wrapper internals.

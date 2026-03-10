@@ -58,6 +58,38 @@ def Foo():
     assert re.fullmatch(r"[0-9a-f]{64}", d1) is not None
 
 
+def test_local_digest_normalizes_test_targets_like_deps(tmp_path: Path) -> None:
+    p = tmp_path / "tests_specs.py"
+    _write(
+        p,
+        """
+def test_render():
+    raise AssertionError
+""".lstrip(),
+    )
+    e = _entry(
+        kind="test",
+        spec_ref="tests.specs:test_render",
+        module="tests.specs",
+        qualname="test_render",
+        source_file=str(p),
+        decorator_kwargs={"targets": ["pkg.ui.render_screen", "pkg.ui:play_cli"]},
+    )
+
+    d1 = local_digest(e)
+    e2 = _entry(
+        kind="test",
+        spec_ref="tests.specs:test_render",
+        module="tests.specs",
+        qualname="test_render",
+        source_file=str(p),
+        decorator_kwargs={"targets": ["pkg.ui:play_cli", "pkg.ui:render_screen"]},
+    )
+    d2 = local_digest(e2)
+
+    assert d1 == d2
+
+
 def test_local_digest_changes_on_source_change(tmp_path: Path) -> None:
     p = tmp_path / "m.py"
     _write(

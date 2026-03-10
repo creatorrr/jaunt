@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import jaunt
+from dice_demo import parse_dice, roll
 
 
-@jaunt.test()
+@jaunt.test(targets=[parse_dice])
 def test_parse_dice_variants() -> None:
     """
-    Target: dice_demo.parse_dice
-
     parse_dice should accept:
     - "d6" -> (1, 6, 0)
     - "2d6+3" -> (2, 6, 3)
@@ -28,11 +27,9 @@ def test_parse_dice_variants() -> None:
             parse_dice(bad)
 
 
-@jaunt.test()
+@jaunt.test(targets=[roll])
 def test_roll_is_deterministic_with_seeded_rng() -> None:
     """
-    Target: dice_demo.roll
-
     With rng=random.Random(0), the first two d6 rolls are 4 and 4, so:
     - roll("2d6+3", rng=rng) == 11
     """

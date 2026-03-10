@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -101,3 +102,72 @@ def test_jaunt_test_discovers_tests_package_when_test_roots_is_tests(
             if name == "tests" or name.startswith("tests."):
                 sys.modules.pop(name, None)
         _restore_module("tests", orig_tests_mod, existed=had_tests)
+
+
+def test_jaunt_status_imports_bare_test_modules_from_test_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "proj"
+    project.mkdir(parents=True, exist_ok=True)
+
+    _write(
+        project / "jaunt.toml",
+        "\n".join(
+            [
+                "version = 1",
+                "",
+                "[paths]",
+                'source_roots = ["src"]',
+                'test_roots = ["tests"]',
+                'generated_dir = "__generated__"',
+                "",
+            ]
+        ),
+    )
+
+    _write(project / "src" / "demo" / "__init__.py", "")
+    _write(
+        project / "src" / "demo" / "core_specs.py",
+        "\n".join(
+            [
+                "import jaunt",
+                "",
+                "@jaunt.magic()",
+                "def parse_move(raw: str) -> int:",
+                '    """Parse a move."""',
+                '    raise RuntimeError("stub")',
+                "",
+            ]
+        ),
+    )
+    _write(
+        project / "tests" / "core_specs.py",
+        "\n".join(
+            [
+                "import jaunt",
+                "from demo.core_specs import parse_move",
+                "",
+                "@jaunt.test(targets=[parse_move])",
+                "def test_parse_move() -> None:",
+                '    """Verify move parsing."""',
+                '    raise AssertionError("spec stub")',
+                "",
+            ]
+        ),
+    )
+
+    monkeypatch.chdir(project)
+
+    orig_sys_path = list(sys.path)
+    before_modules = set(sys.modules.keys())
+    try:
+        rc = jaunt.cli.main(["status", "--root", str(project), "--json"])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["command"] == "status"
+        assert "demo.core_specs" in data["stale"]
+    finally:
+        sys.path[:] = orig_sys_path
+        for name in set(sys.modules.keys()) - before_modules:
+            if name == "demo" or name.startswith("demo.") or name == "core_specs":
+                sys.modules.pop(name, None)
