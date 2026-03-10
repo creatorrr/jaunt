@@ -31,6 +31,7 @@ from jaunt.progress import ProgressBar
 
 if TYPE_CHECKING:  # pragma: no cover
     from jaunt.config import JauntConfig
+    from jaunt.registry import SpecEntry
 
 
 EXIT_OK = 0
@@ -391,6 +392,33 @@ def _discover_test_spec_modules(*, root: Path, cfg: JauntConfig) -> tuple[list[P
     return existing_test_dirs, sorted(modules_set)
 
 
+def _discover_static_targeted_test_entries(*, root: Path, cfg: JauntConfig) -> list[SpecEntry]:
+    from jaunt import discovery
+    from jaunt.module_contract import extract_targeted_test_entries
+
+    test_dirs = [root / tr for tr in cfg.paths.test_roots]
+    entries: list[SpecEntry] = []
+    for tr, test_dir in zip(cfg.paths.test_roots, test_dirs, strict=False):
+        if not test_dir.exists():
+            continue
+        prefix = ".".join(Path(tr).parts)
+        discovered = discovery.discover_module_files(
+            roots=[test_dir],
+            exclude=[],
+            generated_dir=cfg.paths.generated_dir,
+            module_prefix=prefix or None,
+        )
+        for module_name, path in discovered:
+            try:
+                entries.extend(extract_targeted_test_entries(module_name, str(path)))
+            except Exception as exc:
+                raise JauntDiscoveryError(
+                    f"Failed to statically inspect test module '{module_name}': "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+    return entries
+
+
 def _build_backend(cfg: JauntConfig):
     if cfg.agent.engine == "aider":
         from jaunt.generate.aider_backend import AiderGeneratorBackend
@@ -564,8 +592,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         root, cfg = _load_config(args)
 
         source_dirs = [root / sr for sr in cfg.paths.source_roots]
-        test_dirs = [root / tr for tr in cfg.paths.test_roots]
-        _prepend_sys_path([*source_dirs, *test_dirs, root])
+        _prepend_sys_path([*source_dirs, root])
 
         from jaunt import discovery, registry
         from jaunt.deps import build_spec_graph, collapse_to_module_dag
@@ -581,9 +608,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             roots=[d for d in source_dirs if d.exists()],
         )
         discovery.import_and_collect(modules, kind="magic")
-        existing_test_dirs, test_modules = _discover_test_spec_modules(root=root, cfg=cfg)
-        discovery.evict_modules_for_import(module_names=test_modules, roots=existing_test_dirs)
-        discovery.import_and_collect(test_modules, kind="test")
+        static_targeted_test_entries = _discover_static_targeted_test_entries(root=root, cfg=cfg)
 
         specs = dict(registry.get_magic_registry())
         if not specs:
@@ -619,7 +644,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         build_module_context_digests: dict[str, str] = {}
         build_module_api_digests: dict[str, str] = {}
         targeted_test_entries = group_test_entries_by_target_module(
-            list(registry.get_test_registry().values())
+            static_targeted_test_entries
         )
         for module_name, entries in module_specs.items():
             expected, _errs = builder._build_expected_names(entries)
@@ -702,7 +727,6 @@ def cmd_build(args: argparse.Namespace) -> int:
         _sync_generated_dir_env(cfg)
 
         source_dirs = [root / sr for sr in cfg.paths.source_roots]
-        test_dirs = [root / tr for tr in cfg.paths.test_roots]
 
         skills_block = ""
         try:
@@ -724,7 +748,7 @@ def cmd_build(args: argparse.Namespace) -> int:
         except Exception as e:  # noqa: BLE001 - best-effort; never block build
             _eprint(f"warn: failed ensuring external library skills: {type(e).__name__}: {e}")
 
-        _prepend_sys_path([*source_dirs, *test_dirs, root])
+        _prepend_sys_path([*source_dirs, root])
 
         from jaunt import discovery, registry
         from jaunt.deps import build_spec_graph, collapse_to_module_dag, find_cycles
@@ -740,9 +764,7 @@ def cmd_build(args: argparse.Namespace) -> int:
             roots=[d for d in source_dirs if d.exists()],
         )
         discovery.import_and_collect(modules, kind="magic")
-        existing_test_dirs, test_modules = _discover_test_spec_modules(root=root, cfg=cfg)
-        discovery.evict_modules_for_import(module_names=test_modules, roots=existing_test_dirs)
-        discovery.import_and_collect(test_modules, kind="test")
+        static_targeted_test_entries = _discover_static_targeted_test_entries(root=root, cfg=cfg)
 
         specs = dict(registry.get_magic_registry())
         if not specs:
@@ -785,7 +807,7 @@ def cmd_build(args: argparse.Namespace) -> int:
         build_module_context_digests: dict[str, str] = {}
         build_module_api_digests: dict[str, str] = {}
         targeted_test_entries = group_test_entries_by_target_module(
-            list(registry.get_test_registry().values())
+            static_targeted_test_entries
         )
         for module_name, entries in module_specs.items():
             expected, _errs = builder._build_expected_names(entries)
@@ -918,10 +940,9 @@ def cmd_test(args: argparse.Namespace) -> int:
 
         source_dirs = [root / sr for sr in cfg.paths.source_roots]
         test_dirs = [root / tr for tr in cfg.paths.test_roots]
-        # Include source roots, the project root, and raw test roots so both
-        # packaged tests (`tests.*`) and bare test modules (`core_specs`) can
-        # be imported during discovery.
-        _prepend_sys_path([*source_dirs, *test_dirs, root])
+        # Import source specs and namespace-package test modules without
+        # prepending raw test roots, which can shadow stdlib/dependency imports.
+        _prepend_sys_path([*source_dirs, root])
 
         if not bool(args.no_build):
             rc = cmd_build(args)

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Literal
 
 from jaunt.registry import SpecEntry
-from jaunt.spec_ref import SpecRef, normalize_spec_refs
+from jaunt.spec_ref import SpecRef, normalize_spec_ref, normalize_spec_refs
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +184,37 @@ def group_test_entries_by_target_module(entries: list[SpecEntry]) -> dict[str, l
     return grouped
 
 
+def extract_targeted_test_entries(module_name: str, source_file: str) -> list[SpecEntry]:
+    source = Path(source_file).read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=source_file)
+    imported_modules, imported_specs = _collect_target_imports(tree)
+
+    entries: list[SpecEntry] = []
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        targets = _targets_for_test_node(
+            node,
+            imported_modules=imported_modules,
+            imported_specs=imported_specs,
+        )
+        if targets is None:
+            continue
+        spec_ref = normalize_spec_ref(f"{module_name}:{node.name}")
+        entries.append(
+            SpecEntry(
+                kind="test",
+                spec_ref=spec_ref,
+                module=module_name,
+                qualname=node.name,
+                source_file=source_file,
+                obj=object(),
+                decorator_kwargs={"targets": targets},
+            )
+        )
+    return entries
+
+
 def extract_spec_preamble(source_file: str) -> str:
     """Return source text before the first jaunt-decorated definition."""
 
@@ -298,6 +329,157 @@ def _format_prompt_block(symbols: list[HandwrittenSymbol]) -> str:
 
 def _indent(text: str, *, prefix: str = "  ") -> str:
     return "\n".join(prefix + line if line else prefix.rstrip() for line in text.splitlines())
+
+
+def _collect_target_imports(tree: ast.Module) -> tuple[dict[str, str], dict[str, SpecRef]]:
+    imported_modules: dict[str, str] = {}
+    imported_specs: dict[str, SpecRef] = {}
+
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bound_name = alias.asname or alias.name.split(".", 1)[0]
+                imported_modules[bound_name] = alias.name.split(".", 1)[0]
+                if alias.asname is not None:
+                    imported_modules[bound_name] = alias.name
+            continue
+
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        module = node.module or ""
+        if not module:
+            continue
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            imported_specs[alias.asname or alias.name] = normalize_spec_ref(
+                f"{module}:{alias.name}"
+            )
+
+    return imported_modules, imported_specs
+
+
+def _targets_for_test_node(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    *,
+    imported_modules: dict[str, str],
+    imported_specs: dict[str, SpecRef],
+) -> tuple[SpecRef, ...] | None:
+    for dec in node.decorator_list:
+        if not _is_test_decorator(dec):
+            continue
+        if not isinstance(dec, ast.Call):
+            return None
+        for kw in dec.keywords:
+            if kw.arg != "targets" or kw.value is None:
+                continue
+            return _resolve_target_expr(
+                kw.value,
+                imported_modules=imported_modules,
+                imported_specs=imported_specs,
+            )
+        return None
+    return None
+
+
+def _resolve_target_expr(
+    node: ast.expr,
+    *,
+    imported_modules: dict[str, str],
+    imported_specs: dict[str, SpecRef],
+) -> tuple[SpecRef, ...]:
+    refs = tuple(
+        _iter_target_refs(
+            node,
+            imported_modules=imported_modules,
+            imported_specs=imported_specs,
+        )
+    )
+    return normalize_spec_refs(refs)
+
+
+def _iter_target_refs(
+    node: ast.expr,
+    *,
+    imported_modules: dict[str, str],
+    imported_specs: dict[str, SpecRef],
+) -> list[SpecRef]:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [normalize_spec_ref(node.value)]
+
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        refs: list[SpecRef] = []
+        for elt in node.elts:
+            refs.extend(
+                _iter_target_refs(
+                    elt,
+                    imported_modules=imported_modules,
+                    imported_specs=imported_specs,
+                )
+            )
+        return refs
+
+    if isinstance(node, ast.Name):
+        resolved = imported_specs.get(node.id)
+        if resolved is not None:
+            return [resolved]
+        raise ValueError(f"Unsupported target reference: {ast.unparse(node)}")
+
+    if isinstance(node, ast.Attribute):
+        base, attrs = _flatten_attribute(node)
+        if base in imported_specs:
+            spec_ref = str(imported_specs[base])
+            module_name, _, qualname = spec_ref.partition(":")
+            return [SpecRef(f"{module_name}:{qualname}.{'.'.join(attrs)}")]
+        if base in imported_modules:
+            module_name, qualname = _module_and_qualname_from_import(imported_modules[base], attrs)
+            return [SpecRef(f"{module_name}:{qualname}")]
+        raise ValueError(f"Unsupported target reference: {ast.unparse(node)}")
+
+    raise ValueError(f"Unsupported target reference: {ast.unparse(node)}")
+
+
+def _flatten_attribute(node: ast.Attribute) -> tuple[str, list[str]]:
+    attrs: list[str] = [node.attr]
+    cur = node.value
+    while isinstance(cur, ast.Attribute):
+        attrs.append(cur.attr)
+        cur = cur.value
+    if not isinstance(cur, ast.Name):
+        raise ValueError(f"Unsupported target reference: {ast.unparse(node)}")
+    attrs.reverse()
+    return cur.id, attrs
+
+
+def _module_and_qualname_from_import(module_name: str, attrs: list[str]) -> tuple[str, str]:
+    if not attrs:
+        raise ValueError(f"Unsupported target reference: {module_name}")
+
+    split_at = next((i for i, part in enumerate(attrs) if part and part[0].isupper()), None)
+    if split_at is None:
+        extra_module = attrs[:-1]
+        qualname = attrs[-1]
+    else:
+        extra_module = attrs[:split_at]
+        qualname = ".".join(attrs[split_at:])
+
+    resolved_module = module_name
+    if extra_module:
+        resolved_module += "." + ".".join(extra_module)
+    return resolved_module, qualname
+
+
+def _is_test_decorator(dec: ast.expr) -> bool:
+    target = dec.func if isinstance(dec, ast.Call) else dec
+    if isinstance(target, ast.Attribute):
+        return (
+            isinstance(target.value, ast.Name)
+            and target.value.id == "jaunt"
+            and target.attr == "test"
+        )
+    if isinstance(target, ast.Name):
+        return target.id == "test"
+    return False
 
 
 def _is_jaunt_decorator(dec: ast.expr) -> bool:

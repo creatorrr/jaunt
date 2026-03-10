@@ -257,6 +257,9 @@ class AnthropicBackend(GeneratorBackend):
             "deps_generated_block": fmt_kv_block(deps_gen_items),
             "decorator_apis_block": fmt_kv_block(decorator_api_items),
             "module_contract_block": ctx.module_contract_block or "(none)\n",
+            "blueprint_source_block": ctx.blueprint_source or "(none)\n",
+            "attached_test_specs_block": ctx.attached_test_specs_block or "(none)\n",
+            "package_context_block": ctx.package_context_block or "(none)\n",
             "error_context_block": fmt_kv_block(err_items),
             "async_test_info": async_test_info(ctx.async_runner),
         }

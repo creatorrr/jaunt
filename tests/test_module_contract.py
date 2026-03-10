@@ -4,6 +4,7 @@ from pathlib import Path
 
 from jaunt.module_contract import (
     build_module_contract,
+    extract_targeted_test_entries,
     target_modules_by_name,
     target_refs_by_test_name,
 )
@@ -117,3 +118,59 @@ def test_target_modules_by_name_uses_explicit_targets() -> None:
     targets = target_modules_by_name([entry])
 
     assert targets == {"test_method": ("pkg.board",)}
+
+
+def test_extract_targeted_test_entries_resolves_imported_names_and_methods(tmp_path: Path) -> None:
+    source = tmp_path / "tests_specs.py"
+    _write(
+        source,
+        "\n".join(
+            [
+                "import jaunt",
+                "from pkg.board import TaskBoard, summarize",
+                "from pkg.ui import render_screen",
+                "",
+                "@jaunt.test(",
+                "    targets=[TaskBoard, TaskBoard.validate_priority, summarize, render_screen]",
+                ")",
+                "def test_board_flow() -> None:",
+                '    """Exercise the board APIs."""',
+                '    raise AssertionError("spec stub")',
+                "",
+            ]
+        ),
+    )
+
+    entries = extract_targeted_test_entries("tests.specs", str(source))
+
+    assert len(entries) == 1
+    assert entries[0].decorator_kwargs["targets"] == (
+        normalize_spec_ref("pkg.board:TaskBoard"),
+        normalize_spec_ref("pkg.board:TaskBoard.validate_priority"),
+        normalize_spec_ref("pkg.board:summarize"),
+        normalize_spec_ref("pkg.ui:render_screen"),
+    )
+
+
+def test_extract_targeted_test_entries_rejects_unsupported_target_syntax(tmp_path: Path) -> None:
+    source = tmp_path / "tests_specs.py"
+    _write(
+        source,
+        "\n".join(
+            [
+                "import jaunt",
+                "",
+                "@jaunt.test(targets=build_targets())",
+                "def test_board_flow() -> None:",
+                '    raise AssertionError("spec stub")',
+                "",
+            ]
+        ),
+    )
+
+    try:
+        extract_targeted_test_entries("tests.specs", str(source))
+    except ValueError as exc:
+        assert "Unsupported target reference" in str(exc)
+    else:
+        raise AssertionError("expected unsupported static target syntax to fail")

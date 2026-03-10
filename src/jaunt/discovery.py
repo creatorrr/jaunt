@@ -100,6 +100,90 @@ def evict_modules_for_import(*, module_names: list[str], roots: list[Path]) -> N
     importlib.invalidate_caches()
 
 
+def _module_name_for_file(
+    *,
+    root: Path,
+    py_file: Path,
+    module_prefix: str | None = None,
+) -> str | None:
+    rel = py_file.relative_to(root)
+    if rel.name == "__init__.py":
+        base_mod = ".".join(rel.parent.parts)
+    else:
+        base_mod = ".".join(rel.with_suffix("").parts)
+
+    prefix = module_prefix or None
+    if base_mod == "":
+        if prefix is None:
+            return None
+        return prefix
+
+    if prefix is None:
+        return base_mod
+    return f"{prefix}.{base_mod}"
+
+
+def discover_module_files(
+    *,
+    roots: list[Path],
+    exclude: list[str],
+    generated_dir: str,
+    module_prefix: str | None = None,
+    target_modules: set[str] | None = None,
+) -> list[tuple[str, Path]]:
+    """Discover Python modules and their backing files under the provided roots."""
+
+    prefix = module_prefix or None
+
+    if target_modules is not None:
+        found: dict[str, Path] = {}
+        for mod in target_modules:
+            relative_mod = mod
+            if prefix is not None and mod.startswith(f"{prefix}."):
+                relative_mod = mod[len(prefix) + 1 :]
+            elif prefix is not None and mod == prefix:
+                relative_mod = ""
+
+            for root in roots:
+                if relative_mod == "":
+                    candidate = root / "__init__.py"
+                    if candidate.is_file():
+                        found[mod] = candidate
+                        break
+                else:
+                    parts = relative_mod.split(".")
+                    file_path = root / Path(*parts).with_suffix(".py")
+                    pkg_path = root / Path(*parts) / "__init__.py"
+                    if file_path.is_file():
+                        found[mod] = file_path
+                        break
+                    if pkg_path.is_file():
+                        found[mod] = pkg_path
+                        break
+        return sorted(found.items(), key=lambda item: item[0])
+
+    discovered: dict[str, Path] = {}
+    for root in roots:
+        for py_file in root.rglob("*.py"):
+            if not py_file.is_file():
+                continue
+
+            rel = py_file.relative_to(root)
+            if generated_dir and generated_dir in rel.parts:
+                continue
+
+            rel_posix = rel.as_posix()
+            if _is_excluded(rel_posix, exclude=exclude):
+                continue
+
+            module_name = _module_name_for_file(root=root, py_file=py_file, module_prefix=prefix)
+            if module_name is None:
+                continue
+            discovered[module_name] = py_file
+
+    return sorted(discovered.items(), key=lambda item: item[0])
+
+
 def discover_modules(
     *,
     roots: list[Path],
@@ -118,70 +202,16 @@ def discover_modules(
     - If `target_modules` is provided, fast-path: verify each target exists on
       disk and return only those instead of scanning the full tree.
     """
-
-    prefix = module_prefix or None
-
-    # Fast path: resolve target modules directly from their expected file paths.
-    if target_modules is not None:
-        found: set[str] = set()
-        for mod in target_modules:
-            # Strip prefix to get the relative module name.
-            relative_mod = mod
-            if prefix is not None and mod.startswith(f"{prefix}."):
-                relative_mod = mod[len(prefix) + 1 :]
-            elif prefix is not None and mod == prefix:
-                relative_mod = ""
-
-            for root in roots:
-                if relative_mod == "":
-                    candidate = root / "__init__.py"
-                    if candidate.is_file():
-                        found.add(mod)
-                        break
-                else:
-                    parts = relative_mod.split(".")
-                    # Could be a package (dir/__init__.py) or a module (file.py).
-                    file_path = root / Path(*parts).with_suffix(".py")
-                    pkg_path = root / Path(*parts) / "__init__.py"
-                    if file_path.is_file() or pkg_path.is_file():
-                        found.add(mod)
-                        break
-        return sorted(found)
-
-    module_names: set[str] = set()
-
-    for root in roots:
-        for py_file in root.rglob("*.py"):
-            if not py_file.is_file():
-                continue
-
-            rel = py_file.relative_to(root)
-            if generated_dir and generated_dir in rel.parts:
-                continue
-
-            rel_posix = rel.as_posix()
-            if _is_excluded(rel_posix, exclude=exclude):
-                continue
-
-            if rel.name == "__init__.py":
-                base_mod = ".".join(rel.parent.parts)
-            else:
-                base_mod = ".".join(rel.with_suffix("").parts)
-
-            if base_mod == "":
-                # Root-level __init__.py doesn't map to a sensible module name
-                # unless the caller provides a namespace prefix (ex: tests).
-                if prefix is None:
-                    continue
-                module_names.add(prefix)
-                continue
-
-            if prefix is None:
-                module_names.add(base_mod)
-            else:
-                module_names.add(f"{prefix}.{base_mod}")
-
-    return sorted(module_names)
+    return [
+        module_name
+        for module_name, _path in discover_module_files(
+            roots=roots,
+            exclude=exclude,
+            generated_dir=generated_dir,
+            module_prefix=module_prefix,
+            target_modules=target_modules,
+        )
+    ]
 
 
 def import_and_collect(module_names: list[str], *, kind: Literal["magic", "test"]) -> None:

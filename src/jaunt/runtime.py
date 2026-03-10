@@ -354,12 +354,12 @@ def test(
             decorator_kwargs["deps"] = deps
         if targets is not None:
             try:
-                normalize_spec_refs(targets)
+                normalized_targets = normalize_spec_refs(targets)
             except Exception as exc:
                 raise JauntError(
                     "targets must be a spec object, spec-ref string, or a collection of them."
                 ) from exc
-            decorator_kwargs["targets"] = targets
+            decorator_kwargs["targets"] = normalized_targets
         if prompt is not None:
             decorator_kwargs["prompt"] = prompt
         if infer_deps is not None:

@@ -84,6 +84,18 @@
         doc: Player mark.
         
         
+        Reference-only blueprint of the source module shape:
+        (none)
+        
+        
+        Attached test specs explicitly targeting this module:
+        (none)
+        
+        
+        Local package context:
+        (none)
+        
+        
         Extra error context (fix these issues):
         # error_context[1]
         missing import for math
@@ -93,6 +105,9 @@
         - Do not generate tests.
         - Do not edit user files; only output generated module source code.
         - Reuse handwritten symbols from `pkg.specs` when they already exist there; do not redefine them.
+        - Treat the blueprint as reference-only structure guidance; do not copy handwritten symbols from it.
+        - Treat attached test specs as additional behavioral guidance, not as production code to inline.
+        - Use the package context to prefer nearby real modules and exports over guessed import paths.
         - Include type annotations on all function signatures.
         - Ensure every non-Optional return type has explicit return/raise on all code paths.
         - If a spec uses `async def`, the generated implementation MUST also be `async def`. Use `await` for any async calls within.

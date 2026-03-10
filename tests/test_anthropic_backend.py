@@ -104,6 +104,37 @@ def test_anthropic_backend_render_messages_structure(monkeypatch) -> None:
     assert messages[-1]["role"] == "user"
 
 
+def test_anthropic_backend_renders_build_context_blocks(monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    from jaunt.generate.anthropic_backend import AnthropicBackend
+
+    backend = AnthropicBackend(
+        LLMConfig(provider="anthropic", model="claude-test", api_key_env="ANTHROPIC_API_KEY")
+    )
+
+    ctx = ModuleSpecContext(
+        kind="build",
+        spec_module="pkg.specs",
+        generated_module="pkg.__generated__.specs",
+        expected_names=["foo"],
+        spec_sources={},
+        decorator_prompts={},
+        dependency_apis={},
+        dependency_generated_modules={},
+        blueprint_source="def foo() -> int:\n    ...\n",
+        attached_test_specs_block="# tests.specs:test_foo\nassert foo() == 1\n",
+        package_context_block="## Package tree\npkg/specs.py\n",
+    )
+
+    system, messages = backend._render_messages(ctx, extra_error_context=None)
+
+    assert "foo" in system
+    assert "Reference-only blueprint of the source module shape" in messages[-1]["content"]
+    assert "assert foo() == 1" in messages[-1]["content"]
+    assert "## Package tree" in messages[-1]["content"]
+
+
 # -- Structured output tests --
 
 

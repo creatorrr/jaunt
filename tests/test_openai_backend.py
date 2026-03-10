@@ -137,13 +137,49 @@ def test_openai_backend_injects_skills_block_as_extra_user_message(monkeypatch) 
         skills_block="## requests==2.0.0\nUse requests.get(...)\n",
     )
 
-    source, usage = asyncio.run(backend.generate_module(ctx))
+    source, _usage = asyncio.run(backend.generate_module(ctx))
     assert "def foo" in source
     assert len(seen) == 1
     msgs = seen[0]
     assert len(msgs) == 3
     assert msgs[1]["role"] == "user"
     assert "External library skills (reference):" in msgs[1]["content"]
+
+
+def test_openai_backend_renders_build_context_blocks(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    backend = OpenAIBackend(
+        LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY")
+    )
+
+    seen: list[list[dict[str, str]]] = []
+
+    async def fake_call(messages, **kwargs):
+        seen.append(messages)
+        return "def foo():\n    return 1\n", None
+
+    monkeypatch.setattr(backend, "_call_openai_structured", fake_call)
+
+    ctx = ModuleSpecContext(
+        kind="build",
+        spec_module="pkg.specs",
+        generated_module="pkg.__generated__.specs",
+        expected_names=["foo"],
+        spec_sources={},
+        decorator_prompts={},
+        dependency_apis={},
+        dependency_generated_modules={},
+        blueprint_source="def foo() -> int:\n    ...\n",
+        attached_test_specs_block="# tests.specs:test_foo\nassert foo() == 1\n",
+        package_context_block="## Package tree\npkg/specs.py\n",
+    )
+
+    source, usage = asyncio.run(backend.generate_module(ctx))
+    assert "def foo" in source
+    user = seen[0][1]["content"]
+    assert "Reference-only blueprint of the source module shape" in user
+    assert "assert foo() == 1" in user
+    assert "## Package tree" in user
 
 
 def test_openai_backend_auto_prompt_cache_key_when_enabled(monkeypatch) -> None:

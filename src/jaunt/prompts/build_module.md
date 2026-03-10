@@ -31,6 +31,15 @@ Previously generated dependency modules (for reference only):
 Handwritten source-module symbols already available for reuse:
 {{module_contract_block}}
 
+Reference-only blueprint of the source module shape:
+{{blueprint_source_block}}
+
+Attached test specs explicitly targeting this module:
+{{attached_test_specs_block}}
+
+Local package context:
+{{package_context_block}}
+
 Extra error context (fix these issues):
 {{error_context_block}}
 
@@ -38,6 +47,9 @@ Rules:
 - Do not generate tests.
 - Do not edit user files; only output generated module source code.
 - Reuse handwritten symbols from `{{spec_module}}` when they already exist there; do not redefine them.
+- Treat the blueprint as reference-only structure guidance; do not copy handwritten symbols from it.
+- Treat attached test specs as additional behavioral guidance, not as production code to inline.
+- Use the package context to prefer nearby real modules and exports over guessed import paths.
 - Include type annotations on all function signatures.
 - Ensure every non-Optional return type has explicit return/raise on all code paths.
 - If a spec uses `async def`, the generated implementation MUST also be `async def`. Use `await` for any async calls within.
