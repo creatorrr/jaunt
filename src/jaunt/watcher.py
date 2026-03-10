@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -63,7 +64,7 @@ def filter_spec_files(
 async def run_watch_loop(
     *,
     changes_iter: AsyncIterator[set[tuple[Any, str]]],
-    run_cycle: Callable[[WatchEvent], WatchCycleResult],
+    run_cycle: Callable[[WatchEvent], WatchCycleResult | Awaitable[WatchCycleResult]],
     on_event: Callable[[str], None],
     on_cycle_result: Callable[[WatchCycleResult], None],
     on_error: Callable[[BaseException], None],
@@ -91,6 +92,8 @@ async def run_watch_loop(
 
         try:
             result = run_cycle(event)
+            if inspect.isawaitable(result):
+                result = await result
         except Exception as exc:
             on_error(exc)
             continue
@@ -116,9 +119,9 @@ def build_cycle_runner(
     args: Any,
     *,
     run_tests: bool,
-) -> Callable[[WatchEvent], WatchCycleResult]:
-    """Create a cycle runner that calls cmd_build() and optionally cmd_test()."""
-    from jaunt.cli import cmd_build, cmd_test
+) -> Callable[[WatchEvent], Coroutine[Any, Any, WatchCycleResult]]:
+    """Create a cycle runner that calls async build/test helpers."""
+    from jaunt.cli import _cmd_build_async, _cmd_test_async
 
     build_args = argparse.Namespace(
         root=getattr(args, "root", None),
@@ -147,13 +150,13 @@ def build_cycle_runner(
         pytest_args=[],
     )
 
-    def runner(event: WatchEvent) -> WatchCycleResult:
+    async def runner(event: WatchEvent) -> WatchCycleResult:
         t0 = time.monotonic()
-        build_rc = cmd_build(build_args)
+        build_rc = await _cmd_build_async(build_args)
 
         test_rc: int | None = None
         if run_tests and build_rc == 0:
-            test_rc = cmd_test(test_args)
+            test_rc = await _cmd_test_async(test_args)
 
         duration = time.monotonic() - t0
         return WatchCycleResult(

@@ -118,6 +118,27 @@ async def _fake_changes(
         yield batch
 
 
+async def _run_watch_once(
+    *,
+    batch: set[tuple[Any, str]],
+    run_cycle: Any,
+    on_event: Any = lambda msg: None,
+    on_cycle_result: Any = lambda r: None,
+    on_error: Any = lambda e: None,
+    source_roots: list[Path] | None = None,
+    test_roots: list[Path] | None = None,
+) -> None:
+    await run_watch_loop(
+        changes_iter=_fake_changes([batch]),
+        run_cycle=run_cycle,
+        on_event=on_event,
+        on_cycle_result=on_cycle_result,
+        on_error=on_error,
+        source_roots=source_roots or [Path("/src")],
+        test_roots=test_roots or [],
+    )
+
+
 def test_watch_loop_calls_run_cycle_on_change() -> None:
     cycles: list[WatchEvent] = []
 
@@ -131,14 +152,9 @@ def test_watch_loop_calls_run_cycle_on_change() -> None:
         )
 
     async def run() -> None:
-        await run_watch_loop(
-            changes_iter=_fake_changes([{(1, "/src/pkg/specs.py")}]),
+        await _run_watch_once(
+            batch={(1, "/src/pkg/specs.py")},
             run_cycle=fake_run_cycle,
-            on_event=lambda msg: None,
-            on_cycle_result=lambda r: None,
-            on_error=lambda e: None,
-            source_roots=[Path("/src")],
-            test_roots=[],
         )
 
     asyncio.run(run())
@@ -159,14 +175,9 @@ def test_watch_loop_skips_irrelevant_changes() -> None:
         )
 
     async def run() -> None:
-        await run_watch_loop(
-            changes_iter=_fake_changes([{(1, "/other/readme.md")}]),
+        await _run_watch_once(
+            batch={(1, "/other/readme.md")},
             run_cycle=fake_run_cycle,
-            on_event=lambda msg: None,
-            on_cycle_result=lambda r: None,
-            on_error=lambda e: None,
-            source_roots=[Path("/src")],
-            test_roots=[],
         )
 
     asyncio.run(run())
@@ -185,14 +196,10 @@ def test_watch_loop_emits_change_detected_message() -> None:
         )
 
     async def run() -> None:
-        await run_watch_loop(
-            changes_iter=_fake_changes([{(1, "/src/pkg/specs.py")}]),
+        await _run_watch_once(
+            batch={(1, "/src/pkg/specs.py")},
             run_cycle=fake_run_cycle,
             on_event=lambda msg: messages.append(msg),
-            on_cycle_result=lambda r: None,
-            on_error=lambda e: None,
-            source_roots=[Path("/src")],
-            test_roots=[],
         )
 
     asyncio.run(run())
@@ -212,14 +219,10 @@ def test_watch_loop_emits_building_and_done_messages() -> None:
         )
 
     async def run() -> None:
-        await run_watch_loop(
-            changes_iter=_fake_changes([{(1, "/src/a.py")}]),
+        await _run_watch_once(
+            batch={(1, "/src/a.py")},
             run_cycle=fake_run_cycle,
             on_event=lambda msg: messages.append(msg),
-            on_cycle_result=lambda r: None,
-            on_error=lambda e: None,
-            source_roots=[Path("/src")],
-            test_roots=[],
         )
 
     asyncio.run(run())
@@ -308,19 +311,48 @@ def test_watch_loop_reports_cycle_result() -> None:
         )
 
     async def run() -> None:
-        await run_watch_loop(
-            changes_iter=_fake_changes([{(1, "/src/a.py")}]),
+        await _run_watch_once(
+            batch={(1, "/src/a.py")},
             run_cycle=fake_run_cycle,
-            on_event=lambda msg: None,
             on_cycle_result=lambda r: results.append(r),
-            on_error=lambda e: None,
-            source_roots=[Path("/src")],
-            test_roots=[],
         )
 
     asyncio.run(run())
     assert len(results) == 1
     assert results[0].build_exit_code == 0
+
+
+def test_watch_loop_awaits_async_cycle_runner() -> None:
+    messages: list[str] = []
+    results: list[WatchCycleResult] = []
+    errors: list[BaseException] = []
+    seen_events: list[WatchEvent] = []
+
+    async def fake_run_cycle(event: WatchEvent) -> WatchCycleResult:
+        seen_events.append(event)
+        await asyncio.sleep(0)
+        return WatchCycleResult(
+            build_exit_code=0,
+            test_exit_code=None,
+            duration_s=0.4,
+            changed_paths=event.changed_paths,
+        )
+
+    async def run() -> None:
+        await _run_watch_once(
+            batch={(1, "/src/pkg/specs.py")},
+            run_cycle=fake_run_cycle,
+            on_event=lambda msg: messages.append(msg),
+            on_cycle_result=lambda r: results.append(r),
+            on_error=lambda e: errors.append(e),
+        )
+
+    asyncio.run(run())
+    assert len(seen_events) == 1
+    assert len(results) == 1
+    assert errors == []
+    assert any("building" in msg for msg in messages)
+    assert any("done" in msg for msg in messages)
 
 
 # ---------------------------------------------------------------------------
@@ -375,9 +407,14 @@ def test_format_json_build_failure() -> None:
 
 def test_cycle_runner_calls_cmd_build(monkeypatch) -> None:
     build_calls: list[bool] = []
+
+    async def fake_cmd_build(args: Any) -> int:
+        build_calls.append(bool(args.json_output))
+        return 0
+
     monkeypatch.setattr(
-        "jaunt.cli.cmd_build",
-        lambda args: (build_calls.append(bool(args.json_output)), 0)[1],
+        "jaunt.cli._cmd_build_async",
+        fake_cmd_build,
     )
 
     import jaunt.cli
@@ -386,7 +423,7 @@ def test_cycle_runner_calls_cmd_build(monkeypatch) -> None:
     runner = build_cycle_runner(ns, run_tests=False)
 
     event = WatchEvent(changed_paths=frozenset({Path("/src/a.py")}), timestamp=1000.0)
-    result = runner(event)
+    result = asyncio.run(runner(event))
     assert result.build_exit_code == 0
     assert result.test_exit_code is None
     assert build_calls == [False]
@@ -395,12 +432,14 @@ def test_cycle_runner_calls_cmd_build(monkeypatch) -> None:
 def test_cycle_runner_calls_cmd_test_when_enabled(monkeypatch) -> None:
     build_calls: list[bool] = []
     test_calls: list[tuple[bool, bool, bool, list[str]]] = []
-    monkeypatch.setattr(
-        "jaunt.cli.cmd_build",
-        lambda args: (build_calls.append(bool(args.json_output)), 0)[1],
-    )
 
-    def fake_cmd_test(args: Any) -> int:
+    async def fake_cmd_build(args: Any) -> int:
+        build_calls.append(bool(args.json_output))
+        return 0
+
+    monkeypatch.setattr("jaunt.cli._cmd_build_async", fake_cmd_build)
+
+    async def fake_cmd_test(args: Any) -> int:
         test_calls.append(
             (
                 bool(args.no_build),
@@ -411,7 +450,7 @@ def test_cycle_runner_calls_cmd_test_when_enabled(monkeypatch) -> None:
         )
         return 0
 
-    monkeypatch.setattr("jaunt.cli.cmd_test", fake_cmd_test)
+    monkeypatch.setattr("jaunt.cli._cmd_test_async", fake_cmd_test)
 
     import jaunt.cli
 
@@ -419,7 +458,7 @@ def test_cycle_runner_calls_cmd_test_when_enabled(monkeypatch) -> None:
     runner = build_cycle_runner(ns, run_tests=True)
 
     event = WatchEvent(changed_paths=frozenset({Path("/src/a.py")}), timestamp=1000.0)
-    result = runner(event)
+    result = asyncio.run(runner(event))
     assert result.build_exit_code == 0
     assert result.test_exit_code == 0
     assert len(build_calls) == 1
@@ -429,9 +468,17 @@ def test_cycle_runner_calls_cmd_test_when_enabled(monkeypatch) -> None:
 
 
 def test_cycle_runner_skips_test_on_build_failure(monkeypatch) -> None:
-    monkeypatch.setattr("jaunt.cli.cmd_build", lambda args: 3)
+    async def fake_cmd_build(args: Any) -> int:
+        return 3
+
     test_calls: list[object] = []
-    monkeypatch.setattr("jaunt.cli.cmd_test", lambda args: (test_calls.append(args), 0)[1])
+
+    async def fake_cmd_test(args: Any) -> int:
+        test_calls.append(args)
+        return 0
+
+    monkeypatch.setattr("jaunt.cli._cmd_build_async", fake_cmd_build)
+    monkeypatch.setattr("jaunt.cli._cmd_test_async", fake_cmd_test)
 
     import jaunt.cli
 
@@ -439,14 +486,17 @@ def test_cycle_runner_skips_test_on_build_failure(monkeypatch) -> None:
     runner = build_cycle_runner(ns, run_tests=True)
 
     event = WatchEvent(changed_paths=frozenset({Path("/src/a.py")}), timestamp=1000.0)
-    result = runner(event)
+    result = asyncio.run(runner(event))
     assert result.build_exit_code == 3
     assert result.test_exit_code is None
     assert len(test_calls) == 0
 
 
 def test_cycle_runner_measures_duration(monkeypatch) -> None:
-    monkeypatch.setattr("jaunt.cli.cmd_build", lambda args: 0)
+    async def fake_cmd_build(args: Any) -> int:
+        return 0
+
+    monkeypatch.setattr("jaunt.cli._cmd_build_async", fake_cmd_build)
 
     import jaunt.cli
 
@@ -454,5 +504,5 @@ def test_cycle_runner_measures_duration(monkeypatch) -> None:
     runner = build_cycle_runner(ns, run_tests=False)
 
     event = WatchEvent(changed_paths=frozenset({Path("/src/a.py")}), timestamp=1000.0)
-    result = runner(event)
+    result = asyncio.run(runner(event))
     assert result.duration_s >= 0.0

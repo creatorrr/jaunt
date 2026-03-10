@@ -717,7 +717,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         return EXIT_CONFIG_OR_DISCOVERY
 
 
-def cmd_build(args: argparse.Namespace) -> int:
+async def _cmd_build_async(args: argparse.Namespace) -> int:
     json_mode = _is_json_mode(args)
     try:
         root, cfg = _load_config(args)
@@ -730,15 +730,13 @@ def cmd_build(args: argparse.Namespace) -> int:
         try:
             from jaunt import skills_auto
 
-            skills_res = asyncio.run(
-                skills_auto.ensure_pypi_skills_and_block(
-                    project_root=root,
-                    source_roots=[d for d in source_dirs if d.exists()],
-                    generated_dir=cfg.paths.generated_dir,
-                    llm=cfg.llm,
-                    agent=cfg.agent,
-                    aider=cfg.aider,
-                )
+            skills_res = await skills_auto.ensure_pypi_skills_and_block(
+                project_root=root,
+                source_roots=[d for d in source_dirs if d.exists()],
+                generated_dir=cfg.paths.generated_dir,
+                llm=cfg.llm,
+                agent=cfg.agent,
+                aider=cfg.aider,
             )
             for w in skills_res.warnings:
                 _eprint(f"warn: {w}")
@@ -870,27 +868,25 @@ def cmd_build(args: argparse.Namespace) -> int:
         cost_tracker = CostTracker(max_cost=cfg.llm.max_cost_per_build)
 
         jobs = int(args.jobs) if args.jobs is not None else int(cfg.build.jobs)
-        report = asyncio.run(
-            builder.run_build(
-                package_dir=package_dir,
-                generated_dir=cfg.paths.generated_dir,
-                module_specs=module_specs,
-                specs=specs,
-                spec_graph=spec_graph,
-                module_dag=module_dag,
-                stale_modules=stale,
-                changed_modules=api_changed,
-                backend=_build_backend(cfg),
-                generation_fingerprint=build_generation_fingerprint,
-                skills_block=skills_block,
-                jobs=jobs,
-                progress=progress,
-                response_cache=response_cache,
-                cost_tracker=cost_tracker,
-                ty_retry_attempts=cfg.build.ty_retry_attempts,
-                async_runner=cfg.build.async_runner,
-                targeted_test_entries=targeted_test_entries,
-            )
+        report = await builder.run_build(
+            package_dir=package_dir,
+            generated_dir=cfg.paths.generated_dir,
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules=stale,
+            changed_modules=api_changed,
+            backend=_build_backend(cfg),
+            generation_fingerprint=build_generation_fingerprint,
+            skills_block=skills_block,
+            jobs=jobs,
+            progress=progress,
+            response_cache=response_cache,
+            cost_tracker=cost_tracker,
+            ty_retry_attempts=cfg.build.ty_retry_attempts,
+            async_runner=cfg.build.async_runner,
+            targeted_test_entries=targeted_test_entries,
         )
 
         if report.failed and not json_mode:
@@ -927,7 +923,11 @@ def cmd_build(args: argparse.Namespace) -> int:
         return EXIT_GENERATION_ERROR
 
 
-def cmd_test(args: argparse.Namespace) -> int:
+def cmd_build(args: argparse.Namespace) -> int:
+    return asyncio.run(_cmd_build_async(args))
+
+
+async def _cmd_test_async(args: argparse.Namespace) -> int:
     json_mode = _is_json_mode(args)
     try:
         root, cfg = _load_config(args)
@@ -941,7 +941,7 @@ def cmd_test(args: argparse.Namespace) -> int:
         _prepend_sys_path([*source_dirs, root])
 
         if not bool(args.no_build):
-            rc = cmd_build(args)
+            rc = await _cmd_build_async(args)
             if rc != EXIT_OK:
                 return rc
 
@@ -1120,7 +1120,7 @@ def cmd_test(args: argparse.Namespace) -> int:
         )
 
         if asyncio.iscoroutine(result):
-            result = asyncio.run(result)
+            result = await result
 
         exit_code = int(getattr(result, "exit_code", 1))
 
@@ -1153,6 +1153,10 @@ def cmd_test(args: argparse.Namespace) -> int:
         if json_mode:
             _emit_json({"command": "test", "ok": False, "error": str(e)})
         return EXIT_GENERATION_ERROR
+
+
+def cmd_test(args: argparse.Namespace) -> int:
+    return asyncio.run(_cmd_test_async(args))
 
 
 def cmd_eval(args: argparse.Namespace) -> int:

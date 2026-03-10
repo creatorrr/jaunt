@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 import json
 from pathlib import Path
 
 import jaunt.cli
+from jaunt.watcher import WatchCycleResult, WatchEvent
 
 
 def test_parse_watch_defaults() -> None:
@@ -123,6 +125,48 @@ def test_cmd_watch_missing_config(tmp_path: Path, monkeypatch) -> None:
     ns = jaunt.cli.parse_args(["watch"])
     rc = jaunt.cli.cmd_watch(ns)
     assert rc == jaunt.cli.EXIT_CONFIG_OR_DISCOVERY
+
+
+def test_cmd_watch_runs_async_cycle_runner_once(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "jaunt.toml").write_text("version = 1\n", encoding="utf-8")
+    (tmp_path / "src").mkdir()
+
+    import jaunt.watcher
+
+    monkeypatch.setattr(jaunt.watcher, "check_watchfiles_available", lambda: None)
+
+    async def fake_changes(
+        watch_paths: list[Path],
+    ) -> AsyncIterator[set[tuple[int, str]]]:
+        assert tmp_path / "src" in watch_paths
+        yield {(1, str(tmp_path / "src" / "specs.py"))}
+
+    calls: list[WatchEvent] = []
+
+    def fake_build_cycle_runner(args, *, run_tests: bool):
+        async def runner(event: WatchEvent) -> WatchCycleResult:
+            calls.append(event)
+            return WatchCycleResult(
+                build_exit_code=0,
+                test_exit_code=None,
+                duration_s=0.01,
+                changed_paths=event.changed_paths,
+            )
+
+        return runner
+
+    monkeypatch.setattr(jaunt.watcher, "make_watchfiles_iter", fake_changes)
+    monkeypatch.setattr(jaunt.watcher, "build_cycle_runner", fake_build_cycle_runner)
+
+    ns = jaunt.cli.parse_args(["watch"])
+    rc = jaunt.cli.cmd_watch(ns)
+
+    assert rc == jaunt.cli.EXIT_OK
+    assert len(calls) == 1
+    captured = capsys.readouterr()
+    assert "[watch] done" in captured.err
+    assert "running event loop" not in captured.err
 
 
 def _raise_import_error() -> None:

@@ -279,25 +279,23 @@ def test_filter_spec_files_honors_custom_generated_dir() -> None:
 def test_build_cycle_runner_propagates_no_cache(monkeypatch) -> None:
     calls: list[tuple[str, bool]] = []
 
-    monkeypatch.setattr(
-        jaunt.cli,
-        "cmd_build",
-        lambda args: calls.append(("build", bool(args.no_cache))) or 0,
-    )
-    monkeypatch.setattr(
-        jaunt.cli,
-        "cmd_test",
-        lambda args: calls.append(("test", bool(args.no_cache))) or 0,
-    )
+    async def fake_cmd_build(args) -> int:
+        calls.append(("build", bool(args.no_cache)))
+        return 0
+
+    async def fake_cmd_test(args) -> int:
+        calls.append(("test", bool(args.no_cache)))
+        return 0
+
+    monkeypatch.setattr(jaunt.cli, "_cmd_build_async", fake_cmd_build)
+    monkeypatch.setattr(jaunt.cli, "_cmd_test_async", fake_cmd_test)
 
     args = jaunt.cli.parse_args(["watch", "--test", "--no-cache"])
     runner = build_cycle_runner(args, run_tests=True)
     result = runner(
-        WatchEvent(
-            changed_paths=frozenset({Path("/project/src/specs.py")}),
-            timestamp=0.0,
-        )
+        WatchEvent(changed_paths=frozenset({Path("/project/src/specs.py")}), timestamp=0.0)
     )
+    result = asyncio.run(result)
 
     assert result.build_exit_code == 0
     assert result.test_exit_code == 0
