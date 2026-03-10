@@ -643,9 +643,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         build_generation_fingerprint = generation_fingerprint(cfg, kind="build")
         build_module_context_digests: dict[str, str] = {}
         build_module_api_digests: dict[str, str] = {}
-        targeted_test_entries = group_test_entries_by_target_module(
-            static_targeted_test_entries
-        )
+        targeted_test_entries = group_test_entries_by_target_module(static_targeted_test_entries)
         for module_name, entries in module_specs.items():
             expected, _errs = builder._build_expected_names(entries)
             build_module_context_digests[module_name] = builder.build_module_context_artifacts(
@@ -806,9 +804,7 @@ def cmd_build(args: argparse.Namespace) -> int:
         build_generation_fingerprint = generation_fingerprint(cfg, kind="build")
         build_module_context_digests: dict[str, str] = {}
         build_module_api_digests: dict[str, str] = {}
-        targeted_test_entries = group_test_entries_by_target_module(
-            static_targeted_test_entries
-        )
+        targeted_test_entries = group_test_entries_by_target_module(static_targeted_test_entries)
         for module_name, entries in module_specs.items():
             expected, _errs = builder._build_expected_names(entries)
             build_module_context_digests[module_name] = builder.build_module_context_artifacts(
