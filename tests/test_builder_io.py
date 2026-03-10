@@ -323,9 +323,7 @@ def test_build_module_context_blueprint_preserves_source_order(tmp_path: Path) -
 
     blueprint = artifacts.blueprint_source
 
-    claims_idx = blueprint.index(
-        "# handwritten class already defined in `pkg.auth_specs`: Claims"
-    )
+    claims_idx = blueprint.index("# handwritten class already defined in `pkg.auth_specs`: Claims")
     create_idx = blueprint.index("def create_token(subject: str) -> str:")
     ttl_idx = blueprint.index(
         "# handwritten assignment already defined in `pkg.auth_specs`: DEFAULT_TTL"
