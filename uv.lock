@@ -1154,7 +1154,7 @@ wheels = [
 
 [[package]]
 name = "jaunt"
-version = "0.4.2"
+version = "0.4.3"
 source = { editable = "." }
 
 [package.optional-dependencies]
@@ -1163,6 +1163,15 @@ aider = [
 ]
 all = [
     { name = "aider-chat" },
+    { name = "anthropic" },
+    { name = "anyio" },
+    { name = "cerebras-cloud-sdk" },
+    { name = "fastmcp" },
+    { name = "openai" },
+    { name = "pytest-asyncio" },
+    { name = "watchfiles" },
+]
+all-sdk = [
     { name = "anthropic" },
     { name = "anyio" },
     { name = "cerebras-cloud-sdk" },
@@ -1222,22 +1231,29 @@ requires-dist = [
     { name = "aider-chat", marker = "extra == 'cerebras'", specifier = "~=0.86.2" },
     { name = "aider-chat", marker = "extra == 'openai'", specifier = "~=0.86.2" },
     { name = "anthropic", marker = "extra == 'all'", specifier = ">=0.39.0,<1" },
+    { name = "anthropic", marker = "extra == 'all-sdk'", specifier = ">=0.39.0,<1" },
     { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=0.39.0,<1" },
     { name = "anyio", marker = "extra == 'all'", specifier = ">=4.1" },
+    { name = "anyio", marker = "extra == 'all-sdk'", specifier = ">=4.1" },
     { name = "anyio", marker = "extra == 'anyio'", specifier = ">=4.1" },
     { name = "cerebras-cloud-sdk", marker = "extra == 'all'", specifier = ">=1.0.0" },
+    { name = "cerebras-cloud-sdk", marker = "extra == 'all-sdk'", specifier = ">=1.0.0" },
     { name = "cerebras-cloud-sdk", marker = "extra == 'cerebras'", specifier = ">=1.0.0" },
     { name = "fastmcp", marker = "extra == 'all'", specifier = ">=2.0.0" },
+    { name = "fastmcp", marker = "extra == 'all-sdk'", specifier = ">=2.0.0" },
     { name = "fastmcp", marker = "extra == 'mcp'", specifier = ">=2.0.0" },
     { name = "openai", marker = "extra == 'all'", specifier = ">=1.0.0,<3" },
+    { name = "openai", marker = "extra == 'all-sdk'", specifier = ">=1.0.0,<3" },
     { name = "openai", marker = "extra == 'openai'", specifier = ">=1.0.0,<3" },
     { name = "pytest-asyncio", marker = "extra == 'all'", specifier = ">=1.0" },
+    { name = "pytest-asyncio", marker = "extra == 'all-sdk'", specifier = ">=1.0" },
     { name = "pytest-asyncio", marker = "extra == 'async'", specifier = ">=1.0" },
     { name = "rich", marker = "extra == 'rich'", specifier = ">=13,<15" },
     { name = "watchfiles", marker = "extra == 'all'", specifier = ">=1.0.0" },
+    { name = "watchfiles", marker = "extra == 'all-sdk'", specifier = ">=1.0.0" },
     { name = "watchfiles", marker = "extra == 'watch'", specifier = ">=1.0.0" },
 ]
-provides-extras = ["openai", "anthropic", "cerebras", "aider", "watch", "mcp", "anyio", "rich", "async", "all"]
+provides-extras = ["openai", "anthropic", "cerebras", "aider", "watch", "mcp", "anyio", "rich", "async", "all", "all-sdk"]
 
 [package.metadata.requires-dev]
 dev = [
