@@ -23,6 +23,7 @@ Jaunt is a small Python library + CLI for **spec-driven code generation**:
 - Jaunt generates real modules under `__generated__/` using an LLM backend (OpenAI, Anthropic, or Cerebras).
 - Async support is available for both implementation and test specs through `async def` plus the `build.async_runner` setting.
 - `@magic` works on individual class methods too — decorate instance methods, `@classmethod`, `@staticmethod`, or `@abstractmethod` stubs and Jaunt generates only those methods while preserving the rest of the class.
+- Incremental freshness tracks both module digests and exported dependency APIs, so signature changes, whole-class member changes, and contract docstring edits can invalidate dependents.
 
 ## Installation
 
@@ -72,6 +73,12 @@ uv run jaunt build --root examples/jwt_auth
 # Generate pytest tests for @jaunt.test specs and run them.
 PYTHONPATH=examples/jwt_auth/src uv run jaunt test --root examples/jwt_auth
 ```
+
+## Freshness Model
+
+- The full cleaned docstring is part of the spec contract, not just the first summary line.
+- For whole-class `@jaunt.magic` specs, Jaunt treats the class signature plus declared members and method signatures as exported API.
+- Jaunt's freshness model uses that dependency API too, so an upstream contract change can mark downstream modules stale even if their own source file did not change.
 
 ## Eval Suite
 

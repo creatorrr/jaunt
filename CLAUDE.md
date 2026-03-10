@@ -56,6 +56,7 @@ src/jaunt/          # Library source
   parse_cache.py    # Persistent AST parse cache
   paths.py          # Path resolution helpers
   header.py         # Generated file header format
+  module_api.py     # Exported API summaries/digests for dependency-aware rebuilds
   external_imports.py  # External import detection
   skills_auto.py    # Auto-generated PyPI skills
   generate/
@@ -72,11 +73,14 @@ examples/           # Runnable example projects
 
 - **Spec**: A decorated Python function/class stub that describes *what* to
   implement. Uses `@jaunt.magic` for implementations, `@jaunt.test` for tests.
+  The full cleaned docstring is part of the behavioral contract.
 - **Generated dir**: Output directory (default `__generated__/`) where LLM-
   generated code is written. Configurable via `jaunt.toml` or
   `JAUNT_GENERATED_DIR` env var.
 - **Incremental builds**: Jaunt computes SHA-256 digests over spec source +
-  decorator kwargs + transitive deps. Only stale modules are regenerated.
+  decorator kwargs + transitive deps, and separately tracks each module's
+  exported dependency API. Signature changes, full docstring contract edits,
+  and whole-class member/method changes can make dependents stale too.
 - **Dependency graph**: Built from explicit `deps=` kwargs and optional
   AST-based inference. Topologically sorted; cycle detection with clear errors.
 
@@ -131,7 +135,7 @@ jaunt init --force            # Overwrite existing jaunt.toml
 jaunt clean                   # Remove all __generated__ directories
 jaunt clean --dry-run         # Show what would be removed
 
-jaunt status                  # Show stale vs fresh modules
+jaunt status                  # Show which modules are stale, including upstream API fallout
 jaunt status --json           # Machine-readable status
 
 jaunt watch                   # Auto-rebuild on file changes

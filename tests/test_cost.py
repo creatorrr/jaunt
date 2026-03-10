@@ -14,6 +14,7 @@ def test_empty_tracker() -> None:
     assert ct.api_calls == 0
     assert ct.cache_hits == 0
     assert ct.total_tokens == 0
+    assert ct.total_cached_prompt_tokens == 0
     assert ct.estimated_cost == 0.0
 
 
@@ -70,19 +71,29 @@ def test_summary_dict_keys() -> None:
         "api_calls",
         "cache_hits",
         "prompt_tokens",
+        "cached_prompt_tokens",
         "completion_tokens",
         "total_tokens",
         "estimated_cost_usd",
     }
 
 
+def test_cached_prompt_tokens_are_aggregated() -> None:
+    ct = CostTracker()
+    ct.record("mod", TokenUsage(100, 50, "gpt-5", "openai", cached_prompt_tokens=60))
+    ct.record("mod2", TokenUsage(200, 75, "gpt-5", "openai", cached_prompt_tokens=40))
+    assert ct.total_cached_prompt_tokens == 100
+    assert ct.summary_dict()["cached_prompt_tokens"] == 100
+
+
 def test_format_summary_output() -> None:
     ct = CostTracker(max_cost=1.0)
-    ct.record("mod", TokenUsage(100, 50, "gpt-5", "openai"))
+    ct.record("mod", TokenUsage(100, 50, "gpt-5", "openai", cached_prompt_tokens=10))
     ct.record_cache_hit()
     text = ct.format_summary()
     assert "1 API call(s)" in text
     assert "1 cache hit(s)" in text
+    assert "Cached prompt tokens: 10" in text
     assert "Budget limit" in text
 
 

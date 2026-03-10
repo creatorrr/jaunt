@@ -16,6 +16,7 @@ def format_header(
     module_digest: str,
     generation_fingerprint: str = "",
     module_context_digest: str = "",
+    module_api_digest: str = "",
     spec_refs: list[str],
 ) -> str:
     digest = module_digest if module_digest.startswith("sha256:") else f"sha256:{module_digest}"
@@ -35,6 +36,13 @@ def format_header(
             else f"sha256:{module_context_digest}"
         )
         lines.insert(5, f"# jaunt:module_context_digest={context_digest}")
+    if module_api_digest:
+        api_digest = (
+            module_api_digest
+            if module_api_digest.startswith("sha256:")
+            else f"sha256:{module_api_digest}"
+        )
+        lines.insert(5, f"# jaunt:module_api_digest={api_digest}")
     if generation_fingerprint:
         fingerprint = (
             generation_fingerprint
@@ -88,3 +96,10 @@ def extract_module_context_digest(source: str) -> str | None:
     if parsed is None:
         return None
     return parsed.get("module_context_digest")
+
+
+def extract_module_api_digest(source: str) -> str | None:
+    parsed = parse_header(source)
+    if parsed is None:
+        return None
+    return parsed.get("module_api_digest")

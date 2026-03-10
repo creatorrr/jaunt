@@ -15,6 +15,8 @@ Jaunt is a workflow where humans and AI assistants write **intent** (Python spec
 4. Review the generated output together (correctness, style, safety, performance).
 5. Iterate: adjust specs/tests and regenerate.
 
+Use `jaunt status` as the freshness check. Dependency API changes include signature edits, full docstring contract edits, and, for whole-class specs, class member or method-signature changes.
+
 ## 4. Writing Good Spec Stubs (most important)
 
 ### Principles
@@ -23,9 +25,11 @@ Jaunt is a workflow where humans and AI assistants write **intent** (Python spec
 - **Define edge cases.** Empty inputs, `None`, boundary values, duplicates, ordering, timeouts.
 - **Constrain the solution when it matters.** Complexity, determinism, caching, stable ordering.
 - **Prefer pure logic.** Move I/O behind parameters (dependency injection) so tests stay fast and local.
+- **Treat the full docstring as the contract.** The later rules and error cases matter, not just the first sentence.
 
 ### Patterns
 - **Docstring as contract:** include short examples, preconditions, postconditions.
+- **Whole-class specs are real API surfaces:** class members and method signatures are part of what downstream specs depend on.
 - **Typed dependencies:** accept `Callable[...]` or protocol-like objects instead of reaching for globals.
 - **Small, composable units:** one concept per symbol.
 
@@ -154,4 +158,3 @@ See `examples/jaunt.toml` for a starter template.
 - Never edit `__generated__/` by hand (it will be overwritten).
 - Always regenerate via the Jaunt CLI after changing specs/tests.
 - Always review generated output before shipping.
-

@@ -51,6 +51,8 @@ The docstring IS the specification. Write it like a really good ticket, not a co
 - include 1-3 **examples** if the behavior is subtle
 - be specific about return shape (keys, format, units)
 
+Jaunt treats the full cleaned docstring as contract text for dependency freshness, not just the first summary line. If later lines describe edge cases or errors, they still count as API.
+
 Think: "If I handed this to a senior developer, would they implement it the same way every time?" If not, add more constraints.
 
 ### Body
@@ -125,6 +127,8 @@ class LRUCache:
 ```
 
 This "whole-class" style hands full control to the LLM — it decides `__init__`, internal data structures, and method signatures.
+
+For dependency freshness, the exported API of a whole-class spec includes the class signature plus declared members and method signatures. Adding, removing, or changing those members is a downstream contract change.
 
 MVP constraint: custom metaclasses are not supported for `@jaunt.magic` classes.
 

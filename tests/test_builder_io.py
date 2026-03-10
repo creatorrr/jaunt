@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from jaunt.builder import detect_stale_modules, write_generated_module
+from jaunt.builder import detect_api_changed_modules, detect_stale_modules, write_generated_module
 from jaunt.deps import build_spec_graph
 from jaunt.digest import module_digest
+from jaunt.module_api import module_api_digest
 from jaunt.header import HEADER_MARKER
 from jaunt.registry import SpecEntry
 from jaunt.spec_ref import normalize_spec_ref
@@ -205,3 +206,69 @@ def A():
         generation_fingerprint="aider-build",
     )
     assert stale == {"m"}
+
+
+def test_detect_api_changed_modules_only_flags_api_differences(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    spec_path = tmp_path / "m.py"
+    _write(
+        spec_path,
+        """
+def A(x: int) -> int:
+    return x + 1
+""".lstrip(),
+    )
+    entry = _entry(module="m", qualname="A", source_file=str(spec_path))
+    specs = {entry.spec_ref: entry}
+    spec_graph = build_spec_graph(specs, infer_default=False)
+    digest = module_digest("m", [entry], specs, spec_graph)
+    api_digest = module_api_digest([entry])
+
+    write_generated_module(
+        package_dir=src,
+        generated_dir="__generated__",
+        module_name="m",
+        source="def A(x: int) -> int:\n    return x + 1\n",
+        header_fields={
+            "tool_version": "0",
+            "kind": "build",
+            "source_module": "m",
+            "module_digest": digest,
+            "module_api_digest": api_digest,
+            "spec_refs": [str(entry.spec_ref)],
+        },
+    )
+
+    _write(
+        spec_path,
+        """
+def A(x: int) -> int:
+    y = x + 1
+    return y
+""".lstrip(),
+    )
+    entry_after = _entry(module="m", qualname="A", source_file=str(spec_path))
+
+    changed = detect_api_changed_modules(
+        package_dir=src,
+        generated_dir="__generated__",
+        module_specs={"m": [entry_after]},
+        module_api_digests={"m": module_api_digest([entry_after])},
+    )
+    assert changed == set()
+
+    _write(
+        spec_path,
+        """
+def A(x: str) -> int:
+    return len(x)
+""".lstrip(),
+    )
+    entry_sig_change = _entry(module="m", qualname="A", source_file=str(spec_path))
+    changed = detect_api_changed_modules(
+        package_dir=src,
+        generated_dir="__generated__",
+        module_specs={"m": [entry_sig_change]},
+        module_api_digests={"m": module_api_digest([entry_sig_change])},
+    )
+    assert changed == {"m"}

@@ -6,7 +6,7 @@ Verify exact flags with: `jaunt --help`, `jaunt build --help`, etc.
 
 ### build — Generate implementations
 ```bash
-jaunt build                              # Build all stale modules
+jaunt build                              # Build all stale modules, including API-invalidated dependents
 jaunt build --force                      # Regenerate everything
 jaunt build --jobs 16                    # Override parallelism
 jaunt build --target my_app.specs        # Build one module
@@ -39,9 +39,11 @@ jaunt clean --dry-run                    # Preview what would be removed
 
 ### status — Show module staleness
 ```bash
-jaunt status                             # List stale/fresh modules
+jaunt status                             # Preview the same stale set build will regenerate
 jaunt status --json                      # Machine-readable output
 ```
+
+`status` is intended to reflect dependency-driven freshness too. If an upstream module's exported API changes, downstream dependents belong in the stale set even if their own source file did not change.
 
 ### watch — Auto-rebuild on changes
 ```bash

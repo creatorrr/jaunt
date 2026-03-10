@@ -30,6 +30,8 @@ class LLMConfig:
     max_cost_per_build: float | None = None
     reasoning_effort: str | None = None
     anthropic_thinking_budget_tokens: int | None = None
+    prompt_cache: bool = False
+    prompt_cache_key: str = ""
 
 
 _VALID_ASYNC_RUNNERS = ("asyncio", "anyio")
@@ -243,6 +245,16 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             name="llm.anthropic_thinking_budget_tokens",
         )
 
+    if "prompt_cache" in llm_tbl:
+        prompt_cache = _as_bool(llm_tbl["prompt_cache"], name="llm.prompt_cache")
+    else:
+        prompt_cache = False
+
+    if "prompt_cache_key" in llm_tbl:
+        prompt_cache_key = _as_str(llm_tbl["prompt_cache_key"], name="llm.prompt_cache_key")
+    else:
+        prompt_cache_key = ""
+
     if "jobs" in build_tbl:
         build_jobs = _as_int(build_tbl["jobs"], name="build.jobs")
     else:
@@ -388,6 +400,8 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             max_cost_per_build=max_cost_per_build,
             reasoning_effort=reasoning_effort,
             anthropic_thinking_budget_tokens=anthropic_thinking_budget_tokens,
+            prompt_cache=prompt_cache,
+            prompt_cache_key=prompt_cache_key,
         ),
         build=BuildConfig(
             jobs=build_jobs,

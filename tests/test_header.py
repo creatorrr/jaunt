@@ -5,6 +5,7 @@ import json
 from jaunt.header import (
     HEADER_MARKER,
     extract_generation_fingerprint,
+    extract_module_api_digest,
     extract_module_context_digest,
     extract_module_digest,
     format_header,
@@ -68,6 +69,7 @@ def test_format_header_includes_generation_fingerprint_when_provided() -> None:
         module_digest="sha256:abc123",
         generation_fingerprint="deadbeef",
         module_context_digest="facefeed",
+        module_api_digest="cafefeed",
         spec_refs=[],
     )
 
@@ -75,5 +77,7 @@ def test_format_header_includes_generation_fingerprint_when_provided() -> None:
     assert parsed is not None
     assert parsed["generation_fingerprint"] == "sha256:deadbeef"
     assert parsed["module_context_digest"] == "sha256:facefeed"
+    assert parsed["module_api_digest"] == "sha256:cafefeed"
     assert extract_generation_fingerprint(hdr + "x=1\n") == "sha256:deadbeef"
     assert extract_module_context_digest(hdr + "x=1\n") == "sha256:facefeed"
+    assert extract_module_api_digest(hdr + "x=1\n") == "sha256:cafefeed"
