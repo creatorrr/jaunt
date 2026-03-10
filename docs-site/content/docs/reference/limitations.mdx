@@ -21,6 +21,17 @@ Those provider extras now include Jaunt's default Aider runtime too. If you mana
 dependencies manually, make sure the environment includes both the provider SDK
 and `aider-chat`.
 
+Known gotcha: `aider-chat 0.86.2` currently pins `numpy==1.26.4`. That means
+`jaunt[all]` can fail to resolve in environments that already require
+`numpy>=2`.
+
+If you hit that conflict:
+
+- prefer running Jaunt in an isolated tool environment, for example:
+  `uv tool run --from 'jaunt[all]' jaunt build --root .`
+- or install `jaunt[all-sdk]` instead, which keeps the provider/tooling extras
+  but omits `aider-chat`
+
 ## Hardcoded `__generated__` Dir Name
 
 Runtime forwarding for `@jaunt.magic` reads `JAUNT_GENERATED_DIR` (default: `__generated__`). `jaunt build`/`jaunt test` set this env var in-process, but that does not persist across separate shell sessions or app runtimes.

@@ -1,6 +1,6 @@
 [project]
 name = "jaunt"
-version = "0.4.2"
+version = "0.4.3"
 description = "Spec-driven code generation framework: write intent as decorated Python stubs, generate implementations and tests with LLMs."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -33,6 +33,7 @@ anyio = ["anyio>=4.1"]
 rich = ["rich>=13,<15"]
 async = ["pytest-asyncio>=1.0"]
 all = ["openai>=1.0.0,<3", "anthropic>=0.39.0,<1", "cerebras-cloud-sdk>=1.0.0", "aider-chat~=0.86.2", "watchfiles>=1.0.0", "fastmcp>=2.0.0", "anyio>=4.1", "pytest-asyncio>=1.0"]
+all-sdk = ["openai>=1.0.0,<3", "anthropic>=0.39.0,<1", "cerebras-cloud-sdk>=1.0.0", "watchfiles>=1.0.0", "fastmcp>=2.0.0", "anyio>=4.1", "pytest-asyncio>=1.0"]
 
 [project.scripts]
 jaunt = "jaunt.cli:main"

@@ -481,6 +481,7 @@ generated_dir = "__generated__"
 [llm]
 # Install your chosen provider/runtime bundle:
 # pip install jaunt[openai], jaunt[anthropic], or jaunt[cerebras]
+# For provider SDKs/tooling without Aider, use: pip install jaunt[all-sdk]
 provider = "openai"
 model = "gpt-5.2"
 api_key_env = "OPENAI_API_KEY"
