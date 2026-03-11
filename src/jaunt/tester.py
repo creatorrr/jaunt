@@ -433,6 +433,7 @@ class RepairBuildContext:
     skills_block: str = ""
     jobs: int = 1
     async_runner: str = "asyncio"
+    build_instructions: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -571,6 +572,16 @@ async def run_test_generation(
     generated_files: list[Path] = []
     completed: set[str] = set()
 
+    def _phase(module_name: str, stage: str, detail: str = "") -> None:
+        if progress is None:
+            return
+        phase = getattr(progress, "phase", None)
+        if callable(phase):
+            try:
+                phase(module_name, stage, detail)
+            except Exception:
+                pass
+
     async def gen_one(module_name: str) -> tuple[bool, list[str], Path | None]:
         entries = module_specs.get(module_name, [])
         if not entries:
@@ -648,18 +659,22 @@ async def run_test_generation(
                 cache_errors = _validate_candidate(cached.source)
                 if not cache_errors:
                     result_source = cached.source
+                    _phase(module_name, "cache hit")
                     if cost_tracker is not None:
                         cost_tracker.record_cache_hit()
 
         if result_source is None:
+            _phase(module_name, "generating")
             result = await backend.generate_with_retry(
                 ctx,
                 extra_validator=_retry_validator,
                 initial_error_context=(initial_error_context_by_module or {}).get(module_name),
+                progress=lambda stage, detail: _phase(module_name, stage, detail),
             )
             if result.source is None:
                 return False, result.errors or ["No source returned."], None
 
+            _phase(module_name, "validating")
             errors = _validate_candidate(result.source)
             if errors:
                 return False, errors, None
@@ -950,6 +965,7 @@ async def run_tests(
                 response_cache=None,
                 cost_tracker=cost_tracker,
                 async_runner=repair_build_context.async_runner,
+                build_instructions=repair_build_context.build_instructions,
                 initial_error_context_by_module={
                     module_name: repair_lines for module_name in implicated_build_modules
                 },

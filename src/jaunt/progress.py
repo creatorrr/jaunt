@@ -4,6 +4,20 @@ import sys
 import time
 from dataclasses import dataclass
 from shutil import get_terminal_size
+from typing import Any
+
+
+def _stream_is_tty(stream: Any) -> bool:
+    isatty = getattr(stream, "isatty", None)
+    return bool(isatty()) if callable(isatty) else False
+
+
+def _make_rich_console(stream: Any) -> Any | None:
+    try:  # pragma: no cover - optional dependency
+        from rich.console import Console
+    except Exception:  # noqa: BLE001 - best-effort rich support
+        return None
+    return Console(file=stream, force_terminal=True)
 
 
 @dataclass
@@ -11,7 +25,7 @@ class ProgressBar:
     label: str
     total: int
     enabled: bool = True
-    stream: object = sys.stderr
+    stream: Any = sys.stderr
     width: int = 28
     min_interval_s: float = 0.08
 
@@ -21,6 +35,12 @@ class ProgressBar:
         self._fail = 0
         self._last_render = 0.0
         self._finished = False
+        self._console: Any = None
+        if _stream_is_tty(self.stream):
+            try:
+                self._console = _make_rich_console(self.stream)
+            except Exception:
+                self._console = None
         self._render("")  # initial line
 
     def advance(self, item: str, *, ok: bool) -> None:
@@ -40,12 +60,29 @@ class ProgressBar:
         self._render("done", force=True)
         self._write("\n")
 
+    def phase(self, item: str, stage: str, detail: str = "") -> None:
+        if self._finished or not self.enabled:
+            return
+        label = f"[{self.label}] {item}: {stage}"
+        if detail:
+            label += f" ({detail})"
+        if self._console is not None:
+            try:
+                self._write("\r")
+                self._console.print(label, style="cyan")
+                self._render("", force=True)
+                return
+            except Exception:
+                self._console = None
+        self._write("\n" + label + "\n")
+        self._render("", force=True)
+
     def _write(self, s: str) -> None:
         if not self.enabled:
             return
         try:
-            self.stream.write(s)  # type: ignore[attr-defined]
-            self.stream.flush()  # type: ignore[attr-defined]
+            self.stream.write(s)
+            self.stream.flush()
         except Exception:
             # Progress is best-effort; never fail the CLI because of rendering.
             self.enabled = False

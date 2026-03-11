@@ -160,6 +160,8 @@ class AiderExecutor(AgentExecutor):
         task: AgentTask,
         target_path: Path,
         ro_paths: list[Path],
+        *,
+        interactive: bool = False,
     ) -> Any:
         model_kwargs: dict[str, Any] = {}
         if task.mode == "architect":
@@ -173,7 +175,11 @@ class AiderExecutor(AgentExecutor):
             main_effort=task.main_reasoning_effort,
             editor_effort=task.editor_reasoning_effort,
         )
-        io = self._io_cls(yes=True, pretty=False, fancy_input=False)
+        io = self._io_cls(
+            yes=None if interactive else True,
+            pretty=interactive,
+            fancy_input=interactive,
+        )
 
         return self._coder_cls.create(
             main_model=model,
@@ -185,7 +191,7 @@ class AiderExecutor(AgentExecutor):
             auto_lint=False,
             auto_test=False,
             use_git=False,
-            stream=False,
+            stream=interactive,
             map_tokens=self._aider.map_tokens,
             suggest_shell_commands=False,
             verbose=False,
@@ -248,6 +254,45 @@ class AiderExecutor(AgentExecutor):
                 coder = self._build_coder(root, task, target_path, ro_paths)
                 try:
                     await asyncio.to_thread(coder.run, task.instruction)
+                except Exception as e:
+                    output = ""
+                    try:
+                        if target_path.exists():
+                            output = target_path.read_text(encoding="utf-8")
+                    except Exception:
+                        output = ""
+                    raise AgentTaskExecutionError(
+                        str(e),
+                        output=output,
+                        usage=self._usage_from_coder(coder, self._llm),
+                    ) from e
+
+                output = target_path.read_text(encoding="utf-8")
+                return AgentTaskResult(
+                    output=output,
+                    usage=self._usage_from_coder(coder, self._llm),
+                    trace_dir=root if self._aider.save_traces else None,
+                )
+            finally:
+                if tmp is not None:
+                    tmp.cleanup()
+
+    async def run_task_interactive(self, task: AgentTask) -> AgentTaskResult:
+        async with self._api_key_env_scope():
+            root, tmp = self._make_workspace_dir()
+            try:
+                target_path, ro_paths = self._write_workspace(root, task)
+                coder = self._build_coder(
+                    root,
+                    task,
+                    target_path,
+                    ro_paths,
+                    interactive=True,
+                )
+                try:
+                    await asyncio.to_thread(coder.run, task.instruction)
+                    print("\n[jaunt] interactive Aider session ready. Use /exit when finished.")
+                    await asyncio.to_thread(coder.run)
                 except Exception as e:
                     output = ""
                     try:

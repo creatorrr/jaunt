@@ -26,6 +26,9 @@ def test_load_minimal_config_defaults_apply(tmp_path: Path) -> None:
     assert cfg.build.jobs == 8
     assert cfg.build.infer_deps is True
     assert cfg.build.ty_retry_attempts == 1
+    assert cfg.build.async_runner == "asyncio"
+    assert cfg.build.include_target_tests is False
+    assert cfg.build.instructions == []
 
     assert cfg.test.jobs == 4
     assert cfg.test.infer_deps is True
@@ -66,6 +69,9 @@ def test_load_config_overrides_work(tmp_path: Path) -> None:
                 "jobs = 2",
                 "infer_deps = false",
                 "ty_retry_attempts = 2",
+                'async_runner = "anyio"',
+                "include_target_tests = true",
+                'instructions = ["Prefer helpers.", "Stay close to the spec."]',
                 "",
                 "[test]",
                 "jobs = 3",
@@ -109,6 +115,9 @@ def test_load_config_overrides_work(tmp_path: Path) -> None:
     assert cfg.build.jobs == 2
     assert cfg.build.infer_deps is False
     assert cfg.build.ty_retry_attempts == 2
+    assert cfg.build.async_runner == "anyio"
+    assert cfg.build.include_target_tests is True
+    assert cfg.build.instructions == ["Prefer helpers.", "Stay close to the spec."]
 
     assert cfg.test.jobs == 3
     assert cfg.test.infer_deps is False

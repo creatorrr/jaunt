@@ -136,6 +136,19 @@ def test_cmd_init_template_includes_install_hint(tmp_path: Path, monkeypatch) ->
     assert "jaunt[openai]" in content
 
 
+def test_cmd_init_template_includes_all_supported_sections(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    ns = jaunt.cli.parse_args(["init"])
+    jaunt.cli.cmd_init(ns)
+
+    content = (tmp_path / "jaunt.toml").read_text()
+    assert "[build]" in content
+    assert "include_target_tests = false" in content
+    assert "instructions =" in content
+    assert "[test]" in content
+    assert "[prompts]" in content
+
+
 def test_cmd_init_toml_is_valid(tmp_path: Path, monkeypatch) -> None:
     """Generated jaunt.toml should be loadable by the config system."""
     import tomllib

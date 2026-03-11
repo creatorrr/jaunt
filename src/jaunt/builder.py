@@ -17,7 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -262,6 +262,7 @@ class _GeneratedComponent:
 class BuildModuleContextArtifacts:
     module_contract_block: str
     blueprint_source: str
+    build_instructions_block: str
     attached_test_specs_block: str
     package_context_block: str
     handwritten_names: tuple[str, ...]
@@ -278,6 +279,7 @@ def build_module_context_artifacts(
     module_dag: dict[str, set[str]],
     package_dir: Path,
     generated_dir: str,
+    build_instructions: Sequence[str] | None = None,
     targeted_test_entries: dict[str, list[SpecEntry]] | None = None,
 ) -> BuildModuleContextArtifacts:
     module_contract = build_module_contract(
@@ -289,6 +291,7 @@ def build_module_context_artifacts(
         entries=entries,
         generated_names=generated_names or expected_names,
     )
+    build_instructions_block = _build_instructions_block(build_instructions or [])
     attached_test_specs_block = _build_attached_test_specs_block(
         targeted_test_entries.get(module_name, []) if targeted_test_entries else []
     )
@@ -303,12 +306,14 @@ def build_module_context_artifacts(
     digest = _build_context_digest(
         module_contract_block=module_contract.prompt_block,
         blueprint_source=blueprint_source,
+        build_instructions_block=build_instructions_block,
         attached_test_specs_block=attached_test_specs_block,
         package_context_block=package_context_block,
     )
     return BuildModuleContextArtifacts(
         module_contract_block=module_contract.prompt_block,
         blueprint_source=blueprint_source,
+        build_instructions_block=build_instructions_block,
         attached_test_specs_block=attached_test_specs_block,
         package_context_block=package_context_block,
         handwritten_names=module_contract.handwritten_names,
@@ -320,6 +325,7 @@ def _build_context_digest(
     *,
     module_contract_block: str,
     blueprint_source: str,
+    build_instructions_block: str,
     attached_test_specs_block: str,
     package_context_block: str,
 ) -> str:
@@ -327,12 +333,20 @@ def _build_context_digest(
     for block in (
         module_contract_block,
         blueprint_source,
+        build_instructions_block,
         attached_test_specs_block,
         package_context_block,
     ):
         h.update((block or "").encode("utf-8"))
         h.update(b"\x00")
     return h.hexdigest()
+
+
+def _build_instructions_block(instructions: Sequence[str]) -> str:
+    lines = [value.strip() for value in instructions if value.strip()]
+    if not lines:
+        return ""
+    return "\n".join(f"- {line}" for line in lines) + "\n"
 
 
 def _build_blueprint_source(*, entries: list[SpecEntry], generated_names: list[str]) -> str:
@@ -903,6 +917,8 @@ async def run_build(
     cost_tracker: CostTracker | None = None,
     ty_retry_attempts: int | None = None,
     async_runner: str = "asyncio",
+    build_instructions: Sequence[str] | None = None,
+    interactive: bool = False,
     initial_error_context_by_module: dict[str, list[str]] | None = None,
     targeted_test_entries: dict[str, list[SpecEntry]] | None = None,
 ) -> BuildReport:
@@ -950,6 +966,16 @@ async def run_build(
     ty_cmd = _resolve_ty_cmd() if ty_attempts is not None else None
     llm_slots = asyncio.Semaphore(jobs)
 
+    def _phase(module_name: str, stage: str, detail: str = "") -> None:
+        if progress is None:
+            return
+        phase = getattr(progress, "phase", None)
+        if callable(phase):
+            try:
+                phase(module_name, stage, detail)
+            except Exception:
+                pass
+
     def _collect_dependency_context(
         module_name: str,
     ) -> tuple[dict[SpecRef, str], dict[str, str]]:
@@ -990,7 +1016,7 @@ async def run_build(
     ) -> tuple[bool, str | None, list[str]]:
         result_source: str | None = None
         ck: str | None = None
-        if response_cache is not None:
+        if response_cache is not None and not interactive:
             ck = cache_key_from_context(
                 ctx,
                 model=backend.model_name,
@@ -1002,17 +1028,34 @@ async def run_build(
                 cache_errors = validate_candidate(cached.source)
                 if not cache_errors:
                     result_source = cached.source
+                    _phase(module_name, "cache hit")
                     if cost_tracker is not None:
                         cost_tracker.record_cache_hit()
 
         if result_source is None:
+            if interactive:
+                _phase(module_name, "interactive", "launching aider")
+                source, usage = await backend.generate_interactive(
+                    ctx,
+                    extra_error_context=(initial_error_context_by_module or {}).get(module_name),
+                )
+                result_source = source
+                _phase(module_name, "validating")
+                validation_errors = validate_candidate(result_source)
+                if validation_errors:
+                    return False, None, validation_errors
+                if cost_tracker is not None and usage is not None:
+                    cost_tracker.record(module_name, usage)
+                return True, result_source, []
             max_attempts = (2 + (ty_attempts or 0)) if ty_cmd is not None else 2
             async with llm_slots:
+                _phase(module_name, "generating")
                 result = await backend.generate_with_retry(
                     ctx,
                     max_attempts=max_attempts,
                     extra_validator=retry_validator,
                     initial_error_context=(initial_error_context_by_module or {}).get(module_name),
+                    progress=lambda stage, detail: _phase(module_name, stage, detail),
                 )
             if result.source is None:
                 return False, None, result.errors or ["No source returned."]
@@ -1020,6 +1063,7 @@ async def run_build(
                 return False, None, result.errors
 
             result_source = result.source
+            _phase(module_name, "validating")
             validation_errors = validate_candidate(result_source)
             if validation_errors:
                 return False, None, validation_errors
@@ -1107,6 +1151,7 @@ async def run_build(
                 module_dag=module_dag,
                 package_dir=package_dir,
                 generated_dir=generated_dir,
+                build_instructions=build_instructions,
                 targeted_test_entries=targeted_test_entries,
             )
             ctx = ModuleSpecContext(
@@ -1124,6 +1169,7 @@ async def run_build(
                 skills_block=skills_block,
                 module_contract_block=component_contract.module_contract_block,
                 blueprint_source=component_contract.blueprint_source,
+                build_instructions_block=component_contract.build_instructions_block,
                 attached_test_specs_block=component_contract.attached_test_specs_block,
                 package_context_block=component_contract.package_context_block,
                 module_context_digest=component_contract.digest,
@@ -1173,6 +1219,7 @@ async def run_build(
             module_dag=module_dag,
             package_dir=package_dir,
             generated_dir=generated_dir,
+            build_instructions=build_instructions,
             targeted_test_entries=targeted_test_entries,
         )
         handwritten_names = module_contract.handwritten_names

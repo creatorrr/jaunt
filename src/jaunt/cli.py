@@ -84,6 +84,29 @@ def _add_common_flags(p: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_build_generation_flags(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--instruction",
+        action="append",
+        default=[],
+        dest="instructions",
+        help="Additional build instruction appended to the build prompt (repeatable).",
+    )
+    p.add_argument(
+        "--include-target-tests",
+        action="store_true",
+        dest="include_target_tests",
+        default=None,
+        help="Include targeted test spec source in build prompts.",
+    )
+    p.add_argument(
+        "--no-include-target-tests",
+        action="store_false",
+        dest="include_target_tests",
+        help="Do not include targeted test spec source in build prompts.",
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="jaunt")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -92,9 +115,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
     build_p = subparsers.add_parser("build", help="Generate code for magic specs.")
     _add_common_flags(build_p)
+    _add_build_generation_flags(build_p)
+    build_p.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Launch an interactive Aider session for a single resolved build target.",
+    )
 
     test_p = subparsers.add_parser("test", help="Generate tests and run pytest.")
     _add_common_flags(test_p)
+    _add_build_generation_flags(test_p)
     test_p.add_argument("--no-build", action="store_true", help="Skip `jaunt build`.")
     test_p.add_argument("--no-run", action="store_true", help="Skip running pytest.")
     test_p.add_argument(
@@ -207,6 +237,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     watch_p = subparsers.add_parser("watch", help="Watch for changes and rebuild.")
     _add_common_flags(watch_p)
+    _add_build_generation_flags(watch_p)
     watch_p.add_argument(
         "--test",
         action="store_true",
@@ -291,9 +322,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     skill_import_p = skill_sub.add_parser("import", help="Import skills from ancestor dirs.")
+    skill_import_p.add_argument("names", nargs="*", help="Exact skill names to import.")
     skill_import_p.add_argument("--root", type=str, default=None)
     skill_import_p.add_argument(
         "--from", type=str, default=None, dest="from_dir", help="Import from specific directory."
+    )
+    skill_import_p.add_argument(
+        "--all",
+        action="store_true",
+        dest="import_all",
+        help="Import all discoverable skills.",
     )
     skill_import_p.add_argument("--dry-run", action="store_true", help="Show what would import.")
     skill_import_p.add_argument(
@@ -359,6 +397,19 @@ def _load_config(args: argparse.Namespace) -> tuple[Path, JauntConfig]:
     assert root is not None
     cfg = load_config(root=root, config_path=config_path)
     return root, cfg
+
+
+def _effective_build_instructions(cfg: JauntConfig, args: argparse.Namespace) -> list[str]:
+    configured = list(cfg.build.instructions)
+    cli_values = [value.strip() for value in list(getattr(args, "instructions", []) or [])]
+    return [value for value in [*configured, *cli_values] if value]
+
+
+def _effective_include_target_tests(cfg: JauntConfig, args: argparse.Namespace) -> bool:
+    override = getattr(args, "include_target_tests", None)
+    if override is None:
+        return bool(cfg.build.include_target_tests)
+    return bool(override)
 
 
 def _prepend_sys_path(dirs: Sequence[Path]) -> None:
@@ -485,11 +536,38 @@ generated_dir = "__generated__"
 provider = "openai"
 model = "gpt-5.2"
 api_key_env = "OPENAI_API_KEY"
+# max_cost_per_build = 5.0
 # Optional: pass through provider reasoning control (OpenAI/Cerebras).
 # reasoning_effort = "medium"
 # Optional: Anthropic thinking budget; when set Jaunt sends
 # thinking = { type = "enabled", budget_tokens = ... }.
 # anthropic_thinking_budget_tokens = 1024
+# prompt_cache = true
+# prompt_cache_key = "jaunt:shared-builds"
+
+[build]
+jobs = 8
+infer_deps = true
+ty_retry_attempts = 1
+async_runner = "asyncio"
+# Keep target test source out of build prompts by default.
+include_target_tests = false
+# Add persistent extra instructions that apply to build generation.
+# instructions = [
+#   "Prefer small composable helpers over monolithic functions.",
+# ]
+
+[test]
+jobs = 4
+infer_deps = true
+pytest_args = ["-q"]
+
+[prompts]
+# Override packaged prompt templates with project-local files if needed.
+# build_system = ""
+# build_module = ""
+# test_system = ""
+# test_module = ""
 
 [agent]
 engine = "aider"
@@ -591,6 +669,8 @@ def cmd_status(args: argparse.Namespace) -> int:
     json_mode = _is_json_mode(args)
     try:
         root, cfg = _load_config(args)
+        include_target_tests = _effective_include_target_tests(cfg, args)
+        build_instructions = _effective_build_instructions(cfg, args)
 
         source_dirs = [root / sr for sr in cfg.paths.source_roots]
         _prepend_sys_path([*source_dirs, root])
@@ -609,7 +689,11 @@ def cmd_status(args: argparse.Namespace) -> int:
             roots=[d for d in source_dirs if d.exists()],
         )
         discovery.import_and_collect(modules, kind="magic")
-        static_targeted_test_entries = _discover_static_targeted_test_entries(root=root, cfg=cfg)
+        static_targeted_test_entries = (
+            _discover_static_targeted_test_entries(root=root, cfg=cfg)
+            if include_target_tests
+            else []
+        )
 
         specs = dict(registry.get_magic_registry())
         if not specs:
@@ -641,7 +725,12 @@ def cmd_status(args: argparse.Namespace) -> int:
         from jaunt.module_api import module_api_digest
         from jaunt.module_contract import group_test_entries_by_target_module
 
-        build_generation_fingerprint = generation_fingerprint(cfg, kind="build")
+        build_generation_fingerprint = generation_fingerprint(
+            cfg,
+            kind="build",
+            build_instructions=build_instructions,
+            include_target_tests=include_target_tests,
+        )
         build_module_context_digests: dict[str, str] = {}
         build_module_api_digests: dict[str, str] = {}
         targeted_test_entries = group_test_entries_by_target_module(static_targeted_test_entries)
@@ -655,6 +744,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                 module_dag=module_dag,
                 package_dir=package_dir,
                 generated_dir=cfg.paths.generated_dir,
+                build_instructions=build_instructions,
                 targeted_test_entries=targeted_test_entries,
             ).digest
             build_module_api_digests[module_name] = module_api_digest(entries)
@@ -724,6 +814,8 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
         root, cfg = _load_config(args)
         _maybe_load_dotenv(root)
         _sync_generated_dir_env(cfg)
+        include_target_tests = _effective_include_target_tests(cfg, args)
+        build_instructions = _effective_build_instructions(cfg, args)
 
         source_dirs = [root / sr for sr in cfg.paths.source_roots]
 
@@ -761,7 +853,11 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             roots=[d for d in source_dirs if d.exists()],
         )
         discovery.import_and_collect(modules, kind="magic")
-        static_targeted_test_entries = _discover_static_targeted_test_entries(root=root, cfg=cfg)
+        static_targeted_test_entries = (
+            _discover_static_targeted_test_entries(root=root, cfg=cfg)
+            if include_target_tests
+            else []
+        )
 
         specs = dict(registry.get_magic_registry())
         if not specs:
@@ -800,7 +896,12 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
         from jaunt.module_api import module_api_digest
         from jaunt.module_contract import group_test_entries_by_target_module
 
-        build_generation_fingerprint = generation_fingerprint(cfg, kind="build")
+        build_generation_fingerprint = generation_fingerprint(
+            cfg,
+            kind="build",
+            build_instructions=build_instructions,
+            include_target_tests=include_target_tests,
+        )
         build_module_context_digests: dict[str, str] = {}
         build_module_api_digests: dict[str, str] = {}
         targeted_test_entries = group_test_entries_by_target_module(static_targeted_test_entries)
@@ -814,6 +915,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                 module_dag=module_dag,
                 package_dir=package_dir,
                 generated_dir=cfg.paths.generated_dir,
+                build_instructions=build_instructions,
                 targeted_test_entries=targeted_test_entries,
             ).digest
             build_module_api_digests[module_name] = module_api_digest(entries)
@@ -845,10 +947,27 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             stale,
             changed_modules=api_changed,
         )
+        interactive = bool(getattr(args, "interactive", False))
+        if interactive:
+            if cfg.agent.engine != "aider":
+                raise JauntConfigError(
+                    '`jaunt build --interactive` requires agent.engine = "aider".'
+                )
+            if not expanded_stale:
+                raise JauntConfigError(
+                    "Interactive build needs exactly one stale target. "
+                    "Use --force and --target MODULE to reopen a specific module."
+                )
+            if len(expanded_stale) != 1:
+                raise JauntConfigError(
+                    "Interactive build needs exactly one resolved module. "
+                    "Narrow the scope with --target MODULE."
+                )
 
         progress = None
         if (
             expanded_stale
+            and not interactive
             and not json_mode
             and (not bool(args.no_progress))
             and sys.stderr.isatty()
@@ -881,12 +1000,14 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             backend=_build_backend(cfg),
             generation_fingerprint=build_generation_fingerprint,
             skills_block=skills_block,
-            jobs=jobs,
+            jobs=1 if interactive else jobs,
             progress=progress,
-            response_cache=response_cache,
+            response_cache=None if interactive else response_cache,
             cost_tracker=cost_tracker,
             ty_retry_attempts=cfg.build.ty_retry_attempts,
             async_runner=cfg.build.async_runner,
+            build_instructions=build_instructions,
+            interactive=interactive,
             targeted_test_entries=targeted_test_entries,
         )
 
@@ -934,6 +1055,8 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
         root, cfg = _load_config(args)
         _maybe_load_dotenv(root)
         _sync_generated_dir_env(cfg)
+        include_target_tests = _effective_include_target_tests(cfg, args)
+        build_instructions = _effective_build_instructions(cfg, args)
 
         source_dirs = [root / sr for sr in cfg.paths.source_roots]
         test_dirs = [root / tr for tr in cfg.paths.test_roots]
@@ -1018,6 +1141,7 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
                 _emit_json({"command": "test", "ok": True, "exit_code": 0})
             return EXIT_OK
         targeted_test_entries = group_test_entries_by_target_module(list(specs.values()))
+        build_targeted_test_entries = targeted_test_entries if include_target_tests else {}
 
         infer_default = bool(cfg.test.infer_deps) and (not bool(args.no_infer_deps))
         spec_graph = build_spec_graph(specs, infer_default=infer_default)
@@ -1079,7 +1203,12 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
         except Exception:
             build_skills_block = ""
 
-        build_generation_fingerprint = generation_fingerprint(cfg, kind="build")
+        build_generation_fingerprint = generation_fingerprint(
+            cfg,
+            kind="build",
+            build_instructions=build_instructions,
+            include_target_tests=include_target_tests,
+        )
         repair_build_context = tester.RepairBuildContext(
             package_dir=package_dir,
             generated_dir=cfg.paths.generated_dir,
@@ -1089,10 +1218,11 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             module_dag=build_magic_module_dag,
             backend=backend,
             generation_fingerprint=build_generation_fingerprint,
-            targeted_test_entries=targeted_test_entries,
+            targeted_test_entries=build_targeted_test_entries,
             skills_block=build_skills_block,
             jobs=int(cfg.build.jobs),
             async_runner=cfg.build.async_runner,
+            build_instructions=build_instructions,
         )
 
         result = tester.run_tests(
@@ -1384,6 +1514,7 @@ def cmd_skill(args: argparse.Namespace) -> int:
     from jaunt.skill_manager import (
         add_skill,
         discover_all_skills,
+        find_importable_skills,
         import_skills,
         remove_auto_skills,
         remove_skill,
@@ -1568,13 +1699,66 @@ def cmd_skill(args: argparse.Namespace) -> int:
         root = _resolve_skill_root(args)
         from_dir = Path(args.from_dir).resolve() if getattr(args, "from_dir", None) else None
         dry_run = bool(getattr(args, "dry_run", False))
-        results = import_skills(root, from_dir=from_dir, dry_run=dry_run)
+        selected_names = list(getattr(args, "names", []) or [])
+        import_all = bool(getattr(args, "import_all", False))
+        available = find_importable_skills(root, from_dir=from_dir)
+        available_names = [name for name, _path in available]
+        if import_all and selected_names:
+            msg = "Use either explicit skill names or --all, not both."
+            _eprint(f"error: {msg}")
+            if json_mode:
+                _emit_json(
+                    {
+                        "command": "skill import",
+                        "ok": False,
+                        "error": msg,
+                        "available": available_names,
+                    }
+                )
+            return EXIT_CONFIG_OR_DISCOVERY
+        if not import_all and not selected_names:
+            msg = "Specify skill names to import, or pass --all."
+            _eprint(f"error: {msg}")
+            if not json_mode and available_names:
+                print("Importable skills:")
+                for name in available_names:
+                    print(f"  {name}")
+            if json_mode:
+                _emit_json(
+                    {
+                        "command": "skill import",
+                        "ok": False,
+                        "error": msg,
+                        "available": available_names,
+                    }
+                )
+            return EXIT_CONFIG_OR_DISCOVERY
+        try:
+            results = import_skills(
+                root,
+                names=None if import_all else selected_names,
+                from_dir=from_dir,
+                dry_run=dry_run,
+            )
+        except ValueError as e:
+            _eprint(f"error: {e}")
+            if json_mode:
+                _emit_json(
+                    {
+                        "command": "skill import",
+                        "ok": False,
+                        "error": str(e),
+                        "available": available_names,
+                    }
+                )
+            return EXIT_CONFIG_OR_DISCOVERY
         if json_mode:
             _emit_json(
                 {
                     "command": "skill import",
                     "ok": True,
                     "dry_run": dry_run,
+                    "selected": sorted(available_names if import_all else selected_names),
                     "results": [{"name": n, "source": str(p), "status": s} for n, p, s in results],
                 }
             )
@@ -1671,12 +1855,34 @@ def cmd_skill(args: argparse.Namespace) -> int:
             return EXIT_CONFIG_OR_DISCOVERY
 
         # Run LLM
+        progress = None
+        if (
+            not json_mode
+            and (not bool(getattr(args, "no_progress", False)))
+            and sys.stderr.isatty()
+        ):
+            progress = ProgressBar(label="skill", total=1, enabled=True, stream=sys.stderr)
         try:
             from jaunt.skill_builder import SkillBuilder
 
             builder = SkillBuilder(cfg.llm, cfg.agent, cfg.aider)
-            updated = asyncio.run(builder.build_skill(existing, lib_contents))
+            if progress is not None:
+                progress.phase(args.name, "building")
+            updated = asyncio.run(
+                builder.build_skill(
+                    existing,
+                    lib_contents,
+                    progress=(
+                        (lambda stage, detail: progress.phase(args.name, stage, detail))
+                        if progress is not None
+                        else None
+                    ),
+                )
+            )
         except Exception as e:  # noqa: BLE001
+            if progress is not None:
+                progress.advance(args.name, ok=False)
+                progress.finish()
             msg = f"{type(e).__name__}: {e}"
             _eprint(f"error: {msg}")
             if json_mode:
@@ -1688,6 +1894,9 @@ def cmd_skill(args: argparse.Namespace) -> int:
 
         skill_md = skills_dir(root) / args.name / "SKILL.md"
         _atomic_write_text(skill_md, updated + "\n")
+        if progress is not None:
+            progress.advance(args.name, ok=True)
+            progress.finish()
 
         if json_mode:
             _emit_json({"command": "skill build", "ok": True, "path": str(skill_md)})

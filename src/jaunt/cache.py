@@ -89,6 +89,8 @@ def cache_key_from_context(
     h.update(b"\x00")
     h.update((ctx.blueprint_source or "").encode())
     h.update(b"\x00")
+    h.update((ctx.build_instructions_block or "").encode())
+    h.update(b"\x00")
     h.update((ctx.attached_test_specs_block or "").encode())
     h.update(b"\x00")
     h.update((ctx.package_context_block or "").encode())

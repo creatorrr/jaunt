@@ -86,6 +86,10 @@ def _render_prompt_sections(
         "deps_generated_block": fmt_kv_block(deps_generated_items),
         "decorator_apis_block": fmt_kv_block(decorator_api_items),
         "module_contract_block": ctx.module_contract_block or "(none)\n",
+        "blueprint_source_block": ctx.blueprint_source or "(none)\n",
+        "build_instructions_block": ctx.build_instructions_block or "(none)\n",
+        "attached_test_specs_block": ctx.attached_test_specs_block or "(none)\n",
+        "package_context_block": ctx.package_context_block or "(none)\n",
         "error_context_block": fmt_kv_block(err_items),
         "async_test_info": async_test_info(ctx.async_runner),
     }
@@ -302,13 +306,13 @@ class AiderGeneratorBackend(GeneratorBackend):
             provider=self.provider_name,
         )
 
-    async def _run_attempt(
+    def _make_task(
         self,
         ctx: ModuleSpecContext,
         *,
         attempt_plan: _AttemptPlan,
         extra_error_context: list[str] | None,
-    ) -> tuple[str, TokenUsage | None]:
+    ) -> AgentTask:
         _mode, system_template, user_template = self._templates_for_ctx(ctx)
         system, user, deps_generated, error_context, skills_block = _render_prompt_sections(
             ctx=ctx,
@@ -345,6 +349,13 @@ class AiderGeneratorBackend(GeneratorBackend):
                     content=ctx.blueprint_source.rstrip() + "\n",
                 )
             )
+        if (ctx.build_instructions_block or "").strip():
+            read_only_files.append(
+                AgentFile(
+                    relative_path="context/build_instructions.md",
+                    content=ctx.build_instructions_block.rstrip() + "\n",
+                )
+            )
         if (ctx.attached_test_specs_block or "").strip():
             read_only_files.append(
                 AgentFile(
@@ -375,6 +386,10 @@ class AiderGeneratorBackend(GeneratorBackend):
                 "Do not copy handwritten symbols into generated output; "
                 "reuse them from the source module."
             )
+        if (ctx.build_instructions_block or "").strip():
+            instruction_lines.append(
+                "Read `context/build_instructions.md` for extra user/project build guidance."
+            )
         if (ctx.attached_test_specs_block or "").strip():
             instruction_lines.append(
                 "Read `context/test_specs.md` for tests explicitly targeting this module."
@@ -394,7 +409,7 @@ class AiderGeneratorBackend(GeneratorBackend):
                 "Return the completed Python source in the target file.",
             ]
         )
-        task = AgentTask(
+        return AgentTask(
             kind="build_module" if ctx.kind == "build" else "test_module",
             mode=attempt_plan.mode,
             instruction="\n".join(instruction_lines) + "\n",
@@ -407,6 +422,19 @@ class AiderGeneratorBackend(GeneratorBackend):
             editor_edit_format=attempt_plan.editor_edit_format,
             main_reasoning_effort=attempt_plan.main_reasoning_effort,
             editor_reasoning_effort=attempt_plan.editor_reasoning_effort,
+        )
+
+    async def _run_attempt(
+        self,
+        ctx: ModuleSpecContext,
+        *,
+        attempt_plan: _AttemptPlan,
+        extra_error_context: list[str] | None,
+    ) -> tuple[str, TokenUsage | None]:
+        task = self._make_task(
+            ctx,
+            attempt_plan=attempt_plan,
+            extra_error_context=extra_error_context,
         )
         result = await self._executor.run_task(task)
         return result.output, result.usage
@@ -421,6 +449,18 @@ class AiderGeneratorBackend(GeneratorBackend):
             extra_error_context=extra_error_context,
         )
 
+    async def generate_interactive(
+        self, ctx: ModuleSpecContext, *, extra_error_context: list[str] | None = None
+    ) -> tuple[str, TokenUsage | None]:
+        attempt_plan = self._plan_attempt(ctx=ctx, previous_source="", failure_kind=None)
+        task = self._make_task(
+            ctx,
+            attempt_plan=attempt_plan,
+            extra_error_context=extra_error_context,
+        )
+        result = await self._executor.run_task_interactive(task)
+        return result.output, result.usage
+
     async def generate_with_retry(
         self,
         ctx: ModuleSpecContext,
@@ -428,6 +468,7 @@ class AiderGeneratorBackend(GeneratorBackend):
         max_attempts: int = 2,
         extra_validator: Callable[[str], list[str]] | None = None,
         initial_error_context: list[str] | None = None,
+        progress: Callable[[str, str], None] | None = None,
     ) -> GenerationResult:
         attempts = 0
         last_source = ""
@@ -445,6 +486,8 @@ class AiderGeneratorBackend(GeneratorBackend):
                 failure_kind=failure_kind,
             )
             attempts += 1
+            if progress is not None:
+                progress("attempt", f"{attempts}/{max_attempts}")
             try:
                 source, usage = await self._run_attempt(
                     ctx,
@@ -464,6 +507,8 @@ class AiderGeneratorBackend(GeneratorBackend):
                 last_errors = _compact_lines(str(e))
                 if attempts >= max_attempts:
                     break
+                if progress is not None:
+                    progress("retry", f"attempt {attempts}")
                 retry_error_context = _retry_context_lines(
                     failure_kind=failure_kind,
                     details=last_errors,
@@ -474,6 +519,8 @@ class AiderGeneratorBackend(GeneratorBackend):
             if not last_errors and extra_validator is not None:
                 last_errors = extra_validator(last_source)
             if not last_errors:
+                if progress is not None:
+                    progress("done", f"attempt {attempts}")
                 return GenerationResult(
                     attempts=attempts,
                     source=last_source,
@@ -484,6 +531,8 @@ class AiderGeneratorBackend(GeneratorBackend):
             failure_kind = _classify_validation_failure(last_errors)
             if attempts >= max_attempts:
                 break
+            if progress is not None:
+                progress("retry", f"attempt {attempts}")
             retry_error_context = _retry_context_lines(
                 failure_kind=failure_kind,
                 details=last_errors,

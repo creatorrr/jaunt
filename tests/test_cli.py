@@ -13,6 +13,9 @@ def test_parse_build_defaults() -> None:
     assert ns.target == []
     assert ns.no_infer_deps is False
     assert ns.no_progress is False
+    assert ns.instructions == []
+    assert ns.include_target_tests is None
+    assert ns.interactive is False
 
 
 def test_parse_build_flags() -> None:
@@ -32,6 +35,10 @@ def test_parse_build_flags() -> None:
             "pkg.other",
             "--no-infer-deps",
             "--no-progress",
+            "--instruction",
+            "Prefer helpers.",
+            "--include-target-tests",
+            "--interactive",
         ]
     )
     assert ns.command == "build"
@@ -42,6 +49,9 @@ def test_parse_build_flags() -> None:
     assert ns.target == ["pkg.mod:foo", "pkg.other"]
     assert ns.no_infer_deps is True
     assert ns.no_progress is True
+    assert ns.instructions == ["Prefer helpers."]
+    assert ns.include_target_tests is True
+    assert ns.interactive is True
 
 
 def test_parse_test_defaults() -> None:
@@ -51,6 +61,8 @@ def test_parse_test_defaults() -> None:
     assert ns.no_run is False
     assert ns.pytest_args == []
     assert ns.no_progress is False
+    assert ns.instructions == []
+    assert ns.include_target_tests is None
 
 
 def test_parse_test_flags() -> None:
@@ -60,6 +72,9 @@ def test_parse_test_flags() -> None:
             "--no-build",
             "--no-run",
             "--no-progress",
+            "--instruction",
+            "Stay close to the spec.",
+            "--no-include-target-tests",
             "--pytest-args=-k",
             "--pytest-args",
             "foo",
@@ -70,6 +85,8 @@ def test_parse_test_flags() -> None:
     assert ns.no_run is True
     assert ns.pytest_args == ["-k", "foo"]
     assert ns.no_progress is True
+    assert ns.instructions == ["Stay close to the spec."]
+    assert ns.include_target_tests is False
 
 
 def test_parse_eval_defaults() -> None:

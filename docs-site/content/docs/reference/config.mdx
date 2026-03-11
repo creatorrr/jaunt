@@ -37,20 +37,32 @@ provider = "openai"
 model = "gpt-5.2"
 # Environment variable used for the API key (default: "OPENAI_API_KEY").
 api_key_env = "OPENAI_API_KEY"
+# Optional hard ceiling for accumulated API spend during a build/test command.
+# max_cost_per_build = 5.0
 # Optional pass-through for OpenAI/Cerebras.
 # Common values: "low", "medium", "high".
 # reasoning_effort = "medium"
 # Optional Anthropic thinking budget. If set, Jaunt sends:
 # thinking = { type = "enabled", budget_tokens = ... }.
 # anthropic_thinking_budget_tokens = 1024
+# Enable OpenAI prompt caching support when available.
+# prompt_cache = true
+# Optional explicit cache key prefix.
+# prompt_cache_key = "jaunt:shared-builds"
 
 [build]
 # Max parallel workers for build generation.
 jobs = 8
 # Best-effort dependency inference (explicit deps always apply).
 infer_deps = true
+# Extra ty-based repair passes after the normal retry loop.
+ty_retry_attempts = 1
 # Pytest marker backend for generated async tests: "asyncio" or "anyio".
 async_runner = "asyncio"
+# Include targeted test-spec source in build prompts.
+include_target_tests = false
+# Optional project-wide steering appended to build prompts.
+# instructions = ["Prefer small composable helpers."]
 
 [test]
 # Max parallel workers for test generation.

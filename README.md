@@ -33,7 +33,7 @@ pip install jaunt[anthropic]   # Anthropic/Claude + default Aider runtime
 pip install jaunt[cerebras]    # Cerebras + default Aider runtime
 pip install jaunt[aider]       # runtime-only extra for custom install setups
 pip install jaunt[all]         # all bundled backends/tools, including Aider
-pip install jaunt[all-sdk]     # all provider/tooling extras, without Aider
+pip install jaunt[all-sdk]     # same Jaunt CLI, but without the Aider dependency
 
 # For conflicting app environments, prefer running Jaunt as an isolated tool:
 uv tool run --from 'jaunt[all]' jaunt build --root .
@@ -56,7 +56,7 @@ Known gotcha: `aider-chat 0.86.2` currently pins `numpy==1.26.4`. Since Jaunt's
 default Aider install path includes `aider-chat`, `jaunt[all]` can fail to
 resolve in app environments that require NumPy 2.x. If your project already
 depends on `numpy>=2`, either run Jaunt in an isolated tool environment or
-install `jaunt[all-sdk]` and avoid the Aider extra in that environment.
+install `jaunt[all-sdk]` and avoid the Aider dependency in that environment.
 
 ## Quickstart (This Repo)
 

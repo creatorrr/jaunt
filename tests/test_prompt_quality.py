@@ -135,6 +135,17 @@ def test_build_module_mentions_handwritten_symbol_reuse(monkeypatch) -> None:
     assert "do not redefine" in text
 
 
+def test_build_module_mentions_additional_build_instructions(monkeypatch) -> None:
+    backend = _backend(monkeypatch)
+    _system, user = _render(
+        backend,
+        _build_ctx(build_instructions_block="- Prefer composable helpers.\n"),
+    )
+    text = user.lower()
+    assert "additional build instructions" in text
+    assert "composable helpers" in text
+
+
 # ---------------------------------------------------------------------------
 # Test system prompt
 # ---------------------------------------------------------------------------

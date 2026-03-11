@@ -15,6 +15,7 @@ _TREE_MAX = 2_000
 _TREE_DEPTH = 3
 _TREE_ENTRIES = 50
 _MAX_MODULES = 10
+_EXTRA_CONTEXT_MAX = 20_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +35,7 @@ class LibContent:
     module_structure: str
     public_api: str
     version: str
+    extra_context: str = ""
 
 
 def resolve_lib(lib_str: str) -> LibRef:
@@ -261,6 +263,7 @@ def _inspect_pypi(ref: LibRef) -> LibContent:
         module_structure=module_structure,
         public_api=public_api,
         version=version,
+        extra_context="",
     )
 
 
@@ -285,6 +288,7 @@ def _inspect_local(ref: LibRef) -> LibContent:
 
     # Determine source directories (handles src/ layout)
     source_dirs = _local_source_dirs(directory)
+    has_python_layout = any(ref.import_roots)
 
     # Source files — scan all source dirs
     source_files: list[tuple[str, str]] = []
@@ -296,6 +300,8 @@ def _inspect_local(ref: LibRef) -> LibContent:
         tree_parts.append(_build_module_tree(src_dir))
 
     module_structure = "\n".join(t for t in tree_parts if t)[:_TREE_MAX]
+    if not module_structure and not has_python_layout:
+        module_structure = _build_generic_tree(directory)
 
     # Public API
     for rel, content in source_files:
@@ -304,6 +310,9 @@ def _inspect_local(ref: LibRef) -> LibContent:
             api_lines.append(f"# {rel}")
             api_lines.extend(sigs)
     public_api = "\n".join(api_lines)[:_API_MAX]
+    extra_context = ""
+    if not has_python_layout:
+        extra_context = _collect_extra_text_context(directory)
 
     # Summary from README first line or empty
     summary = ""
@@ -313,6 +322,8 @@ def _inspect_local(ref: LibRef) -> LibContent:
             if stripped:
                 summary = stripped[:200]
                 break
+    if not summary:
+        summary = directory.name
 
     return LibContent(
         ref=ref,
@@ -321,6 +332,7 @@ def _inspect_local(ref: LibRef) -> LibContent:
         module_structure=module_structure,
         public_api=public_api,
         version=version,
+        extra_context=extra_context,
     )
 
 
@@ -468,6 +480,106 @@ def _build_module_tree(root: Path, *, _depth: int = 0, _count: list[int] | None 
             _count[0] += 1
 
     return "\n".join(lines)
+
+
+def _build_generic_tree(root: Path, *, _depth: int = 0, _count: list[int] | None = None) -> str:
+    """Build a shallow tree for general project folders, not just Python packages."""
+    if _count is None:
+        _count = [0]
+    if _depth >= _TREE_DEPTH or _count[0] >= _TREE_ENTRIES:
+        return ""
+
+    lines: list[str] = []
+    indent = "  " * _depth
+    skip_dirs = {
+        "__pycache__",
+        ".git",
+        ".hg",
+        ".svn",
+        ".venv",
+        "venv",
+        "node_modules",
+        "dist",
+        "build",
+    }
+
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return ""
+
+    for entry in entries:
+        if _count[0] >= _TREE_ENTRIES:
+            break
+        if entry.name.startswith(".") and entry.name not in {".env.example"}:
+            continue
+        if entry.is_dir():
+            if entry.name in skip_dirs:
+                continue
+            lines.append(f"{indent}{entry.name}/")
+            _count[0] += 1
+            sub = _build_generic_tree(entry, _depth=_depth + 1, _count=_count)
+            if sub:
+                lines.append(sub)
+        elif entry.is_file():
+            lines.append(f"{indent}{entry.name}")
+            _count[0] += 1
+
+    return "\n".join(lines)
+
+
+def _collect_extra_text_context(directory: Path) -> str:
+    """Collect non-binary text snippets from a general folder within a fixed budget."""
+    skip_dirs = {
+        "__pycache__",
+        ".git",
+        ".hg",
+        ".svn",
+        ".venv",
+        "venv",
+        "node_modules",
+        "dist",
+        "build",
+    }
+    max_file_chars = 3_000
+    parts: list[str] = []
+    total = 0
+
+    for path in sorted(directory.rglob("*")):
+        if total >= _EXTRA_CONTEXT_MAX:
+            break
+        if any(part in skip_dirs for part in path.parts):
+            continue
+        if path.is_dir():
+            continue
+        if path.name.startswith("."):
+            continue
+        try:
+            if path.stat().st_size > 200_000:
+                continue
+            raw = path.read_bytes()
+        except OSError:
+            continue
+        if b"\x00" in raw[:2048]:
+            continue
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        text = text.strip()
+        if not text:
+            continue
+        rel = str(path.relative_to(directory))
+        chunk = f"### {rel}\n{text[:max_file_chars].rstrip()}\n"
+        if total + len(chunk) > _EXTRA_CONTEXT_MAX:
+            remaining = _EXTRA_CONTEXT_MAX - total
+            if remaining <= 0:
+                break
+            chunk = chunk[:remaining].rstrip() + "\n"
+        parts.append(chunk)
+        total += len(chunk)
+
+    return "\n".join(parts).strip()
 
 
 def _extract_local_version(directory: Path) -> str:

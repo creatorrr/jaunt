@@ -27,6 +27,7 @@ class ModuleSpecContext:
     skills_block: str = ""
     module_contract_block: str = ""
     blueprint_source: str = ""
+    build_instructions_block: str = ""
     attached_test_specs_block: str = ""
     package_context_block: str = ""
     module_context_digest: str = ""
@@ -83,6 +84,11 @@ class GeneratorBackend(ABC):
         Returns (source_code, optional_token_usage).
         """
 
+    async def generate_interactive(
+        self, ctx: ModuleSpecContext, *, extra_error_context: list[str] | None = None
+    ) -> tuple[str, TokenUsage | None]:
+        raise NotImplementedError("Interactive generation is not supported by this backend.")
+
     async def generate_with_retry(
         self,
         ctx: ModuleSpecContext,
@@ -90,6 +96,7 @@ class GeneratorBackend(ABC):
         max_attempts: int = 2,
         extra_validator: Callable[[str], list[str]] | None = None,
         initial_error_context: list[str] | None = None,
+        progress: Callable[[str, str], None] | None = None,
     ) -> GenerationResult:
         """Generate code, validate, and retry with error context (deterministic)."""
 
@@ -103,6 +110,8 @@ class GeneratorBackend(ABC):
 
         while attempts < max_attempts:
             attempts += 1
+            if progress is not None:
+                progress("attempt", f"{attempts}/{max_attempts}")
             last_source, usage = await self.generate_module(ctx, extra_error_context=extra_ctx)
             if usage is not None:
                 total_prompt += usage.prompt_tokens
@@ -113,6 +122,8 @@ class GeneratorBackend(ABC):
             if not last_errors and extra_validator is not None:
                 last_errors = extra_validator(last_source)
             if not last_errors:
+                if progress is not None:
+                    progress("done", f"attempt {attempts}")
                 agg = (
                     TokenUsage(
                         total_prompt,
@@ -130,6 +141,8 @@ class GeneratorBackend(ABC):
                 break
 
             # Retry with appended context describing what was wrong previously.
+            if progress is not None:
+                progress("retry", f"attempt {attempts}")
             retry_ctx = [f"previous output errors: {e}" for e in last_errors]
             extra_ctx = (extra_ctx or []) + retry_ctx
 

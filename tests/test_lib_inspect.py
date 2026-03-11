@@ -143,6 +143,20 @@ def test_inspect_local_src_layout(tmp_path: Path) -> None:
     assert "mypkg/" in content.module_structure
 
 
+def test_inspect_local_non_python_folder_collects_extra_context(tmp_path: Path) -> None:
+    _write(tmp_path / "README.md", "# Memory API\nA service repo.\n")
+    _write(tmp_path / "docs" / "overview.md", "## Overview\nUseful background.\n")
+    _write(tmp_path / "config" / "service.toml", 'name = "memory-api"\n')
+
+    ref = LibRef(type="path", name=tmp_path.name, path=str(tmp_path), version=None, import_roots=[])
+    content = inspect_lib(ref)
+
+    assert "Memory API" in content.readme
+    assert "docs/" in content.module_structure or "overview.md" in content.module_structure
+    assert "Useful background" in content.extra_context
+    assert 'name = "memory-api"' in content.extra_context
+
+
 def test_resolve_import_root_single_file_module(tmp_path: Path, monkeypatch) -> None:
     """Single-file modules (e.g. six.py) should return the file, not its parent."""
     import importlib.util

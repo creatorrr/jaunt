@@ -45,6 +45,8 @@ class BuildConfig:
     infer_deps: bool
     ty_retry_attempts: int = 1
     async_runner: str = "asyncio"
+    include_target_tests: bool = False
+    instructions: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -277,6 +279,19 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     else:
         async_runner = "asyncio"
 
+    if "include_target_tests" in build_tbl:
+        include_target_tests = _as_bool(
+            build_tbl["include_target_tests"],
+            name="build.include_target_tests",
+        )
+    else:
+        include_target_tests = False
+
+    if "instructions" in build_tbl:
+        build_instructions = _as_str_list(build_tbl["instructions"], name="build.instructions")
+    else:
+        build_instructions = []
+
     if "jobs" in test_tbl:
         test_jobs = _as_int(test_tbl["jobs"], name="test.jobs")
     else:
@@ -408,6 +423,8 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             infer_deps=build_infer_deps,
             ty_retry_attempts=build_ty_retry_attempts,
             async_runner=async_runner,
+            include_target_tests=include_target_tests,
+            instructions=build_instructions,
         ),
         test=TestConfig(jobs=test_jobs, infer_deps=test_infer_deps, pytest_args=pytest_args),
         prompts=PromptsConfig(

@@ -73,10 +73,17 @@ def test_parse_skill_refresh() -> None:
 
 
 def test_parse_skill_import() -> None:
-    args = parse_args(["skill", "import", "--from", "/some/dir", "--dry-run"])
+    args = parse_args(["skill", "import", "rich", "--from", "/some/dir", "--dry-run"])
     assert args.skill_command == "import"
+    assert args.names == ["rich"]
     assert args.from_dir == "/some/dir"
     assert args.dry_run is True
+
+
+def test_parse_skill_import_all() -> None:
+    args = parse_args(["skill", "import", "--all"])
+    assert args.skill_command == "import"
+    assert args.import_all is True
 
 
 def test_parse_skill_build() -> None:
@@ -196,6 +203,7 @@ def test_cmd_skill_import_json(tmp_path: Path, capsys) -> None:
         [
             "skill",
             "import",
+            "ext-tool",
             "--root",
             str(project),
             "--from",
@@ -208,6 +216,51 @@ def test_cmd_skill_import_json(tmp_path: Path, capsys) -> None:
     assert out["ok"] is True
     assert len(out["results"]) == 1
     assert out["results"][0]["status"] == "imported"
+
+
+def test_cmd_skill_import_all_json(tmp_path: Path, capsys) -> None:
+    source = tmp_path / "ext"
+    _write(source / "ext-tool/SKILL.md", "ext content\n")
+    project = tmp_path / "proj"
+    project.mkdir()
+    rc = main(
+        [
+            "skill",
+            "import",
+            "--all",
+            "--root",
+            str(project),
+            "--from",
+            str(source),
+            "--json",
+        ]
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["ok"] is True
+    assert out["selected"] == ["ext-tool"]
+
+
+def test_cmd_skill_import_requires_selection(tmp_path: Path, capsys) -> None:
+    source = tmp_path / "ext"
+    _write(source / "ext-tool/SKILL.md", "ext content\n")
+    project = tmp_path / "proj"
+    project.mkdir()
+    rc = main(
+        [
+            "skill",
+            "import",
+            "--root",
+            str(project),
+            "--from",
+            str(source),
+            "--json",
+        ]
+    )
+    assert rc != 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["ok"] is False
+    assert out["available"] == ["ext-tool"]
 
 
 def test_cmd_skill_build_no_meta(tmp_path: Path, capsys) -> None:

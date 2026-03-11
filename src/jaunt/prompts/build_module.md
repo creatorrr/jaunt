@@ -37,6 +37,9 @@ Reference-only blueprint of the source module shape:
 Attached test specs explicitly targeting this module:
 {{attached_test_specs_block}}
 
+Additional build instructions from the user/project:
+{{build_instructions_block}}
+
 Local package context:
 {{package_context_block}}
 
@@ -49,6 +52,7 @@ Rules:
 - Reuse handwritten symbols from `{{spec_module}}` when they already exist there; do not redefine them.
 - Treat the blueprint as reference-only structure guidance; do not copy handwritten symbols from it.
 - Treat attached test specs as additional behavioral guidance, not as production code to inline.
+- Treat additional build instructions as extra user intent layered on top of the spec docstrings.
 - Use the package context to prefer nearby real modules and exports over guessed import paths.
 - Include type annotations on all function signatures.
 - Ensure every non-Optional return type has explicit return/raise on all code paths.
