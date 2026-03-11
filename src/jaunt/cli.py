@@ -951,7 +951,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
         if interactive:
             if cfg.agent.engine != "aider":
                 raise JauntConfigError(
-                    "`jaunt build --interactive` requires agent.engine = \"aider\"."
+                    '`jaunt build --interactive` requires agent.engine = "aider".'
                 )
             if not expanded_stale:
                 raise JauntConfigError(

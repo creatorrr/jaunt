@@ -59,9 +59,7 @@ def generation_fingerprint_from_config(
     build_runtime_parts = list(runtime_parts)
     if kind == "build":
         instruction_source = (
-            list(build_instructions)
-            if build_instructions is not None
-            else cfg.build.instructions
+            list(build_instructions) if build_instructions is not None else cfg.build.instructions
         )
         effective_instructions = [item.strip() for item in instruction_source if item.strip()]
         effective_include_target_tests = (

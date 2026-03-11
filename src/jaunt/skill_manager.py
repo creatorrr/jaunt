@@ -404,14 +404,10 @@ def import_skills(
         if missing:
             available = ", ".join(sorted(importable_by_name)) or "(none)"
             missing_txt = ", ".join(missing)
-            raise ValueError(
-                f"Unknown importable skill(s): {missing_txt}. Available: {available}"
-            )
+            raise ValueError(f"Unknown importable skill(s): {missing_txt}. Available: {available}")
         selected_names = set(requested)
         importable = [
-            (name, source_path)
-            for name, source_path in importable
-            if name in selected_names
+            (name, source_path) for name, source_path in importable if name in selected_names
         ]
 
     sd = skills_dir(project_root)
