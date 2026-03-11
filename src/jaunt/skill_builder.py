@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -137,8 +138,11 @@ class SkillBuilder:
         lib_contents: list[LibContent],
         *,
         max_source_chars: int = 100_000,
+        progress: Callable[[str, str], None] | None = None,
     ) -> str:
         """Elaborate/update SKILL.md using gathered library info + LLM."""
+        if progress is not None:
+            progress("context", "collecting library context")
         # Gather additional source files beyond what inspect_lib collected
         source_sections: list[str] = []
         total_chars = 0
@@ -157,6 +161,8 @@ class SkillBuilder:
                 section += f"\n### Module structure\n{lc.module_structure}\n"
             if lc.public_api:
                 section += f"\n### Public API\n{lc.public_api}\n"
+            if lc.extra_context:
+                section += f"\n### Additional context\n{lc.extra_context}\n"
 
             # Gather additional source files
             extra_source = _gather_extra_source(lc, max_chars=max_source_chars - total_chars)
@@ -180,19 +186,27 @@ class SkillBuilder:
         last_err: Exception | None = None
         for attempt in range(1, 3):
             try:
+                if progress is not None:
+                    progress("attempt", f"{attempt}/2")
                 if self._agent.engine == "aider":
                     out = await self._run_aider(existing_content, library_info_block)
                 else:
                     out = await self._call_llm(self._system_prompt, user_msg)
                 stripped = strip_markdown_fences(out)
+                if progress is not None:
+                    progress("validating", f"attempt {attempt}")
                 errs = validate_skill_markdown(stripped)
                 if errs:
                     raise RuntimeError("; ".join(errs))
+                if progress is not None:
+                    progress("done", f"attempt {attempt}")
                 return stripped
             except Exception as e:  # noqa: BLE001
                 last_err = e
                 if attempt >= 2:
                     break
+                if progress is not None:
+                    progress("retry", f"attempt {attempt}")
                 await asyncio.sleep(0.35 * attempt)
 
         assert last_err is not None

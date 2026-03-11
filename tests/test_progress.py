@@ -78,3 +78,12 @@ def test_progressbar_broken_stream_disables():
     pb = ProgressBar(label="build", total=1, enabled=True, stream=BadStream(), min_interval_s=0)
     # After __post_init__ tries to render and fails, it should be disabled
     assert not pb.enabled
+
+
+def test_progressbar_phase_writes_message():
+    stream = io.StringIO()
+    pb = ProgressBar(label="build", total=1, enabled=True, stream=stream, min_interval_s=0)
+    pb.phase("pkg.mod", "generating", "1/2")
+    pb.finish()
+    output = stream.getvalue()
+    assert "[build] pkg.mod: generating (1/2)" in output

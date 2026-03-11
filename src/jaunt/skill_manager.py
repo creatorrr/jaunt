@@ -389,10 +389,31 @@ def find_importable_skills(
 
 
 def import_skills(
-    project_root: Path, *, from_dir: Path | None = None, dry_run: bool = False
+    project_root: Path,
+    *,
+    names: list[str] | None = None,
+    from_dir: Path | None = None,
+    dry_run: bool = False,
 ) -> list[tuple[str, Path, str]]:
     """Import skills from external dirs into .agents/skills/. Returns (name, source, status)."""
     importable = find_importable_skills(project_root, from_dir=from_dir)
+    requested = [validate_skill_name(name) for name in (names or [])]
+    if requested:
+        importable_by_name = {name: source_path for name, source_path in importable}
+        missing = [name for name in requested if name not in importable_by_name]
+        if missing:
+            available = ", ".join(sorted(importable_by_name)) or "(none)"
+            missing_txt = ", ".join(missing)
+            raise ValueError(
+                f"Unknown importable skill(s): {missing_txt}. Available: {available}"
+            )
+        selected_names = set(requested)
+        importable = [
+            (name, source_path)
+            for name, source_path in importable
+            if name in selected_names
+        ]
+
     sd = skills_dir(project_root)
     results: list[tuple[str, Path, str]] = []
 

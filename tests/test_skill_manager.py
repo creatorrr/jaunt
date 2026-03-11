@@ -263,6 +263,31 @@ def test_import_from_explicit_dir(tmp_path: Path) -> None:
     assert (project / ".agents/skills/my-tool/SKILL.md").exists()
 
 
+def test_import_from_explicit_dir_selected_names(tmp_path: Path) -> None:
+    source = tmp_path / "source_skills"
+    _write(source / "my-tool/SKILL.md", "tool content\n")
+    _write(source / "other-tool/SKILL.md", "other content\n")
+
+    project = tmp_path / "project"
+    project.mkdir()
+
+    results = import_skills(project, from_dir=source, names=["other-tool"])
+    assert [result[0] for result in results] == ["other-tool"]
+    assert not (project / ".agents/skills/my-tool").exists()
+    assert (project / ".agents/skills/other-tool/SKILL.md").exists()
+
+
+def test_import_selected_names_missing_raises(tmp_path: Path) -> None:
+    source = tmp_path / "source_skills"
+    _write(source / "my-tool/SKILL.md", "tool content\n")
+
+    project = tmp_path / "project"
+    project.mkdir()
+
+    with pytest.raises(ValueError, match="Unknown importable skill"):
+        import_skills(project, from_dir=source, names=["missing-tool"])
+
+
 def test_import_copies_sibling_files(tmp_path: Path) -> None:
     """Import should copy the entire skill directory, not just SKILL.md."""
     source = tmp_path / "source_skills"

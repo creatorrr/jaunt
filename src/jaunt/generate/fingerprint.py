@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from typing import Literal
 
 from jaunt.config import JauntConfig
@@ -41,6 +42,8 @@ def generation_fingerprint_from_config(
     cfg: JauntConfig,
     *,
     kind: Literal["build", "test"],
+    build_instructions: Sequence[str] | None = None,
+    include_target_tests: bool | None = None,
 ) -> str:
     if kind == "build":
         system_prompt = load_prompt("build_system.md", cfg.prompts.build_system or None)
@@ -53,6 +56,25 @@ def generation_fingerprint_from_config(
     editor_model = cfg.aider.editor_model if cfg.agent.engine == "aider" else ""
     reasoning_effort = cfg.llm.reasoning_effort if cfg.agent.engine == "aider" else ""
     runtime_parts = aider_generation_fingerprint_parts(kind) if cfg.agent.engine == "aider" else []
+    build_runtime_parts = list(runtime_parts)
+    if kind == "build":
+        instruction_source = (
+            list(build_instructions)
+            if build_instructions is not None
+            else cfg.build.instructions
+        )
+        effective_instructions = [item.strip() for item in instruction_source if item.strip()]
+        effective_include_target_tests = (
+            bool(cfg.build.include_target_tests)
+            if include_target_tests is None
+            else bool(include_target_tests)
+        )
+        build_runtime_parts.extend(
+            [
+                f"include_target_tests={effective_include_target_tests}",
+                "build_instructions=" + json.dumps(effective_instructions, ensure_ascii=True),
+            ]
+        )
 
     return build_generation_fingerprint(
         engine=cfg.agent.engine,
@@ -61,5 +83,5 @@ def generation_fingerprint_from_config(
         prompt_parts=[system_prompt, user_prompt],
         editor_model=editor_model,
         reasoning_effort=reasoning_effort or "",
-        runtime_parts=runtime_parts,
+        runtime_parts=build_runtime_parts,
     )

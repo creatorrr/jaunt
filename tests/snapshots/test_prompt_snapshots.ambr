@@ -92,6 +92,10 @@
         (none)
         
         
+        Additional build instructions from the user/project:
+        (none)
+        
+        
         Local package context:
         (none)
         
@@ -107,6 +111,7 @@
         - Reuse handwritten symbols from `pkg.specs` when they already exist there; do not redefine them.
         - Treat the blueprint as reference-only structure guidance; do not copy handwritten symbols from it.
         - Treat attached test specs as additional behavioral guidance, not as production code to inline.
+        - Treat additional build instructions as extra user intent layered on top of the spec docstrings.
         - Use the package context to prefer nearby real modules and exports over guessed import paths.
         - Include type annotations on all function signatures.
         - Ensure every non-Optional return type has explicit return/raise on all code paths.

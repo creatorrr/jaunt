@@ -1,16 +1,48 @@
 # Example jaunt.toml
-#
-# This is a starter template; keys will evolve with Jaunt as the MVP is implemented.
 
-[project]
-# Modules (or directories) containing spec stubs and tests for Jaunt to scan.
-roots = ["src", "tests"]
+version = 1
 
-[generation]
-# Where generated implementation is written.
+[paths]
+source_roots = ["src"]
+test_roots = ["tests"]
 generated_dir = "__generated__"
 
-[backend]
-# Which generator backend to use (placeholder).
-name = "openai"
+[llm]
+provider = "openai"
+model = "gpt-5.2"
+api_key_env = "OPENAI_API_KEY"
+# max_cost_per_build = 5.0
+# reasoning_effort = "medium"
+# anthropic_thinking_budget_tokens = 1024
+# prompt_cache = true
+# prompt_cache_key = "jaunt:shared-builds"
 
+[build]
+jobs = 8
+infer_deps = true
+ty_retry_attempts = 1
+async_runner = "asyncio"
+include_target_tests = false
+# instructions = ["Prefer small helpers."]
+
+[test]
+jobs = 4
+infer_deps = true
+pytest_args = ["-q"]
+
+[prompts]
+# build_system = ""
+# build_module = ""
+# test_system = ""
+# test_module = ""
+
+[agent]
+engine = "aider"
+
+[aider]
+build_mode = "architect"
+test_mode = "code"
+skill_mode = "code"
+editor_model = ""
+map_tokens = 0
+save_traces = false
