@@ -263,3 +263,37 @@ def _append_doc_lines(lines: list[str], doc: str, *, indent: str = "") -> None:
     lines.append(f"{indent}doc:")
     for line in doc_lines:
         lines.append(f"{indent}  {line}")
+
+
+def build_generated_class_api_summary(
+    generated_source: str,
+    class_name: str,
+    *,
+    spec_docstring: str,
+    public_api_only: bool = True,
+) -> SpecApiSummary:
+    tree = ast.parse(generated_source)
+    cls = _find_top_level_class(tree, class_name)
+    if cls is None:
+        raise ValueError(f"Generated class {class_name!r} not found.")
+    members = _class_members(generated_source, cls)
+    if public_api_only:
+        members = tuple(m for m in members if not m.name.startswith("_") or m.name.startswith("__"))
+    return SpecApiSummary(
+        spec_ref=SpecRef(f"<generated>:{class_name}"),
+        kind="class",
+        name=class_name,
+        signature=_class_signature(cls),
+        doc=spec_docstring,
+        members=members,
+    )
+
+
+def generated_public_api_digest(generated_source: str, class_name: str) -> str:
+    summary = build_generated_class_api_summary(
+        generated_source, class_name, spec_docstring="", public_api_only=True
+    )
+    payload = json.dumps(
+        [[m.name, m.signature] for m in summary.members], sort_keys=True, ensure_ascii=True
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
