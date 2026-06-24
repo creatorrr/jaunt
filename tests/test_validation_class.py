@@ -105,3 +105,56 @@ def test_dropped_param_warns_not_fails() -> None:
     assert validate_build_class_source(src, **BASE_KW) == []
     warns = class_build_warnings(src, class_name="C", stub_signatures={"do": ["self", "x"]})
     assert any("x" in w for w in warns)
+
+
+def test_fails_when_stub_left_unfilled_even_if_sentinel_stripped() -> None:
+    src = (
+        'class C:\n    "A class."\n'
+        "    def do(self):\n        raise NotImplementedError\n"
+    )
+    errs = validate_build_class_source(src, **BASE_KW)
+    assert any("stub" in e for e in errs)
+
+
+def test_passes_when_stub_filled() -> None:
+    src = 'class C:\n    "A class."\n    def do(self):\n        return 1\n'
+    assert validate_build_class_source(src, **BASE_KW) == []
+
+
+def test_docstring_only_empty_class_fails() -> None:
+    src = 'class C:\n    "A class."\n    pass\n'
+    kw = _kw(stub_methods=[], require_public_method=True)
+    errs = validate_build_class_source(src, **kw)
+    assert any("public method" in e for e in errs)
+
+
+def test_docstring_only_with_public_method_passes() -> None:
+    src = 'class C:\n    "A class."\n    def total(self):\n        return 0\n'
+    kw = _kw(stub_methods=[], require_public_method=True)
+    assert validate_build_class_source(src, **kw) == []
+
+
+def test_fails_when_class_attribute_dropped() -> None:
+    src = 'class C:\n    "A class."\n    def do(self):\n        return 1\n'
+    kw = _kw(class_attributes={"CAPACITY": "CAPACITY: int = 10"})
+    errs = validate_build_class_source(src, **kw)
+    assert any("CAPACITY" in e for e in errs)
+
+
+def test_fails_when_class_attribute_value_changed() -> None:
+    src = (
+        'class C:\n    "A class."\n    CAPACITY = None\n'
+        "    def do(self):\n        return 1\n"
+    )
+    kw = _kw(class_attributes={"CAPACITY": "CAPACITY: int = 10"})
+    errs = validate_build_class_source(src, **kw)
+    assert any("CAPACITY" in e for e in errs)
+
+
+def test_passes_when_class_attribute_retained() -> None:
+    src = (
+        'class C:\n    "A class."\n    CAPACITY: int = 10\n'
+        "    def do(self):\n        return 1\n"
+    )
+    kw = _kw(class_attributes={"CAPACITY": "CAPACITY: int = 10"})
+    assert validate_build_class_source(src, **kw) == []

@@ -9,6 +9,8 @@ from __future__ import annotations
 import ast
 from collections.abc import Iterable
 
+from jaunt.class_analysis import is_stub_body
+
 
 def _syntax_error_to_str(err: SyntaxError) -> str:
     # Keep formatting stable and readable for retry prompts.
@@ -418,6 +420,19 @@ def _method_nodes(cls: ast.ClassDef) -> dict[str, ast.FunctionDef | ast.AsyncFun
     return {n.name: n for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
 
 
+def _class_attribute_nodes(cls: ast.ClassDef) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for node in cls.body:
+        if isinstance(node, ast.Assign):
+            rendered = ast.unparse(node)
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name):
+                    out[tgt.id] = rendered
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            out[node.target.id] = ast.unparse(node)
+    return out
+
+
 def _normalized_ast_dump(src_or_node: str | ast.AST) -> str:
     node = ast.parse(src_or_node).body[0] if isinstance(src_or_node, str) else src_or_node
     # Strip decorators so @jaunt.preserve and formatting don't affect equivalence.
@@ -436,6 +451,8 @@ def validate_build_class_source(
     class_decorators: list[str],
     required_abstractmethods: list[str],
     spec_docstring: str,
+    class_attributes: dict[str, str] | None = None,
+    require_public_method: bool = False,
 ) -> list[str]:
     try:
         mod = ast.parse(source or "")
@@ -490,6 +507,35 @@ def validate_build_class_source(
             errors.append(
                 f"{class_name}: the spec docstring must be retained (additions are allowed)."
             )
+
+    # Unfilled-stub detection (AST, not the sentinel comment): each declared stub
+    # method must have a real body in the output.
+    for name in stub_methods:
+        node = methods.get(name)
+        if node is not None and is_stub_body(node):
+            errors.append(
+                f"{class_name}: method {name!r} was left as a stub; implement it per the spec."
+            )
+
+    # Class-attribute preservation: every spec class attribute must survive with the
+    # same annotation/value (compared modulo formatting via ast.unparse round-trip).
+    if class_attributes:
+        actual_attrs = _class_attribute_nodes(cls)
+        for attr_name, expected_src in class_attributes.items():
+            actual_src = actual_attrs.get(attr_name)
+            if actual_src is None:
+                errors.append(
+                    f"{class_name}: class attribute {attr_name!r} from the spec was not preserved."
+                )
+            elif actual_src != expected_src:
+                errors.append(
+                    f"{class_name}: class attribute {attr_name!r} was modified; "
+                    "keep it exactly as declared in the spec."
+                )
+
+    # Docstring-only completeness: a docstring-only spec must yield a non-trivial class.
+    if require_public_method and not any(not name.startswith("_") for name in methods):
+        errors.append(f"{class_name}: docstring-only spec must define at least one public method.")
 
     return errors
 
