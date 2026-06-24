@@ -136,6 +136,60 @@ def test_load_config_overrides_work(tmp_path: Path) -> None:
     assert cfg.aider.save_traces is True
 
 
+def test_codex_config_parsing(tmp_path: Path) -> None:
+    (tmp_path / "jaunt.toml").write_text(
+        "\n".join(
+            [
+                "version = 1",
+                "",
+                "[agent]",
+                'engine = "codex"',
+                "",
+                "[codex]",
+                'model = "gpt-5.2-codex"',
+                'reasoning_effort = "medium"',
+                'sandbox = "workspace-write"',
+                'features = ["multi_agent", "search"]',
+                "",
+                "[codex.config]",
+                'model_verbosity = "low"',
+                "disable_response_storage = true",
+                "",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    cfg = load_config(root=tmp_path)
+
+    assert cfg.agent.engine == "codex"
+    assert cfg.codex.model == "gpt-5.2-codex"
+    assert cfg.codex.reasoning_effort == "medium"
+    assert cfg.codex.sandbox == "workspace-write"
+    assert cfg.codex.features == ["multi_agent", "search"]
+    assert cfg.codex.config == {
+        "model_verbosity": "low",
+        "disable_response_storage": True,
+    }
+
+
+def test_codex_engine_defaults_load(tmp_path: Path) -> None:
+    (tmp_path / "jaunt.toml").write_text(
+        "\n".join(["version = 1", "", "[agent]", 'engine = "codex"', ""]) + "\n",
+        encoding="utf-8",
+    )
+
+    cfg = load_config(root=tmp_path)
+
+    assert cfg.agent.engine == "codex"
+    assert cfg.codex.model == ""
+    assert cfg.codex.reasoning_effort == "high"
+    assert cfg.codex.sandbox == "workspace-write"
+    assert cfg.codex.features == []
+    assert cfg.codex.config == {}
+
+
 def test_invalid_toml_raises(tmp_path: Path) -> None:
     p = tmp_path / "jaunt.toml"
     p.write_text("version = \n", encoding="utf-8")

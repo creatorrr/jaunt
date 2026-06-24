@@ -526,6 +526,11 @@ def _discover_static_targeted_test_entries(*, root: Path, cfg: JauntConfig) -> l
 
 
 def _build_backend(cfg: JauntConfig):
+    if cfg.agent.engine == "codex":
+        from jaunt.generate.codex_backend import CodexBackend
+
+        return CodexBackend(cfg.codex, cfg.llm, cfg.prompts, pool_size=cfg.build.jobs)
+
     if cfg.agent.engine == "aider":
         from jaunt.generate.aider_backend import AiderGeneratorBackend
 

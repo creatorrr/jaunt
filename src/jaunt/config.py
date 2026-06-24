@@ -35,7 +35,7 @@ class LLMConfig:
 
 
 _VALID_ASYNC_RUNNERS = ("asyncio", "anyio")
-_VALID_AGENT_ENGINES = ("legacy", "aider")
+_VALID_AGENT_ENGINES = ("legacy", "aider", "codex")
 _VALID_AIDER_MODES = ("architect", "code")
 _VALID_DERIVE = ("examples", "errors")
 
@@ -84,6 +84,15 @@ class AiderConfig:
 
 
 @dataclass(frozen=True)
+class CodexConfig:
+    model: str = ""
+    reasoning_effort: str = "high"
+    sandbox: str = "workspace-write"
+    features: list[str] = field(default_factory=list)
+    config: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class ContractConfig:
     battery_dir: str = "tests/contract"
     derive: list[str] = field(default_factory=lambda: ["examples", "errors"])
@@ -100,6 +109,7 @@ class JauntConfig:
     prompts: PromptsConfig
     agent: AgentConfig = field(default_factory=AgentConfig)
     aider: AiderConfig = field(default_factory=AiderConfig)
+    codex: CodexConfig = field(default_factory=CodexConfig)
     contract: ContractConfig = field(default_factory=ContractConfig)
 
 
@@ -209,6 +219,7 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     prompts_tbl = _as_table(data.get("prompts"), name="prompts")
     agent_tbl = _as_table(data.get("agent"), name="agent")
     aider_tbl = _as_table(data.get("aider"), name="aider")
+    codex_tbl = _as_table(data.get("codex"), name="codex")
     contract_tbl = _as_table(data.get("contract"), name="contract")
 
     if "source_roots" in paths_tbl:
@@ -378,6 +389,33 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     else:
         aider_save_traces = False
 
+    if "model" in codex_tbl:
+        codex_model = _as_str(codex_tbl["model"], name="codex.model")
+    else:
+        codex_model = ""
+
+    if "reasoning_effort" in codex_tbl:
+        codex_reasoning_effort = _as_str(
+            codex_tbl["reasoning_effort"], name="codex.reasoning_effort"
+        ).strip()
+    else:
+        codex_reasoning_effort = "high"
+
+    if "sandbox" in codex_tbl:
+        codex_sandbox = _as_str(codex_tbl["sandbox"], name="codex.sandbox").strip()
+    else:
+        codex_sandbox = "workspace-write"
+
+    if "features" in codex_tbl:
+        codex_features = _as_str_list(codex_tbl["features"], name="codex.features")
+    else:
+        codex_features = []
+
+    if "config" in codex_tbl:
+        codex_config = _as_table(codex_tbl["config"], name="codex.config")
+    else:
+        codex_config = {}
+
     if "battery_dir" in contract_tbl:
         contract_battery_dir = _as_str(contract_tbl["battery_dir"], name="contract.battery_dir")
     else:
@@ -483,6 +521,13 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             editor_model=aider_editor_model,
             map_tokens=aider_map_tokens,
             save_traces=aider_save_traces,
+        ),
+        codex=CodexConfig(
+            model=codex_model,
+            reasoning_effort=codex_reasoning_effort,
+            sandbox=codex_sandbox,
+            features=codex_features,
+            config=codex_config,
         ),
         contract=ContractConfig(
             battery_dir=contract_battery_dir,
