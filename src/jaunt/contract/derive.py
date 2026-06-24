@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import ast
 import builtins
+import json
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from jaunt.contract.battery import DerivedRegion
+from jaunt.generate.shared import strip_markdown_fences
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +101,35 @@ def _parse_raises(docstring: str) -> tuple[RaisesRow, ...]:
 
 def extract_blocks_structured(docstring: str) -> ContractBlocks:
     return ContractBlocks(examples=_parse_examples(docstring), raises=_parse_raises(docstring))
+
+
+async def extract_blocks_via_model(
+    prose: str,
+    *,
+    complete: Callable[[str, str], Awaitable[str]],
+    func_name: str = "f",
+) -> ContractBlocks:
+    from jaunt.generate.shared import load_prompt, render_template
+
+    system = load_prompt("contract_derive_system.md", None)
+    user = render_template(
+        load_prompt("contract_derive_user.md", None),
+        {"func_name": func_name, "prose": prose},
+    )
+    raw = await complete(system, user)
+    payload = json.loads(strip_markdown_fences(raw))
+
+    examples = tuple(
+        ExampleRow(str(row["input"]), str(row["expected"]))
+        for row in payload.get("examples", [])
+        if "input" in row and "expected" in row
+    )
+    raises = tuple(
+        RaisesRow(str(row["input"]), str(row["exc"]))
+        for row in payload.get("raises", [])
+        if "input" in row and "exc" in row
+    )
+    return ContractBlocks(examples=examples, raises=raises)
 
 
 def _render_examples_region(rows: tuple[ExampleRow, ...], func_name: str) -> DerivedRegion:

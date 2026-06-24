@@ -203,6 +203,14 @@ class CerebrasBackend(GeneratorBackend):
 
         raise last_exc  # type: ignore[misc]
 
+    async def complete_text(self, *, system: str, user: str) -> str:
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        content, _usage = await self._call_cerebras(messages)
+        return content
+
     def _render_messages(
         self, ctx: ModuleSpecContext, *, extra_error_context: list[str] | None
     ) -> list[dict[str, str]]:

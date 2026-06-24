@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from jaunt.contract.battery import parse_battery
+from jaunt.contract.derive import ContractBlocks
 from jaunt.contract.drift import DriftState, compute_drift_state
 from jaunt.digest import contract_digests
 from jaunt.registry import SpecEntry
@@ -126,6 +127,7 @@ def reconcile_entry(
     *,
     module_namespace: dict[str, object],
     tool_version: str,
+    model_extract: Callable[[str], ContractBlocks] | None = None,
 ) -> ReconcileResult:
     from jaunt.contract.derive import (
         derive_regions,
@@ -141,6 +143,8 @@ def reconcile_entry(
     node = load_function_node(entry.source_file, entry.qualname)
     docstring = _docstring_of(node)
     blocks = extract_blocks_structured(docstring)
+    if blocks.is_empty() and model_extract is not None and docstring.strip():
+        blocks = model_extract(docstring)
 
     fn = module_namespace.get(entry.qualname)
     if not callable(fn):

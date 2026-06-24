@@ -90,6 +90,14 @@ class GeneratorBackend(ABC):
     ) -> tuple[str, TokenUsage | None]:
         raise NotImplementedError("Interactive generation is not supported by this backend.")
 
+    async def complete_text(self, *, system: str, user: str) -> str:
+        """Single-shot text completion for contract derivation.
+
+        Default: unsupported. Providers override this. Used only by `jaunt reconcile`
+        when docstring prose is unstructured.
+        """
+        raise NotImplementedError("Contract derivation via model is not supported on this backend.")
+
     async def generate_with_retry(
         self,
         ctx: ModuleSpecContext,

@@ -217,6 +217,11 @@ class AnthropicBackend(GeneratorBackend):
 
         raise last_exc  # type: ignore[misc]
 
+    async def complete_text(self, *, system: str, user: str) -> str:
+        messages = [{"role": "user", "content": user}]
+        content, _usage = await self._call_anthropic(system, messages)
+        return content
+
     def _render_messages(
         self, ctx: ModuleSpecContext, *, extra_error_context: list[str] | None
     ) -> tuple[str, list[dict[str, str]]]:

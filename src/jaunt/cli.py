@@ -780,6 +780,20 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
 
         root, cfg = _load_config(args)
         from jaunt.contract import runner
+        from jaunt.contract.derive import extract_blocks_via_model
+        from jaunt.generate.base import GeneratorBackend
+
+        _backend_box: list[GeneratorBackend] = []
+
+        def _model_extract(prose: str):
+            if not _backend_box:
+                _backend_box.append(_build_backend(cfg))
+            backend = _backend_box[0]
+
+            async def _complete(system: str, user: str) -> str:
+                return await backend.complete_text(system=system, user=user)
+
+            return asyncio.run(extract_blocks_via_model(prose, complete=_complete))
 
         specs = _discover_contract_specs(root=root, cfg=cfg)
         target_mods = _iter_target_modules(getattr(args, "target", []) or [])
@@ -798,6 +812,7 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
                     entry,
                     module_namespace=vars(module),
                     tool_version=__version__,
+                    model_extract=_model_extract,
                 )
             )
 
