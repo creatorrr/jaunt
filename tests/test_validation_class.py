@@ -25,6 +25,22 @@ def test_passes_when_structure_matches() -> None:
     assert validate_build_class_source(src, **BASE_KW) == []
 
 
+def test_multiline_docstring_retained_modulo_whitespace_reflow() -> None:
+    # docstring-only spec docstrings are multi-line; the LLM commonly reflows the
+    # internal whitespace. Retention must be whitespace-tolerant (see Inventory in
+    # examples/06_whole_class surfacing this end-to-end).
+    spec_doc = "An item store. Supports add(item, qty),\n    remove(item, qty), and total()."
+    generated = (
+        'class C:\n'
+        '    """An item store. Supports add(item, qty), remove(item, qty), and total().\n\n'
+        '    Quantities never go below zero.\n'
+        '    """\n'
+        '    def do(self):\n        return 1\n'
+    )
+    kw = _kw(spec_docstring=spec_doc)
+    assert validate_build_class_source(generated, **kw) == []
+
+
 def test_fails_when_stub_method_missing() -> None:
     src = 'class C:\n    "A class."\n    def other(self):\n        return 1\n'
     errs = validate_build_class_source(src, **BASE_KW)

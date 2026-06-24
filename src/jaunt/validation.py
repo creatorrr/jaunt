@@ -488,15 +488,21 @@ def validate_build_class_source(
                 f"{class_name}: preserved method {name!r} was modified; it must be kept verbatim."
             )
 
-    # Docstring retained (additions allowed).
+    # Docstring retained (additions allowed). Compare with whitespace normalized so
+    # an LLM reflowing a multi-line docstring's internal spacing is not a failure.
     if spec_docstring:
         actual_doc = ast.get_docstring(cls, clean=True) or ""
-        if spec_docstring.strip() not in actual_doc:
+        if _normalize_whitespace(spec_docstring) not in _normalize_whitespace(actual_doc):
             errors.append(
                 f"{class_name}: the spec docstring must be retained (additions are allowed)."
             )
 
     return errors
+
+
+def _normalize_whitespace(text: str) -> str:
+    """Collapse all runs of whitespace to single spaces for tolerant comparison."""
+    return " ".join(text.split())
 
 
 def class_build_warnings(
