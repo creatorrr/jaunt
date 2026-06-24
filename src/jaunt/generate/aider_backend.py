@@ -86,6 +86,7 @@ def _render_prompt_sections(
         "deps_generated_block": fmt_kv_block(deps_generated_items),
         "decorator_apis_block": fmt_kv_block(decorator_api_items),
         "module_contract_block": ctx.module_contract_block or "(none)\n",
+        "base_contract_block": ctx.base_contract_block or "(none)\n",
         "blueprint_source_block": ctx.blueprint_source or "(none)\n",
         "build_instructions_block": ctx.build_instructions_block or "(none)\n",
         "attached_test_specs_block": ctx.attached_test_specs_block or "(none)\n",

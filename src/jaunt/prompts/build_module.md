@@ -11,13 +11,23 @@ How to read the specs above:
 - The function/class signature is the exact API you must implement (same name, parameters, type hints, return type).
 - The docstring is your specification — implement the behavior, rules, edge cases, and error handling it describes.
 - If a spec includes a `# Decorator prompt` section, treat it as additional user-provided instructions that supplement the docstring.
-- If a spec shows a class with method stubs (methods decorated with `@magic`), generate the entire class with those methods implemented. Preserve non-magic methods, class-level attributes, `@classmethod`, `@staticmethod`, and `@abstractmethod` decorators as shown in the spec.
+- If a spec shows a class decorated with `@magic` (whole-class mode), generate the COMPLETE class:
+  - Implement every method whose body is a stub (only a docstring, `...`, `pass`, or `raise NotImplementedError`).
+  - Keep every other method, class attribute, base class, and class decorator EXACTLY as shown (verbatim) — including any method marked `@jaunt.preserve`, which you must emit WITHOUT the `@jaunt.preserve` decorator.
+  - You may add private helper methods and shared state as needed.
+  - Retain the class docstring's content (you may append notes).
+  - Honor the inheritance contract in "Base class contract" below: implement all inherited abstractmethods and make overrides consistent with their base signatures.
+  - If the class body is only a docstring (docstring-only mode), design the full public API the docstring implies.
+- If a spec shows a class with per-method `@magic` stubs, generate the entire class with those methods implemented (legacy per-method mode), preserving non-magic members and decorators.
 
 Dependency APIs (callable signatures/docstrings):
 {{deps_api_block}}
 
 Decorator Dependency APIs (reference only):
 {{decorator_apis_block}}
+
+Base class contract (inherited/overridable methods and required abstractmethods):
+{{base_contract_block}}
 
 How to use dependencies:
 - Each Dependency API entry key is like `<module>:<qualname>`. Import the name from `<module>`.

@@ -26,6 +26,7 @@ class ModuleSpecContext:
     decorator_apis: dict[SpecRef, str] = field(default_factory=dict)
     skills_block: str = ""
     module_contract_block: str = ""
+    base_contract_block: str = ""
     blueprint_source: str = ""
     build_instructions_block: str = ""
     attached_test_specs_block: str = ""

@@ -26,6 +26,7 @@ from jaunt import paths
 from jaunt.agent_docs import ensure_agent_docs
 from jaunt.cache import CacheEntry, ResponseCache, cache_key_from_context
 from jaunt.cost import CostTracker
+from jaunt.decorator_analysis import _is_magic_decorator
 from jaunt.digest import extract_source_segment, module_digest
 from jaunt.errors import JauntDependencyCycleError, JauntGenerationError
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
@@ -43,7 +44,12 @@ from jaunt.module_contract import (
 )
 from jaunt.registry import SpecEntry
 from jaunt.spec_ref import SpecRef
-from jaunt.validation import validate_build_contract_only, validate_build_generated_source
+from jaunt.validation import (
+    class_build_warnings,
+    validate_build_class_source,
+    validate_build_contract_only,
+    validate_build_generated_source,
+)
 
 _TY_CHECK_TIMEOUT_S = 20.0
 
@@ -261,12 +267,98 @@ class _GeneratedComponent:
 @dataclass(frozen=True, slots=True)
 class BuildModuleContextArtifacts:
     module_contract_block: str
+    base_contract_block: str
     blueprint_source: str
     build_instructions_block: str
     attached_test_specs_block: str
     package_context_block: str
     handwritten_names: tuple[str, ...]
     digest: str
+
+
+def _whole_class_specs(entries: list[SpecEntry]) -> dict[str, SpecEntry]:
+    """Map class name -> SpecEntry for whole-class @magic specs (obj is a type, no dot)."""
+    out: dict[str, SpecEntry] = {}
+    for e in entries:
+        if e.class_name is None and "." not in e.qualname and isinstance(e.obj, type):
+            out[e.qualname] = e
+    return out
+
+
+def _class_validation_inputs(entry: SpecEntry) -> dict[str, object]:
+    import ast as _ast
+
+    from jaunt.class_analysis import is_preserve_decorator, resolve_base_contract
+    from jaunt.class_analysis import split_class_members
+    from jaunt.digest import extract_source_segment
+
+    seg = extract_source_segment(entry)
+    cls_node = _ast.parse(seg).body[0]
+    assert isinstance(cls_node, _ast.ClassDef)
+    split = split_class_members(cls_node)
+    methods = {
+        n.name: n
+        for n in cls_node.body
+        if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+    }
+    preserved_segments: dict[str, str] = {}
+    for name in split.preserved:
+        node = methods[name]
+        # Strip @jaunt.preserve before storing for comparison.
+        clone = _ast.parse(_ast.unparse(node)).body[0]
+        assert isinstance(clone, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+        clone.decorator_list = [d for d in clone.decorator_list if not is_preserve_decorator(d)]
+        preserved_segments[name] = _ast.unparse(clone)
+    contract = resolve_base_contract(entry.obj)  # type: ignore[arg-type]
+    return {
+        "class_name": entry.qualname,
+        "stub_methods": list(split.stubs),
+        "preserved_segments": preserved_segments,
+        "declared_bases": [_ast.unparse(b) for b in cls_node.bases],
+        "class_decorators": [
+            _ast.unparse(d) for d in cls_node.decorator_list if not _is_magic_decorator(d)
+        ],
+        "required_abstractmethods": list(contract.required_abstractmethods),
+        "spec_docstring": _ast.get_docstring(cls_node, clean=True) or "",
+    }
+
+
+def _class_warning_inputs(entry: SpecEntry) -> dict[str, object]:
+    import ast as _ast
+
+    from jaunt.class_analysis import split_class_members
+    from jaunt.digest import extract_source_segment
+
+    seg = extract_source_segment(entry)
+    cls_node = _ast.parse(seg).body[0]
+    assert isinstance(cls_node, _ast.ClassDef)
+    split = split_class_members(cls_node)
+    methods = {
+        n.name: n
+        for n in cls_node.body
+        if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+    }
+    stub_signatures: dict[str, list[str]] = {}
+    for name in split.stubs:
+        node = methods[name]
+        stub_signatures[name] = [
+            *(arg.arg for arg in node.args.posonlyargs),
+            *(arg.arg for arg in node.args.args),
+            *(arg.arg for arg in node.args.kwonlyargs),
+        ]
+    return {
+        "class_name": entry.qualname,
+        "stub_signatures": stub_signatures,
+    }
+
+
+def _base_contract_block(entries: list[SpecEntry]) -> str:
+    from jaunt.class_analysis import resolve_base_contract
+
+    blocks: list[str] = []
+    for entry in _whole_class_specs(entries).values():
+        blocks.append(resolve_base_contract(entry.obj).block)  # type: ignore[arg-type]
+    return "\n\n".join(blocks)
 
 
 def build_module_context_artifacts(
@@ -281,7 +373,10 @@ def build_module_context_artifacts(
     generated_dir: str,
     build_instructions: Sequence[str] | None = None,
     targeted_test_entries: dict[str, list[SpecEntry]] | None = None,
+    base_contract_block: str | None = None,
 ) -> BuildModuleContextArtifacts:
+    if base_contract_block is None:
+        base_contract_block = _base_contract_block(entries)
     module_contract = build_module_contract(
         entries=entries,
         expected_names=expected_names,
@@ -309,9 +404,11 @@ def build_module_context_artifacts(
         build_instructions_block=build_instructions_block,
         attached_test_specs_block=attached_test_specs_block,
         package_context_block=package_context_block,
+        base_contract_block=base_contract_block,
     )
     return BuildModuleContextArtifacts(
         module_contract_block=module_contract.prompt_block,
+        base_contract_block=base_contract_block,
         blueprint_source=blueprint_source,
         build_instructions_block=build_instructions_block,
         attached_test_specs_block=attached_test_specs_block,
@@ -328,10 +425,12 @@ def _build_context_digest(
     build_instructions_block: str,
     attached_test_specs_block: str,
     package_context_block: str,
+    base_contract_block: str,
 ) -> str:
     h = hashlib.sha256()
     for block in (
         module_contract_block,
+        base_contract_block,
         blueprint_source,
         build_instructions_block,
         attached_test_specs_block,
@@ -1142,6 +1241,7 @@ async def run_build(
                 if lines:
                     decorator_apis[entry.spec_ref] = "\n".join(lines)
 
+            base_contract_block = _base_contract_block(component_entries)
             component_contract = build_module_context_artifacts(
                 module_name=module_name,
                 entries=entries,
@@ -1153,6 +1253,7 @@ async def run_build(
                 generated_dir=generated_dir,
                 build_instructions=build_instructions,
                 targeted_test_entries=targeted_test_entries,
+                base_contract_block=base_contract_block,
             )
             ctx = ModuleSpecContext(
                 kind="build",
@@ -1168,6 +1269,7 @@ async def run_build(
                 decorator_apis=decorator_apis,
                 skills_block=skills_block,
                 module_contract_block=component_contract.module_contract_block,
+                base_contract_block=component_contract.base_contract_block,
                 blueprint_source=component_contract.blueprint_source,
                 build_instructions_block=component_contract.build_instructions_block,
                 attached_test_specs_block=component_contract.attached_test_specs_block,
@@ -1179,6 +1281,7 @@ async def run_build(
 
         def _make_validators(
             *,
+            component_entries: list[SpecEntry],
             component_expected: list[str],
             handwritten_names: tuple[str, ...],
         ) -> tuple[Callable[[str], list[str]], Callable[[str], list[str]]]:
@@ -1191,6 +1294,12 @@ async def run_build(
                 )
                 if errs:
                     return errs
+                whole = _whole_class_specs(component_entries)
+                for entry in whole.values():
+                    kw = _class_validation_inputs(entry)
+                    class_errs = validate_build_class_source(source, **kw)  # type: ignore[arg-type]
+                    if class_errs:
+                        return class_errs
                 if ty_validator is None:
                     return []
                 return ty_validator(source)
@@ -1221,6 +1330,7 @@ async def run_build(
             generated_dir=generated_dir,
             build_instructions=build_instructions,
             targeted_test_entries=targeted_test_entries,
+            base_contract_block=_base_contract_block(entries),
         )
         handwritten_names = module_contract.handwritten_names
 
@@ -1233,6 +1343,12 @@ async def run_build(
             )
             if errs:
                 return errs
+            whole = _whole_class_specs(entries)
+            for entry in whole.values():
+                kw = _class_validation_inputs(entry)
+                class_errs = validate_build_class_source(source, **kw)  # type: ignore[arg-type]
+                if class_errs:
+                    return class_errs
             if ty_validator is None:
                 return []
             return ty_validator(source)
@@ -1257,6 +1373,7 @@ async def run_build(
                 except ValueError as exc:
                     return False, None, [str(exc)]
                 validate_candidate, retry_validator = _make_validators(
+                    component_entries=component_entries,
                     component_expected=list(component_expected),
                     handwritten_names=handwritten_names,
                 )
@@ -1298,6 +1415,7 @@ async def run_build(
         if result_source is None:
             ctx, _component_expected, handwritten_names = _component_payload(entries)
             validate_candidate, retry_validator = _make_validators(
+                component_entries=entries,
                 component_expected=expected,
                 handwritten_names=handwritten_names,
             )
@@ -1312,6 +1430,11 @@ async def run_build(
                     return False, [*split_errors, *errs]
                 return False, errs
             result_source = source
+
+        for entry in _whole_class_specs(entries).values():
+            kw = _class_warning_inputs(entry)
+            for warning in class_build_warnings(result_source, **kw):  # type: ignore[arg-type]
+                _phase(module_name, "warning", warning)
 
         generated_sources[module_name] = result_source
 
