@@ -630,15 +630,15 @@ pytest_args = ["-q"]
 # test_module = ""
 
 [agent]
-engine = "aider"
+engine = "codex"
 
-[aider]
-build_mode = "architect"
-test_mode = "code"
-skill_mode = "code"
-editor_model = ""
-map_tokens = 0
-save_traces = false
+[codex]
+model = "gpt-5.2"
+reasoning_effort = "high"
+sandbox = "workspace-write"
+# features = []
+# Raw passthrough to `codex` (advanced):
+# [codex.config]
 """
 
 
@@ -1761,91 +1761,11 @@ def cmd_test(args: argparse.Namespace) -> int:
 
 def cmd_eval(args: argparse.Namespace) -> int:
     json_mode = _is_json_mode(args)
-    try:
-        root, cfg = _load_config(args)
-        _maybe_load_dotenv(root)
-
-        from jaunt import eval as jaunt_eval
-
-        compare_values = [v for group in list(args.compare or []) for v in group]
-        targets = jaunt_eval.resolve_eval_targets(
-            compare_values=compare_values,
-            provider_override=getattr(args, "provider", None),
-            model_override=getattr(args, "model", None),
-            config_provider=cfg.llm.provider,
-            config_model=cfg.llm.model,
-        )
-        suite_name = getattr(args, "suite", "codegen")
-        if suite_name == "agent":
-            agent_cases = jaunt_eval.load_agent_cases(list(args.case or []))
-            out_root = Path(args.out).resolve() if args.out else (root / ".jaunt" / "evals")
-            run_dir = jaunt_eval.make_run_dir(out_root)
-
-            if len(targets) == 1:
-                suite = jaunt_eval.run_agent_eval_suite(target=targets[0], cases=agent_cases)
-                jaunt_eval.write_agent_single_target_results(suite=suite, run_dir=run_dir)
-
-                if json_mode:
-                    _emit_json(jaunt_eval.agent_suite_to_cli_json(suite=suite, run_dir=run_dir))
-                else:
-                    print(jaunt_eval.format_agent_suite_table(suite))
-                    print(f"\nResults written to: {run_dir}")
-
-                return EXIT_OK if suite.failed == 0 else EXIT_GENERATION_ERROR
-
-            compare = jaunt_eval.run_agent_compare(targets=targets, cases=agent_cases)
-            jaunt_eval.write_agent_compare_results(compare=compare, run_dir=run_dir)
-
-            if json_mode:
-                _emit_json(jaunt_eval.agent_compare_to_cli_json(compare=compare, run_dir=run_dir))
-            else:
-                print(jaunt_eval.format_agent_compare_table(compare))
-                print(f"\nResults written to: {run_dir}")
-
-            return EXIT_OK if compare.ok else EXIT_GENERATION_ERROR
-
-        cases = jaunt_eval.load_cases(list(args.case or []))
-        out_root = Path(args.out).resolve() if args.out else (root / ".jaunt" / "evals")
-        run_dir = jaunt_eval.make_run_dir(out_root)
-
-        if len(targets) == 1:
-            suite = jaunt_eval.run_eval_suite(target=targets[0], cases=cases)
-            jaunt_eval.write_single_target_results(suite=suite, run_dir=run_dir)
-
-            if json_mode:
-                _emit_json(jaunt_eval.suite_to_cli_json(suite=suite, run_dir=run_dir))
-            else:
-                print(jaunt_eval.format_suite_table(suite))
-                print(f"\nResults written to: {run_dir}")
-
-            return EXIT_OK if suite.failed == 0 else EXIT_GENERATION_ERROR
-
-        compare = jaunt_eval.run_compare(targets=targets, cases=cases)
-        jaunt_eval.write_compare_results(compare=compare, run_dir=run_dir)
-
-        if json_mode:
-            _emit_json(jaunt_eval.compare_to_cli_json(compare=compare, run_dir=run_dir))
-        else:
-            print(jaunt_eval.format_compare_table(compare))
-            print(f"\nResults written to: {run_dir}")
-
-        return EXIT_OK if compare.ok else EXIT_GENERATION_ERROR
-    except (
-        JauntConfigError,
-        JauntDiscoveryError,
-        JauntDependencyCycleError,
-        KeyError,
-        ValueError,
-    ) as e:
-        _print_error(e)
-        if json_mode:
-            _emit_json({"command": "eval", "ok": False, "error": str(e)})
-        return EXIT_CONFIG_OR_DISCOVERY
-    except (JauntGenerationError, ImportError, OSError) as e:
-        _print_error(e)
-        if json_mode:
-            _emit_json({"command": "eval", "ok": False, "error": str(e)})
-        return EXIT_GENERATION_ERROR
+    error = "jaunt eval is not supported under the Codex engine (rework pending)."
+    _eprint(f"error: {error}")
+    if json_mode:
+        _emit_json({"command": "eval", "ok": False, "error": error})
+    return EXIT_CONFIG_OR_DISCOVERY
 
 
 def cmd_cache(args: argparse.Namespace) -> int:
