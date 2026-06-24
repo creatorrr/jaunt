@@ -38,7 +38,7 @@ class ContractBlocks:
         return not self.examples and not self.raises
 
 
-_HEADER_RE = re.compile(r"^([A-Za-z][A-Za-z ]*):\s*$")
+_HEADER_RE = re.compile(r"([A-Za-z][A-Za-z ]*):\s*$")
 _EXC_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -50,7 +50,7 @@ def _section_lines(docstring: str, name: str) -> list[str]:
     collecting = False
     for raw in lines:
         line = raw.strip()
-        m = _HEADER_RE.match(line)
+        m = _HEADER_RE.search(line)
         if m:
             collecting = m.group(1).strip().lower() == name.lower()
             continue

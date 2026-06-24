@@ -8,6 +8,17 @@ from collections.abc import Iterator
 
 from jaunt.contract.derive import ContractBlocks, evaluate_blocks
 
+EJECT_STRENGTH_WARN = 0.5
+
+
+def parse_strength(text: str) -> tuple[int, int]:
+    killed_s, _, applicable_s = text.partition("/")
+    try:
+        return (int(killed_s), int(applicable_s))
+    except ValueError:
+        return (0, 0)
+
+
 _CMP_SWAP: dict[type[ast.cmpop], type[ast.cmpop]] = {
     ast.Lt: ast.LtE,
     ast.LtE: ast.Lt,

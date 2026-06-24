@@ -111,6 +111,30 @@ def parse_battery(source: str) -> ParsedBattery:
     return ParsedBattery(header=header, regions=regions, preserved=preserved)
 
 
+def de_jaunt_battery(source: str, *, provenance: str) -> str:
+    """Turn a jaunt battery into a plain, hand-owned pytest module."""
+
+    # Drop the contract header lines.
+    lines = source.splitlines()
+    body_lines: list[str] = []
+    in_header = lines[:1] == [CONTRACT_BATTERY_MARKER] or lines[:1] == [
+        "# This file is maintained by jaunt (contract mode). Review like any test."
+    ]
+    legacy_marker = "# This file is maintained by jaunt (contract mode). Review like any test."
+    for line in lines:
+        if in_header and (
+            line == CONTRACT_BATTERY_MARKER or line == legacy_marker or line.startswith("# jaunt:")
+        ):
+            continue
+        in_header = False
+        # Drop derived-region markers but keep the code between them.
+        if line.startswith("# >>> jaunt:derived ") or line.startswith("# <<< jaunt:derived "):
+            continue
+        body_lines.append(line)
+    body = "\n".join(body_lines).strip()
+    return f"# {provenance} (ejected from jaunt contract mode; now hand-owned).\n{body}\n"
+
+
 def merge_battery(
     existing: str | None,
     *,

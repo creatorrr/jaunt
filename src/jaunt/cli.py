@@ -193,6 +193,11 @@ def _build_parser() -> argparse.ArgumentParser:
     adopt_p.add_argument("ref", help="Spec ref 'module:func'.")
     _add_common_flags(adopt_p)
 
+    eject_p = subparsers.add_parser("eject", help="Remove contract tracking; leave plain pytest.")
+    eject_p.add_argument("ref", nargs="?", default=None, help="Spec ref 'module:func'.")
+    eject_p.add_argument("--all", action="store_true", help="Eject all contract functions.")
+    _add_common_flags(eject_p)
+
     eval_p = subparsers.add_parser("eval", help="Run built-in eval suite against a real backend.")
     eval_p.add_argument(
         "--root",
@@ -909,6 +914,69 @@ def cmd_adopt(args: argparse.Namespace) -> int:
         _print_error(e)
         if json_mode:
             _emit_json({"command": "adopt", "ok": False, "error": str(e)})
+        return EXIT_CONFIG_OR_DISCOVERY
+
+
+def cmd_eject(args: argparse.Namespace) -> int:
+    json_mode = _is_json_mode(args)
+    try:
+        from jaunt.contract import runner
+        from jaunt.contract.battery import de_jaunt_battery, parse_battery
+        from jaunt.contract.edits import remove_contract_marker
+        from jaunt.contract.strength import EJECT_STRENGTH_WARN, parse_strength
+
+        root, cfg = _load_config(args)
+        specs = _discover_contract_specs(root=root, cfg=cfg)
+
+        if getattr(args, "all", False):
+            targets = list(specs.values())
+        else:
+            ref = args.ref
+            module, sep, func = ref.partition(":")
+            if not sep:
+                module, _, func = ref.rpartition(".")
+            targets = [e for e in specs.values() if e.module == module and e.qualname == func]
+            if not targets:
+                raise JauntDiscoveryError(f"No contract function matches {ref!r}.")
+
+        ejected: list[str] = []
+        warnings: list[str] = []
+        for entry in targets:
+            path = runner.battery_path(root, cfg.contract.battery_dir, entry)
+            if path.is_file():
+                parsed = parse_battery(path.read_text(encoding="utf-8"))
+                strength = (parsed.header or {}).get("strength", "0/0")
+                killed, applicable = parse_strength(strength)
+                if applicable == 0 or killed / applicable < EJECT_STRENGTH_WARN:
+                    warnings.append(
+                        f"{entry.spec_ref}: weak contract (strength {strength}); "
+                        "freezing weak tests."
+                    )
+                path.write_text(
+                    de_jaunt_battery(
+                        path.read_text(encoding="utf-8"),
+                        provenance=f"was {entry.spec_ref}",
+                    ),
+                    encoding="utf-8",
+                )
+            src = Path(entry.source_file).read_text(encoding="utf-8")
+            Path(entry.source_file).write_text(
+                remove_contract_marker(src, entry.qualname), encoding="utf-8"
+            )
+            ejected.append(str(entry.spec_ref))
+
+        if json_mode:
+            _emit_json({"command": "eject", "ok": True, "ejected": ejected, "warnings": warnings})
+        else:
+            for w in warnings:
+                print(f"warning: {w}")
+            for ref in ejected:
+                print(f"Ejected {ref} -> plain Python + plain pytest.")
+        return EXIT_OK
+    except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError) as e:
+        _print_error(e)
+        if json_mode:
+            _emit_json({"command": "eject", "ok": False, "error": str(e)})
         return EXIT_CONFIG_OR_DISCOVERY
 
 
@@ -2275,6 +2343,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_reconcile(args)
     if args.command == "adopt":
         return cmd_adopt(args)
+    if args.command == "eject":
+        return cmd_eject(args)
     if args.command == "eval":
         return cmd_eval(args)
     if args.command == "watch":
