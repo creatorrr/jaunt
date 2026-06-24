@@ -136,3 +136,156 @@ def resolve_base_contract(cls_obj: type) -> BaseContract:
         project_base_refs=tuple(project_refs),
         required_abstractmethods=required,
     )
+
+
+_IMPLEMENT_SENTINEL = "# jaunt:implement"
+
+
+def _is_magic_decorator(dec: ast.expr) -> bool:
+    """True for ``@jaunt.magic``/``@magic`` and their called forms (local copy to keep
+    this module dependency-free)."""
+    target = dec.func if isinstance(dec, ast.Call) else dec
+    if isinstance(target, ast.Attribute):
+        return (
+            isinstance(target.value, ast.Name)
+            and target.value.id == "jaunt"
+            and target.attr == "magic"
+        )
+    if isinstance(target, ast.Name):
+        return target.id == "magic"
+    return False
+
+
+def collect_spec_module_imports(spec_source: str) -> list[str]:
+    """Every top-level import / from-import in the spec module, unparsed, in order.
+
+    Unlike preamble extraction this does not stop at the first decorated def, so an
+    import that only a preserved method or class decorator needs is not dropped.
+    """
+    try:
+        mod = ast.parse(spec_source or "")
+    except SyntaxError:
+        return []
+    out: list[str] = []
+    for node in mod.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            rendered = ast.unparse(node).strip()
+            if rendered:
+                out.append(rendered)
+    return out
+
+
+def _stub_node_with_sentinel(
+    node: ast.FunctionDef | ast.AsyncFunctionDef, class_name: str
+) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    clone = ast.parse(ast.unparse(node)).body[0]
+    assert isinstance(clone, (ast.FunctionDef, ast.AsyncFunctionDef))
+    body: list[ast.stmt] = []
+    doc = ast.get_docstring(node, clean=False)
+    if doc is not None:
+        body.append(ast.Expr(value=ast.Constant(value=doc)))
+    msg = f"jaunt: implement {class_name}.{node.name} per the spec"
+    body.append(ast.parse(f"raise NotImplementedError({msg!r})").body[0])
+    clone.body = body
+    return clone
+
+
+def _attach_sentinels(text: str) -> str:
+    """Re-attach the ``# jaunt:implement`` comment that ``ast.unparse`` drops."""
+    out: list[str] = []
+    for line in text.splitlines():
+        if (
+            "raise NotImplementedError" in line
+            and "jaunt: implement" in line
+            and _IMPLEMENT_SENTINEL not in line
+        ):
+            line = f"{line}  {_IMPLEMENT_SENTINEL}"
+        out.append(line)
+    return "\n".join(out)
+
+
+def build_class_scaffold(class_segment: str) -> str:
+    """Aider seed scaffold for a single whole-class @magic spec (see module docstring)."""
+    cls = ast.parse(class_segment).body[0]
+    assert isinstance(cls, ast.ClassDef)
+    class_name = cls.name
+
+    new_body: list[ast.stmt] = []
+    doc = ast.get_docstring(cls, clean=False)
+    if doc is not None:
+        new_body.append(ast.Expr(value=ast.Constant(value=doc)))
+    for node in cls.body:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            new_body.append(node)
+
+    split = split_class_members(cls)
+    methods = {n.name: n for n in _iter_methods(cls)}
+
+    for name in split.preserved:
+        clone = ast.parse(ast.unparse(methods[name])).body[0]
+        assert isinstance(clone, (ast.FunctionDef, ast.AsyncFunctionDef))
+        clone.decorator_list = [
+            d for d in clone.decorator_list if not is_preserve_decorator(d)
+        ]
+        new_body.append(clone)
+
+    for name in split.stubs:
+        new_body.append(_stub_node_with_sentinel(methods[name], class_name))
+
+    # Emit `pass` only when the class declares no methods (docstring-only / attrs-only),
+    # regardless of a docstring already being present (Codex finding #1).
+    if not split.stubs and not split.preserved:
+        new_body.append(ast.Pass())
+
+    new_cls = ast.ClassDef(
+        name=class_name,
+        bases=cls.bases,
+        keywords=cls.keywords,
+        body=new_body,
+        decorator_list=[d for d in cls.decorator_list if not _is_magic_decorator(d)],
+        type_params=getattr(cls, "type_params", []),
+    )
+    ast.fix_missing_locations(new_cls)
+    return _attach_sentinels(ast.unparse(new_cls)).rstrip() + "\n"
+
+
+def render_whole_class_contract(*, class_segment: str, base_contract_block: str) -> str:
+    cls = ast.parse(class_segment).body[0]
+    assert isinstance(cls, ast.ClassDef)
+    split = split_class_members(cls)
+    mode = classify_class_mode(cls)
+
+    lines = [f"# Whole-class generation contract: {cls.name}", ""]
+    if split.stubs:
+        lines.append(
+            "Replace each `# jaunt:implement` method body with a real implementation "
+            "(remove the sentinel and the NotImplementedError):"
+        )
+        lines.extend(f"- {cls.name}.{name}" for name in split.stubs)
+        lines.append("")
+    if split.preserved:
+        lines.append("Keep these methods EXACTLY as written — do not modify their bodies:")
+        lines.extend(f"- {cls.name}.{name}" for name in split.preserved)
+        lines.append("")
+    if mode == "docstring_only":
+        lines.append(
+            "Design the full public API the class docstring implies; define real public "
+            "methods (an empty class body is invalid)."
+        )
+        lines.append("")
+    block = base_contract_block.strip()
+    if block and block != "(no base classes)":
+        lines.append(
+            "Base-class / abstractmethod contract — implement all inherited "
+            "abstractmethods and keep overrides signature-compatible:"
+        )
+        lines.append(block)
+        lines.append("")
+    lines.extend(
+        [
+            "Retain the class docstring (you may add to it).",
+            "Preserve declared base classes, class decorators, and class attributes verbatim.",
+            "You may add `__init__`, private helpers, and shared state as needed.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
