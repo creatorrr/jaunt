@@ -1208,9 +1208,7 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
         targeted_test_entries = group_test_entries_by_target_module(list(specs.values()))
         if include_target_tests:
             build_targeted_test_entries = {
-                module_name: [
-                    entry for entry in entries if ".__auto__." not in entry.module
-                ]
+                module_name: [entry for entry in entries if ".__auto__." not in entry.module]
                 for module_name, entries in targeted_test_entries.items()
             }
         else:

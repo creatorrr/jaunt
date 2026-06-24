@@ -31,11 +31,11 @@ def test_multiline_docstring_retained_modulo_whitespace_reflow() -> None:
     # examples/06_whole_class surfacing this end-to-end).
     spec_doc = "An item store. Supports add(item, qty),\n    remove(item, qty), and total()."
     generated = (
-        'class C:\n'
+        "class C:\n"
         '    """An item store. Supports add(item, qty), remove(item, qty), and total().\n\n'
-        '    Quantities never go below zero.\n'
+        "    Quantities never go below zero.\n"
         '    """\n'
-        '    def do(self):\n        return 1\n'
+        "    def do(self):\n        return 1\n"
     )
     kw = _kw(spec_docstring=spec_doc)
     assert validate_build_class_source(generated, **kw) == []

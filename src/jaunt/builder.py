@@ -297,9 +297,7 @@ def _class_validation_inputs(entry: SpecEntry) -> dict[str, object]:
     assert isinstance(cls_node, _ast.ClassDef)
     split = split_class_members(cls_node)
     methods = {
-        n.name: n
-        for n in cls_node.body
-        if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+        n.name: n for n in cls_node.body if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))
     }
     preserved_segments: dict[str, str] = {}
     for name in split.preserved:
@@ -334,9 +332,7 @@ def _class_warning_inputs(entry: SpecEntry) -> dict[str, object]:
     assert isinstance(cls_node, _ast.ClassDef)
     split = split_class_members(cls_node)
     methods = {
-        n.name: n
-        for n in cls_node.body
-        if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+        n.name: n for n in cls_node.body if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))
     }
     stub_signatures: dict[str, list[str]] = {}
     for name in split.stubs:

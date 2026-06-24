@@ -44,19 +44,28 @@ def test_opt_in_via_kwarg() -> None:
 
 def test_default_on_applies_when_kwarg_absent() -> None:
     specs = {e.spec_ref: e for e in [_magic_class("pkg.mod", "Cart", test=None)]}
-    assert synthesize_auto_class_test_entries(
-        specs, default_on=False, tests_package="tests", generated_dir="__generated__"
-    ) == {}
-    assert synthesize_auto_class_test_entries(
-        specs, default_on=True, tests_package="tests", generated_dir="__generated__"
-    ) != {}
+    assert (
+        synthesize_auto_class_test_entries(
+            specs, default_on=False, tests_package="tests", generated_dir="__generated__"
+        )
+        == {}
+    )
+    assert (
+        synthesize_auto_class_test_entries(
+            specs, default_on=True, tests_package="tests", generated_dir="__generated__"
+        )
+        != {}
+    )
 
 
 def test_kwarg_false_overrides_default_on() -> None:
     specs = {e.spec_ref: e for e in [_magic_class("pkg.mod", "Cart", test=False)]}
-    assert synthesize_auto_class_test_entries(
-        specs, default_on=True, tests_package="tests", generated_dir="__generated__"
-    ) == {}
+    assert (
+        synthesize_auto_class_test_entries(
+            specs, default_on=True, tests_package="tests", generated_dir="__generated__"
+        )
+        == {}
+    )
 
 
 def test_target_api_digest_change_marks_stale(tmp_path: Path) -> None:

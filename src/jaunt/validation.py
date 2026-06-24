@@ -415,11 +415,7 @@ def _find_class(mod: ast.Module, class_name: str) -> ast.ClassDef | None:
 
 
 def _method_nodes(cls: ast.ClassDef) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
-    return {
-        n.name: n
-        for n in cls.body
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
+    return {n.name: n for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
 
 
 def _normalized_ast_dump(src_or_node: str | ast.AST) -> str:
@@ -473,9 +469,7 @@ def validate_build_class_source(
     # Abstractmethods: each required name must be defined on the generated class.
     for name in required_abstractmethods:
         if name not in methods:
-            errors.append(
-                f"{class_name}: inherited abstractmethod {name!r} is not implemented."
-            )
+            errors.append(f"{class_name}: inherited abstractmethod {name!r} is not implemented.")
 
     # Preserved-intact: AST-equivalence (decorators stripped).
     for name, spec_seg in preserved_segments.items():
