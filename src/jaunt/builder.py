@@ -288,7 +288,11 @@ def _whole_class_specs(entries: list[SpecEntry]) -> dict[str, SpecEntry]:
 def _class_validation_inputs(entry: SpecEntry) -> dict[str, object]:
     import ast as _ast
 
-    from jaunt.class_analysis import is_preserve_decorator, resolve_base_contract
+    from jaunt.class_analysis import (
+        classify_class_mode,
+        is_preserve_decorator,
+        resolve_base_contract,
+    )
     from jaunt.class_analysis import split_class_members
     from jaunt.digest import extract_source_segment
 
@@ -299,6 +303,15 @@ def _class_validation_inputs(entry: SpecEntry) -> dict[str, object]:
     methods = {
         n.name: n for n in cls_node.body if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))
     }
+    class_attributes: dict[str, str] = {}
+    for node in cls_node.body:
+        if isinstance(node, _ast.Assign):
+            rendered = _ast.unparse(node)
+            for t in node.targets:
+                if isinstance(t, _ast.Name):
+                    class_attributes[t.id] = rendered
+        elif isinstance(node, _ast.AnnAssign) and isinstance(node.target, _ast.Name):
+            class_attributes[node.target.id] = _ast.unparse(node)
     preserved_segments: dict[str, str] = {}
     for name in split.preserved:
         node = methods[name]
@@ -318,6 +331,8 @@ def _class_validation_inputs(entry: SpecEntry) -> dict[str, object]:
         ],
         "required_abstractmethods": list(contract.required_abstractmethods),
         "spec_docstring": _ast.get_docstring(cls_node, clean=True) or "",
+        "class_attributes": class_attributes,
+        "require_public_method": classify_class_mode(cls_node) == "docstring_only",
     }
 
 
@@ -1251,6 +1266,34 @@ async def run_build(
                 targeted_test_entries=targeted_test_entries,
                 base_contract_block=base_contract_block,
             )
+            whole = _whole_class_specs(component_entries)
+            seed_target_content = ""
+            whole_class_contract_block = ""
+            if whole:
+                from jaunt.class_analysis import (
+                    build_class_scaffold,
+                    collect_spec_module_imports,
+                    render_whole_class_contract,
+                    resolve_base_contract,
+                )
+
+                spec_src = Path(component_entries[0].source_file).read_text(encoding="utf-8")
+                imports = collect_spec_module_imports(spec_src)
+                scaffolds = [
+                    build_class_scaffold(extract_source_segment(e)) for e in whole.values()
+                ]
+                seed_parts: list[str] = []
+                if imports:
+                    seed_parts.append("\n".join(imports))
+                seed_parts.extend(scaffolds)
+                seed_target_content = "\n\n\n".join(seed_parts).rstrip() + "\n"
+                whole_class_contract_block = "\n\n".join(
+                    render_whole_class_contract(
+                        class_segment=extract_source_segment(e),
+                        base_contract_block=resolve_base_contract(e.obj).block,  # type: ignore[arg-type]
+                    )
+                    for e in whole.values()
+                )
             ctx = ModuleSpecContext(
                 kind="build",
                 spec_module=module_name,
@@ -1272,6 +1315,9 @@ async def run_build(
                 package_context_block=component_contract.package_context_block,
                 module_context_digest=component_contract.digest,
                 async_runner=async_runner,
+                seed_target_content=seed_target_content,
+                whole_class_contract_block=whole_class_contract_block,
+                whole_class=bool(whole),
             )
             return ctx, tuple(component_expected), component_contract.handwritten_names
 
@@ -1309,6 +1355,12 @@ async def run_build(
                 )
                 if errs:
                     return errs
+                whole = _whole_class_specs(component_entries)
+                for entry in whole.values():
+                    kw = _class_validation_inputs(entry)
+                    class_errs = validate_build_class_source(source, **kw)  # type: ignore[arg-type]
+                    if class_errs:
+                        return class_errs
                 if ty_validator is None:
                     return []
                 return ty_validator(source)

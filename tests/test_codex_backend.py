@@ -70,6 +70,44 @@ def test_generate_module_returns_written_source_and_writes_seed(monkeypatch) -> 
     asyncio.run(run())
 
 
+def test_generate_module_writes_whole_class_contract_file(monkeypatch) -> None:
+    async def run() -> None:
+        backend = _backend()
+        seen: dict[str, object] = {}
+        session = SimpleNamespace()
+
+        async def call_tool(name, args):
+            root = Path(args["cwd"])
+            seen["seed"] = (root / "pkg/__generated__/thing.py").read_text(encoding="utf-8")
+            seen["contract"] = (root / "_context/whole_class_contract.md").read_text(
+                encoding="utf-8"
+            )
+            seen["prompt"] = args["prompt"]
+            (root / "pkg/__generated__/thing.py").write_text(
+                "def alpha():\n    return 1\n\ndef beta():\n    return 2\n",
+                encoding="utf-8",
+            )
+            return SimpleNamespace(structuredContent={})
+
+        session.call_tool = AsyncMock(side_effect=call_tool)
+        monkeypatch.setattr(backend, "_spawn_slot", AsyncMock(return_value=session))
+
+        await backend.generate_module(
+            _ctx(
+                seed_target_content="class Stack:\n    ...\n",
+                whole_class_contract_block="# contract\nfill Stack.push\n",
+            )
+        )
+
+        assert seen["seed"] == "class Stack:\n    ...\n"
+        assert seen["contract"] == "# contract\nfill Stack.push\n"
+        prompt = seen["prompt"]
+        assert isinstance(prompt, str)
+        assert "_context/whole_class_contract.md" in prompt
+
+    asyncio.run(run())
+
+
 def test_generate_module_prompt_assembly(monkeypatch) -> None:
     async def run() -> None:
         backend = _backend()
