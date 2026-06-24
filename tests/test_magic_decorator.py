@@ -556,3 +556,35 @@ def test_magic_test_kwarg_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
     ref = normalize_spec_ref(f"{AutoTestClass.__module__}:{AutoTestClass.__qualname__}")
     entry = get_magic_registry()[ref]
     assert entry.decorator_kwargs.get("test") is True
+
+
+def test_whole_class_records_project_base_dep(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def _import(_name: str) -> Any:
+        raise ModuleNotFoundError(_name)
+
+    monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+    clear_registries()
+    module_name = "tmp_whole_class_base_dep"
+    src = '''
+    import jaunt
+
+    @jaunt.magic()
+    class Base:
+        """base spec"""
+
+    @jaunt.magic()
+    class Child(Base):
+        """child spec"""
+    '''
+
+    try:
+        _import_module_from_source(tmp_path, module_name, src)
+        child_ref = normalize_spec_ref(f"{module_name}:Child")
+        entry = get_magic_registry()[child_ref]
+        dep_strs = {str(d) for d in entry.auto_deps}
+        assert any(d.endswith(":Base") for d in dep_strs)
+    finally:
+        sys.modules.pop(module_name, None)

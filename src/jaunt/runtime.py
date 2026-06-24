@@ -196,6 +196,20 @@ def magic(
             decorated_obj=obj,
         )
 
+        merged_auto_deps = analysis.auto_deps
+        if isinstance(obj, type) and class_name is None:
+            from jaunt.class_analysis import resolve_base_contract
+
+            base_refs: list[SpecRef] = []
+            for ref_str in resolve_base_contract(obj).project_base_refs:
+                try:
+                    base_refs.append(normalize_spec_ref(ref_str))
+                except Exception:
+                    continue
+            if base_refs:
+                merged: set[SpecRef] = set(analysis.auto_deps) | set(base_refs)
+                merged_auto_deps = tuple(sorted(merged, key=lambda ref: str(ref)))
+
         entry = SpecEntry(
             kind="magic",
             spec_ref=spec_ref,
@@ -205,7 +219,7 @@ def magic(
             obj=obj,
             decorator_kwargs=decorator_kwargs,
             class_name=class_name,
-            auto_deps=analysis.auto_deps,
+            auto_deps=merged_auto_deps,
             decorator_api_records=analysis.records,
             effective_signature=analysis.effective_signature,
             effective_signature_source=analysis.effective_signature_source,
