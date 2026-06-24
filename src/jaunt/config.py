@@ -56,6 +56,7 @@ class TestConfig:
     jobs: int
     infer_deps: bool
     pytest_args: list[str]
+    auto_class_tests: bool = False
 
 
 @dataclass(frozen=True)
@@ -307,6 +308,11 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     else:
         pytest_args = ["-q"]
 
+    if "auto_class_tests" in test_tbl:
+        auto_class_tests = _as_bool(test_tbl["auto_class_tests"], name="test.auto_class_tests")
+    else:
+        auto_class_tests = False
+
     if "build_system" in prompts_tbl:
         build_system = _as_str(prompts_tbl["build_system"], name="prompts.build_system")
     else:
@@ -426,7 +432,12 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             include_target_tests=include_target_tests,
             instructions=build_instructions,
         ),
-        test=TestConfig(jobs=test_jobs, infer_deps=test_infer_deps, pytest_args=pytest_args),
+        test=TestConfig(
+            jobs=test_jobs,
+            infer_deps=test_infer_deps,
+            pytest_args=pytest_args,
+            auto_class_tests=auto_class_tests,
+        ),
         prompts=PromptsConfig(
             build_system=build_system,
             build_module=build_module,

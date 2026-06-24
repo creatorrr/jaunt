@@ -293,3 +293,16 @@ def test_validation_aider_map_tokens_must_be_ge_0(tmp_path: Path) -> None:
     )
     with pytest.raises(JauntConfigError, match="aider.map_tokens"):
         load_config(root=tmp_path)
+
+
+def test_auto_class_tests_defaults_false_and_parses(tmp_path) -> None:
+    from jaunt.config import load_config
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "jaunt.toml").write_text("version = 1\n[test]\nauto_class_tests = true\n")
+    cfg = load_config(root=tmp_path)
+    assert cfg.test.auto_class_tests is True
+
+    (tmp_path / "jaunt2.toml").write_text("version = 1\n")
+    cfg2 = load_config(config_path=tmp_path / "jaunt2.toml", root=tmp_path)
+    assert cfg2.test.auto_class_tests is False
