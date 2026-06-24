@@ -33,6 +33,9 @@ class ModuleSpecContext:
     package_context_block: str = ""
     module_context_digest: str = ""
     async_runner: str = "asyncio"
+    seed_target_content: str = ""
+    whole_class_contract_block: str = ""
+    whole_class: bool = False
 
 
 @dataclass(frozen=True, slots=True)

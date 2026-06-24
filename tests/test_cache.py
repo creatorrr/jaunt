@@ -25,6 +25,9 @@ def _make_ctx(**overrides: object) -> ModuleSpecContext:
         attached_test_specs_block=overrides.get("attached_test_specs_block", ""),  # type: ignore[arg-type]
         package_context_block=overrides.get("package_context_block", ""),  # type: ignore[arg-type]
         module_context_digest=overrides.get("module_context_digest", ""),  # type: ignore[arg-type]
+        seed_target_content=overrides.get("seed_target_content", ""),  # type: ignore[arg-type]
+        whole_class_contract_block=overrides.get("whole_class_contract_block", ""),  # type: ignore[arg-type]
+        whole_class=overrides.get("whole_class", False),  # type: ignore[arg-type]
     )
 
 
@@ -202,3 +205,20 @@ def test_cache_corrupt_file_returns_none(tmp_path: Path) -> None:
     path.write_text("not valid json", encoding="utf-8")
     assert rc.get(key) is None
     assert rc.misses == 1
+
+
+def test_cache_key_changes_with_seed_target_content() -> None:
+    a = cache_key_from_context(_make_ctx(), model="m", provider="p")
+    b = cache_key_from_context(
+        _make_ctx(seed_target_content="class C: ..."), model="m", provider="p"
+    )
+    assert a != b
+
+
+def test_cache_key_changes_with_whole_class_flag_and_contract() -> None:
+    base = cache_key_from_context(_make_ctx(), model="m", provider="p")
+    flagged = cache_key_from_context(_make_ctx(whole_class=True), model="m", provider="p")
+    contracted = cache_key_from_context(
+        _make_ctx(whole_class_contract_block="fill push"), model="m", provider="p"
+    )
+    assert len({base, flagged, contracted}) == 3
