@@ -6,8 +6,10 @@ Did he smile his work to see? -- generate tests, then let pytest be the judge.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import heapq
 import importlib.metadata
+import json
 import os
 import subprocess
 import sys
@@ -129,6 +131,83 @@ def _normalize_digest(digest: str | None) -> str | None:
     if digest.startswith("sha256:"):
         return digest.split(":", 1)[1]
     return digest
+
+
+def combine_module_context_digest(
+    base_digest: str | None, target_api_digest: str | None
+) -> str | None:
+    base = _normalize_digest(base_digest)
+    api = _normalize_digest(target_api_digest)
+    if base is None or api is None:
+        return None
+    return hashlib.sha256(f"{base}\n{api}".encode()).hexdigest()
+
+
+def _is_auto_test_module(module_name: str) -> bool:
+    return ".__auto__." in module_name
+
+
+def _auto_test_spec_source(entry: SpecEntry) -> str:
+    raw_targets = entry.decorator_kwargs.get("targets")
+    if isinstance(raw_targets, (list, tuple, set, frozenset)):
+        targets = ", ".join(sorted(str(target) for target in raw_targets))
+    elif raw_targets is None:
+        targets = ""
+    else:
+        targets = str(raw_targets)
+    doc = (
+        f"Auto-generated baseline tests for {targets}."
+        if targets
+        else "Auto-generated baseline tests."
+    )
+    return (
+        f"def {entry.qualname}() -> None:\n"
+        f"    {doc!r}\n"
+        '    raise AssertionError("generated at test time")'
+    )
+
+
+def _test_source_segment(entry: SpecEntry) -> str:
+    if _is_auto_test_module(entry.module):
+        return _auto_test_spec_source(entry)
+    return extract_source_segment(entry)
+
+
+def _auto_entry_payload(
+    entry: SpecEntry, spec_graph: dict[SpecRef, set[SpecRef]]
+) -> dict[str, object]:
+    targets = entry.decorator_kwargs.get("targets")
+    if isinstance(targets, (list, tuple, set, frozenset)):
+        target_refs = sorted(str(target) for target in targets)
+    elif targets is None:
+        target_refs = []
+    else:
+        target_refs = [str(targets)]
+    return {
+        "spec_ref": str(entry.spec_ref),
+        "module": entry.module,
+        "qualname": entry.qualname,
+        "source": _auto_test_spec_source(entry),
+        "targets": target_refs,
+        "public_api_only": bool(entry.decorator_kwargs.get("public_api_only", True)),
+        "deps": sorted(str(dep) for dep in spec_graph.get(entry.spec_ref, set())),
+    }
+
+
+def _test_module_digest(
+    module_name: str,
+    entries: list[SpecEntry],
+    specs: dict[SpecRef, SpecEntry],
+    spec_graph: dict[SpecRef, set[SpecRef]],
+) -> str:
+    if not _is_auto_test_module(module_name):
+        return module_digest(module_name, entries, specs, spec_graph)
+    payload = [
+        _auto_entry_payload(entry, spec_graph)
+        for entry in sorted(entries, key=lambda item: str(item.spec_ref))
+    ]
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=True).encode()
+    return hashlib.sha256(raw).hexdigest()
 
 
 def _resolve_test_roots(
@@ -291,6 +370,7 @@ def detect_stale_test_modules(
     spec_graph: dict[SpecRef, set[SpecRef]],
     generation_fingerprint: str = "",
     module_context_digests: dict[str, str] | None = None,
+    target_api_digests: dict[str, str] | None = None,
     tests_package: str = "tests",
     test_roots: Sequence[Path] | None = None,
     force: bool = False,
@@ -335,7 +415,7 @@ def detect_stale_test_modules(
             continue
 
         on_disk = _normalize_digest(extract_module_digest(existing))
-        computed = _normalize_digest(module_digest(module_name, entries, specs, spec_graph))
+        computed = _normalize_digest(_test_module_digest(module_name, entries, specs, spec_graph))
         if on_disk is None or computed is None or on_disk != computed:
             stale.add(module_name)
             continue
@@ -349,9 +429,16 @@ def detect_stale_test_modules(
             ):
                 stale.add(module_name)
                 continue
-        if module_context_digests is not None:
+        if module_context_digests is not None or target_api_digests is not None:
             on_disk_context = _normalize_digest(extract_module_context_digest(existing))
-            computed_context = _normalize_digest(module_context_digests.get(module_name))
+            computed_context = _normalize_digest(
+                module_context_digests.get(module_name) if module_context_digests else None
+            )
+            if target_api_digests is not None:
+                computed_context = combine_module_context_digest(
+                    computed_context,
+                    target_api_digests.get(module_name),
+                )
             if (
                 on_disk_context is None
                 or computed_context is None
@@ -560,6 +647,7 @@ async def run_test_generation(
     stale_modules: set[str],
     backend: GeneratorBackend,
     generation_fingerprint: str = "",
+    target_api_digests: dict[str, str] | None = None,
     jobs: int = 4,
     progress: object | None = None,
     response_cache: ResponseCache | None = None,
@@ -627,7 +715,7 @@ async def run_test_generation(
         decorator_prompts: dict[SpecRef, str] = {}
         public_api_only_by_name = test_public_api_only_by_name(entries)
         for e in entries:
-            spec_source = extract_source_segment(e)
+            spec_source = _test_source_segment(e)
             if not public_api_only_by_name.get(e.qualname, True):
                 spec_source = (
                     f"{spec_source.rstrip()}\n\n"
@@ -641,6 +729,15 @@ async def run_test_generation(
                 decorator_prompts[e.spec_ref] = p
         target_modules_map = target_modules_by_name(entries)
         module_contract = build_module_contract(entries=entries, expected_names=expected)
+        module_context_digest = module_contract.digest
+        if target_api_digests is not None:
+            module_context_digest = (
+                combine_module_context_digest(
+                    module_context_digest,
+                    target_api_digests.get(module_name),
+                )
+                or module_context_digest
+            )
 
         ctx = ModuleSpecContext(
             kind="test",
@@ -654,7 +751,7 @@ async def run_test_generation(
             dependency_apis=dependency_apis or {},
             dependency_generated_modules={},
             module_contract_block=module_contract.prompt_block,
-            module_context_digest=module_contract.digest,
+            module_context_digest=module_context_digest,
             async_runner=async_runner,
         )
 
@@ -730,14 +827,14 @@ async def run_test_generation(
                 )
                 response_cache.put(ck, entry)
 
-        digest = module_digest(module_name, entries, specs, spec_graph)
+        digest = _test_module_digest(module_name, entries, specs, spec_graph)
         header_fields = {
             "tool_version": _tool_version(),
             "kind": "test",
             "source_module": module_name,
             "module_digest": digest,
             "generation_fingerprint": generation_fingerprint,
-            "module_context_digest": module_contract.digest,
+            "module_context_digest": module_context_digest,
             "spec_refs": [str(e.spec_ref) for e in entries],
         }
 
@@ -874,6 +971,7 @@ async def run_tests(
     stale_modules: set[str] | None = None,
     backend: GeneratorBackend | None = None,
     generation_fingerprint: str = "",
+    target_api_digests: dict[str, str] | None = None,
     jobs: int = 4,
     pytest_args: list[str] | None = None,
     no_generate: bool = False,
@@ -915,6 +1013,7 @@ async def run_tests(
             stale_modules=stale_modules,
             backend=backend,
             generation_fingerprint=generation_fingerprint,
+            target_api_digests=target_api_digests,
             jobs=jobs,
             progress=progress,
             response_cache=response_cache,
@@ -1035,6 +1134,7 @@ async def run_tests(
                 stale_modules=failed_test_modules,
                 backend=backend,
                 generation_fingerprint=generation_fingerprint,
+                target_api_digests=target_api_digests,
                 jobs=jobs,
                 progress=None,
                 response_cache=None,

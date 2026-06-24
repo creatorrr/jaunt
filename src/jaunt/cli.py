@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -1069,10 +1070,19 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             if rc != EXIT_OK:
                 return rc
 
-        from jaunt import discovery, registry
+        from jaunt import discovery, paths, registry
         from jaunt.deps import build_spec_graph, collapse_to_module_dag
-        from jaunt.module_api import build_dependency_api_block
-        from jaunt.module_contract import build_module_contract, group_test_entries_by_target_module
+        from jaunt.module_api import (
+            build_dependency_api_block,
+            build_generated_class_api_summary,
+            generated_public_api_digest,
+        )
+        from jaunt.module_contract import (
+            build_module_contract,
+            group_test_entries_by_target_module,
+            synthesize_auto_class_test_entries,
+            target_refs_by_test_name,
+        )
         from jaunt.spec_ref import SpecRef
 
         # Provide production API reference material (from @jaunt.magic) so
@@ -1101,9 +1111,6 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
                 infer_default=bool(cfg.build.infer_deps) and (not bool(args.no_infer_deps)),
             )
             build_magic_module_dag = collapse_to_module_dag(build_magic_spec_graph)
-            magic_dependency_apis = {
-                ref: build_dependency_api_block(entry) for ref, entry in build_magic_specs.items()
-            }
         else:
             # cmd_build() already imported and registered magic specs.
             build_magic_specs = dict(registry.get_magic_registry())
@@ -1113,13 +1120,62 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
                 infer_default=bool(cfg.build.infer_deps) and (not bool(args.no_infer_deps)),
             )
             build_magic_module_dag = collapse_to_module_dag(build_magic_spec_graph)
-            magic_dependency_apis = {
-                ref: build_dependency_api_block(entry) for ref, entry in build_magic_specs.items()
-            }
+
+        package_dir = next((d for d in source_dirs if d.exists()), root)
+
+        def _is_whole_class_magic(entry: registry.SpecEntry) -> bool:
+            return (
+                entry.class_name is None
+                and "." not in entry.qualname
+                and isinstance(entry.obj, type)
+            )
+
+        def _generated_source_for_magic(entry: registry.SpecEntry) -> str | None:
+            try:
+                generated_module = paths.spec_module_to_generated_module(
+                    entry.module,
+                    generated_dir=cfg.paths.generated_dir,
+                )
+                relpath = paths.generated_module_to_relpath(
+                    generated_module,
+                    generated_dir=cfg.paths.generated_dir,
+                )
+                generated_path = package_dir / relpath
+                if not generated_path.exists():
+                    return None
+                return generated_path.read_text(encoding="utf-8")
+            except Exception:
+                return None
+
+        magic_dependency_apis = {
+            ref: build_dependency_api_block(entry) for ref, entry in build_magic_specs.items()
+        }
+        magic_target_api_digests: dict[SpecRef, str] = {}
+        for ref, entry in build_magic_specs.items():
+            if not _is_whole_class_magic(entry):
+                continue
+            generated_source = _generated_source_for_magic(entry)
+            if generated_source is None:
+                continue
+            try:
+                magic_dependency_apis[ref] = build_generated_class_api_summary(
+                    generated_source,
+                    entry.qualname,
+                    spec_docstring=getattr(entry.obj, "__doc__", "") or "",
+                    public_api_only=True,
+                ).to_prompt_block()
+                magic_target_api_digests[ref] = generated_public_api_digest(
+                    generated_source,
+                    entry.qualname,
+                )
+            except Exception:
+                continue
 
         registry.clear_registries()
         modules_set: set[str] = set()
         existing_test_dirs = [d for d in test_dirs if d.exists()]
+        first_test_root = Path(cfg.paths.test_roots[0]) if cfg.paths.test_roots else Path("tests")
+        tests_package = ".".join(first_test_root.parts) or "tests"
         for tr, test_dir in zip(cfg.paths.test_roots, test_dirs, strict=False):
             if not test_dir.exists():
                 continue
@@ -1136,17 +1192,37 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
         discovery.import_and_collect(modules, kind="test")
 
         specs = dict(registry.get_test_registry())
+        auto_entries = synthesize_auto_class_test_entries(
+            build_magic_specs,
+            default_on=bool(cfg.test.auto_class_tests),
+            tests_package=tests_package,
+            generated_dir=cfg.paths.generated_dir,
+        )
+        for entries in auto_entries.values():
+            for entry in entries:
+                specs[entry.spec_ref] = entry
         if not specs:
             if json_mode:
                 _emit_json({"command": "test", "ok": True, "exit_code": 0})
             return EXIT_OK
         targeted_test_entries = group_test_entries_by_target_module(list(specs.values()))
-        build_targeted_test_entries = targeted_test_entries if include_target_tests else {}
+        if include_target_tests:
+            build_targeted_test_entries = {
+                module_name: [
+                    entry for entry in entries if ".__auto__." not in entry.module
+                ]
+                for module_name, entries in targeted_test_entries.items()
+            }
+        else:
+            build_targeted_test_entries = {}
 
         infer_default = bool(cfg.test.infer_deps) and (not bool(args.no_infer_deps))
         spec_graph = build_spec_graph(specs, infer_default=infer_default)
         module_dag = collapse_to_module_dag(spec_graph)
         module_specs = registry.get_specs_by_module("test")
+        for module_name, entries in auto_entries.items():
+            module_specs.setdefault(module_name, []).extend(entries)
+            module_specs[module_name].sort(key=lambda e: (e.qualname, str(e.spec_ref)))
 
         # Lazy imports (these are layered; keep CLI import-time minimal).
         from jaunt import builder, tester
@@ -1156,22 +1232,34 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
         pytest_args = [*cfg.test.pytest_args, *list(args.pytest_args or [])]
         test_generation_fingerprint = generation_fingerprint(cfg, kind="test")
         test_module_context_digests: dict[str, str] = {}
+        test_target_api_digests: dict[str, str] = {}
         for module_name, entries in module_specs.items():
             expected, _errs = builder._build_expected_names(entries)
             test_module_context_digests[module_name] = build_module_contract(
                 entries=entries,
                 expected_names=expected,
             ).digest
+            target_digest_parts: set[str] = set()
+            for refs in target_refs_by_test_name(entries).values():
+                for ref in refs:
+                    api_digest = magic_target_api_digests.get(ref)
+                    if api_digest:
+                        target_digest_parts.add(f"{ref}={api_digest}")
+            if target_digest_parts:
+                payload = "\n".join(sorted(target_digest_parts)).encode()
+                test_target_api_digests[module_name] = hashlib.sha256(payload).hexdigest()
 
         stale = tester.detect_stale_test_modules(
             project_dir=root,
             generated_dir=cfg.paths.generated_dir,
+            tests_package=tests_package,
             test_roots=existing_test_dirs,
             module_specs=module_specs,
             specs=specs,
             spec_graph=spec_graph,
             generation_fingerprint=test_generation_fingerprint,
             module_context_digests=test_module_context_digests,
+            target_api_digests=test_target_api_digests or None,
             force=bool(args.force),
         )
         stale = builder.expand_stale_modules(module_dag, stale)
@@ -1194,7 +1282,6 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
         response_cache = ResponseCache(cache_dir, enabled=not no_cache)
         cost_tracker = CostTracker(max_cost=cfg.llm.max_cost_per_build)
         backend = _build_backend(cfg)
-        package_dir = next((d for d in source_dirs if d.exists()), root)
         build_skills_block = ""
         try:
             from jaunt.skill_manager import build_skills_block as _build_skills_block
@@ -1227,6 +1314,7 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
 
         result = tester.run_tests(
             project_dir=root,
+            tests_package=tests_package,
             generated_dir=cfg.paths.generated_dir,
             test_roots=existing_test_dirs,
             dependency_apis=magic_dependency_apis,
@@ -1237,6 +1325,7 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             stale_modules=stale,
             backend=backend,
             generation_fingerprint=test_generation_fingerprint,
+            target_api_digests=test_target_api_digests or None,
             jobs=jobs,
             no_generate=False,
             no_run=bool(args.no_run),
