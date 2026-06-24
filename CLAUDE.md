@@ -81,6 +81,10 @@ examples/           # Runnable example projects
   decorator kwargs + transitive deps, and separately tracks each module's
   exported dependency API. Signature changes, full docstring contract edits,
   and whole-class member/method changes can make dependents stale too.
+- **Whole-class `@magic`**: A class-level `@jaunt.magic` can be docstring-only
+  (Jaunt designs the API), stubs-only (Jaunt implements declared methods), or a
+  mix of stubs and preserved members. Use `@jaunt.preserve` on a method to keep
+  it hand-written even if its body looks like a stub.
 - **Dependency graph**: Built from explicit `deps=` kwargs and optional
   AST-based inference. Topologically sorted; cycle detection with clear errors.
 
