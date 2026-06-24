@@ -162,10 +162,15 @@ escalates. Only then can the ladder below actually fire.
    `fallback_backend: GeneratorBackend | None`). If the aider path still fails a
    whole-class component, the builder retries that component once with
    `fallback_backend`. To avoid cross-engine incremental corruption:
-   - the fallback write **bypasses the aider response cache** (no read, no write),
-   - the output header is **stamped with the fallback backend's own
-     generation fingerprint/provider**, so `status` and future cache lookups treat
-     the module as belonging to the engine that actually produced it,
+   - the fallback write **bypasses the aider response cache** (no read, no write) —
+     this is the load-bearing fix for Codex #5 (never poison the aider response cache
+     with direct-backend output),
+   - the output header is **stamped with the aider build `generation_fingerprint`**
+     that `run_build` already holds (**revised 2026-06-24**, superseding the earlier
+     "stamp the fallback's own fingerprint"). Reason: the module belongs to an
+     aider-engine project; stamping the aider fingerprint keeps `jaunt status` stable
+     so the module is not perpetually re-flagged stale and re-fallback'd on every build.
+     Provenance is surfaced via a `logger.warning`,
    - the fallback is logged.
 
 ## 5. Validation guards

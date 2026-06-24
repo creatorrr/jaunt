@@ -24,7 +24,7 @@
 ## File Structure
 
 - `src/jaunt/class_analysis.py` — **(modify)** add `collect_spec_module_imports`, `build_class_scaffold`, `render_whole_class_contract` (+ private helpers). Pure functions over class source segments; no `jaunt` imports beyond `ast`/stdlib.
-- `src/jaunt/validation.py` — **(modify)** extend `validate_build_class_source` with three guards + two new keyword params (defaulted, back-compatible); add `_class_attribute_names`.
+- `src/jaunt/validation.py` — **(modify)** extend `validate_build_class_source` with three guards + two new keyword params (defaulted, back-compatible); add `_class_attribute_nodes`.
 - `src/jaunt/generate/base.py` — **(modify)** add `seed_target_content`, `whole_class_contract_block`, `whole_class` fields to `ModuleSpecContext`.
 - `src/jaunt/cache.py` — **(modify)** include the three new ctx fields in `cache_key_from_context`.
 - `src/jaunt/generate/aider_backend.py` — **(modify)** seed `target_content` from `ctx.seed_target_content`; write the contract as a `context/` read-only file; escalate diff→whole-file on contract failure when `ctx.whole_class`.
@@ -40,12 +40,12 @@
 ## Task 1: Validation guards (AST unfilled-stub, docstring-only completeness, attribute preservation)
 
 **Files:**
-- Modify: `src/jaunt/validation.py` (`validate_build_class_source` ~429-494; add `_class_attribute_names`)
+- Modify: `src/jaunt/validation.py` (`validate_build_class_source` ~429-494; add `_class_attribute_nodes`)
 - Test: `tests/test_validation_class.py`
 
 **Interfaces:**
 - Consumes: `jaunt.class_analysis.is_stub_body` (existing).
-- Produces: `validate_build_class_source(..., class_attributes: list[str] | None = None, require_public_method: bool = False) -> list[str]`. New params are **defaulted** so the existing `_class_validation_inputs` caller (which passes `**kw`) keeps working until Task 5 supplies them.
+- Produces: `validate_build_class_source(..., class_attributes: dict[str, str] | None = None, require_public_method: bool = False) -> list[str]` (`class_attributes` maps attr name → normalized source). New params are **defaulted** so the existing `_class_validation_inputs` caller (which passes `**kw`) keeps working until Task 5 supplies them.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -83,7 +83,18 @@ def test_docstring_only_with_public_method_passes() -> None:
 
 def test_fails_when_class_attribute_dropped() -> None:
     src = 'class C:\n    "A class."\n    def do(self):\n        return 1\n'
-    kw = _kw(class_attributes=["CAPACITY"])
+    kw = _kw(class_attributes={"CAPACITY": "CAPACITY: int = 10"})
+    errs = validate_build_class_source(src, **kw)
+    assert any("CAPACITY" in e for e in errs)
+
+
+def test_fails_when_class_attribute_value_changed() -> None:
+    # name-only checking would accept this; the annotation/value must match too.
+    src = (
+        'class C:\n    "A class."\n    CAPACITY = None\n'
+        "    def do(self):\n        return 1\n"
+    )
+    kw = _kw(class_attributes={"CAPACITY": "CAPACITY: int = 10"})
     errs = validate_build_class_source(src, **kw)
     assert any("CAPACITY" in e for e in errs)
 
@@ -93,7 +104,7 @@ def test_passes_when_class_attribute_retained() -> None:
         'class C:\n    "A class."\n    CAPACITY: int = 10\n'
         "    def do(self):\n        return 1\n"
     )
-    kw = _kw(class_attributes=["CAPACITY"])
+    kw = _kw(class_attributes={"CAPACITY": "CAPACITY: int = 10"})
     assert validate_build_class_source(src, **kw) == []
 ```
 
@@ -110,22 +121,26 @@ In `src/jaunt/validation.py`, add the top-level import near the other imports:
 from jaunt.class_analysis import is_stub_body
 ```
 
-Add this helper next to `_method_nodes`:
+Add this helper next to `_method_nodes` (it maps each class-attribute name to the
+**normalized source** of its declaration, so the guard checks annotation + value, not
+just the name — Codex finding #5):
 
 ```python
-def _class_attribute_names(cls: ast.ClassDef) -> set[str]:
-    names: set[str] = set()
+def _class_attribute_nodes(cls: ast.ClassDef) -> dict[str, str]:
+    out: dict[str, str] = {}
     for node in cls.body:
         if isinstance(node, ast.Assign):
+            rendered = ast.unparse(node)
             for tgt in node.targets:
                 if isinstance(tgt, ast.Name):
-                    names.add(tgt.id)
+                    out[tgt.id] = rendered
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            names.add(node.target.id)
-    return names
+            out[node.target.id] = ast.unparse(node)
+    return out
 ```
 
-Change the `validate_build_class_source` signature to add the two params:
+Change the `validate_build_class_source` signature to add the two params. `class_attributes`
+maps attr name → the normalized source (`ast.unparse(node)`) of the spec's declaration:
 
 ```python
 def validate_build_class_source(
@@ -138,7 +153,7 @@ def validate_build_class_source(
     class_decorators: list[str],
     required_abstractmethods: list[str],
     spec_docstring: str,
-    class_attributes: list[str] | None = None,
+    class_attributes: dict[str, str] | None = None,
     require_public_method: bool = False,
 ) -> list[str]:
 ```
@@ -155,13 +170,20 @@ Then, inside the function, **after** the existing docstring-retention block and 
                 f"{class_name}: method {name!r} was left as a stub; implement it per the spec."
             )
 
-    # Class-attribute preservation: every spec class attribute must survive.
+    # Class-attribute preservation: every spec class attribute must survive with the
+    # same annotation/value (compared modulo formatting via ast.unparse round-trip).
     if class_attributes:
-        actual_attrs = _class_attribute_names(cls)
-        for attr in class_attributes:
-            if attr not in actual_attrs:
+        actual_attrs = _class_attribute_nodes(cls)
+        for attr_name, expected_src in class_attributes.items():
+            actual_src = actual_attrs.get(attr_name)
+            if actual_src is None:
                 errors.append(
-                    f"{class_name}: class attribute {attr!r} from the spec was not preserved."
+                    f"{class_name}: class attribute {attr_name!r} from the spec was not preserved."
+                )
+            elif actual_src != expected_src:
+                errors.append(
+                    f"{class_name}: class attribute {attr_name!r} was modified; "
+                    "keep it exactly as declared in the spec."
                 )
 
     # Docstring-only completeness: a docstring-only spec must yield a non-trivial class.
@@ -200,7 +222,7 @@ git commit -m "feat(validation): add unfilled-stub, docstring-only, and attribut
 - Consumes: existing `split_class_members`, `classify_class_mode`, `is_preserve_decorator`, `_iter_methods`.
 - Produces:
   - `collect_spec_module_imports(spec_source: str) -> list[str]` — every top-level `import`/`from … import`, unparsed, in source order.
-  - `build_class_scaffold(class_segment: str) -> str` — scaffold for ONE whole-class spec: header (bases + decorators, `@magic` stripped), docstring, class attributes verbatim, preserved methods verbatim (`@jaunt.preserve` stripped) under a `# preserved — do not modify` comment, stub methods → signature + docstring + `raise NotImplementedError("jaunt: implement <Class>.<method> per the spec")  # jaunt:implement`. Docstring-only classes (no methods) get `pass`.
+  - `build_class_scaffold(class_segment: str) -> str` — scaffold for ONE whole-class spec: header (bases + decorators, `@magic` stripped), docstring, class attributes verbatim, preserved methods (`@jaunt.preserve` stripped), stub methods → signature + docstring + `raise NotImplementedError("jaunt: implement <Class>.<method> per the spec")  # jaunt:implement`. Docstring-only classes (no methods) get `pass`.
   - `render_whole_class_contract(*, class_segment: str, base_contract_block: str) -> str` — the per-component contract prose.
 
 - [ ] **Step 1: Write the failing tests**
@@ -262,10 +284,9 @@ def test_scaffold_renders_header_attrs_docstring_preserved_and_sentinel_stub() -
     assert "A stack. LIFO." in scaffold
     # @magic stripped from the header
     assert "@jaunt.magic" not in scaffold
-    # preserved method kept verbatim, @jaunt.preserve stripped, marker present
+    # preserved method body kept, @jaunt.preserve stripped
     assert "self._n == 0" in scaffold
     assert "@jaunt.preserve" not in scaffold
-    assert "# preserved — do not modify" in scaffold
     # stub becomes a sentinel body
     assert "# jaunt:implement" in scaffold
     assert "jaunt: implement Stack.push per the spec" in scaffold
@@ -386,15 +407,14 @@ def build_class_scaffold(class_segment: str) -> str:
         clone.decorator_list = [
             d for d in clone.decorator_list if not is_preserve_decorator(d)
         ]
-        # A comment marker before the preserved def (unparse won't emit comments, so
-        # carry it as a leading string-expr that reads as guidance, not a docstring).
-        new_body.append(ast.Expr(value=ast.Constant(value="preserved — do not modify")))
         new_body.append(clone)
 
     for name in split.stubs:
         new_body.append(_stub_node_with_sentinel(methods[name], class_name))
 
-    if not new_body:
+    # Emit `pass` only when the class declares no methods (docstring-only / attrs-only),
+    # regardless of a docstring already being present (Codex finding #1).
+    if not split.stubs and not split.preserved:
         new_body.append(ast.Pass())
 
     new_cls = ast.ClassDef(
@@ -406,10 +426,7 @@ def build_class_scaffold(class_segment: str) -> str:
         type_params=getattr(cls, "type_params", []),
     )
     ast.fix_missing_locations(new_cls)
-    text = _attach_sentinels(ast.unparse(new_cls))
-    # Turn the preserved-marker string-expr into a real comment.
-    text = text.replace("'preserved — do not modify'", "# preserved — do not modify")
-    return text.rstrip() + "\n"
+    return _attach_sentinels(ast.unparse(new_cls)).rstrip() + "\n"
 
 
 def render_whole_class_contract(*, class_segment: str, base_contract_block: str) -> str:
@@ -454,10 +471,21 @@ def render_whole_class_contract(*, class_segment: str, base_contract_block: str)
     return "\n".join(lines) + "\n"
 ```
 
-> **Note on the preserved-marker comment:** `ast.unparse` cannot emit comments, so the
-> marker is round-tripped through a string-expr placeholder and converted back to a `#`
-> comment by the final `.replace(...)`. The scaffold is still valid Python either way;
-> the test asserts the `# preserved — do not modify` form is present.
+> **Note (no comment marker — Codex #2/#3):** an earlier draft injected a `# preserved`
+> comment via a string-expr placeholder + global `.replace()`. That was dropped: it broke
+> when the marker became the class docstring (no preceding docstring/attrs) and could
+> corrupt a legitimate `'preserved — do not modify'` string literal. Aider already learns
+> which methods to leave alone from the contract block (Task 2 renderer lists them
+> explicitly), so the in-scaffold comment is unnecessary.
+>
+> **Note (preserved-method normalization — Codex #4):** preserved methods are round-tripped
+> through `ast.unparse` in the seed, so their comments/formatting may be normalized. This is
+> intentional and consistent with the shipped preserved-method contract, which is enforced
+> by **AST-equivalence** (`validate_build_class_source` compares decorators-stripped ASTs;
+> see `tests/test_validation_class.py::test_passes_when_preserved_method_intact_modulo_formatting`
+> and the `ast.unparse`-based `_class_validation_inputs`). The source spec remains canonical;
+> only the generated copy is normalized. Bodies (the behavior `@jaunt.preserve` protects) are
+> preserved exactly.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -611,7 +639,8 @@ def _whole_class_ctx(**overrides) -> ModuleSpecContext:
 
 def _backend() -> AiderGeneratorBackend:
     llm = LLMConfig(provider="anthropic", model="claude-sonnet-4-6", api_key_env="ANTHROPIC_API_KEY")
-    return AiderGeneratorBackend(llm, AiderConfig(), PromptsConfig())
+    prompts = PromptsConfig(build_system="", build_module="", test_system="", test_module="")
+    return AiderGeneratorBackend(llm, AiderConfig(), prompts)
 
 
 def test_first_attempt_seeds_scaffold_content() -> None:
@@ -796,7 +825,7 @@ def _run_build_with(tmp_path: Path, backend: GeneratorBackend) -> BuildReport:
     entry = _entry(spec_path)
     specs = {entry.spec_ref: entry}
     module_specs = {"pkg.mod": [entry]}
-    spec_graph = build_spec_graph(specs)
+    spec_graph = build_spec_graph(specs, infer_default=False)
     return asyncio.run(
         run_build(
             package_dir=tmp_path / "src",
@@ -851,17 +880,19 @@ In `src/jaunt/builder.py`, `_class_validation_inputs`, extend the import and the
     from jaunt.class_analysis import classify_class_mode
 ```
 
-Compute class attribute names from the spec class node (add before the `return`):
+Compute class attributes as a `name -> normalized source` dict from the spec class node
+(matching Task 1's `class_attributes: dict[str, str]`; add before the `return`):
 
 ```python
-    class_attributes: list[str] = []
+    class_attributes: dict[str, str] = {}
     for node in cls_node.body:
         if isinstance(node, _ast.Assign):
-            class_attributes.extend(
-                t.id for t in node.targets if isinstance(t, _ast.Name)
-            )
+            rendered = _ast.unparse(node)
+            for t in node.targets:
+                if isinstance(t, _ast.Name):
+                    class_attributes[t.id] = rendered
         elif isinstance(node, _ast.AnnAssign) and isinstance(node.target, _ast.Name):
-            class_attributes.append(node.target.id)
+            class_attributes[node.target.id] = _ast.unparse(node)
 ```
 
 And add two keys to the returned dict:
@@ -1006,7 +1037,10 @@ class _FailingBackend(GeneratorBackend):
         return "", None
 
 
-def test_fallback_backend_recovers_failed_whole_class_build(tmp_path: Path) -> None:
+def test_fallback_recovers_bypasses_cache_and_stamps_aider_fingerprint(tmp_path: Path) -> None:
+    from jaunt.cache import ResponseCache
+    from jaunt.header import extract_generation_fingerprint
+
     good = (
         "class Counter:\n"
         '    """A counter. Starts at zero."""\n'
@@ -1016,22 +1050,31 @@ def test_fallback_backend_recovers_failed_whole_class_build(tmp_path: Path) -> N
     spec_path = _write_spec(tmp_path)
     entry = _entry(spec_path)
     specs = {entry.spec_ref: entry}
+    cache = ResponseCache(tmp_path / ".jaunt" / "cache", enabled=True)
     report = asyncio.run(
         run_build(
             package_dir=tmp_path / "src",
             generated_dir="__generated__",
             module_specs={"pkg.mod": [entry]},
             specs=specs,
-            spec_graph=build_spec_graph(specs),
+            spec_graph=build_spec_graph(specs, infer_default=False),
             module_dag={"pkg.mod": set()},
             stale_modules={"pkg.mod"},
             backend=_FailingBackend(),
             fallback_backend=fallback,
+            generation_fingerprint="AIDERFP",
+            response_cache=cache,
         )
     )
     assert "pkg.mod" in report.generated
     out = (tmp_path / "src" / "pkg" / "__generated__" / "mod.py").read_text()
     assert "def incr" in out and "return 1" in out
+    # Cache-bypass: the failing aider attempt cached nothing and the fallback writes
+    # directly, so no entry was persisted.
+    assert cache.info()["entries"] == 0
+    # Stamp: header carries the (aider) build fingerprint passed to run_build, not the
+    # fallback backend's — keeps `status` stable (see the Task 6 decision note).
+    assert extract_generation_fingerprint(out) == "sha256:AIDERFP"
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -1308,4 +1351,27 @@ git commit -m "feat(examples): whole-class example runs under default aider engi
 
 **Type consistency:** `build_class_scaffold(class_segment: str) -> str`, `collect_spec_module_imports(spec_source: str) -> list[str]`, `render_whole_class_contract(*, class_segment, base_contract_block) -> str`, `validate_build_class_source(..., class_attributes=None, require_public_method=False)`, ctx fields `seed_target_content`/`whole_class_contract_block`/`whole_class`, and `run_build(..., fallback_backend=None)` are used identically wherever they appear. ✓
 
-**Known trade-off (flagged for plan review):** Task 6 stamps fallback output with the aider fingerprint (not a legacy one) + cache-bypass, refining spec §4 step 3 to avoid perpetual re-fallback. See the Task 6 decision note.
+**Known trade-off (flagged for plan review):** Task 6 stamps fallback output with the aider fingerprint (not a legacy one) + cache-bypass, refining spec §4 step 3 to avoid perpetual re-fallback. See the Task 6 decision note. (User-approved 2026-06-24; spec §4 updated to match.)
+
+## Codex review incorporated (2026-06-24)
+
+A read-only Codex pass (high effort) reviewed this plan against the codebase. The
+escalation wiring (Task 5 in-loop validator → Task 4 whole-file escalation) was traced
+and confirmed sound. All nine findings were verified against the code and folded in:
+
+- **#1 (BLOCKER)** docstring-only scaffold never emitted `pass` (the `if not new_body:`
+  guard was always false once a docstring was added) → Task 2 now emits `pass` when the
+  class declares no methods.
+- **#2/#3 (MAJOR)** the `# preserved` string-expr marker + global `.replace()` was fragile
+  (became the class docstring; corrupted matching string literals) → marker removed; the
+  contract block already names preserved methods (Task 2).
+- **#4 (MAJOR)** preserved-method normalization in the seed → documented as intentional
+  and consistent with the AST-equivalence preserved-method validator (Task 2 note).
+- **#5 (MAJOR)** attribute guard checked names only → now compares annotation/value via
+  normalized source (Task 1: `class_attributes: dict[str, str]`, `_class_attribute_nodes`).
+- **#6 (MAJOR)** plan/spec contradiction on fallback stamping → resolved per the user's
+  decision (aider stamp); spec §4 updated to match.
+- **#7 (MINOR)** `PromptsConfig()` needs four fields → Task 4 test fixed.
+- **#8 (MINOR)** `build_spec_graph` needs `infer_default=` → Tasks 5/6 tests fixed.
+- **#9 (MINOR)** fallback test was false-green → Task 6 test now asserts cache stays empty
+  and the header carries the aider fingerprint.
