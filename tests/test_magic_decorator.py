@@ -49,6 +49,10 @@ class HostClass:
         ...
 
 
+class AutoTestClass:
+    """spec for the magic(test=...) pass-through test."""
+
+
 @pytest.fixture(autouse=True)
 def _clear_registries() -> Generator[None, None, None]:
     clear_registries()
@@ -540,3 +544,15 @@ class TestAbstractMethodSupport:
             object(),
         )
         assert getattr(wrapper, "__isabstractmethod__", False) is False
+
+
+def test_magic_test_kwarg_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _import(_name: str) -> Any:
+        raise ModuleNotFoundError(_name)
+
+    monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+    magic(test=True)(AutoTestClass)
+    ref = normalize_spec_ref(f"{AutoTestClass.__module__}:{AutoTestClass.__qualname__}")
+    entry = get_magic_registry()[ref]
+    assert entry.decorator_kwargs.get("test") is True

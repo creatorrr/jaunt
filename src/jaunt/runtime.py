@@ -155,6 +155,7 @@ def magic(
     deps: object | None = None,
     prompt: object | None = None,
     infer_deps: object | None = None,
+    test: object | None = None,
 ):
     """Decorator factory for declaring magic specs."""
 
@@ -183,6 +184,10 @@ def magic(
             decorator_kwargs["prompt"] = prompt
         if infer_deps is not None:
             decorator_kwargs["infer_deps"] = infer_deps
+        if test is not None:
+            if not isinstance(test, bool):
+                raise JauntError("@magic(test=...) must be a boolean when provided.")
+            decorator_kwargs["test"] = test
 
         analysis = analyze_magic_decorators(
             module=module,
