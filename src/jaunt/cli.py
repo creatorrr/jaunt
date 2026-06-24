@@ -189,6 +189,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_common_flags(reconcile_p)
 
+    adopt_p = subparsers.add_parser("adopt", help="Add @jaunt.contract to a function and derive.")
+    adopt_p.add_argument("ref", help="Spec ref 'module:func'.")
+    _add_common_flags(adopt_p)
+
     eval_p = subparsers.add_parser("eval", help="Run built-in eval suite against a real backend.")
     eval_p.add_argument(
         "--root",
@@ -471,6 +475,22 @@ def _discover_contract_specs(*, root: Path, cfg: JauntConfig) -> dict[SpecRef, S
     )
     discovery.import_and_collect(modules, kind="contract")
     return dict(registry.get_contract_registry())
+
+
+def _resolve_contract_source_file(*, root: Path, cfg: JauntConfig, module: str) -> Path:
+    from jaunt import discovery
+
+    source_dirs = [root / sr for sr in cfg.paths.source_roots if (root / sr).exists()]
+    found = discovery.discover_module_files(
+        roots=source_dirs,
+        exclude=[],
+        generated_dir=cfg.paths.generated_dir,
+        target_modules={module},
+    )
+    for mod, path in found:
+        if mod == module:
+            return path
+    raise JauntDiscoveryError(f"Could not locate source module {module!r} under source_roots.")
 
 
 def _discover_static_targeted_test_entries(*, root: Path, cfg: JauntConfig) -> list[SpecEntry]:
@@ -810,6 +830,70 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
         _print_error(e)
         if json_mode:
             _emit_json({"command": "reconcile", "ok": False, "error": str(e)})
+        return EXIT_CONFIG_OR_DISCOVERY
+
+
+def cmd_adopt(args: argparse.Namespace) -> int:
+    json_mode = _is_json_mode(args)
+    try:
+        import importlib
+
+        from jaunt import __version__
+        from jaunt.contract import runner
+        from jaunt.contract.edits import add_contract_marker
+
+        root, cfg = _load_config(args)
+        ref = args.ref
+        module, sep, func = ref.partition(":")
+        if not sep:
+            module, _, func = ref.rpartition(".")
+        if not module or not func:
+            raise JauntConfigError(f"adopt expects a 'module:func' ref, got {ref!r}.")
+
+        src_path = _resolve_contract_source_file(root=root, cfg=cfg, module=module)
+        source = src_path.read_text(encoding="utf-8")
+        src_path.write_text(add_contract_marker(source, func), encoding="utf-8")
+
+        # Re-import with the marker present and reconcile this one entry.
+        specs = _discover_contract_specs(root=root, cfg=cfg)
+        entry = next((e for e in specs.values() if e.module == module and e.qualname == func), None)
+        if entry is None:
+            raise JauntDiscoveryError(f"Adopted {ref!r} but could not re-discover it.")
+
+        importlib.reload(importlib.import_module(module))
+        mod = importlib.import_module(module)
+        result = runner.reconcile_entry(
+            root,
+            cfg.contract.battery_dir,
+            cfg.contract.derive,
+            cfg.contract.strength,
+            entry,
+            module_namespace=vars(mod),
+            tool_version=__version__,
+        )
+
+        if json_mode:
+            _emit_json(
+                {
+                    "command": "adopt",
+                    "ok": result.ok,
+                    "ref": result.spec_ref,
+                    "strength": result.strength,
+                    "failures": result.failures,
+                }
+            )
+        elif result.ok:
+            print(f"Adopted {result.spec_ref} (strength {result.strength}).")
+        else:
+            print(f"Adopted {result.spec_ref} but the body disagrees with its docstring:")
+            for f in result.failures:
+                print(f"    - {f}")
+
+        return EXIT_OK if result.ok else EXIT_PYTEST_FAILURE
+    except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError) as e:
+        _print_error(e)
+        if json_mode:
+            _emit_json({"command": "adopt", "ok": False, "error": str(e)})
         return EXIT_CONFIG_OR_DISCOVERY
 
 
@@ -2174,6 +2258,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_check(args)
     if args.command == "reconcile":
         return cmd_reconcile(args)
+    if args.command == "adopt":
+        return cmd_adopt(args)
     if args.command == "eval":
         return cmd_eval(args)
     if args.command == "watch":
