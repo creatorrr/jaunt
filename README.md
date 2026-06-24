@@ -25,6 +25,18 @@ Jaunt is a small Python library + CLI for **spec-driven code generation**:
 - `@magic` works on individual class methods too — decorate instance methods, `@classmethod`, `@staticmethod`, or `@abstractmethod` stubs and Jaunt generates only those methods while preserving the rest of the class.
 - Incremental freshness tracks both module digests and exported dependency APIs, so signature changes, whole-class member changes, and contract docstring edits can invalidate dependents.
 
+## Two Modes
+
+Jaunt supports two first-class authoring modes that coexist and are selected by
+decorator:
+
+- **Magic mode** (`@jaunt.magic` / `@jaunt.test`): the docstring is canonical and
+  Jaunt generates implementations under `__generated__/`.
+- **Contract mode** (`@jaunt.contract`): committed code is canonical and Jaunt
+  derives a committed pytest battery under `tests/contract/`.
+
+See `examples/contract_slugify/` for a Contract-mode walkthrough.
+
 ## Installation
 
 ```bash

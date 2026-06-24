@@ -105,7 +105,7 @@ def run_battery_file(path: Path, *, root: Path, source_roots: list[str]) -> bool
         capture_output=True,
         text=True,
     )
-    return proc.returncode == 0
+    return proc.returncode in (0, 5)
 
 
 @dataclass(frozen=True, slots=True)

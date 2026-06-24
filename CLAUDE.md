@@ -74,6 +74,10 @@ examples/           # Runnable example projects
 - **Spec**: A decorated Python function/class stub that describes *what* to
   implement. Uses `@jaunt.magic` for implementations, `@jaunt.test` for tests.
   The full cleaned docstring is part of the behavioral contract.
+- **Contract mode**: Committed code is canonical; `@jaunt.contract` is a runtime
+  no-op marker; the docstring is the contract. Jaunt derives a committed pytest
+  battery in `tests/contract/`. `reconcile` is the only model-calling command,
+  while `check` is the deterministic CI gate (no API key).
 - **Generated dir**: Output directory (default `__generated__/`) where LLM-
   generated code is written. Configurable via `jaunt.toml` or
   `JAUNT_GENERATED_DIR` env var.
@@ -145,12 +149,20 @@ jaunt clean --dry-run         # Show what would be removed
 jaunt status                  # Show which modules are stale, including upstream API fallout
 jaunt status --json           # Machine-readable status
 
+jaunt adopt <module:func>     # Add @jaunt.contract to existing code and derive its battery
+jaunt reconcile               # Derive/refresh committed contract batteries (calls the model)
+jaunt check                   # Verify committed batteries deterministically (CI gate, no model)
+jaunt eject <module:func>     # Remove contract tracking; leave plain Python + plain pytest
+
 jaunt watch                   # Auto-rebuild on file changes
 jaunt watch --test            # Build + test on change
 ```
 
 Common flags: `--root`, `--config`, `--jobs N`, `--force`, `--target`,
 `--no-infer-deps`, `--no-progress`, `--json`.
+
+Note: `jaunt check` returns exit code `4` on any blocking drift state (unbuilt /
+stale-prose / signature-drift / behavior-drift).
 
 ## Exit Codes
 

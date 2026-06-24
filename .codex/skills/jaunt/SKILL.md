@@ -160,6 +160,58 @@ jaunt status
 - If output is wrong, refine the spec stub or test spec and regenerate.
 - Use `prompt=` decorator kwarg for extra LLM instructions on a specific spec.
 
+## Contract Mode
+
+Contract mode is the second authoring mode. It is the inverse of Magic mode: the **committed code is the source of truth**, the docstring is the **contract**, and Jaunt maintains a derived, committed pytest battery in `tests/contract/` instead of generating the implementation. The two modes coexist and are selected per symbol by decorator.
+
+**When to use it:** you have existing or hand-written code whose body you want to keep, but you want it pinned by a docstring contract and guarded by a regenerable test battery. Reach for Contract mode when you do **not** want to surrender the implementation to the LLM (Magic mode), only to pin its behavior.
+
+The `@jaunt.contract` decorator is a runtime no-op marker; it only registers a `kind="contract"` spec. The function body stays exactly as you wrote it.
+
+```python
+import jaunt
+
+@jaunt.contract()
+def slugify(title: str) -> str:
+    """
+    Convert a title to a URL-safe slug.
+
+    Rules:
+    - Lowercase the input.
+    - Replace whitespace runs with a single "-".
+    - Raise ValueError if the result is empty.
+    """
+    s = "-".join(title.lower().split())
+    if not s:
+        raise ValueError("empty slug")
+    return s
+```
+
+**Lifecycle loop:** `adopt` -> `reconcile` -> `check` -> `eject`.
+
+```bash
+# Add @jaunt.contract to existing code and derive its battery
+jaunt adopt my_app.text:slugify
+
+# Derive/refresh committed contract batteries (calls the model)
+jaunt reconcile
+
+# Verify committed batteries deterministically (CI gate, no model)
+jaunt check
+
+# Remove contract tracking; leave plain Python + plain pytest
+jaunt eject my_app.text:slugify
+```
+
+**Key rule: `check` never calls the model; only `reconcile` does.** `check` is the
+deterministic CI gate — it runs with no API key and no network, and returns exit code `4`
+on any blocking drift state (unbuilt / stale-prose / signature-drift / behavior-drift).
+`reconcile` (and `adopt`, which calls reconcile internally) are the only model-calling
+commands.
+
+**v1 limit:** top-level sync functions only. Class/method/async contracts are out of scope
+and raise a clear "not supported in v1" error rather than being silently mis-handled.
+
 ## Aider Runtime Notes
 
 - Install the runtime with `pip install jaunt[aider]` or `uv sync --extra aider`.
@@ -259,6 +311,10 @@ test_module = ""
 | `jaunt init` | Scaffold `jaunt.toml` + directories |
 | `jaunt clean` | Remove all `__generated__/` directories |
 | `jaunt status` | Show stale vs fresh modules |
+| `jaunt adopt <module:func>` | Add `@jaunt.contract` to existing code and derive its battery |
+| `jaunt reconcile` | Derive/refresh committed contract batteries (calls the model) |
+| `jaunt check` | Verify committed batteries deterministically (CI gate, no model) |
+| `jaunt eject <module:func>` | Remove contract tracking; leave plain Python + plain pytest |
 | `jaunt watch` | Auto-rebuild on file changes (`--test` to also run tests) |
 | `jaunt eval` | Benchmark LLM providers on built-in cases |
 | `jaunt skill build <name>` | Elaborate a checked-in user skill using the configured runtime |
