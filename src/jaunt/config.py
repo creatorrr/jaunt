@@ -37,6 +37,7 @@ class LLMConfig:
 _VALID_ASYNC_RUNNERS = ("asyncio", "anyio")
 _VALID_AGENT_ENGINES = ("legacy", "aider")
 _VALID_AIDER_MODES = ("architect", "code")
+_VALID_DERIVE = ("examples", "errors")
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,13 @@ class AiderConfig:
 
 
 @dataclass(frozen=True)
+class ContractConfig:
+    battery_dir: str = "tests/contract"
+    derive: list[str] = field(default_factory=lambda: ["examples", "errors"])
+    strength: bool = True
+
+
+@dataclass(frozen=True)
 class JauntConfig:
     version: int
     paths: PathsConfig
@@ -92,6 +100,7 @@ class JauntConfig:
     prompts: PromptsConfig
     agent: AgentConfig = field(default_factory=AgentConfig)
     aider: AiderConfig = field(default_factory=AiderConfig)
+    contract: ContractConfig = field(default_factory=ContractConfig)
 
 
 def find_project_root(start: Path) -> Path:
@@ -200,6 +209,7 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     prompts_tbl = _as_table(data.get("prompts"), name="prompts")
     agent_tbl = _as_table(data.get("agent"), name="agent")
     aider_tbl = _as_table(data.get("aider"), name="aider")
+    contract_tbl = _as_table(data.get("contract"), name="contract")
 
     if "source_roots" in paths_tbl:
         source_roots = _as_str_list(paths_tbl["source_roots"], name="paths.source_roots")
@@ -368,6 +378,27 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     else:
         aider_save_traces = False
 
+    if "battery_dir" in contract_tbl:
+        contract_battery_dir = _as_str(contract_tbl["battery_dir"], name="contract.battery_dir")
+    else:
+        contract_battery_dir = "tests/contract"
+
+    if "derive" in contract_tbl:
+        contract_derive = _as_str_list(contract_tbl["derive"], name="contract.derive")
+        for entry in contract_derive:
+            if entry not in _VALID_DERIVE:
+                raise JauntConfigError(
+                    f"Invalid config: contract.derive entries must be one of "
+                    f"{_VALID_DERIVE!r}, got {entry!r}."
+                )
+    else:
+        contract_derive = ["examples", "errors"]
+
+    if "strength" in contract_tbl:
+        contract_strength = _as_bool(contract_tbl["strength"], name="contract.strength")
+    else:
+        contract_strength = True
+
     # Validation
     if not any((root / sr).exists() for sr in source_roots):
         raise JauntConfigError(
@@ -452,5 +483,10 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             editor_model=aider_editor_model,
             map_tokens=aider_map_tokens,
             save_traces=aider_save_traces,
+        ),
+        contract=ContractConfig(
+            battery_dir=contract_battery_dir,
+            derive=contract_derive,
+            strength=contract_strength,
         ),
     )

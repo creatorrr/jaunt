@@ -24,7 +24,7 @@ class DecoratorApiRecord:
 
 @dataclass(frozen=True, slots=True)
 class SpecEntry:
-    kind: Literal["magic", "test"]
+    kind: Literal["magic", "test", "contract"]
     spec_ref: SpecRef
     module: str
     qualname: str
@@ -41,6 +41,19 @@ class SpecEntry:
 
 _MAGIC_REGISTRY: dict[SpecRef, SpecEntry] = {}
 _TEST_REGISTRY: dict[SpecRef, SpecEntry] = {}
+_CONTRACT_REGISTRY: dict[SpecRef, SpecEntry] = {}
+
+
+def register_contract(entry: SpecEntry) -> None:
+    """Register a contract spec entry (last write wins)."""
+
+    _CONTRACT_REGISTRY[entry.spec_ref] = entry
+
+
+def get_contract_registry() -> dict[SpecRef, SpecEntry]:
+    """Return the global contract registry (treat as read-only)."""
+
+    return _CONTRACT_REGISTRY
 
 
 def register_magic(entry: SpecEntry) -> None:
@@ -72,15 +85,18 @@ def clear_registries() -> None:
 
     _MAGIC_REGISTRY.clear()
     _TEST_REGISTRY.clear()
+    _CONTRACT_REGISTRY.clear()
 
 
-def get_specs_by_module(kind: Literal["magic", "test"]) -> dict[str, list[SpecEntry]]:
+def get_specs_by_module(kind: Literal["magic", "test", "contract"]) -> dict[str, list[SpecEntry]]:
     """Group specs by entry.module with stable ordering within each module."""
 
     if kind == "magic":
         entries = _MAGIC_REGISTRY.values()
     elif kind == "test":
         entries = _TEST_REGISTRY.values()
+    elif kind == "contract":
+        entries = _CONTRACT_REGISTRY.values()
     else:  # pragma: no cover
         raise ValueError(f"unknown kind: {kind!r}")
 

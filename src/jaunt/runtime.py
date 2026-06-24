@@ -14,12 +14,12 @@ import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from types import ModuleType
-from typing import Any, TypeVar, cast
+from typing import Any, TypeVar, cast, overload
 
 from jaunt.decorator_analysis import analyze_magic_decorators, resolve_qualname_for_line
 from jaunt.errors import JauntError, JauntNotBuiltError
 from jaunt.paths import spec_module_to_generated_module
-from jaunt.registry import SpecEntry, register_magic, register_test
+from jaunt.registry import SpecEntry, register_contract, register_magic, register_test
 from jaunt.spec_ref import SpecRef, normalize_spec_ref, normalize_spec_refs, spec_ref_from_object
 
 F = TypeVar("F", bound=Callable[..., object])
@@ -418,4 +418,60 @@ def test(
         f.__test__ = False
         return fn
 
+    return _decorate
+
+
+@overload
+def contract(obj: F) -> F: ...
+
+
+@overload
+def contract(obj: None = ..., *, deps: object | None = ...) -> Callable[[F], F]: ...
+
+
+def contract(obj: F | None = None, *, deps: object | None = None) -> F | Callable[[F], F]:
+    """Mark a fully-implemented function as contract-tracked.
+
+    Runtime no-op: returns the function unchanged (like a type annotation). At
+    import time it registers a ``kind="contract"`` SpecEntry so discovery and the
+    contract commands (`reconcile`/`check`/`adopt`/`eject`) can find it. There is
+    NO import-time substitution and NO ``__generated__`` import — the committed
+    body is the thing that runs. Accepts ``@jaunt.contract`` and
+    ``@jaunt.contract()``.
+    """
+
+    def _decorate(fn: F) -> F:
+        if isinstance(fn, (classmethod, staticmethod)):
+            raise JauntError("@contract must decorate a plain function (v1: top-level sync only).")
+        if isinstance(fn, type):
+            raise JauntError("@contract does not support classes in v1 (top-level sync functions).")
+        if inspect.iscoroutinefunction(fn):
+            raise JauntError("@contract does not support async functions in v1.")
+
+        class_name = _classify_qualname(fn)  # rejects closures/deep nesting
+        if class_name is not None:
+            raise JauntError("@contract does not support methods in v1 (top-level functions only).")
+
+        f = cast(Any, fn)
+        qualname = cast(str, f.__qualname__)
+        spec_ref = spec_ref_from_object(fn)
+
+        decorator_kwargs: dict[str, object] = {}
+        if deps is not None:
+            decorator_kwargs["deps"] = deps
+
+        entry = SpecEntry(
+            kind="contract",
+            spec_ref=spec_ref,
+            module=cast(str, f.__module__),
+            qualname=qualname,
+            source_file=_source_file(fn),
+            obj=fn,
+            decorator_kwargs=decorator_kwargs,
+        )
+        register_contract(entry)
+        return fn
+
+    if obj is not None:
+        return _decorate(obj)
     return _decorate
