@@ -118,11 +118,6 @@ def _build_parser() -> argparse.ArgumentParser:
     build_p = subparsers.add_parser("build", help="Generate code for magic specs.")
     _add_common_flags(build_p)
     _add_build_generation_flags(build_p)
-    build_p.add_argument(
-        "--interactive",
-        action="store_true",
-        help="Launch an interactive Aider session for a single resolved build target.",
-    )
 
     test_p = subparsers.add_parser("test", help="Generate tests and run pytest.")
     _add_common_flags(test_p)
@@ -526,32 +521,9 @@ def _discover_static_targeted_test_entries(*, root: Path, cfg: JauntConfig) -> l
 
 
 def _build_backend(cfg: JauntConfig):
-    if cfg.agent.engine == "codex":
-        from jaunt.generate.codex_backend import CodexBackend
+    from jaunt.generate.codex_backend import CodexBackend
 
-        return CodexBackend(cfg.codex, cfg.llm, cfg.prompts, pool_size=cfg.build.jobs)
-
-    if cfg.agent.engine == "aider":
-        from jaunt.generate.aider_backend import AiderGeneratorBackend
-
-        return AiderGeneratorBackend(cfg.llm, cfg.aider, cfg.prompts)
-
-    provider = cfg.llm.provider
-    if provider == "openai":
-        from jaunt.generate.openai_backend import OpenAIBackend
-
-        return OpenAIBackend(cfg.llm, cfg.prompts)
-    if provider == "anthropic":
-        from jaunt.generate.anthropic_backend import AnthropicBackend
-
-        return AnthropicBackend(cfg.llm, cfg.prompts)
-    if provider == "cerebras":
-        from jaunt.generate.cerebras_backend import CerebrasBackend
-
-        return CerebrasBackend(cfg.llm, cfg.prompts)
-    raise JauntConfigError(
-        f"Unsupported llm.provider: {provider!r}. Supported: 'openai', 'anthropic', 'cerebras'."
-    )
+    return CodexBackend(cfg.codex, cfg.llm, cfg.prompts, pool_size=cfg.build.jobs)
 
 
 def _is_json_mode(args: argparse.Namespace) -> bool:
@@ -1212,7 +1184,6 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                 generated_dir=cfg.paths.generated_dir,
                 llm=cfg.llm,
                 agent=cfg.agent,
-                aider=cfg.aider,
                 codex=cfg.codex,
             )
             for w in skills_res.warnings:
@@ -1331,27 +1302,9 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             stale,
             changed_modules=api_changed,
         )
-        interactive = bool(getattr(args, "interactive", False))
-        if interactive:
-            if cfg.agent.engine != "aider":
-                raise JauntConfigError(
-                    '`jaunt build --interactive` requires agent.engine = "aider".'
-                )
-            if not expanded_stale:
-                raise JauntConfigError(
-                    "Interactive build needs exactly one stale target. "
-                    "Use --force and --target MODULE to reopen a specific module."
-                )
-            if len(expanded_stale) != 1:
-                raise JauntConfigError(
-                    "Interactive build needs exactly one resolved module. "
-                    "Narrow the scope with --target MODULE."
-                )
-
         progress = None
         if (
             expanded_stale
-            and not interactive
             and not json_mode
             and (not bool(args.no_progress))
             and sys.stderr.isatty()
@@ -1384,14 +1337,13 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             backend=_build_backend(cfg),
             generation_fingerprint=build_generation_fingerprint,
             skills_block=skills_block,
-            jobs=1 if interactive else jobs,
+            jobs=jobs,
             progress=progress,
-            response_cache=None if interactive else response_cache,
+            response_cache=response_cache,
             cost_tracker=cost_tracker,
             ty_retry_attempts=cfg.build.ty_retry_attempts,
             async_runner=cfg.build.async_runner,
             build_instructions=build_instructions,
-            interactive=interactive,
             targeted_test_entries=targeted_test_entries,
         )
 
@@ -2054,7 +2006,6 @@ def cmd_skill(args: argparse.Namespace) -> int:
                     generated_dir=cfg.paths.generated_dir,
                     llm=cfg.llm,
                     agent=cfg.agent,
-                    aider=cfg.aider,
                     codex=cfg.codex,
                 )
             )
@@ -2255,7 +2206,7 @@ def cmd_skill(args: argparse.Namespace) -> int:
         try:
             from jaunt.skill_builder import SkillBuilder
 
-            builder = SkillBuilder(cfg.llm, cfg.agent, cfg.aider, cfg.codex)
+            builder = SkillBuilder(cfg.llm, cfg.agent, codex=cfg.codex)
             if progress is not None:
                 progress.phase(args.name, "building")
             updated = asyncio.run(

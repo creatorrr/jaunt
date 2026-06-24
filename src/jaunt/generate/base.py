@@ -88,11 +88,6 @@ class GeneratorBackend(ABC):
         Returns (source_code, optional_token_usage).
         """
 
-    async def generate_interactive(
-        self, ctx: ModuleSpecContext, *, extra_error_context: list[str] | None = None
-    ) -> tuple[str, TokenUsage | None]:
-        raise NotImplementedError("Interactive generation is not supported by this backend.")
-
     async def complete_text(self, *, system: str, user: str) -> str:
         """Single-shot text completion for contract derivation.
 

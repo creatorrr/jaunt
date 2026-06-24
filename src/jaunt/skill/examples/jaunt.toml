@@ -37,12 +37,9 @@ pytest_args = ["-q"]
 # test_module = ""
 
 [agent]
-engine = "aider"
+engine = "codex"
 
-[aider]
-build_mode = "architect"
-test_mode = "code"
-skill_mode = "code"
-editor_model = ""
-map_tokens = 0
-save_traces = false
+[codex]
+model = "gpt-5.2-codex"
+reasoning_effort = "high"
+sandbox = "workspace-write"

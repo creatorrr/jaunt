@@ -457,7 +457,10 @@ def test_cmd_status_marks_engine_switch_as_stale(tmp_path: Path, monkeypatch, ca
                     'source_roots = ["src"]',
                     "",
                     "[agent]",
-                    'engine = "aider"',
+                    'engine = "codex"',
+                    "",
+                    "[codex]",
+                    'reasoning_effort = "medium"',
                     "",
                 ]
             )

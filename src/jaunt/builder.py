@@ -1028,7 +1028,6 @@ async def run_build(
     ty_retry_attempts: int | None = None,
     async_runner: str = "asyncio",
     build_instructions: Sequence[str] | None = None,
-    interactive: bool = False,
     initial_error_context_by_module: dict[str, list[str]] | None = None,
     targeted_test_entries: dict[str, list[SpecEntry]] | None = None,
 ) -> BuildReport:
@@ -1126,7 +1125,7 @@ async def run_build(
     ) -> tuple[bool, str | None, list[str]]:
         result_source: str | None = None
         ck: str | None = None
-        if response_cache is not None and not interactive:
+        if response_cache is not None:
             ck = cache_key_from_context(
                 ctx,
                 model=backend.model_name,
@@ -1143,20 +1142,6 @@ async def run_build(
                         cost_tracker.record_cache_hit()
 
         if result_source is None:
-            if interactive:
-                _phase(module_name, "interactive", "launching aider")
-                source, usage = await backend.generate_interactive(
-                    ctx,
-                    extra_error_context=(initial_error_context_by_module or {}).get(module_name),
-                )
-                result_source = source
-                _phase(module_name, "validating")
-                validation_errors = validate_candidate(result_source)
-                if validation_errors:
-                    return False, None, validation_errors
-                if cost_tracker is not None and usage is not None:
-                    cost_tracker.record(module_name, usage)
-                return True, result_source, []
             max_attempts = (2 + (ty_attempts or 0)) if ty_cmd is not None else 2
             async with llm_slots:
                 _phase(module_name, "generating")

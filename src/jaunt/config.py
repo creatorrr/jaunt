@@ -35,8 +35,7 @@ class LLMConfig:
 
 
 _VALID_ASYNC_RUNNERS = ("asyncio", "anyio")
-_VALID_AGENT_ENGINES = ("legacy", "aider", "codex")
-_VALID_AIDER_MODES = ("architect", "code")
+_VALID_AGENT_ENGINES = ("codex",)
 _VALID_DERIVE = ("examples", "errors")
 
 
@@ -70,17 +69,7 @@ class PromptsConfig:
 
 @dataclass(frozen=True)
 class AgentConfig:
-    engine: str = "aider"
-
-
-@dataclass(frozen=True)
-class AiderConfig:
-    build_mode: str = "architect"
-    test_mode: str = "code"
-    skill_mode: str = "code"
-    editor_model: str = ""
-    map_tokens: int = 0
-    save_traces: bool = False
+    engine: str = "codex"
 
 
 @dataclass(frozen=True)
@@ -108,7 +97,6 @@ class JauntConfig:
     test: TestConfig
     prompts: PromptsConfig
     agent: AgentConfig = field(default_factory=AgentConfig)
-    aider: AiderConfig = field(default_factory=AiderConfig)
     codex: CodexConfig = field(default_factory=CodexConfig)
     contract: ContractConfig = field(default_factory=ContractConfig)
 
@@ -218,7 +206,6 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     test_tbl = _as_table(data.get("test"), name="test")
     prompts_tbl = _as_table(data.get("prompts"), name="prompts")
     agent_tbl = _as_table(data.get("agent"), name="agent")
-    aider_tbl = _as_table(data.get("aider"), name="aider")
     codex_tbl = _as_table(data.get("codex"), name="codex")
     contract_tbl = _as_table(data.get("contract"), name="contract")
 
@@ -357,37 +344,7 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     if "engine" in agent_tbl:
         agent_engine = _as_str(agent_tbl["engine"], name="agent.engine").strip()
     else:
-        agent_engine = "aider"
-
-    if "build_mode" in aider_tbl:
-        aider_build_mode = _as_str(aider_tbl["build_mode"], name="aider.build_mode").strip()
-    else:
-        aider_build_mode = "architect"
-
-    if "test_mode" in aider_tbl:
-        aider_test_mode = _as_str(aider_tbl["test_mode"], name="aider.test_mode").strip()
-    else:
-        aider_test_mode = "code"
-
-    if "skill_mode" in aider_tbl:
-        aider_skill_mode = _as_str(aider_tbl["skill_mode"], name="aider.skill_mode").strip()
-    else:
-        aider_skill_mode = "code"
-
-    if "editor_model" in aider_tbl:
-        aider_editor_model = _as_str(aider_tbl["editor_model"], name="aider.editor_model")
-    else:
-        aider_editor_model = ""
-
-    if "map_tokens" in aider_tbl:
-        aider_map_tokens = _as_int(aider_tbl["map_tokens"], name="aider.map_tokens")
-    else:
-        aider_map_tokens = 0
-
-    if "save_traces" in aider_tbl:
-        aider_save_traces = _as_bool(aider_tbl["save_traces"], name="aider.save_traces")
-    else:
-        aider_save_traces = False
+        agent_engine = "codex"
 
     if "model" in codex_tbl:
         codex_model = _as_str(codex_tbl["model"], name="codex.model")
@@ -459,20 +416,11 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
         )
     if agent_engine not in _VALID_AGENT_ENGINES:
         raise JauntConfigError(
-            f"Invalid config: agent.engine must be one of {_VALID_AGENT_ENGINES!r}, "
-            f"got {agent_engine!r}."
+            f"Invalid config: agent.engine must be 'codex' (got {agent_engine!r}). "
+            "The 'legacy' and 'aider' engines have been removed; Codex is now the sole "
+            "engine. Remove any [agent] engine override and any [aider] table from "
+            "jaunt.toml and use [codex] instead."
         )
-    for key, value in (
-        ("aider.build_mode", aider_build_mode),
-        ("aider.test_mode", aider_test_mode),
-        ("aider.skill_mode", aider_skill_mode),
-    ):
-        if value not in _VALID_AIDER_MODES:
-            raise JauntConfigError(
-                f"Invalid config: {key} must be one of {_VALID_AIDER_MODES!r}, got {value!r}."
-            )
-    if aider_map_tokens < 0:
-        raise JauntConfigError("Invalid config: aider.map_tokens must be >= 0.")
     if anthropic_thinking_budget_tokens is not None and anthropic_thinking_budget_tokens < 1:
         raise JauntConfigError("Invalid config: llm.anthropic_thinking_budget_tokens must be >= 1.")
 
@@ -514,14 +462,6 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             test_module=test_module,
         ),
         agent=AgentConfig(engine=agent_engine),
-        aider=AiderConfig(
-            build_mode=aider_build_mode,
-            test_mode=aider_test_mode,
-            skill_mode=aider_skill_mode,
-            editor_model=aider_editor_model,
-            map_tokens=aider_map_tokens,
-            save_traces=aider_save_traces,
-        ),
         codex=CodexConfig(
             model=codex_model,
             reasoning_effort=codex_reasoning_effort,

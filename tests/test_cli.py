@@ -15,7 +15,6 @@ def test_parse_build_defaults() -> None:
     assert ns.no_progress is False
     assert ns.instructions == []
     assert ns.include_target_tests is None
-    assert ns.interactive is False
 
 
 def test_parse_build_flags() -> None:
@@ -38,7 +37,6 @@ def test_parse_build_flags() -> None:
             "--instruction",
             "Prefer helpers.",
             "--include-target-tests",
-            "--interactive",
         ]
     )
     assert ns.command == "build"
@@ -51,7 +49,6 @@ def test_parse_build_flags() -> None:
     assert ns.no_progress is True
     assert ns.instructions == ["Prefer helpers."]
     assert ns.include_target_tests is True
-    assert ns.interactive is True
 
 
 def test_parse_test_defaults() -> None:

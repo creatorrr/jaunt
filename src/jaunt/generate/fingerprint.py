@@ -8,7 +8,6 @@ from collections.abc import Sequence
 from typing import Literal
 
 from jaunt.config import JauntConfig
-from jaunt.generate.aider_contract import aider_generation_fingerprint_parts
 from jaunt.generate.shared import load_prompt
 
 
@@ -48,14 +47,18 @@ def generation_fingerprint_from_config(
     if kind == "build":
         system_prompt = load_prompt("build_system.md", cfg.prompts.build_system or None)
         user_prompt = load_prompt("build_module.md", cfg.prompts.build_module or None)
-        mode = cfg.aider.build_mode if cfg.agent.engine == "aider" else ""
+        mode = ""
     else:
         system_prompt = load_prompt("test_system.md", cfg.prompts.test_system or None)
         user_prompt = load_prompt("test_module.md", cfg.prompts.test_module or None)
-        mode = cfg.aider.test_mode if cfg.agent.engine == "aider" else ""
-    editor_model = cfg.aider.editor_model if cfg.agent.engine == "aider" else ""
-    reasoning_effort = cfg.llm.reasoning_effort if cfg.agent.engine == "aider" else ""
-    runtime_parts = aider_generation_fingerprint_parts(kind) if cfg.agent.engine == "aider" else []
+        mode = ""
+    editor_model = ""
+    reasoning_effort = cfg.codex.reasoning_effort if cfg.agent.engine == "codex" else ""
+    runtime_parts = (
+        [f"codex_model={cfg.codex.model}", f"codex_sandbox={cfg.codex.sandbox}"]
+        if cfg.agent.engine == "codex"
+        else []
+    )
     build_runtime_parts = list(runtime_parts)
     if kind == "build":
         instruction_source = (

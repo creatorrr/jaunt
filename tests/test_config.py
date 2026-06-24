@@ -38,13 +38,7 @@ def test_load_minimal_config_defaults_apply(tmp_path: Path) -> None:
     assert cfg.prompts.build_module == ""
     assert cfg.prompts.test_system == ""
     assert cfg.prompts.test_module == ""
-    assert cfg.agent.engine == "aider"
-    assert cfg.aider.build_mode == "architect"
-    assert cfg.aider.test_mode == "code"
-    assert cfg.aider.skill_mode == "code"
-    assert cfg.aider.editor_model == ""
-    assert cfg.aider.map_tokens == 0
-    assert cfg.aider.save_traces is False
+    assert cfg.agent.engine == "codex"
 
 
 def test_load_config_overrides_work(tmp_path: Path) -> None:
@@ -85,15 +79,11 @@ def test_load_config_overrides_work(tmp_path: Path) -> None:
                 'test_module = "tm"',
                 "",
                 "[agent]",
-                'engine = "aider"',
+                'engine = "codex"',
                 "",
-                "[aider]",
-                'build_mode = "architect"',
-                'test_mode = "code"',
-                'skill_mode = "code"',
-                'editor_model = "gpt-5.2-mini"',
-                "map_tokens = 2048",
-                "save_traces = true",
+                "[codex]",
+                'model = "gpt-5.2-codex"',
+                'reasoning_effort = "medium"',
                 "",
             ]
         )
@@ -127,13 +117,9 @@ def test_load_config_overrides_work(tmp_path: Path) -> None:
     assert cfg.prompts.build_module == "bm"
     assert cfg.prompts.test_system == "ts"
     assert cfg.prompts.test_module == "tm"
-    assert cfg.agent.engine == "aider"
-    assert cfg.aider.build_mode == "architect"
-    assert cfg.aider.test_mode == "code"
-    assert cfg.aider.skill_mode == "code"
-    assert cfg.aider.editor_model == "gpt-5.2-mini"
-    assert cfg.aider.map_tokens == 2048
-    assert cfg.aider.save_traces is True
+    assert cfg.agent.engine == "codex"
+    assert cfg.codex.model == "gpt-5.2-codex"
+    assert cfg.codex.reasoning_effort == "medium"
 
 
 def test_codex_config_parsing(tmp_path: Path) -> None:
@@ -327,25 +313,6 @@ def test_validation_agent_engine_must_be_known(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     with pytest.raises(JauntConfigError, match="agent.engine"):
-        load_config(root=tmp_path)
-
-
-def test_validation_aider_map_tokens_must_be_ge_0(tmp_path: Path) -> None:
-    (tmp_path / "src").mkdir()
-    (tmp_path / "jaunt.toml").write_text(
-        "\n".join(
-            [
-                "version = 1",
-                "",
-                "[aider]",
-                "map_tokens = -1",
-                "",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    with pytest.raises(JauntConfigError, match="aider.map_tokens"):
         load_config(root=tmp_path)
 
 

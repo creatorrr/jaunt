@@ -11,7 +11,7 @@ from jaunt.skill_manager import _atomic_write_text
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Sequence
 
-    from jaunt.config import AgentConfig, AiderConfig, CodexConfig, LLMConfig
+    from jaunt.config import AgentConfig, CodexConfig, LLMConfig
 
 
 _HEADER_PREFIX = "<!-- jaunt:skill=pypi"
@@ -63,7 +63,6 @@ async def ensure_pypi_skills_and_block(
     generated_dir: str,
     llm: LLMConfig,
     agent: AgentConfig | None = None,
-    aider: AiderConfig | None = None,
     codex: CodexConfig | None = None,
 ) -> SkillsAutoResult:
     """Best-effort: ensure skills exist for imported external PyPI libs.
@@ -85,7 +84,6 @@ async def ensure_pypi_skills_and_block(
             dists=dists,
             llm=llm,
             agent=agent,
-            aider=aider,
             codex=codex,
             warnings=warnings,
         )
@@ -105,7 +103,6 @@ async def _generate_pypi_skills(
     dists: dict[str, str],
     llm: LLMConfig,
     agent: AgentConfig | None,
-    aider: AiderConfig | None,
     codex: CodexConfig | None,
     warnings: list[str],
 ) -> int:
@@ -153,22 +150,12 @@ async def _generate_pypi_skills(
     if to_generate:
         generator = None
         try:
-            from jaunt.config import AgentConfig, AiderConfig, CodexConfig
-            from jaunt.skillgen import (
-                AiderSkillGenerator,
-                CodexSkillGenerator,
-                OpenAISkillGenerator,
-            )
+            from jaunt.config import AgentConfig, CodexConfig
+            from jaunt.skillgen import CodexSkillGenerator
 
             resolved_agent = agent or AgentConfig()
-            resolved_aider = aider or AiderConfig()
             resolved_codex = codex or CodexConfig()
-            if resolved_agent.engine == "aider":
-                generator = AiderSkillGenerator(llm, resolved_agent, resolved_aider)
-            elif resolved_agent.engine == "codex":
-                generator = CodexSkillGenerator(llm, resolved_agent, resolved_codex)
-            else:
-                generator = OpenAISkillGenerator(llm)
+            generator = CodexSkillGenerator(llm, resolved_agent, resolved_codex)
         except Exception as e:  # noqa: BLE001
             warnings.append(f"Failed initializing skill generator: {type(e).__name__}: {e}")
             failures += len(to_generate)

@@ -208,7 +208,7 @@ def A():
         module_specs=module_specs,
         specs=specs,
         spec_graph=spec_graph,
-        generation_fingerprint="aider-build",
+        generation_fingerprint="codex-build",
     )
     assert stale == {"m"}
 

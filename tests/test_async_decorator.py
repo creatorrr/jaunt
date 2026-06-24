@@ -501,57 +501,23 @@ class TestPromptRendering:
     def test_rendered_test_prompt_includes_asyncio_marker(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from jaunt.config import LLMConfig
-        from jaunt.generate.base import ModuleSpecContext
-        from jaunt.generate.openai_backend import OpenAIBackend
-        from jaunt.spec_ref import normalize_spec_ref
+        from jaunt.generate.shared import async_test_info, load_prompt, render_template
 
-        monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-        backend = OpenAIBackend(
-            LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY")
+        rendered = render_template(
+            load_prompt("test_module.md", None),
+            {"async_test_info": async_test_info("asyncio")},
         )
-        foo_ref = normalize_spec_ref("pkg.specs:foo")
-        ctx = ModuleSpecContext(
-            kind="test",
-            spec_module="pkg.specs",
-            generated_module="pkg.__generated__.specs",
-            expected_names=["foo"],
-            spec_sources={foo_ref: "async def foo() -> int:\n    pass\n"},
-            decorator_prompts={},
-            dependency_apis={},
-            dependency_generated_modules={},
-            async_runner="asyncio",
-        )
-        messages = backend._render_messages(ctx, extra_error_context=None)
-        rendered = "\n".join(m["content"] for m in messages)
         assert "pytest.mark.asyncio" in rendered
 
     def test_rendered_test_prompt_includes_anyio_marker(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from jaunt.config import LLMConfig
-        from jaunt.generate.base import ModuleSpecContext
-        from jaunt.generate.openai_backend import OpenAIBackend
-        from jaunt.spec_ref import normalize_spec_ref
+        from jaunt.generate.shared import async_test_info, load_prompt, render_template
 
-        monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-        backend = OpenAIBackend(
-            LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY")
+        rendered = render_template(
+            load_prompt("test_module.md", None),
+            {"async_test_info": async_test_info("anyio")},
         )
-        foo_ref = normalize_spec_ref("pkg.specs:foo")
-        ctx = ModuleSpecContext(
-            kind="test",
-            spec_module="pkg.specs",
-            generated_module="pkg.__generated__.specs",
-            expected_names=["foo"],
-            spec_sources={foo_ref: "async def foo() -> int:\n    pass\n"},
-            decorator_prompts={},
-            dependency_apis={},
-            dependency_generated_modules={},
-            async_runner="anyio",
-        )
-        messages = backend._render_messages(ctx, extra_error_context=None)
-        rendered = "\n".join(m["content"] for m in messages)
         assert "pytest.mark.anyio" in rendered
 
 

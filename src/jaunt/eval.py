@@ -799,13 +799,9 @@ def _render_agent_jaunt_toml(target: EvalTarget) -> str:
             'pytest_args = ["-q"]',
             "",
             "[agent]",
-            'engine = "aider"',
+            'engine = "codex"',
             "",
-            "[aider]",
-            'build_mode = "architect"',
-            'test_mode = "code"',
-            'skill_mode = "code"',
-            f'editor_model = "{target.model}"',
+            "[codex]",
             "",
         ]
     )
