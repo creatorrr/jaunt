@@ -85,6 +85,9 @@ examples/           # Runnable example projects
   (Jaunt designs the API), stubs-only (Jaunt implements declared methods), or a
   mix of stubs and preserved members. Use `@jaunt.preserve` on a method to keep
   it hand-written even if its body looks like a stub.
+- **Auto-generated class tests**: Class specs can get generated pytest coverage
+  through explicit `@jaunt.test(targets=Cls)` test specs, opt-in implicit
+  `@jaunt.magic(test=True)`, or the `[test] auto_class_tests` config flag.
 - **Dependency graph**: Built from explicit `deps=` kwargs and optional
   AST-based inference. Topologically sorted; cycle detection with clear errors.
 

@@ -146,6 +146,7 @@
         - Write clear, specific assertions that verify concrete expected values — avoid bare `assert result` without checking a specific value.
         - Each test function should be self-contained and independent.
         - Use pytest idioms: `pytest.raises` for expected exceptions, parametrize where appropriate.
+        - For class targets, prefer holistic stateful tests that construct instances, exercise realistic method sequences, verify declared base-class/ABC behavior such as `isinstance`, and avoid re-testing unchanged inherited methods.
         
         Rules:
         - Emit only the test module source code.
@@ -208,6 +209,12 @@
         - Cover the happy path (normal usage) and edge cases (boundary values, error conditions, empty inputs).
         - Write specific assertions that check concrete values — avoid bare `assert result`.
         - Use `pytest.raises` for expected exceptions.
+        - When a target is a class, test it holistically: construct it, drive realistic
+          sequences of method calls (stateful scenarios), and assert invariants across
+          calls — not just isolated per-method results.
+        - Verify the class satisfies its declared base classes / ABCs (e.g. `isinstance`,
+          instantiability) and that overrides behave consistently with the base contract.
+        - Do not re-test unchanged inherited methods; focus on this class's own behavior.
         
         Rules:
         - Generate tests only (no production implementation).

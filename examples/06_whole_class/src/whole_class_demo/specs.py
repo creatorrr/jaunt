@@ -21,3 +21,9 @@ class Stack:
 class Inventory:
     """Docstring-only: an item->quantity store. Supports add(item, qty),
     remove(item, qty) (never below zero), and total() across all items."""
+
+
+@jaunt.magic(test=True)
+class TempStats:
+    """Rolling temperature stats. record(temp) stores a reading;
+    mean() returns the average; max() returns the highest; reset() clears all."""
