@@ -9,13 +9,9 @@ from the class contract. `TempStats` opts into implicit auto-testing with
 `@jaunt.magic(test=True)`, and this example also enables `[test]
 auto_class_tests`.
 
-> **Note:** `jaunt.toml` sets `[agent] engine = "legacy"`. Whole-class `@magic`
-> generation currently requires the direct backend; the default `aider` engine
-> does not yet emit a full class body for whole-class specs.
-
 ## Build
 
-This example requires an OpenAI API key:
+This example requires the `codex` CLI installed and authenticated (`codex login`):
 
 ```bash
 cd examples/06_whole_class && uv run --project ../.. jaunt build

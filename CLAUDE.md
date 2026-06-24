@@ -3,12 +3,14 @@
 Jaunt is a spec-driven code generation framework for Python. Users write
 implementation intent as decorator-marked stubs (`@jaunt.magic`) and test intent
 as test stubs (`@jaunt.test`). Jaunt generates real implementations and pytest
-tests into `__generated__/` directories using an LLM backend (OpenAI or
-Anthropic).
+tests into `__generated__/` directories using the OpenAI **Codex** CLI as its
+code-generation engine (`codex mcp-server`).
 
 ## Quick Reference
 
 ```bash
+# Requires the `codex` CLI installed and authenticated (`codex login`).
+
 # Install
 uv sync --frozen
 
@@ -24,7 +26,7 @@ uv run ruff check .
 # Typecheck
 uv run ty check
 
-# Build an example project (requires OPENAI_API_KEY, ANTHROPIC_API_KEY, or CEREBRAS_API_KEY)
+# Build an example project (requires the `codex` CLI, authenticated via `codex login`)
 cd examples/jwt_auth && uv run --project ../.. jaunt build
 
 # Optional extras:
@@ -59,11 +61,10 @@ src/jaunt/          # Library source
   module_api.py     # Exported API summaries/digests for dependency-aware rebuilds
   external_imports.py  # External import detection
   skills_auto.py    # Auto-generated PyPI skills
+  codex_executor.py   # Codex-driven agent executor (auto-skills)
   generate/
     base.py              # Abstract GeneratorBackend interface
-    openai_backend.py    # OpenAI provider
-    anthropic_backend.py # Anthropic/Claude provider
-    cerebras_backend.py  # Cerebras provider
+    codex_backend.py    # Codex engine (drives `codex mcp-server`)
   prompts/          # LLM prompt templates (Jinja-like {{var}})
 tests/              # pytest test suite (~41 files)
 examples/           # Runnable example projects
@@ -100,10 +101,20 @@ examples/           # Runnable example projects
 ```toml
 version = 1
 
+[agent]
+engine = "codex"          # the only supported engine
+
+[codex]
+model = "gpt-5.2-codex"
+reasoning_effort = "high"  # low | medium | high
+sandbox = "workspace-write"
+
+# [llm] is retained but informational under Codex: Codex authenticates via
+# `codex login` / CODEX_API_KEY, not `llm.api_key_env`.
 [llm]
-provider = "openai"          # or "anthropic", "cerebras"
-model = "gpt-5.2"            # or "claude-sonnet-4-20250514", "llama-4-scout-17b-16e-instruct", etc.
-api_key_env = "OPENAI_API_KEY"  # or "ANTHROPIC_API_KEY", "CEREBRAS_API_KEY"
+provider = "openai"
+model = "gpt-5.2"
+api_key_env = "OPENAI_API_KEY"
 
 [paths]
 source_roots = ["src", "."]
@@ -186,7 +197,7 @@ Always run the full test suite after changes:
 uv run pytest
 ```
 
-The test suite uses mocking for OpenAI calls and does not require API keys.
+The test suite mocks the generator backend and does not require API keys.
 Tests are organized by module — `test_cli.py`, `test_builder_io.py`,
 `test_config.py`, etc.
 

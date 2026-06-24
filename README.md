@@ -20,7 +20,7 @@ Jaunt is a small Python library + CLI for **spec-driven code generation**:
 
 - Write implementation intent as normal Python stubs decorated with `@jaunt.magic(...)`.
 - Optionally write test intent as stubs decorated with `@jaunt.test(...)`.
-- Jaunt generates real modules under `__generated__/` using an LLM backend (OpenAI, Anthropic, or Cerebras).
+- Jaunt generates real modules under `__generated__/` using the OpenAI Codex CLI (`codex mcp-server`) as its code-generation engine.
 - Async support is available for both implementation and test specs through `async def` plus the `build.async_runner` setting.
 - `@magic` works on individual class methods too — decorate instance methods, `@classmethod`, `@staticmethod`, or `@abstractmethod` stubs and Jaunt generates only those methods while preserving the rest of the class.
 - Incremental freshness tracks both module digests and exported dependency APIs, so signature changes, whole-class member changes, and contract docstring edits can invalidate dependents.
@@ -40,35 +40,19 @@ See `examples/contract_slugify/` for a Contract-mode walkthrough.
 ## Installation
 
 ```bash
-pip install jaunt[openai]      # OpenAI + default Aider runtime
-pip install jaunt[anthropic]   # Anthropic/Claude + default Aider runtime
-pip install jaunt[cerebras]    # Cerebras + default Aider runtime
-pip install jaunt[aider]       # runtime-only extra for custom install setups
-pip install jaunt[all]         # all bundled backends/tools, including Aider
-pip install jaunt[all-sdk]     # same Jaunt CLI, but without the Aider dependency
+pip install jaunt
 
-# For conflicting app environments, prefer running Jaunt as an isolated tool:
-uv tool run --from 'jaunt[all]' jaunt build --root .
+# Jaunt drives the external OpenAI Codex CLI, which you install and
+# authenticate separately:
+#   1. Install the `codex` CLI (see the Codex docs).
+#   2. Authenticate it: `codex login`.
 ```
 
-## Aider Runtime
+## Codex Engine
 
-Jaunt now defaults to `agent.engine = "aider"` for its internal
-build/test/skill workflows. Set `agent.engine = "legacy"` if you want the
-older direct-SDK runtime instead.
-
-Practical limitation today: if you use Aider with a custom
-`llm.api_key_env` name that differs from the provider's canonical variable
-(`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `CEREBRAS_API_KEY`), Jaunt currently
-remaps that key through `os.environ` under a global lock. That keeps auth
-stable, but it serializes concurrent Aider tasks for that config. For full
-parallelism today, prefer the canonical provider env var name.
-
-Known gotcha: `aider-chat 0.86.2` currently pins `numpy==1.26.4`. Since Jaunt's
-default Aider install path includes `aider-chat`, `jaunt[all]` can fail to
-resolve in app environments that require NumPy 2.x. If your project already
-depends on `numpy>=2`, either run Jaunt in an isolated tool environment or
-install `jaunt[all-sdk]` and avoid the Aider dependency in that environment.
+Codex is the sole code-generation engine: Jaunt drives `codex mcp-server` for
+all build/test/skill workflows. It requires the external `codex` binary on your
+PATH, authenticated via `codex login`. Multi-provider routing is deferred.
 
 ## Quickstart (This Repo)
 
@@ -76,7 +60,7 @@ Prereqs: `uv` installed.
 
 ```bash
 uv sync
-export OPENAI_API_KEY=...   # or ANTHROPIC_API_KEY for Claude
+codex login                 # authenticate the Codex engine
 uv run jaunt --version
 ```
 
@@ -104,35 +88,7 @@ PYTHONPATH=examples/jwt_auth/src uv run jaunt test --root examples/jwt_auth
 
 ## Eval Suite
 
-Run the built-in eval suite against your configured backend:
-
-```bash
-uv run jaunt eval
-uv run jaunt eval --model gpt-4o
-uv run jaunt eval --provider anthropic --model claude-sonnet-4-5-20250929
-```
-
-Compare explicit provider/model targets:
-
-```bash
-uv run jaunt eval --compare openai:gpt-4o anthropic:claude-sonnet-4-5-20250929
-```
-
-Eval outputs are written under `.jaunt/evals/<timestamp>/`.
-
-### Eval Results (2026-02-15 UTC)
-
-| Run (UTC) | Mode | Target | Reasoning | Passed | Failed | Skipped | Total | Notes | Artifacts |
-| --- | --- | --- | --- | ---:| ---:| ---:| ---:| --- | --- |
-| 2026-02-15T21-34-58Z | single | `cerebras:gpt-oss-120b` | none | 0 | 10 | 0 | 10 | Missing `cerebras-cloud-sdk` dependency | [`examples/expr_eval/.jaunt/evals/2026-02-15T21-34-58Z`](examples/expr_eval/.jaunt/evals/2026-02-15T21-34-58Z) |
-| 2026-02-15T21-35-17Z | single | `cerebras:gpt-oss-120b` | none | 0 | 10 | 0 | 10 | Cerebras `402 payment_required` quota/billing error | [`examples/expr_eval/.jaunt/evals/2026-02-15T21-35-17Z`](examples/expr_eval/.jaunt/evals/2026-02-15T21-35-17Z) |
-| 2026-02-15T21-36-54Z | single | `cerebras:gpt-oss-120b` | none | 10 | 0 | 0 | 10 | All eval cases passed | [`examples/expr_eval/.jaunt/evals/2026-02-15T21-36-54Z`](examples/expr_eval/.jaunt/evals/2026-02-15T21-36-54Z) |
-| 2026-02-15T22-01-24Z-custom-compare | compare | `cerebras:gpt-oss-120b` | low | 10 | 0 | 0 | 10 | All eval cases passed | [`examples/expr_eval/.jaunt/evals/2026-02-15T22-01-24Z-custom-compare`](examples/expr_eval/.jaunt/evals/2026-02-15T22-01-24Z-custom-compare) |
-| 2026-02-15T22-01-24Z-custom-compare | compare | `openai:gpt-5.2` | none | 10 | 0 | 0 | 10 | All eval cases passed | [`examples/expr_eval/.jaunt/evals/2026-02-15T22-01-24Z-custom-compare`](examples/expr_eval/.jaunt/evals/2026-02-15T22-01-24Z-custom-compare) |
-| 2026-02-15T22-01-24Z-custom-compare | compare | `anthropic:opus-4.6` | none | 0 | 10 | 0 | 10 | Anthropic `404 not_found_error` for model name | [`examples/expr_eval/.jaunt/evals/2026-02-15T22-01-24Z-custom-compare`](examples/expr_eval/.jaunt/evals/2026-02-15T22-01-24Z-custom-compare) |
-| 2026-02-15T22-04-19Z-custom-compare | compare | `cerebras:gpt-oss-120b` | low | 10 | 0 | 0 | 10 | All eval cases passed | [`examples/expr_eval/.jaunt/evals/2026-02-15T22-04-19Z-custom-compare`](examples/expr_eval/.jaunt/evals/2026-02-15T22-04-19Z-custom-compare) |
-| 2026-02-15T22-04-19Z-custom-compare | compare | `openai:gpt-5.2` | none | 10 | 0 | 0 | 10 | All eval cases passed | [`examples/expr_eval/.jaunt/evals/2026-02-15T22-04-19Z-custom-compare`](examples/expr_eval/.jaunt/evals/2026-02-15T22-04-19Z-custom-compare) |
-| 2026-02-15T22-04-19Z-custom-compare | compare | `anthropic:claude-haiku-4-5` | none | 9 | 1 | 0 | 10 | One assertion failure (`example_slugify_smoke`) | [`examples/expr_eval/.jaunt/evals/2026-02-15T22-04-19Z-custom-compare`](examples/expr_eval/.jaunt/evals/2026-02-15T22-04-19Z-custom-compare) |
+`jaunt eval` is deferred under the Codex engine (rework pending).
 
 Prompt snapshots:
 
@@ -150,7 +106,7 @@ What happens:
 - Resolve imports to installed PyPI distributions + versions from the current environment.
 - Ensure a skill exists per distribution at:
   - `<project_root>/.agents/skills/<dist-normalized>/SKILL.md`
-- If missing/outdated, fetch the exact PyPI README for `<dist>==<version>` and generate `SKILL.md` using the configured LLM provider.
+- If missing/outdated, fetch the exact PyPI README for `<dist>==<version>` and generate `SKILL.md` using the Codex engine.
 - Inject the concatenated skills text into the build LLM prompt.
 
 Overwrite rules:

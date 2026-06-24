@@ -10,11 +10,10 @@ provider = "openai"
 model = "gpt-5.2"
 api_key_env = "OPENAI_API_KEY"
 
-# Whole-class @magic generation requires the direct ("legacy") backend; the
-# default aider engine emits SEARCH/REPLACE edits that don't produce a full
-# class body for whole-class specs.
-[agent]
-engine = "legacy"
+[codex]
+model = "gpt-5.2-codex"
+reasoning_effort = "high"
+sandbox = "workspace-write"
 
 [test]
 pytest_args = ["-q"]

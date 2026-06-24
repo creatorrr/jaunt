@@ -1,3 +1,5 @@
+> **SUPERSEDED by `docs/superpowers/specs/2026-06-24-codex-engine-design.md`** — Codex's whole-file output delivers whole-class @magic natively; the aider escalation/fallback approach here was not implemented. Retained for its Codex-review history.
+
 # Whole-class `@jaunt.magic` under the default aider engine — Design
 
 **Date:** 2026-06-24
