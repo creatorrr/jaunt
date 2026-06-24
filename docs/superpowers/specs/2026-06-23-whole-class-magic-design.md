@@ -66,6 +66,39 @@ uniformly to `__init__`, `@property` (getter/setter), `@classmethod`, and
 `@staticmethod`. The member's decorators are always preserved regardless of
 stub-vs-real status.
 
+### Explicit override: `@jaunt.preserve`
+
+The heuristic has one blind spot — a method whose *intended* real implementation
+is itself empty-ish (e.g. an intentional `def __init__(self): pass`, a no-op hook
+`def on_event(self): pass`, a deliberately-abstract `raise NotImplementedError`,
+or a `...` placeholder). The `@jaunt.preserve` decorator is the explicit escape
+hatch: it forces a method into the **preserved-verbatim** set, overriding the
+body-shape heuristic.
+
+Semantics:
+
+- **Build-time directive only.** The builder reads it from the AST (as it already
+  reads `@magic`); an explicit `@preserve` always wins over the heuristic.
+- **Runtime no-op.** It is an identity decorator so the spec module imports
+  cleanly. (At runtime the whole class is substituted by the generated class, so
+  the decorator has no runtime role.)
+- **Stripped from the generated output.** The generated class contains the method
+  *without* `@jaunt.preserve`, but *with* its real decorators (`@property`,
+  `@classmethod`, …). The preserved-intact check compares against the stripped
+  form.
+- **Not `@magic`.** It does not trip the whole-class-vs-per-method conflict rule —
+  it is a complementary annotation.
+- **Scope.** Meaningful only inside a whole-class `@magic`. Elsewhere (per-method
+  mode or plain classes, where methods are already preserved) it is a harmless
+  no-op and emits a lint-style warning.
+- **Form.** Bare `@jaunt.preserve` is the primary form; `@jaunt.preserve()` is
+  also accepted. Takes no arguments.
+
+There is intentionally **no** mirror "(re)generate this real-bodied method"
+marker (YAGNI): to regenerate a method, reduce its body to a stub and the
+heuristic handles it. The mental model stays simple — the heuristic decides,
+`@preserve` is the one override.
+
 ### Relationship to per-method `@magic`
 
 Per-method mode is unchanged. The existing mutual-exclusivity rule stays: a class
@@ -77,7 +110,9 @@ so the conflict never arises.
 
 **Preserved (must appear in the generated class):**
 
-- Real (non-stub) methods — preserved *verbatim* (AST-equivalent).
+- Real (non-stub) methods, plus any method marked `@jaunt.preserve` regardless of
+  its body shape — preserved *verbatim* (AST-equivalent, with `@jaunt.preserve`
+  itself stripped from the comparison and the output).
 - Class attribute assignments and annotations.
 - Base classes.
 - The class's own decorators (`@dataclass`, `@runtime_checkable`, …).
@@ -117,7 +152,9 @@ Build context assembled for the call:
 
 The build prompt (`prompts/build_module.md`) gains a whole-class section: emit the
 complete class named `X`; implement every stub against its signature + docstring;
-keep all preserved methods, attributes, base classes, and class decorators; you
+keep all preserved methods (heuristic-detected or `@jaunt.preserve`-marked, the
+latter emitted *without* the `@jaunt.preserve` decorator), attributes, base
+classes, and class decorators; you
 may add private helpers and shared state; honor the inheritance contract and
 implement all inherited abstractmethods; in docstring-only mode design the full
 public API from the docstring; retain the docstring content (you may append
@@ -137,9 +174,10 @@ whole-class spec. Severity levels:
   preserved.
 - **Abstractmethods:** every inherited ABC `@abstractmethod` is implemented. (An
   unimplemented abstractmethod yields an uninstantiable class — a real bug.)
-- **Preserved-intact:** each verbatim method and attribute is AST-equivalent
-  (formatting-normalized) to the spec. Catches LLM drift on parts that must not
-  change.
+- **Preserved-intact:** each verbatim method and attribute — heuristic-detected
+  *or* `@jaunt.preserve`-marked — is AST-equivalent (formatting-normalized) to the
+  spec, with `@jaunt.preserve` stripped before comparison. Catches LLM drift on
+  parts that must not change.
 - **Docstring retained:** the spec docstring's original content is present in the
   generated class docstring (additions allowed; removal/rewrite fails).
 
@@ -164,7 +202,9 @@ expanded docstrings.
 - **Dependency graph:** a class is a single node (already true in `deps.py`). Base
   classes that are project specs become dependencies so they build first and
   invalidate downstream.
-- **Runtime:** no change required. Import-time substitution already works
+- **Runtime:** the only addition is a `@jaunt.preserve` identity decorator
+  (no-op, returns the function unchanged) exported from the `jaunt` package.
+  Import-time substitution of the class is otherwise unchanged
   (`runtime.py:215-242`); the not-built fallback already raises an actionable
   error.
 
@@ -175,8 +215,13 @@ expanded docstrings.
   wire base-class API into the digest.
 - `validation.py` — class-aware validator (structure, abstractmethods,
   preserved-intact, docstring-retained, loose-signature warnings).
+- `runtime.py` + `jaunt/__init__.py` — add and export the `@jaunt.preserve`
+  identity decorator. The "used outside a whole-class `@magic`" warning is emitted
+  during build-time analysis (not at runtime, where the enclosing class's
+  decoration isn't yet known).
 - New util (e.g. in `decorator_analysis.py` or a small new module) — mode
-  detection + stub heuristic + stub/preserved split + base-class resolution.
+  detection + stub heuristic (with `@jaunt.preserve` override) + stub/preserved
+  split + base-class resolution.
 - `module_api.py` / `digest.py` — ensure base-class API participates in the
   class digest.
 - `examples/06_whole_class/` — a runnable example covering stubs, mix, and
@@ -190,7 +235,10 @@ expanded docstrings.
 
 - **Unit:** stub heuristic across `def`/`async def`/`property`/`classmethod`/
   `staticmethod` and each empty-ish body shape; mode detection for the three
-  modes; base-class resolution for project-spec and external bases.
+  modes; base-class resolution for project-spec and external bases;
+  `@jaunt.preserve` forces preservation of an empty-ish-bodied method and is
+  stripped from the output; `@jaunt.preserve` outside a whole-class `@magic`
+  warns and is a no-op.
 - **Validation:** missing stub method (fail); dropped base class (fail);
   unimplemented abstractmethod (fail); drifted preserved method (fail); rewritten
   docstring (fail) vs appended notes (pass); dropped-param signature (warn);
