@@ -10,7 +10,8 @@ from typing import TYPE_CHECKING, Any
 
 from jaunt.agent_runtime import AgentFile, AgentTask
 from jaunt.aider_executor import AiderExecutor
-from jaunt.config import AgentConfig, AiderConfig
+from jaunt.codex_executor import CodexExecutor
+from jaunt.config import AgentConfig, AiderConfig, CodexConfig
 from jaunt.errors import JauntConfigError
 from jaunt.generate.shared import load_prompt, render_template
 from jaunt.skill_agent import strip_markdown_fences, validate_skill_markdown
@@ -28,14 +29,21 @@ class SkillBuilder:
         llm: LLMConfig,
         agent: AgentConfig | None = None,
         aider: AiderConfig | None = None,
+        codex: CodexConfig | None = None,
     ) -> None:
         self._llm = llm
         self._agent = agent or AgentConfig()
         self._aider = aider or AiderConfig()
+        self._codex = codex or CodexConfig()
         self._model = llm.model
         self._provider = llm.provider
         self._system_prompt = load_prompt("skill_build_system.md", None)
         self._user_prompt = load_prompt("skill_build_user.md", None)
+
+        if self._agent.engine == "codex":
+            self._executor = CodexExecutor(self._codex, llm)
+            self._client = None
+            return
 
         if self._agent.engine == "aider":
             self._executor = AiderExecutor(llm, self._aider)
@@ -132,6 +140,41 @@ class SkillBuilder:
         result = await self._executor.run_task(task)
         return result.output
 
+    async def _run_codex(self, existing_content: str, library_info_block: str) -> str:
+        task_body = render_template(
+            self._user_prompt,
+            {
+                "existing_content": existing_content,
+                "library_info_block": library_info_block,
+            },
+        ).strip()
+        contract = (
+            "# Contract\n\n"
+            "Update the target SKILL.md file in place.\n\n"
+            "## System\n\n"
+            f"{self._system_prompt.strip()}\n\n"
+            "## Task\n\n"
+            f"{task_body}\n"
+        )
+        task = AgentTask(
+            kind="skill_update",
+            mode="code",
+            instruction=(
+                "Edit only `workspace/SKILL.md`.\n"
+                "Read and follow `context/contract.md` first.\n"
+                "Use `context/library_info.md` as read-only reference material.\n"
+                "Do not edit files under `context/`.\n"
+                "Output the completed Markdown in `workspace/SKILL.md`.\n"
+            ),
+            target_file=AgentFile(relative_path="workspace/SKILL.md", content=existing_content),
+            read_only_files=[
+                AgentFile(relative_path="context/contract.md", content=contract),
+                AgentFile(relative_path="context/library_info.md", content=library_info_block),
+            ],
+        )
+        result = await self._executor.run_task(task)
+        return result.output
+
     async def build_skill(
         self,
         existing_content: str,
@@ -190,6 +233,8 @@ class SkillBuilder:
                     progress("attempt", f"{attempt}/2")
                 if self._agent.engine == "aider":
                     out = await self._run_aider(existing_content, library_info_block)
+                elif self._agent.engine == "codex":
+                    out = await self._run_codex(existing_content, library_info_block)
                 else:
                     out = await self._call_llm(self._system_prompt, user_msg)
                 stripped = strip_markdown_fences(out)

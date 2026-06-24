@@ -1213,6 +1213,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                 llm=cfg.llm,
                 agent=cfg.agent,
                 aider=cfg.aider,
+                codex=cfg.codex,
             )
             for w in skills_res.warnings:
                 _eprint(f"warn: {w}")
@@ -2134,6 +2135,7 @@ def cmd_skill(args: argparse.Namespace) -> int:
                     llm=cfg.llm,
                     agent=cfg.agent,
                     aider=cfg.aider,
+                    codex=cfg.codex,
                 )
             )
             for w in res.warnings:
@@ -2333,7 +2335,7 @@ def cmd_skill(args: argparse.Namespace) -> int:
         try:
             from jaunt.skill_builder import SkillBuilder
 
-            builder = SkillBuilder(cfg.llm, cfg.agent, cfg.aider)
+            builder = SkillBuilder(cfg.llm, cfg.agent, cfg.aider, cfg.codex)
             if progress is not None:
                 progress.phase(args.name, "building")
             updated = asyncio.run(

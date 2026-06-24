@@ -209,3 +209,44 @@ def test_skill_builder_aider_engine_uses_executor(monkeypatch) -> None:
     result = asyncio.run(builder.build_skill("# old\n", [_make_lib_content()]))
     assert "Updated." in result
     assert seen["task"].kind == "skill_update"
+
+
+def test_skill_builder_codex_engine_uses_executor(monkeypatch) -> None:
+    from jaunt.config import AgentConfig, CodexConfig, LLMConfig
+    from jaunt.skill_builder import SkillBuilder
+
+    monkeypatch.delenv("TEST_KEY", raising=False)
+
+    llm = LLMConfig(provider="openai", model="gpt-test", api_key_env="TEST_KEY")
+    builder = SkillBuilder(llm, AgentConfig(engine="codex"), codex=CodexConfig())
+    seen: dict[str, AgentTask] = {}
+
+    async def fake_run_task(task):
+        seen["task"] = task
+        return type(
+            "Result",
+            (),
+            {
+                "output": "\n".join(
+                    [
+                        "# skill",
+                        "## What it is",
+                        "Updated.",
+                        "## Core concepts",
+                        "Concepts.",
+                        "## Common patterns",
+                        "Patterns.",
+                        "## Gotchas",
+                        "Gotchas.",
+                        "## Testing notes",
+                        "Testing.",
+                    ]
+                )
+            },
+        )()
+
+    monkeypatch.setattr(builder._executor, "run_task", fake_run_task)
+    result = asyncio.run(builder.build_skill("# old\n", [_make_lib_content()]))
+    assert "Updated." in result
+    assert seen["task"].kind == "skill_update"
+    assert seen["task"].mode == "code"
