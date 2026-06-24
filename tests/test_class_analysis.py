@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import abc
 import ast
 
 from jaunt.class_analysis import (
+    BaseContract,
     MemberSplit,
     classify_class_mode,
     is_preserve_decorator,
     is_stub_body,
+    resolve_base_contract,
     split_class_members,
 )
 
@@ -80,3 +83,31 @@ def test_classify_class_mode() -> None:
     assert classify_class_mode(docstring_only) == "docstring_only"
     assert classify_class_mode(stubs) == "stubs"
     assert classify_class_mode(mix) == "mix"
+
+
+def test_resolve_base_contract_collects_abstractmethods_and_signatures() -> None:
+    class Base(abc.ABC):
+        @abc.abstractmethod
+        def required(self, x: int) -> int: ...
+
+        def helper(self) -> str:
+            return "h"
+
+    class Child(Base):
+        """spec"""
+
+    contract = resolve_base_contract(Child)
+    assert isinstance(contract, BaseContract)
+    assert "required" in contract.required_abstractmethods
+    assert "required" in contract.block
+    assert "helper" in contract.block  # inherited public method is offered as context
+
+
+def test_resolve_base_contract_no_bases() -> None:
+    class Plain:
+        """spec"""
+
+    contract = resolve_base_contract(Plain)
+    assert contract.required_abstractmethods == ()
+    # object has no public spec-relevant members worth surfacing
+    assert contract.project_base_refs == ()

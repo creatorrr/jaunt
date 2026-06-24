@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import inspect
 from dataclasses import dataclass
 from typing import Literal
 
@@ -89,3 +90,49 @@ def classify_class_mode(class_node: ast.ClassDef) -> Literal["docstring_only", "
     if not split.stubs and split.preserved:
         return "mix"  # all-real class under @magic is still "mix" (nothing to generate but bodies)
     return "mix"
+
+
+@dataclass(frozen=True, slots=True)
+class BaseContract:
+    block: str
+    project_base_refs: tuple[str, ...]
+    required_abstractmethods: tuple[str, ...]
+
+
+def resolve_base_contract(cls_obj: type) -> BaseContract:
+    required = tuple(sorted(getattr(cls_obj, "__abstractmethods__", frozenset())))
+
+    project_refs: list[str] = []
+    for base in cls_obj.__bases__:
+        if base is object:
+            continue
+        mod = getattr(base, "__module__", "")
+        qual = getattr(base, "__qualname__", base.__name__)
+        # A project base is any non-stdlib base; record a spec-ref-shaped string.
+        if mod and not mod.startswith(("builtins", "abc", "typing", "collections")):
+            project_refs.append(f"{mod}:{qual}")
+
+    lines: list[str] = []
+    seen: set[str] = set()
+    for base in cls_obj.__mro__[1:]:
+        if base is object:
+            continue
+        for name, member in sorted(vars(base).items()):
+            if name.startswith("_") and not name.startswith("__"):
+                continue
+            if name in seen or not callable(member):
+                continue
+            seen.add(name)
+            try:
+                sig = str(inspect.signature(member))
+            except (TypeError, ValueError):
+                sig = "(...)"
+            abstract = " [abstractmethod]" if name in required else ""
+            lines.append(f"{base.__name__}.{name}{sig}{abstract}")
+
+    block = "\n".join(lines) if lines else "(no base classes)"
+    return BaseContract(
+        block=block,
+        project_base_refs=tuple(project_refs),
+        required_abstractmethods=required,
+    )
