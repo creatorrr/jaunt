@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from jaunt.contracts.derive import (
+from jaunt.contract.derive import (
     ExampleRow,
     RaisesRow,
     derive_regions,

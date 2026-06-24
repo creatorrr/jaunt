@@ -6,6 +6,7 @@ import ast
 import hashlib
 import json
 import textwrap
+from dataclasses import dataclass
 from pathlib import Path
 
 from jaunt.errors import JauntDependencyCycleError
@@ -157,3 +158,56 @@ def module_digest(
 
     payload = "\n".join(sorted(digests)).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class ContractDigests:
+    prose: str
+    signature: str
+    body: str
+
+
+def load_function_node(source_file: str, qualname: str) -> ast.FunctionDef:
+    """Load a top-level sync function node by name (v1: no classes/methods/async)."""
+
+    if "." in qualname:
+        raise ValueError(f"Contract specs must be top-level functions in v1, got {qualname!r}.")
+    src = Path(source_file).read_text(encoding="utf-8")
+    tree = ast.parse(src, filename=source_file)
+    for top in tree.body:
+        if isinstance(top, ast.AsyncFunctionDef) and top.name == qualname:
+            raise ValueError(f"Contract function {qualname!r} is async; unsupported in v1.")
+        if isinstance(top, ast.FunctionDef) and top.name == qualname:
+            return top
+    raise ValueError(f"Top-level function {qualname!r} not found in {source_file}.")
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def contract_digests(source_file: str, qualname: str) -> ContractDigests:
+    """Compute stable prose/signature/body digests for a contract function.
+
+    - prose: the cleaned docstring (PEP-257), or "" if absent.
+    - signature: AST-unparsed argument list + return annotation (normalizes formatting).
+    - body: AST-unparsed body with the docstring statement stripped (normalizes
+      comments/whitespace; changes only when the executable body changes).
+    """
+
+    node = load_function_node(source_file, qualname)
+    prose = ast.get_docstring(node, clean=True) or ""
+
+    sig = ast.unparse(node.args) + " -> " + (ast.unparse(node.returns) if node.returns else "")
+
+    body = list(node.body)
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]
+    body_src = "\n".join(ast.unparse(stmt) for stmt in body)
+
+    return ContractDigests(prose=_sha(prose), signature=_sha(sig), body=_sha(body_src))

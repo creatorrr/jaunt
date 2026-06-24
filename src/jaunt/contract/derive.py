@@ -11,7 +11,7 @@ import builtins
 import re
 from dataclasses import dataclass
 
-from jaunt.contracts.battery import DerivedRegion
+from jaunt.contract.battery import DerivedRegion
 
 
 @dataclass(frozen=True, slots=True)

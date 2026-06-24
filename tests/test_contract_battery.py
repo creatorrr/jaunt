@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from jaunt.contracts.battery import DerivedRegion, merge_battery, parse_battery, render_battery
+from jaunt.contract.battery import DerivedRegion, merge_battery, parse_battery, render_battery
 
 FIELDS = {
     "derived_from": "demo:slugify",

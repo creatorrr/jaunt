@@ -214,7 +214,9 @@ def discover_modules(
     ]
 
 
-def import_and_collect(module_names: list[str], *, kind: Literal["magic", "test"]) -> None:
+def import_and_collect(
+    module_names: list[str], *, kind: Literal["magic", "test", "contract"]
+) -> None:
     """Import each module by name to trigger decorator registration side effects."""
 
     for name in module_names:

@@ -33,6 +33,7 @@ from jaunt.progress import ProgressBar
 if TYPE_CHECKING:  # pragma: no cover
     from jaunt.config import JauntConfig
     from jaunt.registry import SpecEntry
+    from jaunt.spec_ref import SpecRef
 
 
 EXIT_OK = 0
@@ -177,6 +178,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     status_p = subparsers.add_parser("status", help="Show project build status.")
     _add_common_flags(status_p)
+
+    check_p = subparsers.add_parser(
+        "check", help="Verify committed contract batteries (deterministic, no model)."
+    )
+    _add_common_flags(check_p)
 
     eval_p = subparsers.add_parser("eval", help="Run built-in eval suite against a real backend.")
     eval_p.add_argument(
@@ -444,6 +450,24 @@ def _discover_test_spec_modules(*, root: Path, cfg: JauntConfig) -> tuple[list[P
     return existing_test_dirs, sorted(modules_set)
 
 
+def _discover_contract_specs(*, root: Path, cfg: JauntConfig) -> dict[SpecRef, SpecEntry]:
+    from jaunt import discovery, registry
+
+    source_dirs = [root / sr for sr in cfg.paths.source_roots]
+    _prepend_sys_path([*source_dirs, root])
+    registry.clear_registries()
+    modules = discovery.discover_modules(
+        roots=[d for d in source_dirs if d.exists()],
+        exclude=[],
+        generated_dir=cfg.paths.generated_dir,
+    )
+    discovery.evict_modules_for_import(
+        module_names=modules, roots=[d for d in source_dirs if d.exists()]
+    )
+    discovery.import_and_collect(modules, kind="contract")
+    return dict(registry.get_contract_registry())
+
+
 def _discover_static_targeted_test_entries(*, root: Path, cfg: JauntConfig) -> list[SpecEntry]:
     from jaunt import discovery
     from jaunt.module_contract import extract_targeted_test_entries
@@ -664,6 +688,62 @@ def cmd_clean(args: argparse.Namespace) -> int:
         )
 
     return EXIT_OK
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    json_mode = _is_json_mode(args)
+    try:
+        root, cfg = _load_config(args)
+        from jaunt.contract import runner
+        from jaunt.contract.drift import BLOCKING_MESSAGE, is_blocking
+
+        specs = _discover_contract_specs(root=root, cfg=cfg)
+        if not specs:
+            if json_mode:
+                _emit_json({"command": "check", "ok": True, "blocked": [], "checked": []})
+            else:
+                print("Contract check: 0 contract function(s).")
+            return EXIT_OK
+
+        def _run(path: Path) -> bool:
+            return runner.run_battery_file(path, root=root, source_roots=cfg.paths.source_roots)
+
+        results = [
+            runner.evaluate_entry(
+                root,
+                cfg.contract.battery_dir,
+                cfg.contract.derive,
+                entry,
+                run_battery=_run,
+            )
+            for entry in sorted(specs.values(), key=lambda e: str(e.spec_ref))
+        ]
+        blocked = [r for r in results if is_blocking(r.state)]
+
+        if json_mode:
+            _emit_json(
+                {
+                    "command": "check",
+                    "ok": not blocked,
+                    "blocked": [{"ref": r.spec_ref, "state": r.state.value} for r in blocked],
+                    "checked": [{"ref": r.spec_ref, "state": r.state.value} for r in results],
+                }
+            )
+        else:
+            for r in results:
+                mark = "BLOCK" if is_blocking(r.state) else "ok"
+                line = f"[{mark}] {r.spec_ref}: {r.state.value}"
+                if is_blocking(r.state):
+                    line += f" — {BLOCKING_MESSAGE.get(r.state, '')}"
+                print(line)
+            print(f"Contract check: {len(results)} checked, {len(blocked)} blocked.")
+
+        return EXIT_PYTEST_FAILURE if blocked else EXIT_OK
+    except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError) as e:
+        _print_error(e)
+        if json_mode:
+            _emit_json({"command": "check", "ok": False, "error": str(e)})
+        return EXIT_CONFIG_OR_DISCOVERY
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -1083,7 +1163,6 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             synthesize_auto_class_test_entries,
             target_refs_by_test_name,
         )
-        from jaunt.spec_ref import SpecRef
 
         # Provide production API reference material (from @jaunt.magic) so
         # test generation can import the real APIs instead of guessing module names.
@@ -2024,6 +2103,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_clean(args)
     if args.command == "status":
         return cmd_status(args)
+    if args.command == "check":
+        return cmd_check(args)
     if args.command == "eval":
         return cmd_eval(args)
     if args.command == "watch":
