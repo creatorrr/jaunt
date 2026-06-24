@@ -405,3 +405,124 @@ def compile_check(source: str, filename: str) -> list[str]:
     except Exception as e:  # pragma: no cover - rare, but return a friendly string.
         return [f"CompileError: {e!r}"]
     return []
+
+
+def _find_class(mod: ast.Module, class_name: str) -> ast.ClassDef | None:
+    for node in mod.body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            return node
+    return None
+
+
+def _method_nodes(cls: ast.ClassDef) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    return {
+        n.name: n
+        for n in cls.body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
+def _normalized_ast_dump(src_or_node: str | ast.AST) -> str:
+    node = ast.parse(src_or_node).body[0] if isinstance(src_or_node, str) else src_or_node
+    # Strip decorators so @jaunt.preserve and formatting don't affect equivalence.
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        node.decorator_list = []
+    return ast.dump(node, include_attributes=False)
+
+
+def validate_build_class_source(
+    source: str,
+    *,
+    class_name: str,
+    stub_methods: list[str],
+    preserved_segments: dict[str, str],
+    declared_bases: list[str],
+    class_decorators: list[str],
+    required_abstractmethods: list[str],
+    spec_docstring: str,
+) -> list[str]:
+    try:
+        mod = ast.parse(source or "")
+    except SyntaxError as e:
+        return [_syntax_error_to_str(e)]
+
+    cls = _find_class(mod, class_name)
+    if cls is None:
+        return [f"Missing top-level class definition: {class_name}"]
+
+    errors: list[str] = []
+    methods = _method_nodes(cls)
+
+    # Structure: stub methods must exist.
+    for name in stub_methods:
+        if name not in methods:
+            errors.append(f"{class_name}: missing required method {name!r} from spec.")
+
+    # Structure: declared bases preserved by name.
+    actual_bases = {ast.unparse(b) for b in cls.bases}
+    for base in declared_bases:
+        if base not in actual_bases:
+            errors.append(f"{class_name}: declared base class {base!r} was not preserved.")
+
+    # Structure: class decorators preserved by source text.
+    actual_decos = {ast.unparse(d) for d in cls.decorator_list}
+    for deco in class_decorators:
+        if deco not in actual_decos:
+            errors.append(f"{class_name}: class decorator {deco!r} was not preserved.")
+
+    # Abstractmethods: each required name must be defined on the generated class.
+    for name in required_abstractmethods:
+        if name not in methods:
+            errors.append(
+                f"{class_name}: inherited abstractmethod {name!r} is not implemented."
+            )
+
+    # Preserved-intact: AST-equivalence (decorators stripped).
+    for name, spec_seg in preserved_segments.items():
+        node = methods.get(name)
+        if node is None:
+            errors.append(f"{class_name}: preserved method {name!r} is missing from output.")
+            continue
+        if _normalized_ast_dump(node) != _normalized_ast_dump(spec_seg):
+            errors.append(
+                f"{class_name}: preserved method {name!r} was modified; it must be kept verbatim."
+            )
+
+    # Docstring retained (additions allowed).
+    if spec_docstring:
+        actual_doc = ast.get_docstring(cls, clean=True) or ""
+        if spec_docstring.strip() not in actual_doc:
+            errors.append(
+                f"{class_name}: the spec docstring must be retained (additions are allowed)."
+            )
+
+    return errors
+
+
+def class_build_warnings(
+    source: str,
+    *,
+    class_name: str,
+    stub_signatures: dict[str, list[str]],
+) -> list[str]:
+    try:
+        mod = ast.parse(source or "")
+    except SyntaxError:
+        return []
+    cls = _find_class(mod, class_name)
+    if cls is None:
+        return []
+    methods = _method_nodes(cls)
+    warnings: list[str] = []
+    for name, declared_params in stub_signatures.items():
+        node = methods.get(name)
+        if node is None:
+            continue
+        actual = {a.arg for a in node.args.args} | {a.arg for a in node.args.kwonlyargs}
+        for param in declared_params:
+            if param not in actual:
+                warnings.append(
+                    f"{class_name}.{name}: generated signature dropped declared parameter "
+                    f"{param!r}."
+                )
+    return warnings
