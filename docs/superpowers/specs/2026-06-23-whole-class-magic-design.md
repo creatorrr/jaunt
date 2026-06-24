@@ -194,9 +194,10 @@ expanded docstrings.
 - **Digest:** the whole class is one spec with one digest over: class source +
   decorator kwargs + transitive dependency APIs + **resolved base-class API**.
   Base-class changes invalidate the subclass.
-- **Dependents & tests:** `module_api.py` already emits `kind="class"` summaries
-  with members; these feed dependents and `@jaunt.test` targeting. In
-  docstring-only mode, dependents/tests see the *generated* class's API summary.
+- **Dependents:** `module_api.py` already emits `kind="class"` summaries with
+  members from the spec; these continue to feed *build-time* dependents.
+- **Tests:** test generation sources the class's public surface from the
+  *generated* implementation (see §6) — this is what fixes docstring-only mode.
 - **Invented-API churn is bounded:** an unchanged docstring ⇒ stable digest ⇒ no
   regeneration ⇒ stable API.
 - **Dependency graph:** a class is a single node (already true in `deps.py`). Base
@@ -208,7 +209,72 @@ expanded docstrings.
   (`runtime.py:215-242`); the not-built fallback already raises an actionable
   error.
 
-## 6. Deliverables (file-by-file)
+## 6. Auto-testing (test generation for whole-class specs)
+
+Whole-class specs need two things ordinary function specs don't: tests must be
+**holistic** (a class is stateful — sequences like `add()` then
+`list_by_priority()`, plus invariants, matter more than isolated per-method
+asserts) and **inheritance-aware** (verify the class satisfies its ABC /
+`isinstance` of its bases; test overrides against the base contract). And the
+current API summary is built from the *spec*, so a docstring-only class is
+invisible to the test LLM.
+
+### 6.1 API source — hybrid (the docstring-only fix)
+
+Test generation sources a class target's surface from a **hybrid**:
+
+- **What exists** — actual public method names + signatures read from the
+  **generated** class on disk (so docstring-only and any invented surface are
+  covered).
+- **The contract** — the spec's class docstring and per-stub docstrings remain
+  authoritative behavioral guidance.
+- **Public filtering** — when `public_api_only` is true (default), private /
+  underscore-prefixed members are excluded from the summary so the LLM doesn't
+  pin tests to non-deterministic internals.
+
+This is wired by extending `build_spec_api_summary` (or a test-specific variant)
+to read generated public members for class targets, while keeping spec docstrings.
+Because tests now depend on the *generated* public API, the test staleness inputs
+gain a **generated public-API digest** (names + signatures, privates excluded):
+when a rebuilt class's public surface changes, dependent tests — explicit or
+implicit — regenerate. An unchanged public surface ⇒ no test regeneration.
+
+### 6.2 Explicit `@jaunt.test` targeting a whole class
+
+Already supported structurally (`targets=MyClass` resolves to the class spec ref;
+`_build_expected_names` groups by class). Improvements:
+
+- The test prompt (`prompts/test_module.md` / `test_system.md`) gains class-aware
+  guidance: write lifecycle / stateful scenarios across methods, assert
+  invariants, verify ABC satisfaction and `isinstance`, test overrides against the
+  base contract, and don't re-test unchanged inherited methods.
+- `public_api_only=True` stays the default. With `public_api_only=False`
+  (white-box), emit a warning that assertions on generated private helpers are
+  fragile across regeneration (the LLM may rename them).
+
+### 6.3 Implicit baseline tests (opt-in)
+
+A `@magic` class can request a generated baseline suite **without** writing a
+`@jaunt.test` stub:
+
+- **Opt-in:** `@jaunt.magic(test=True)` on the class, with a `jaunt.toml`
+  `[test] auto_class_tests = false` default that the per-class kwarg overrides.
+- **What it generates:** happy-path coverage of each public method, a few
+  stateful interaction scenarios, edge cases drawn from the docstrings, and
+  ABC/inheritance checks — all `public_api_only`.
+- **Synthesis & output:** the builder synthesizes a virtual test spec
+  (`kind="test"`, `targets=<class ref>`, `public_api_only=True`) and the tester
+  writes it to a deterministic path mirroring the spec module under the first
+  configured test root's generated tree (e.g.
+  `<test_root>/<generated_dir>/auto/<spec/module/path>.py`). These modules join
+  the normal generation + pytest + auto-repair flow.
+- **Staleness:** digested over the spec docstrings + the class's generated
+  public-API digest (§6.1) + generation fingerprint + config, so baseline tests
+  regenerate when the contract or generated surface changes.
+- **Scope (v1):** implicit tests are a whole-class `@magic` feature; extending
+  `test=True` to function / per-method specs is a possible follow-up.
+
+## 7. Deliverables (file-by-file)
 
 - `prompts/build_module.md` — whole-class generation section.
 - `builder.py` — whole-class spec branch; assemble base-class/MRO contract block;
@@ -223,15 +289,25 @@ expanded docstrings.
   detection + stub heuristic (with `@jaunt.preserve` override) + stub/preserved
   split + base-class resolution.
 - `module_api.py` / `digest.py` — ensure base-class API participates in the
-  class digest.
+  class digest; add a **generated public-API digest** for class targets and a
+  hybrid (generated-surface + spec-docstring) summary path for test generation.
+- `runtime.py` — accept `test: bool` on `@jaunt.magic` (stored in
+  `decorator_kwargs`); `config.py` — add `[test] auto_class_tests` (default
+  `false`).
+- `tester.py` / `module_contract.py` — synthesize virtual test specs for
+  `test=True` classes; resolve their deterministic output path under the test
+  generated tree; feed the hybrid/generated API summary into test context.
+- `prompts/test_module.md` + `prompts/test_system.md` — class-aware test guidance
+  (holistic/stateful scenarios, ABC/inheritance, public-API filtering).
 - `examples/06_whole_class/` — a runnable example covering stubs, mix, and
-  docstring-only.
+  docstring-only, including a class with implicit `test=True`.
 - Tests — mode detection, stub heuristic, generation (per mode), validation
   (structure / drift / abstractmethods / inheritance / docstring), digest
   invalidation on base-class change.
-- Docs — `CLAUDE.md` and the `jaunt` skill: document whole-class mode.
+- Docs — `CLAUDE.md` and the `jaunt` skill: document whole-class mode and
+  auto-testing.
 
-## 7. Testing plan
+## 8. Testing plan
 
 - **Unit:** stub heuristic across `def`/`async def`/`property`/`classmethod`/
   `staticmethod` and each empty-ish body shape; mode detection for the three
@@ -247,8 +323,13 @@ expanded docstrings.
   confirm expected_names, written output, and digest behavior.
 - **Incremental:** changing a base spec marks the subclass stale; unchanged
   docstring-only spec does not regenerate.
+- **Auto-testing:** explicit `@jaunt.test(targets=Cls)` against a docstring-only
+  class produces tests from the generated public surface; `test=True` synthesizes
+  a baseline suite written to the expected path and run by pytest; changing the
+  generated public API marks dependent tests stale while an unchanged surface does
+  not; `public_api_only=False` emits the white-box-fragility warning.
 
-## 8. Risks & mitigations
+## 9. Risks & mitigations
 
 - **LLM drift on preserved parts** → preserved-intact AST check fails the build.
 - **Invented-API instability across builds** → bounded by digest stability;
@@ -257,3 +338,11 @@ expanded docstrings.
   (warn-only); only structure/preservation/abstractmethods fail.
 - **Large prompt/output for big classes** → acceptable in v1; single-shot is
   required for coherent internals. Revisit if it becomes a problem.
+- **Implicit-test cost surprise** → `test=True` adds an LLM call per class; gated
+  behind the opt-in kwarg/config (default off) and skipped when the digest is
+  unchanged.
+- **White-box tests on generated internals** → fragile across regeneration;
+  `public_api_only` defaults true and `False` emits a warning.
+- **Test churn from generated-API-keyed staleness** → only the *public* surface
+  (names + signatures, privates excluded) feeds the digest, so internal-only
+  regenerations don't needlessly invalidate tests.
