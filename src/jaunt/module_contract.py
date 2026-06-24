@@ -184,6 +184,39 @@ def group_test_entries_by_target_module(entries: list[SpecEntry]) -> dict[str, l
     return grouped
 
 
+def synthesize_auto_class_test_entries(
+    magic_specs: dict[SpecRef, SpecEntry],
+    *,
+    default_on: bool,
+    tests_package: str,
+    generated_dir: str,
+) -> dict[str, list[SpecEntry]]:
+    out: dict[str, list[SpecEntry]] = {}
+    for ref, entry in sorted(magic_specs.items(), key=lambda kv: str(kv[0])):
+        if entry.class_name is not None or "." in entry.qualname:
+            continue
+        if not isinstance(entry.obj, type):
+            continue
+        flag = entry.decorator_kwargs.get("test")
+        enabled = bool(flag) if flag is not None else default_on
+        if not enabled:
+            continue
+        auto_module = f"{tests_package}.__auto__.{entry.module}"
+        test_name = f"test_{entry.qualname.lower()}_baseline"
+        test_ref = normalize_spec_ref(f"{auto_module}:{test_name}")
+        synth = SpecEntry(
+            kind="test",
+            spec_ref=test_ref,
+            module=auto_module,
+            qualname=test_name,
+            source_file=entry.source_file,
+            obj=object(),
+            decorator_kwargs={"targets": (ref,), "public_api_only": True},
+        )
+        out.setdefault(auto_module, []).append(synth)
+    return out
+
+
 def extract_targeted_test_entries(module_name: str, source_file: str) -> list[SpecEntry]:
     source = Path(source_file).read_text(encoding="utf-8")
     tree = ast.parse(source, filename=source_file)

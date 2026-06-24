@@ -192,6 +192,15 @@ def _resolve_test_output_path(
     )
 
 
+def _auto_test_output_path(
+    *, project_dir: Path, module_name: str, generated_dir: str, tests_package: str
+) -> Path:
+    # tests.__auto__.pkg.mod -> <project>/<tests_package>/<generated_dir>/auto/pkg/mod.py
+    suffix = module_name.split(".__auto__.", 1)[1]
+    rel = Path(tests_package) / generated_dir / "auto" / Path(*suffix.split("."))
+    return (project_dir / rel).with_suffix(".py")
+
+
 def _ensure_init_files(project_dir: Path, relpath: Path) -> None:
     parts = list(relpath.parts)
     if not parts:
@@ -296,13 +305,21 @@ def detect_stale_test_modules(
             continue
 
         try:
-            out_path = _resolve_test_output_path(
-                project_dir=project_dir,
-                source_file=entries[0].source_file,
-                generated_dir=generated_dir,
-                tests_package=tests_package,
-                test_roots=test_roots,
-            )
+            if ".__auto__." in module_name:
+                out_path = _auto_test_output_path(
+                    project_dir=project_dir,
+                    module_name=module_name,
+                    generated_dir=generated_dir,
+                    tests_package=tests_package,
+                )
+            else:
+                out_path = _resolve_test_output_path(
+                    project_dir=project_dir,
+                    source_file=entries[0].source_file,
+                    generated_dir=generated_dir,
+                    tests_package=tests_package,
+                    test_roots=test_roots,
+                )
         except Exception:
             stale.add(module_name)
             continue
@@ -354,17 +371,25 @@ def _collect_existing_generated_test_files(
     test_roots: Sequence[Path] | None,
 ) -> list[Path]:
     found: set[Path] = set()
-    for entries in module_specs.values():
+    for module_name, entries in module_specs.items():
         if not entries:
             continue
         try:
-            out_path = _resolve_test_output_path(
-                project_dir=project_dir,
-                source_file=entries[0].source_file,
-                generated_dir=generated_dir,
-                tests_package=tests_package,
-                test_roots=test_roots,
-            )
+            if ".__auto__." in module_name:
+                out_path = _auto_test_output_path(
+                    project_dir=project_dir,
+                    module_name=module_name,
+                    generated_dir=generated_dir,
+                    tests_package=tests_package,
+                )
+            else:
+                out_path = _resolve_test_output_path(
+                    project_dir=project_dir,
+                    source_file=entries[0].source_file,
+                    generated_dir=generated_dir,
+                    tests_package=tests_package,
+                    test_roots=test_roots,
+                )
         except Exception:
             continue
         if out_path.exists():
@@ -385,13 +410,21 @@ def _collect_generated_test_paths_by_module(
         if not entries:
             continue
         try:
-            out[module_name] = _resolve_test_output_path(
-                project_dir=project_dir,
-                source_file=entries[0].source_file,
-                generated_dir=generated_dir,
-                tests_package=tests_package,
-                test_roots=test_roots,
-            )
+            if ".__auto__." in module_name:
+                out[module_name] = _auto_test_output_path(
+                    project_dir=project_dir,
+                    module_name=module_name,
+                    generated_dir=generated_dir,
+                    tests_package=tests_package,
+                )
+            else:
+                out[module_name] = _resolve_test_output_path(
+                    project_dir=project_dir,
+                    source_file=entries[0].source_file,
+                    generated_dir=generated_dir,
+                    tests_package=tests_package,
+                    test_roots=test_roots,
+                )
         except Exception:
             continue
     return out
@@ -708,13 +741,21 @@ async def run_test_generation(
             "spec_refs": [str(e.spec_ref) for e in entries],
         }
 
-        out_path = _resolve_test_output_path(
-            project_dir=project_dir,
-            source_file=entries[0].source_file,
-            generated_dir=generated_dir,
-            tests_package=tests_package,
-            test_roots=test_roots,
-        )
+        if ".__auto__." in module_name:
+            out_path = _auto_test_output_path(
+                project_dir=project_dir,
+                module_name=module_name,
+                generated_dir=generated_dir,
+                tests_package=tests_package,
+            )
+        else:
+            out_path = _resolve_test_output_path(
+                project_dir=project_dir,
+                source_file=entries[0].source_file,
+                generated_dir=generated_dir,
+                tests_package=tests_package,
+                test_roots=test_roots,
+            )
         out = _write_generated_test_module(
             project_dir=project_dir,
             out_path=out_path,
