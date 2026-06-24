@@ -993,6 +993,52 @@ def cmd_status(args: argparse.Namespace) -> int:
         from jaunt import discovery, registry
         from jaunt.deps import build_spec_graph, collapse_to_module_dag
 
+        def _contract_rows(infer_default: bool) -> tuple[list[dict[str, object]], set[str]]:
+            from jaunt.contract import runner as contract_runner
+            from jaunt.contract.drift import DriftState
+
+            contract_specs = _discover_contract_specs(root=root, cfg=cfg)
+            rows: list[dict[str, object]] = []
+            review: set[str] = set()
+            if not contract_specs:
+                return rows, review
+
+            def _run_battery(path: Path) -> bool:
+                return contract_runner.run_battery_file(
+                    path, root=root, source_roots=cfg.paths.source_roots
+                )
+
+            statuses = {
+                str(e.spec_ref): contract_runner.evaluate_entry(
+                    root,
+                    cfg.contract.battery_dir,
+                    cfg.contract.derive,
+                    e,
+                    run_battery=_run_battery,
+                )
+                for e in contract_specs.values()
+            }
+
+            cgraph = build_spec_graph(contract_specs, infer_default=infer_default)
+            stale_prose = {
+                ref for ref, st in statuses.items() if st.state is DriftState.STALE_PROSE
+            }
+            for ref, deps in cgraph.items():
+                if any(str(d) in stale_prose for d in deps):
+                    review.add(str(ref))
+
+            for ref in sorted(statuses):
+                st = statuses[ref]
+                rows.append(
+                    {
+                        "ref": ref,
+                        "state": st.state.value,
+                        "strength": st.strength or "0/0",
+                        "review": ref in review,
+                    }
+                )
+            return rows, review
+
         registry.clear_registries()
         modules = discovery.discover_modules(
             roots=[d for d in source_dirs if d.exists()],
@@ -1012,6 +1058,8 @@ def cmd_status(args: argparse.Namespace) -> int:
 
         specs = dict(registry.get_magic_registry())
         if not specs:
+            infer_default = bool(cfg.build.infer_deps) and (not bool(args.no_infer_deps))
+            contract_rows, review_refs = _contract_rows(infer_default)
             if json_mode:
                 _emit_json(
                     {
@@ -1019,11 +1067,18 @@ def cmd_status(args: argparse.Namespace) -> int:
                         "ok": True,
                         "stale": [],
                         "fresh": [],
+                        "contracts": contract_rows,
+                        "contract_review": sorted(review_refs),
                     }
                 )
             else:
                 print("Status: 0 module(s) total")
                 print("No magic specs discovered.")
+                if contract_rows:
+                    print(f"Contracts ({len(contract_rows)}):")
+                    for row in contract_rows:
+                        flag = " [review]" if row["review"] else ""
+                        print(f"- {row['ref']}: {row['state']} (strength {row['strength']})" + flag)
             return EXIT_OK
 
         infer_default = bool(cfg.build.infer_deps) and (not bool(args.no_infer_deps))
@@ -1094,6 +1149,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             changed_modules=api_changed,
         )
         fresh = all_mods - stale
+        contract_rows, review_refs = _contract_rows(infer_default)
 
         if json_mode:
             _emit_json(
@@ -1102,6 +1158,8 @@ def cmd_status(args: argparse.Namespace) -> int:
                     "ok": True,
                     "stale": sorted(stale),
                     "fresh": sorted(fresh),
+                    "contracts": contract_rows,
+                    "contract_review": sorted(review_refs),
                 }
             )
         else:
@@ -1114,6 +1172,11 @@ def cmd_status(args: argparse.Namespace) -> int:
             print(f"Fresh ({len(fresh_sorted)}):")
             for mod in fresh_sorted:
                 print(f"- {mod}")
+            if contract_rows:
+                print(f"Contracts ({len(contract_rows)}):")
+                for row in contract_rows:
+                    flag = " [review]" if row["review"] else ""
+                    print(f"- {row['ref']}: {row['state']} (strength {row['strength']})" + flag)
 
         return EXIT_OK
     except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError, KeyError) as e:
