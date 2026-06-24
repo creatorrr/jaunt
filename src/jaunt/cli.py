@@ -184,6 +184,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_common_flags(check_p)
 
+    reconcile_p = subparsers.add_parser(
+        "reconcile", help="Derive/refresh committed contract batteries (calls the model)."
+    )
+    _add_common_flags(reconcile_p)
+
     eval_p = subparsers.add_parser("eval", help="Run built-in eval suite against a real backend.")
     eval_p.add_argument(
         "--root",
@@ -743,6 +748,68 @@ def cmd_check(args: argparse.Namespace) -> int:
         _print_error(e)
         if json_mode:
             _emit_json({"command": "check", "ok": False, "error": str(e)})
+        return EXIT_CONFIG_OR_DISCOVERY
+
+
+def cmd_reconcile(args: argparse.Namespace) -> int:
+    json_mode = _is_json_mode(args)
+    try:
+        import importlib
+
+        from jaunt import __version__
+
+        root, cfg = _load_config(args)
+        from jaunt.contract import runner
+
+        specs = _discover_contract_specs(root=root, cfg=cfg)
+        target_mods = _iter_target_modules(getattr(args, "target", []) or [])
+
+        results = []
+        for entry in sorted(specs.values(), key=lambda e: str(e.spec_ref)):
+            if target_mods and entry.module not in target_mods:
+                continue
+            module = importlib.import_module(entry.module)
+            results.append(
+                runner.reconcile_entry(
+                    root,
+                    cfg.contract.battery_dir,
+                    cfg.contract.derive,
+                    cfg.contract.strength,
+                    entry,
+                    module_namespace=vars(module),
+                    tool_version=__version__,
+                )
+            )
+
+        failed = [r for r in results if not r.ok]
+        if json_mode:
+            _emit_json(
+                {
+                    "command": "reconcile",
+                    "ok": not failed,
+                    "reconciled": [
+                        {"ref": r.spec_ref, "strength": r.strength, "wrote": r.wrote}
+                        for r in results
+                        if r.ok
+                    ],
+                    "failed": [{"ref": r.spec_ref, "failures": r.failures} for r in failed],
+                }
+            )
+        else:
+            for r in results:
+                if r.ok:
+                    print(f"[ok] {r.spec_ref}: in sync (strength {r.strength})")
+                else:
+                    print(f"[FAIL] {r.spec_ref}: body does not satisfy contract")
+                    for f in r.failures:
+                        print(f"    - {f}")
+            print(f"Reconcile: {len(results) - len(failed)} ok, {len(failed)} failed.")
+
+        return EXIT_PYTEST_FAILURE if failed else EXIT_OK
+    except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError) as e:
+        _print_error(e)
+        if json_mode:
+            _emit_json({"command": "reconcile", "ok": False, "error": str(e)})
         return EXIT_CONFIG_OR_DISCOVERY
 
 
@@ -2105,6 +2172,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_status(args)
     if args.command == "check":
         return cmd_check(args)
+    if args.command == "reconcile":
+        return cmd_reconcile(args)
     if args.command == "eval":
         return cmd_eval(args)
     if args.command == "watch":

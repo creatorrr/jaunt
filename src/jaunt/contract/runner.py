@@ -105,3 +105,84 @@ def run_battery_file(path: Path, *, root: Path, source_roots: list[str]) -> bool
         text=True,
     )
     return proc.returncode == 0
+
+
+@dataclass(frozen=True, slots=True)
+class ReconcileResult:
+    spec_ref: str
+    ok: bool
+    strength: str
+    failures: list[str]
+    battery_path: Path
+    wrote: bool
+
+
+def reconcile_entry(
+    root: Path,
+    battery_dir: str,
+    derive: list[str],
+    strength_enabled: bool,
+    entry: SpecEntry,
+    *,
+    module_namespace: dict[str, object],
+    tool_version: str,
+) -> ReconcileResult:
+    from jaunt.contract.derive import (
+        derive_regions,
+        evaluate_blocks,
+        extract_blocks_structured,
+    )
+    from jaunt.contract.strength import compute_strength, format_strength
+    from jaunt.digest import contract_digests, load_function_node
+
+    spec_ref = str(entry.spec_ref)
+    path = battery_path(root, battery_dir, entry)
+
+    node = load_function_node(entry.source_file, entry.qualname)
+    docstring = _docstring_of(node)
+    blocks = extract_blocks_structured(docstring)
+
+    fn = module_namespace.get(entry.qualname)
+    if not callable(fn):
+        return ReconcileResult(spec_ref, False, "0/0", ["function not importable"], path, False)
+
+    failures = evaluate_blocks(fn, blocks, module_namespace)
+    if failures:
+        return ReconcileResult(spec_ref, False, "0/0", failures, path, False)
+
+    digs = contract_digests(entry.source_file, entry.qualname)
+    strength = "0/0"
+    if strength_enabled:
+        import ast
+
+        func_src = ast.unparse(node)
+        killed, applicable = compute_strength(func_src, entry.qualname, blocks, module_namespace)
+        strength = format_strength(killed, applicable)
+
+    regions = derive_regions(blocks, func_name=entry.qualname, derive=derive)
+    existing = path.read_text(encoding="utf-8") if path.is_file() else None
+    from jaunt.contract.battery import merge_battery
+
+    text = merge_battery(
+        existing,
+        import_module=entry.module,
+        func_name=entry.qualname,
+        regions=regions,
+        header_fields={
+            "derived_from": spec_ref,
+            "prose_digest": digs.prose,
+            "signature": digs.signature,
+            "body_digest": digs.body,
+            "strength": strength,
+            "tool_version": tool_version,
+        },
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return ReconcileResult(spec_ref, True, strength, [], path, True)
+
+
+def _docstring_of(node) -> str:
+    import ast
+
+    return ast.get_docstring(node, clean=True) or ""
