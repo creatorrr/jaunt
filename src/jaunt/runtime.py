@@ -273,6 +273,21 @@ def magic(
     return _decorate
 
 
+def preserve(fn: F | None = None) -> F | Callable[[F], F]:
+    """Mark a method inside a whole-class ``@magic`` as preserved-verbatim.
+
+    Build-time directive only; at runtime the whole class is substituted, so this
+    is an identity decorator. Accepts ``@jaunt.preserve`` and ``@jaunt.preserve()``.
+    """
+    if fn is None:
+
+        def _decorate(f: F) -> F:
+            return f
+
+        return _decorate
+    return fn
+
+
 def _unwrap_from_class(cls: type, name: str) -> Callable[..., object]:
     """Get the raw function from a class, bypassing the descriptor protocol.
 
