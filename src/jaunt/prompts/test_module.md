@@ -28,6 +28,12 @@ Test quality:
 - Cover the happy path (normal usage) and edge cases (boundary values, error conditions, empty inputs).
 - Write specific assertions that check concrete values — avoid bare `assert result`.
 - Use `pytest.raises` for expected exceptions.
+- When a target is a class, test it holistically: construct it, drive realistic
+  sequences of method calls (stateful scenarios), and assert invariants across
+  calls — not just isolated per-method results.
+- Verify the class satisfies its declared base classes / ABCs (e.g. `isinstance`,
+  instantiability) and that overrides behave consistently with the base contract.
+- Do not re-test unchanged inherited methods; focus on this class's own behavior.
 
 Rules:
 - Generate tests only (no production implementation).

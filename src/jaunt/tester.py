@@ -35,6 +35,7 @@ from jaunt.header import (
 from jaunt.module_contract import (
     build_module_contract,
     test_public_api_only_by_name,
+    target_refs_by_test_name,
     target_modules_by_name,
 )
 from jaunt.registry import SpecEntry
@@ -192,6 +193,40 @@ def _auto_entry_payload(
         "public_api_only": bool(entry.decorator_kwargs.get("public_api_only", True)),
         "deps": sorted(str(dep) for dep in spec_graph.get(entry.spec_ref, set())),
     }
+
+
+def _is_whole_class_magic_spec(entry: SpecEntry | None) -> bool:
+    if entry is None:
+        return False
+    return (
+        entry.kind == "magic"
+        and entry.class_name is None
+        and "." not in entry.qualname
+        and isinstance(entry.obj, type)
+    )
+
+
+def _white_box_class_fragility_warnings(
+    *,
+    entries: list[SpecEntry],
+    specs: dict[SpecRef, SpecEntry],
+    public_api_only_by_name: dict[str, bool] | None = None,
+) -> list[str]:
+    policies = public_api_only_by_name or test_public_api_only_by_name(entries)
+    target_refs = target_refs_by_test_name(entries)
+    warnings: list[str] = []
+    for entry in entries:
+        if policies.get(entry.qualname, True):
+            continue
+        for target_ref in target_refs.get(entry.qualname, ()):
+            if not _is_whole_class_magic_spec(specs.get(target_ref)):
+                continue
+            warnings.append(
+                "white-box tests on generated internals are fragile across regeneration. "
+                f"{entry.spec_ref} targets whole-class generated spec {target_ref}."
+            )
+            break
+    return warnings
 
 
 def _test_module_digest(
@@ -714,6 +749,12 @@ async def run_test_generation(
         spec_sources: dict[SpecRef, str] = {}
         decorator_prompts: dict[SpecRef, str] = {}
         public_api_only_by_name = test_public_api_only_by_name(entries)
+        for warning in _white_box_class_fragility_warnings(
+            entries=entries,
+            specs=specs,
+            public_api_only_by_name=public_api_only_by_name,
+        ):
+            _phase(module_name, "warning", warning)
         for e in entries:
             spec_source = _test_source_segment(e)
             if not public_api_only_by_name.get(e.qualname, True):

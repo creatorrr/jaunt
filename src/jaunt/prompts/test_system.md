@@ -7,6 +7,7 @@ Test quality guidelines:
 - Write clear, specific assertions that verify concrete expected values — avoid bare `assert result` without checking a specific value.
 - Each test function should be self-contained and independent.
 - Use pytest idioms: `pytest.raises` for expected exceptions, parametrize where appropriate.
+- For class targets, prefer holistic stateful tests that construct instances, exercise realistic method sequences, verify declared base-class/ABC behavior such as `isinstance`, and avoid re-testing unchanged inherited methods.
 
 Rules:
 - Emit only the test module source code.

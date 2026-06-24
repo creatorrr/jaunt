@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+import jaunt
+
 from jaunt.deps import build_spec_graph
 from jaunt.digest import module_digest
 from jaunt.header import format_header
@@ -134,3 +136,34 @@ def test_generated():
         module_context_digests={"tests.specs_mod": base_context_digest},
         target_api_digests={"tests.specs_mod": "target-api-v2"},
     ) == {"tests.specs_mod"}
+
+
+def test_test_prompt_has_class_guidance() -> None:
+    root = Path(jaunt.__file__).parent / "prompts"
+    text = (root / "test_module.md").read_text()
+    assert "stateful" in text.lower()
+    assert "isinstance" in text.lower() or "abc" in text.lower()
+
+
+def test_white_box_class_target_warning_mentions_regeneration_fragility() -> None:
+    from jaunt.tester import _white_box_class_fragility_warnings
+
+    class_entry = _magic_class("pkg.mod", "Cart", test=None)
+    test_entry = SpecEntry(
+        kind="test",
+        spec_ref=normalize_spec_ref("tests.specs:test_cart_internals"),
+        module="tests.specs",
+        qualname="test_cart_internals",
+        source_file="/tests/specs.py",
+        obj=object(),
+        decorator_kwargs={"targets": (class_entry.spec_ref,), "public_api_only": False},
+    )
+
+    warnings = _white_box_class_fragility_warnings(
+        entries=[test_entry],
+        specs={class_entry.spec_ref: class_entry, test_entry.spec_ref: test_entry},
+    )
+
+    assert len(warnings) == 1
+    assert "white-box" in warnings[0]
+    assert "fragile across regeneration" in warnings[0]
