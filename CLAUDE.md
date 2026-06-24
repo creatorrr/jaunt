@@ -120,6 +120,11 @@ jobs = 4
 infer_deps = true
 pytest_args = ["-q"]
 
+[contract]
+battery_dir = "tests/contract"     # where derived contract batteries are written
+derive = ["examples", "errors"]    # case kinds derived from docstring prose
+strength = true                    # run mutation-based strength scoring at reconcile
+
 [prompts]
 # Optional file path overrides for LLM prompt templates.
 # Leave empty to use the packaged defaults in src/jaunt/prompts/.
@@ -171,7 +176,7 @@ stale-prose / signature-drift / behavior-drift).
 | 0    | Success |
 | 2    | Config, discovery, or dependency cycle error |
 | 3    | Code generation error |
-| 4    | Pytest failure |
+| 4    | Pytest failure, or contract `check`/`reconcile` block (stale prose, signature/behavior drift) |
 
 ## Testing Changes
 
