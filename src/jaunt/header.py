@@ -12,8 +12,6 @@ CONTRACT_BATTERY_MARKER = (
     "Derived regions are regenerated; edits outside them are preserved."
 )
 
-_BATTERY_DIGEST_FIELDS = frozenset({"prose-digest", "body-digest"})
-
 
 def format_contract_battery_header(
     *,

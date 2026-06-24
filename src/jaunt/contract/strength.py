@@ -41,13 +41,6 @@ _BOOL_SWAP: dict[type[ast.boolop], type[ast.boolop]] = {
 }
 
 
-def _func_node(tree: ast.Module) -> ast.FunctionDef:
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef):
-            return node
-    raise ValueError("no top-level function in source")
-
-
 def _mutation_targets(tree: ast.Module) -> list[ast.AST]:
     return list(ast.walk(tree))
 
