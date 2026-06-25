@@ -11,7 +11,7 @@ from jaunt.skill_manager import _atomic_write_text
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Sequence
 
-    from jaunt.config import AgentConfig, CodexConfig, LLMConfig
+    from jaunt.config import AgentConfig, CodexConfig, LLMConfig, SkillsConfig
 
 
 _HEADER_PREFIX = "<!-- jaunt:skill=pypi"
@@ -64,11 +64,15 @@ async def ensure_pypi_skills_and_block(
     llm: LLMConfig,
     agent: AgentConfig | None = None,
     codex: CodexConfig | None = None,
+    skills: SkillsConfig | None = None,
 ) -> SkillsAutoResult:
     """Best-effort: ensure skills exist for imported external PyPI libs.
 
     Returns a single concatenated injection block to pass to the code generator.
     """
+
+    if skills is not None and not skills.auto:
+        return SkillsAutoResult(skills_block="", warnings=[], generation_failures=0)
 
     warnings: list[str] = []
     dists, scan_warnings = discover_external_distributions_with_warnings(
@@ -91,7 +95,15 @@ async def ensure_pypi_skills_and_block(
     # Phase 3: Build injection block from ALL skills on disk (auto + user).
     from jaunt.skill_manager import build_skills_block
 
-    skills_block = build_skills_block(project_root, pypi_dists=dists)
+    if skills is None:
+        skills_block = build_skills_block(project_root, pypi_dists=dists)
+    else:
+        skills_block = build_skills_block(
+            project_root,
+            pypi_dists=dists,
+            inject_user_skills=set(skills.inject_user_skills),
+            max_chars_per_skill=skills.max_chars_per_skill,
+        )
     return SkillsAutoResult(
         skills_block=skills_block, warnings=warnings, generation_failures=generation_failures
     )

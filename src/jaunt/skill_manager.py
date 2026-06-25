@@ -148,7 +148,60 @@ def discover_all_skills(project_root: Path) -> list[SkillInfo]:
     return results
 
 
-def build_skills_block(project_root: Path, *, pypi_dists: dict[str, str] | None = None) -> str:
+def _cap_skill_body(body: str, max_chars: int | None) -> str:
+    if max_chars is None or max_chars < 0 or len(body) <= max_chars:
+        return body
+
+    lines = body.splitlines()
+    capped_lines: list[str] = []
+    in_fence = False
+    fence_start = ""
+    fence_inner: list[str] = []
+
+    def flush_fence() -> None:
+        nonlocal fence_inner, fence_start
+        fence_body = "\n".join(fence_inner)
+        capped_lines.append(fence_start)
+        if len(fence_body) > 400:
+            capped_lines.append("# ... (example elided to slim prompt)")
+        else:
+            capped_lines.extend(fence_inner)
+        fence_inner = []
+        fence_start = ""
+
+    for line in lines:
+        if line.startswith("```"):
+            if in_fence:
+                flush_fence()
+                capped_lines.append(line)
+                in_fence = False
+            else:
+                in_fence = True
+                fence_start = line
+                fence_inner = []
+            continue
+
+        if in_fence:
+            fence_inner.append(line)
+        else:
+            capped_lines.append(line)
+
+    if in_fence:
+        flush_fence()
+
+    slimmed = "\n".join(capped_lines)
+    if len(slimmed) <= max_chars:
+        return slimmed
+    return slimmed[:max_chars].rstrip() + "\n\n[TRUNCATED]"
+
+
+def build_skills_block(
+    project_root: Path,
+    *,
+    pypi_dists: dict[str, str] | None = None,
+    inject_user_skills: set[str] | None = None,
+    max_chars_per_skill: int | None = None,
+) -> str:
     """Build injection block from ALL skills on disk (auto + user).
 
     Returns a deterministic string suitable for LLM prompt injection.
@@ -189,12 +242,15 @@ def build_skills_block(project_root: Path, *, pypi_dists: dict[str, str] | None 
             body = "\n".join(lines[1:]).lstrip("\n")
             heading = f"{dist}=={version}"
         else:
+            if inject_user_skills is not None and dir_name not in inject_user_skills:
+                continue
             body = txt
             heading = dir_name
 
         body = (body or "").strip()
         if not body:
             continue
+        body = _cap_skill_body(body, max_chars_per_skill)
         sections.append(f"## {heading}\n{body}\n")
 
     return "\n".join(sections).strip()

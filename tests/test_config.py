@@ -176,6 +176,34 @@ def test_codex_engine_defaults_load(tmp_path: Path) -> None:
     assert cfg.codex.config == {}
 
 
+def test_skills_config_defaults_and_parses(tmp_path: Path) -> None:
+    (tmp_path / "jaunt.toml").write_text("version = 1\n", encoding="utf-8")
+    cfg = load_config(root=tmp_path)
+    assert cfg.skills.auto is True
+    assert cfg.skills.max_chars_per_skill == 8000
+    assert cfg.skills.inject_user_skills == []
+
+    (tmp_path / "jaunt-skills.toml").write_text(
+        "\n".join(
+            [
+                "version = 1",
+                "",
+                "[skills]",
+                "auto = false",
+                "max_chars_per_skill = 1234",
+                'inject_user_skills = ["local-api"]',
+                "",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    cfg2 = load_config(config_path=tmp_path / "jaunt-skills.toml", root=tmp_path)
+    assert cfg2.skills.auto is False
+    assert cfg2.skills.max_chars_per_skill == 1234
+    assert cfg2.skills.inject_user_skills == ["local-api"]
+
+
 def test_invalid_toml_raises(tmp_path: Path) -> None:
     p = tmp_path / "jaunt.toml"
     p.write_text("version = \n", encoding="utf-8")

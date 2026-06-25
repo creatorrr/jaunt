@@ -110,6 +110,39 @@ def test_build_skills_block_deterministic_order(tmp_path: Path) -> None:
     assert block1.index("A content") < block1.index("M content") < block1.index("Z content")
 
 
+def test_build_skills_block_caps_per_skill_text(tmp_path: Path) -> None:
+    long_body = "\n".join(
+        [
+            "# long-skill",
+            "Intro text.",
+            "```python",
+            "print('example')\n" * 350,
+            "```",
+            "Tail details.\n" * 350,
+        ]
+    )
+    _write(tmp_path / ".agents/skills/long-skill/SKILL.md", long_body)
+
+    block = build_skills_block(tmp_path, max_chars_per_skill=500)
+
+    assert "## long-skill" in block
+    assert len(block) < len(long_body)
+    assert "# ... (example elided to slim prompt)" in block or "[TRUNCATED]" in block
+
+
+def test_build_skills_block_only_injects_opted_in_user_skills(tmp_path: Path) -> None:
+    _write(tmp_path / ".agents/skills/keep/SKILL.md", "# keep\nKeep content\n")
+    _write(tmp_path / ".agents/skills/drop/SKILL.md", "# drop\nDrop content\n")
+
+    filtered = build_skills_block(tmp_path, inject_user_skills={"keep"})
+    assert "Keep content" in filtered
+    assert "Drop content" not in filtered
+
+    default = build_skills_block(tmp_path)
+    assert "Keep content" in default
+    assert "Drop content" in default
+
+
 # --- add_skill ---
 
 

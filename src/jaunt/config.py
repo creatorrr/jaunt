@@ -82,6 +82,13 @@ class CodexConfig:
 
 
 @dataclass(frozen=True)
+class SkillsConfig:
+    auto: bool = True
+    max_chars_per_skill: int = 8000
+    inject_user_skills: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class ContractConfig:
     battery_dir: str = "tests/contract"
     derive: list[str] = field(default_factory=lambda: ["examples", "errors"])
@@ -98,6 +105,7 @@ class JauntConfig:
     prompts: PromptsConfig
     agent: AgentConfig = field(default_factory=AgentConfig)
     codex: CodexConfig = field(default_factory=CodexConfig)
+    skills: SkillsConfig = field(default_factory=SkillsConfig)
     contract: ContractConfig = field(default_factory=ContractConfig)
 
 
@@ -207,6 +215,7 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     prompts_tbl = _as_table(data.get("prompts"), name="prompts")
     agent_tbl = _as_table(data.get("agent"), name="agent")
     codex_tbl = _as_table(data.get("codex"), name="codex")
+    skills_tbl = _as_table(data.get("skills"), name="skills")
     contract_tbl = _as_table(data.get("contract"), name="contract")
 
     if "source_roots" in paths_tbl:
@@ -373,6 +382,25 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     else:
         codex_config = {}
 
+    if "auto" in skills_tbl:
+        skills_auto = _as_bool(skills_tbl["auto"], name="skills.auto")
+    else:
+        skills_auto = True
+
+    if "max_chars_per_skill" in skills_tbl:
+        skills_max_chars_per_skill = _as_int(
+            skills_tbl["max_chars_per_skill"], name="skills.max_chars_per_skill"
+        )
+    else:
+        skills_max_chars_per_skill = 8000
+
+    if "inject_user_skills" in skills_tbl:
+        skills_inject_user = _as_str_list(
+            skills_tbl["inject_user_skills"], name="skills.inject_user_skills"
+        )
+    else:
+        skills_inject_user = []
+
     if "battery_dir" in contract_tbl:
         contract_battery_dir = _as_str(contract_tbl["battery_dir"], name="contract.battery_dir")
     else:
@@ -409,6 +437,8 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
         raise JauntConfigError("Invalid config: jobs must be >= 1.")
     if build_ty_retry_attempts < 0:
         raise JauntConfigError("Invalid config: build.ty_retry_attempts must be >= 0.")
+    if skills_max_chars_per_skill < 0:
+        raise JauntConfigError("Invalid config: skills.max_chars_per_skill must be >= 0.")
     if async_runner not in _VALID_ASYNC_RUNNERS:
         raise JauntConfigError(
             f"Invalid config: build.async_runner must be one of {_VALID_ASYNC_RUNNERS!r}, "
@@ -468,6 +498,11 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             sandbox=codex_sandbox,
             features=codex_features,
             config=codex_config,
+        ),
+        skills=SkillsConfig(
+            auto=skills_auto,
+            max_chars_per_skill=skills_max_chars_per_skill,
+            inject_user_skills=skills_inject_user,
         ),
         contract=ContractConfig(
             battery_dir=contract_battery_dir,

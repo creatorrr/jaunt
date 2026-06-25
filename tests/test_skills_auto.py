@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from jaunt.config import AgentConfig, CodexConfig, LLMConfig
+from jaunt.config import AgentConfig, CodexConfig, LLMConfig, SkillsConfig
 from jaunt.external_imports import discover_external_distributions
 from jaunt.skills_auto import ensure_pypi_skills_and_block, skill_md_path
 
@@ -54,6 +54,31 @@ def test_scan_external_imports_filters_stdlib_and_internal(tmp_path: Path, monke
 def test_skill_path_layout(tmp_path: Path) -> None:
     p = skill_md_path(project_root=tmp_path, dist="typing_extensions")
     assert p == (tmp_path / ".agents" / "skills" / "typing-extensions" / "SKILL.md").resolve()
+
+
+def test_auto_false_disables_injection(tmp_path: Path, monkeypatch) -> None:
+    import jaunt.skills_auto as sa
+
+    discovery_called = False
+
+    def fail_discover(*_a, **_k):
+        nonlocal discovery_called
+        discovery_called = True
+        raise AssertionError("discovery should not be called")
+
+    monkeypatch.setattr(sa, "discover_external_distributions_with_warnings", fail_discover)
+
+    res = asyncio.run(
+        ensure_pypi_skills_and_block(
+            project_root=tmp_path,
+            source_roots=[],
+            generated_dir="__generated__",
+            llm=LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY"),
+            skills=SkillsConfig(auto=False),
+        )
+    )
+    assert res.skills_block == ""
+    assert discovery_called is False
 
 
 def test_existing_generated_skill_same_version_skips_regen(tmp_path: Path, monkeypatch) -> None:
