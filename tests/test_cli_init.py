@@ -126,14 +126,15 @@ def test_cmd_init_with_root_flag(tmp_path: Path) -> None:
     assert (target / "jaunt.toml").exists()
 
 
-def test_cmd_init_template_includes_install_hint(tmp_path: Path, monkeypatch) -> None:
-    """Generated jaunt.toml should hint at installing the provider extra."""
+def test_cmd_init_template_includes_codex_setup_hint(tmp_path: Path, monkeypatch) -> None:
+    """Generated jaunt.toml should guide the user toward Codex engine setup."""
     monkeypatch.chdir(tmp_path)
     ns = jaunt.cli.parse_args(["init"])
     jaunt.cli.cmd_init(ns)
 
     content = (tmp_path / "jaunt.toml").read_text()
-    assert "jaunt[openai]" in content
+    assert "[codex]" in content
+    assert "codex login" in content
 
 
 def test_cmd_init_template_includes_all_supported_sections(tmp_path: Path, monkeypatch) -> None:

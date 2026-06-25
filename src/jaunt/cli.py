@@ -562,20 +562,11 @@ test_roots = ["tests"]
 generated_dir = "__generated__"
 
 [llm]
-# Install your chosen provider/runtime bundle:
-# pip install jaunt[openai], jaunt[anthropic], or jaunt[cerebras]
-# For provider SDKs/tooling without Aider, use: pip install jaunt[all-sdk]
+# Informational under the Codex engine: the model is set in [codex] below, and
+# Codex authenticates via `codex login` / CODEX_API_KEY (not an api_key_env here).
 provider = "openai"
-model = "gpt-5.2"
-api_key_env = "OPENAI_API_KEY"
+model = "gpt-5.5"
 # max_cost_per_build = 5.0
-# Optional: pass through provider reasoning control (OpenAI/Cerebras).
-# reasoning_effort = "medium"
-# Optional: Anthropic thinking budget; when set Jaunt sends
-# thinking = { type = "enabled", budget_tokens = ... }.
-# anthropic_thinking_budget_tokens = 1024
-# prompt_cache = true
-# prompt_cache_key = "jaunt:shared-builds"
 
 [build]
 jobs = 8

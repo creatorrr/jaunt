@@ -20,7 +20,7 @@ Jaunt is a small Python library + CLI for **spec-driven code generation**:
 
 - Write implementation intent as normal Python stubs decorated with `@jaunt.magic(...)`.
 - Optionally write test intent as stubs decorated with `@jaunt.test(...)`.
-- Jaunt generates real modules under `__generated__/` using the OpenAI Codex CLI (`codex mcp-server`) as its code-generation engine.
+- Jaunt generates real modules under `__generated__/` using the OpenAI Codex CLI (`codex exec`) as its code-generation engine.
 - Async support is available for both implementation and test specs through `async def` plus the `build.async_runner` setting.
 - `@magic` works on individual class methods too — decorate instance methods, `@classmethod`, `@staticmethod`, or `@abstractmethod` stubs and Jaunt generates only those methods while preserving the rest of the class.
 - Incremental freshness tracks both module digests and exported dependency APIs, so signature changes, whole-class member changes, and contract docstring edits can invalidate dependents.
@@ -50,7 +50,7 @@ pip install jaunt
 
 ## Codex Engine
 
-Codex is the sole code-generation engine: Jaunt drives `codex mcp-server` for
+Codex is the sole code-generation engine: Jaunt drives `codex exec` for
 all build/test/skill workflows. It requires the external `codex` binary on your
 PATH, authenticated via `codex login`. Multi-provider routing is deferred.
 

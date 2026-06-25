@@ -4,7 +4,7 @@ Jaunt is a spec-driven code generation framework for Python. Users write
 implementation intent as decorator-marked stubs (`@jaunt.magic`) and test intent
 as test stubs (`@jaunt.test`). Jaunt generates real implementations and pytest
 tests into `__generated__/` directories using the OpenAI **Codex** CLI as its
-code-generation engine (`codex mcp-server`).
+code-generation engine (`codex exec`).
 
 ## Quick Reference
 
@@ -64,7 +64,7 @@ src/jaunt/          # Library source
   codex_executor.py   # Codex-driven agent executor (auto-skills)
   generate/
     base.py              # Abstract GeneratorBackend interface
-    codex_backend.py    # Codex engine (drives `codex mcp-server`)
+    codex_backend.py    # Codex engine (drives `codex exec`)
   prompts/          # LLM prompt templates (Jinja-like {{var}})
 tests/              # pytest test suite (~41 files)
 examples/           # Runnable example projects
