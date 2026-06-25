@@ -24,7 +24,7 @@ from jaunt.builder import _build_expected_names
 from jaunt.cache import CacheEntry, ResponseCache, cache_key_from_context
 from jaunt.cost import CostTracker
 from jaunt.digest import extract_source_segment, module_digest
-from jaunt.errors import JauntGenerationError
+from jaunt.errors import JauntConfigError, JauntGenerationError
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
 from jaunt.header import (
     extract_generation_fingerprint,
@@ -48,6 +48,23 @@ def _tool_version() -> str:
         return importlib.metadata.version("jaunt")
     except Exception:
         return "0"
+
+
+def pytest_available() -> bool:
+    """Return True if the `pytest` module is importable."""
+    import importlib.util
+
+    return importlib.util.find_spec("pytest") is not None
+
+
+def ensure_pytest_available() -> None:
+    """Raise JauntConfigError with an actionable hint if pytest is missing."""
+    if pytest_available():
+        return
+    raise JauntConfigError(
+        "pytest is not installed, so generated tests cannot be run. "
+        "Install it with: pip install 'jaunt[test]'  (or: uv sync --extra test)"
+    )
 
 
 def run_pytest(

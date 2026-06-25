@@ -1391,6 +1391,13 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
         include_target_tests = _effective_include_target_tests(cfg, args)
         build_instructions = _effective_build_instructions(cfg, args)
 
+        # Fail fast BEFORE spending any tokens (build or test generation) when
+        # pytest will be needed to run the generated tests but is not installed.
+        if not bool(args.no_run):
+            from jaunt import tester
+
+            tester.ensure_pytest_available()
+
         source_dirs = [root / sr for sr in cfg.paths.source_roots]
         test_dirs = [root / tr for tr in cfg.paths.test_roots]
         # Import source specs and namespace-package test modules without

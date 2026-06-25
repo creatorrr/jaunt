@@ -28,11 +28,13 @@ mcp = ["fastmcp>=2.0.0"]
 anyio = ["anyio>=4.1"]
 rich = ["rich>=13,<15"]
 async = ["pytest-asyncio>=1.0"]
+test = ["pytest>=8"]
 all = [
   "watchfiles>=1.0.0",
   "fastmcp>=2.0.0",
   "anyio>=4.1",
   "pytest-asyncio>=1.0",
+  "pytest>=8",
 ]
 
 [project.scripts]

@@ -475,6 +475,7 @@ source = { editable = "." }
 all = [
     { name = "anyio" },
     { name = "fastmcp" },
+    { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "watchfiles" },
 ]
@@ -489,6 +490,9 @@ mcp = [
 ]
 rich = [
     { name = "rich" },
+]
+test = [
+    { name = "pytest" },
 ]
 watch = [
     { name = "watchfiles" },
@@ -511,13 +515,15 @@ requires-dist = [
     { name = "anyio", marker = "extra == 'anyio'", specifier = ">=4.1" },
     { name = "fastmcp", marker = "extra == 'all'", specifier = ">=2.0.0" },
     { name = "fastmcp", marker = "extra == 'mcp'", specifier = ">=2.0.0" },
+    { name = "pytest", marker = "extra == 'all'", specifier = ">=8" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=8" },
     { name = "pytest-asyncio", marker = "extra == 'all'", specifier = ">=1.0" },
     { name = "pytest-asyncio", marker = "extra == 'async'", specifier = ">=1.0" },
     { name = "rich", marker = "extra == 'rich'", specifier = ">=13,<15" },
     { name = "watchfiles", marker = "extra == 'all'", specifier = ">=1.0.0" },
     { name = "watchfiles", marker = "extra == 'watch'", specifier = ">=1.0.0" },
 ]
-provides-extras = ["watch", "mcp", "anyio", "rich", "async", "all"]
+provides-extras = ["watch", "mcp", "anyio", "rich", "async", "test", "all"]
 
 [package.metadata.requires-dev]
 dev = [
