@@ -44,14 +44,16 @@ def generation_fingerprint_from_config(
     build_instructions: Sequence[str] | None = None,
     include_target_tests: bool | None = None,
 ) -> str:
-    if kind == "build":
-        system_prompt = load_prompt("build_system.md", cfg.prompts.build_system or None)
-        user_prompt = load_prompt("build_module.md", cfg.prompts.build_module or None)
-        mode = ""
-    else:
-        system_prompt = load_prompt("test_system.md", cfg.prompts.test_system or None)
-        user_prompt = load_prompt("test_module.md", cfg.prompts.test_module or None)
-        mode = ""
+    prompt_parts: list[str] = []
+    mode = ""
+    if cfg.agent.engine != "codex":
+        if kind == "build":
+            system_prompt = load_prompt("build_system.md", cfg.prompts.build_system or None)
+            user_prompt = load_prompt("build_module.md", cfg.prompts.build_module or None)
+        else:
+            system_prompt = load_prompt("test_system.md", cfg.prompts.test_system or None)
+            user_prompt = load_prompt("test_module.md", cfg.prompts.test_module or None)
+        prompt_parts = [system_prompt, user_prompt]
     editor_model = ""
     reasoning_effort = cfg.codex.reasoning_effort if cfg.agent.engine == "codex" else ""
     runtime_parts = (
@@ -81,7 +83,7 @@ def generation_fingerprint_from_config(
         engine=cfg.agent.engine,
         kind=kind,
         mode=mode,
-        prompt_parts=[system_prompt, user_prompt],
+        prompt_parts=prompt_parts,
         editor_model=editor_model,
         reasoning_effort=reasoning_effort or "",
         runtime_parts=build_runtime_parts,

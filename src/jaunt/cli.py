@@ -1313,8 +1313,10 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
         )
 
         target_mods = _iter_target_modules(args.target)
+        allowed_modules: set[str] | None = None
         if target_mods:
             allowed = _deps_closure(target_mods, module_dag=module_dag)
+            allowed_modules = allowed
             stale = {m for m in stale if m in allowed}
             api_changed = {m for m in api_changed if m in allowed}
 
@@ -1322,6 +1324,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             module_dag,
             stale,
             changed_modules=api_changed,
+            allowed_modules=allowed_modules,
         )
         progress = None
         if (
@@ -1355,6 +1358,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             module_dag=module_dag,
             stale_modules=stale,
             changed_modules=api_changed,
+            allowed_modules=allowed_modules,
             backend=_build_backend(cfg),
             generation_fingerprint=build_generation_fingerprint,
             skills_block=skills_block,

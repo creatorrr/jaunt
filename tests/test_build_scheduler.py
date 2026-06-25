@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from jaunt import paths
-from jaunt.builder import run_build
+from jaunt.builder import expand_stale_modules, run_build
 from jaunt.deps import build_spec_graph
 from jaunt.errors import JauntDependencyCycleError
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
@@ -51,6 +51,43 @@ class FakeBackend(GeneratorBackend):
         for name in ctx.expected_names:
             lines.append(f"def {name}():\n    return {name!r}\n")
         return "\n".join(lines).rstrip() + "\n", None
+
+
+def test_expand_stale_modules_respects_allowed_modules() -> None:
+    module_dag = {
+        "pkg.dep": set(),
+        "pkg.mid": {"pkg.dep"},
+        "pkg.target": {"pkg.mid"},
+        "pkg.other": {"pkg.dep"},
+        "pkg.already_stale": set(),
+    }
+
+    expanded = expand_stale_modules(
+        module_dag,
+        {"pkg.dep", "pkg.already_stale"},
+        changed_modules={"pkg.dep"},
+        allowed_modules={"pkg.dep", "pkg.mid", "pkg.target"},
+    )
+
+    assert expanded == {"pkg.dep", "pkg.mid", "pkg.target", "pkg.already_stale"}
+
+
+def test_expand_stale_modules_without_allowed_modules_keeps_existing_behavior() -> None:
+    module_dag = {
+        "pkg.dep": set(),
+        "pkg.mid": {"pkg.dep"},
+        "pkg.target": {"pkg.mid"},
+        "pkg.other": {"pkg.dep"},
+    }
+
+    expanded = expand_stale_modules(
+        module_dag,
+        {"pkg.dep"},
+        changed_modules={"pkg.dep"},
+        allowed_modules=None,
+    )
+
+    assert expanded == {"pkg.dep", "pkg.mid", "pkg.target", "pkg.other"}
 
 
 def test_scheduler_respects_dependency_order_jobs_1(tmp_path: Path) -> None:
@@ -125,6 +162,58 @@ def test_dependents_rebuild_only_when_changed_module_api_changes(tmp_path: Path)
     assert report.failed == {}
     assert report.generated == {"pkg.a"}
     assert backend.calls == ["pkg.a"]
+
+
+def test_run_build_allowed_modules_skips_out_of_closure_dependents(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+
+    dep_path = tmp_path / "dep.py"
+    target_path = tmp_path / "target.py"
+    other_path = tmp_path / "other.py"
+    _write(dep_path, "def Dep() -> str:\n    return 'dep'\n")
+    _write(target_path, "def Target() -> str:\n    return Dep()\n")
+    _write(other_path, "def Other() -> str:\n    return Dep()\n")
+
+    dep = _entry(module="pkg.dep", qualname="Dep", source_file=str(dep_path))
+    target = _entry(
+        module="pkg.target",
+        qualname="Target",
+        source_file=str(target_path),
+        deps=["pkg.dep:Dep"],
+    )
+    other = _entry(
+        module="pkg.other",
+        qualname="Other",
+        source_file=str(other_path),
+        deps=["pkg.dep:Dep"],
+    )
+
+    specs = {dep.spec_ref: dep, target.spec_ref: target, other.spec_ref: other}
+    spec_graph = build_spec_graph(specs, infer_default=False)
+    module_specs = {"pkg.dep": [dep], "pkg.target": [target], "pkg.other": [other]}
+    module_dag = {"pkg.dep": set(), "pkg.target": {"pkg.dep"}, "pkg.other": {"pkg.dep"}}
+
+    backend = FakeBackend()
+    report = asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"pkg.dep"},
+            changed_modules={"pkg.dep"},
+            allowed_modules={"pkg.dep", "pkg.target"},
+            backend=backend,
+            jobs=2,
+        )
+    )
+
+    assert report.failed == {}
+    assert report.generated == {"pkg.dep", "pkg.target"}
+    assert report.skipped == {"pkg.other"}
+    assert "pkg.other" not in backend.calls
 
 
 def test_non_stale_modules_are_skipped(tmp_path: Path) -> None:

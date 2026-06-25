@@ -231,6 +231,7 @@ def expand_stale_modules(
     stale_modules: set[str],
     *,
     changed_modules: set[str] | None = None,
+    allowed_modules: set[str] | None = None,
 ) -> set[str]:
     """If a module's exported API changed, its dependents are stale transitively."""
 
@@ -244,6 +245,8 @@ def expand_stale_modules(
     while queue:
         m = queue.pop()
         for dep in dependents.get(m, set()):
+            if allowed_modules is not None and dep not in allowed_modules:
+                continue
             if dep in expanded:
                 continue
             expanded.add(dep)
@@ -1018,6 +1021,7 @@ async def run_build(
     module_dag: dict[str, set[str]],
     stale_modules: set[str],
     changed_modules: set[str] | None = None,
+    allowed_modules: set[str] | None = None,
     backend: GeneratorBackend,
     generation_fingerprint: str = "",
     skills_block: str = "",
@@ -1039,6 +1043,7 @@ async def run_build(
         module_dag,
         set(stale_modules),
         changed_modules=(set(changed_modules) if changed_modules is not None else None),
+        allowed_modules=allowed_modules,
     )
     stale = expanded & set(module_specs.keys())
     skipped = set(module_specs.keys()) - stale
