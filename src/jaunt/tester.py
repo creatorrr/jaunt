@@ -598,6 +598,8 @@ class PytestResult:
     failed: bool
     failures: list[str]
     generation_failed: dict[str, list[str]] = field(default_factory=dict)
+    generated: set[str] = field(default_factory=set)
+    skipped: set[str] = field(default_factory=set)
 
 
 def _compact_failure_context(stdout: str, stderr: str, *, max_lines: int = 28) -> list[str]:
@@ -1027,6 +1029,8 @@ async def run_tests(
 ) -> PytestResult:
     generated_files: list[Path] = []
     gen_failed: dict[str, list[str]] = {}
+    generated: set[str] = set()
+    skipped: set[str] = set()
 
     if not no_generate:
         if (
@@ -1062,6 +1066,8 @@ async def run_tests(
             async_runner=async_runner,
         )
         generated_files = report.generated_files
+        generated = report.generated
+        skipped = report.skipped
         gen_failed = report.failed
     elif module_specs is not None:
         generated_files = _collect_existing_generated_test_files(
@@ -1080,6 +1086,8 @@ async def run_tests(
             failed=exit_code != 0,
             failures=[],
             generation_failed=gen_failed,
+            generated=generated,
+            skipped=skipped,
         )
 
     pytest_result = _run_pytest_capture(
@@ -1219,4 +1227,6 @@ async def run_tests(
         if pytest_exit_code != 0
         else [],
         generation_failed=gen_failed,
+        generated=generated,
+        skipped=skipped,
     )

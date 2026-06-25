@@ -1344,6 +1344,12 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
         if not json_mode and (cost_tracker.api_calls > 0 or cost_tracker.cache_hits > 0):
             _eprint(cost_tracker.format_summary())
 
+        if not json_mode:
+            summary = f"Built {len(report.generated)} module(s), skipped {len(report.skipped)}"
+            if report.failed:
+                summary += f", {len(report.failed)} failed"
+            print(f"{summary}.")
+
         if json_mode:
             _emit_json(
                 {
@@ -1670,6 +1676,12 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
         gen_failed = getattr(result, "generation_failed", {})
         if gen_failed and not json_mode:
             _eprint(format_test_generation_failures(gen_failed))
+
+        if not json_mode:
+            print(
+                f"Generated {len(result.generated)} test module(s), "
+                f"skipped {len(result.skipped)}."
+            )
 
         if json_mode:
             _emit_json(
