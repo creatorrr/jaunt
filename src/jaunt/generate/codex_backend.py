@@ -13,15 +13,24 @@ import asyncio
 import json
 import tempfile
 from pathlib import Path
+from typing import cast
 
 from jaunt.config import CodexConfig, LLMConfig, PromptsConfig
+from jaunt.errors import JauntGenerationError
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext, TokenUsage
 
 
 class CodexExecResult:
     """Parsed result of a single `codex exec --json` run."""
 
-    __slots__ = ("returncode", "final_message", "usage_input", "usage_output", "stderr")
+    __slots__ = (
+        "returncode",
+        "final_message",
+        "usage_input",
+        "usage_output",
+        "usage_cached",
+        "stderr",
+    )
 
     def __init__(
         self,
@@ -30,13 +39,45 @@ class CodexExecResult:
         final_message: str,
         usage_input: int | None,
         usage_output: int | None,
+        usage_cached: int | None,
         stderr: str,
     ) -> None:
         self.returncode = returncode
         self.final_message = final_message
         self.usage_input = usage_input
         self.usage_output = usage_output
+        self.usage_cached = usage_cached
         self.stderr = stderr
+
+
+class _ParsedJsonl:
+    """Parsed `codex exec --json` stream details."""
+
+    __slots__ = (
+        "final_message",
+        "usage_input",
+        "usage_output",
+        "usage_cached",
+        "saw_turn_completed",
+        "failure_message",
+    )
+
+    def __init__(
+        self,
+        *,
+        final_message: str,
+        usage_input: int | None,
+        usage_output: int | None,
+        usage_cached: int | None,
+        saw_turn_completed: bool,
+        failure_message: str | None,
+    ) -> None:
+        self.final_message = final_message
+        self.usage_input = usage_input
+        self.usage_output = usage_output
+        self.usage_cached = usage_cached
+        self.saw_turn_completed = saw_turn_completed
+        self.failure_message = failure_message
 
 
 async def run_codex_exec(
@@ -86,12 +127,23 @@ async def run_codex_exec(
     stdout = stdout_bytes.decode("utf-8", errors="replace")
     stderr = stderr_bytes.decode("utf-8", errors="replace")
 
-    final_message, usage_input, usage_output = _parse_jsonl(stdout)
+    parsed = _parse_jsonl(stdout)
+    returncode = proc.returncode if proc.returncode is not None else -1
+    failure_message = parsed.failure_message
+    if failure_message is None:
+        if returncode != 0:
+            failure_message = f"exit code {returncode}"
+        elif not parsed.saw_turn_completed:
+            failure_message = "no turn.completed event (protocol failure)"
+    if failure_message is not None:
+        raise JauntGenerationError(_format_exec_failure(failure_message, stderr))
+
     return CodexExecResult(
-        returncode=proc.returncode if proc.returncode is not None else -1,
-        final_message=final_message,
-        usage_input=usage_input,
-        usage_output=usage_output,
+        returncode=returncode,
+        final_message=parsed.final_message,
+        usage_input=parsed.usage_input,
+        usage_output=parsed.usage_output,
+        usage_cached=parsed.usage_cached,
         stderr=stderr,
     )
 
@@ -107,12 +159,15 @@ def _toml_value(value: object) -> str:
     return json.dumps(str(value))
 
 
-def _parse_jsonl(stdout: str) -> tuple[str, int | None, int | None]:
+def _parse_jsonl(stdout: str) -> _ParsedJsonl:
     """Extract the final agent message and token usage from `codex exec --json` output."""
 
     final_message = ""
     usage_input: int | None = None
     usage_output: int | None = None
+    usage_cached: int | None = None
+    saw_turn_completed = False
+    failure_message: str | None = None
     for line in stdout.splitlines():
         line = line.strip()
         if not line:
@@ -130,16 +185,70 @@ def _parse_jsonl(stdout: str) -> tuple[str, int | None, int | None]:
                 text = item.get("text")
                 if isinstance(text, str):
                     final_message = text
+        elif etype == "turn.failed":
+            if failure_message is None:
+                failure_message = f"turn.failed: {_turn_failed_message(event)}"
+        elif etype == "error":
+            if failure_message is None:
+                failure_message = f"error event: {_error_event_message(event)}"
         elif etype == "turn.completed":
+            saw_turn_completed = True
             usage = event.get("usage")
             if isinstance(usage, dict):
                 pin = usage.get("input_tokens")
                 pout = usage.get("output_tokens")
+                pcached = usage.get("cached_input_tokens")
                 if isinstance(pin, int):
                     usage_input = pin
                 if isinstance(pout, int):
                     usage_output = pout
-    return final_message, usage_input, usage_output
+                if isinstance(pcached, int):
+                    usage_cached = pcached
+    return _ParsedJsonl(
+        final_message=final_message,
+        usage_input=usage_input,
+        usage_output=usage_output,
+        usage_cached=usage_cached,
+        saw_turn_completed=saw_turn_completed,
+        failure_message=failure_message,
+    )
+
+
+def _turn_failed_message(event: dict[str, object]) -> str:
+    error = event.get("error")
+    if isinstance(error, dict):
+        error_dict = cast(dict[str, object], error)
+        message = error_dict.get("message")
+        if isinstance(message, str) and message.strip():
+            return message
+    elif isinstance(error, str) and error.strip():
+        return error
+    return _raw_event(event)
+
+
+def _error_event_message(event: dict[str, object]) -> str:
+    message = event.get("message")
+    if isinstance(message, str) and message.strip():
+        return message
+    return _raw_event(event)
+
+
+def _raw_event(event: dict[str, object]) -> str:
+    return json.dumps(event, sort_keys=True, default=str)
+
+
+def _format_exec_failure(reason: str, stderr: str) -> str:
+    message = f"codex exec failed: {reason}"
+    clean_stderr = stderr.strip()
+    if clean_stderr:
+        message += f"\nstderr:\n{_truncate_stderr(clean_stderr)}"
+    return message
+
+
+def _truncate_stderr(stderr: str, *, limit: int = 4000) -> str:
+    if len(stderr) <= limit:
+        return stderr
+    return stderr[:limit] + "\n... [stderr truncated]"
 
 
 class CodexBackend(GeneratorBackend):
@@ -272,5 +381,6 @@ class CodexBackend(GeneratorBackend):
                 completion_tokens=pout,
                 model=self._model,
                 provider="codex",
+                cached_prompt_tokens=result.usage_cached or 0,
             )
         return None

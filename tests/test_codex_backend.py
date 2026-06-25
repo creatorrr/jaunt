@@ -6,7 +6,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
+import pytest
+
 from jaunt.config import CodexConfig, LLMConfig
+from jaunt.errors import JauntGenerationError
 from jaunt.generate.base import TokenUsage
 from jaunt.generate.codex_backend import CodexBackend
 
@@ -62,7 +65,16 @@ class _FakeProc:
         return self._stdout, self._stderr
 
 
-def _usage_jsonl(final_message: str, *, input_tokens: int, output_tokens: int) -> bytes:
+def _usage_jsonl(
+    final_message: str,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    cached_input_tokens: int | None = None,
+) -> bytes:
+    usage = {"input_tokens": input_tokens, "output_tokens": output_tokens}
+    if cached_input_tokens is not None:
+        usage["cached_input_tokens"] = cached_input_tokens
     lines = [
         json.dumps({"type": "thread.started", "thread_id": "abc"}),
         json.dumps({"type": "turn.started"}),
@@ -75,7 +87,7 @@ def _usage_jsonl(final_message: str, *, input_tokens: int, output_tokens: int) -
         json.dumps(
             {
                 "type": "turn.completed",
-                "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+                "usage": usage,
             }
         ),
     ]
@@ -286,7 +298,7 @@ def test_usage_parsed_from_json_and_absent_usage(monkeypatch) -> None:
                 encoding="utf-8",
             )
 
-        # No turn.completed usage event -> usage is None.
+        # turn.completed without usage -> usage is None.
         no_usage = (
             json.dumps(
                 {
@@ -295,10 +307,129 @@ def test_usage_parsed_from_json_and_absent_usage(monkeypatch) -> None:
                 }
             )
             + "\n"
+            + json.dumps({"type": "turn.completed"})
+            + "\n"
         ).encode("utf-8")
         _install_fake_exec(monkeypatch, on_run=on_run, stdout=no_usage)
 
         _source, usage = await backend.generate_module(_ctx())
         assert usage is None
+
+    asyncio.run(run())
+
+
+def test_nonzero_exit_raises_generation_error(monkeypatch) -> None:
+    async def run() -> None:
+        backend = _backend()
+
+        def on_run(_args: list[str]) -> None:
+            return None
+
+        _install_fake_exec(
+            monkeypatch,
+            on_run=on_run,
+            stdout=_usage_jsonl("done", input_tokens=1, output_tokens=1),
+            returncode=17,
+        )
+
+        with pytest.raises(JauntGenerationError, match="exit code 17"):
+            await backend.generate_module(_ctx())
+
+    asyncio.run(run())
+
+
+def test_turn_failed_event_raises_generation_error(monkeypatch) -> None:
+    async def run() -> None:
+        backend = _backend()
+
+        def on_run(_args: list[str]) -> None:
+            return None
+
+        failed = (
+            json.dumps({"type": "turn.started"})
+            + "\n"
+            + json.dumps({"type": "turn.failed", "error": {"message": "model overloaded"}})
+            + "\n"
+        ).encode("utf-8")
+        _install_fake_exec(monkeypatch, on_run=on_run, stdout=failed)
+
+        with pytest.raises(JauntGenerationError, match="turn.failed: model overloaded"):
+            await backend.generate_module(_ctx())
+
+    asyncio.run(run())
+
+
+def test_top_level_error_event_raises_generation_error(monkeypatch) -> None:
+    async def run() -> None:
+        backend = _backend()
+
+        def on_run(_args: list[str]) -> None:
+            return None
+
+        errored = (json.dumps({"type": "error", "message": "bad request"}) + "\n").encode(
+            "utf-8"
+        )
+        _install_fake_exec(monkeypatch, on_run=on_run, stdout=errored)
+
+        with pytest.raises(JauntGenerationError, match="error event: bad request"):
+            await backend.generate_module(_ctx())
+
+    asyncio.run(run())
+
+
+def test_missing_turn_completed_raises_protocol_error(monkeypatch) -> None:
+    async def run() -> None:
+        backend = _backend()
+
+        def on_run(_args: list[str]) -> None:
+            return None
+
+        incomplete = (
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "done"},
+                }
+            )
+            + "\n"
+        ).encode("utf-8")
+        _install_fake_exec(monkeypatch, on_run=on_run, stdout=incomplete)
+
+        with pytest.raises(JauntGenerationError, match="no turn.completed event"):
+            await backend.generate_module(_ctx())
+
+    asyncio.run(run())
+
+
+def test_cached_input_tokens_parsed_into_usage(monkeypatch) -> None:
+    async def run() -> None:
+        backend = _backend()
+
+        def on_run(args: list[str]) -> None:
+            root = _cwd_from_args(args)
+            (root / "pkg/__generated__/thing.py").write_text(
+                "def alpha():\n    return 1\n\ndef beta():\n    return 2\n",
+                encoding="utf-8",
+            )
+
+        _install_fake_exec(
+            monkeypatch,
+            on_run=on_run,
+            stdout=_usage_jsonl(
+                "done",
+                input_tokens=10,
+                output_tokens=5,
+                cached_input_tokens=7,
+            ),
+        )
+
+        _source, usage = await backend.generate_module(_ctx())
+        assert usage == TokenUsage(
+            10,
+            5,
+            model="gpt-test",
+            provider="codex",
+            cached_prompt_tokens=7,
+        )
 
     asyncio.run(run())
