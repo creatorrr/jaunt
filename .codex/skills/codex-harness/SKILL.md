@@ -3,11 +3,11 @@ name: codex-harness
 description: >-
   Use when driving OpenAI's Codex CLI programmatically or embedding it as a
   code-writing harness — non-interactive `codex exec` (scripting/CI), `codex
-  mcp-server` (in-process MCP client, the embedding path), `codex app-server`
-  (JSON-RPC for deep integration), or via the OpenAI Agents SDK. Also for
-  building a Jaunt GeneratorBackend on top of Codex (the eventual aider
-  replacement). Triggers: codex exec, codex mcp-server, codex app-server, cdx,
-  scripting/driving Codex, replacing aider with codex.
+  exec` as Jaunt's shipped per-call subprocess backend, `codex mcp-server`
+  (in-process MCP client alternative), `codex app-server` (JSON-RPC for deep
+  integration), or via the OpenAI Agents SDK. Also for working on Jaunt's
+  shipped Codex `GeneratorBackend`. Triggers: codex exec, codex mcp-server,
+  codex app-server, cdx, scripting/driving Codex, Jaunt CodexBackend.
 ---
 
 # Codex as a Code-Writing Harness
@@ -17,18 +17,20 @@ code. Unlike a library you call, Codex is an *agent process*: you give it a
 prompt and a workspace, and it iterates (reads files, runs commands in a
 sandbox, edits files) until the task is done. This skill covers the four ways to
 drive it programmatically, and how to embed it as Jaunt's code-generation
-backend.
+backend. Jaunt's current shipped backend uses `codex exec` as a per-call
+subprocess; `mcp-server` and `app-server` are background alternatives, not
+current Jaunt guidance.
 
 Reference docs (load on demand):
 
 | File | Mode | Use it for |
 |------|------|-----------|
-| [references/exec.md](references/exec.md) | `codex exec` | One-shot, scriptable runs; CI; piping; JSONL streams |
-| [references/mcp-server.md](references/mcp-server.md) | `codex mcp-server` | **Embedding path** — reusable, thread-based sessions over MCP |
-| [references/app-server.md](references/app-server.md) | `codex app-server` | Deep IDE-grade integration: JSON-RPC, approvals, fine-grained events |
+| [references/exec.md](references/exec.md) | `codex exec` | One-shot, scriptable runs; CI; piping; JSONL streams; Jaunt's shipped backend |
+| [references/mcp-server.md](references/mcp-server.md) | `codex mcp-server` | Background alternative — reusable, thread-based sessions over MCP |
+| [references/app-server.md](references/app-server.md) | `codex app-server` | Background alternative — deep IDE-grade JSON-RPC integration |
 | [references/agents-sdk.md](references/agents-sdk.md) | OpenAI Agents SDK | Multi-agent orchestration with Codex as a tool |
 | [references/config-and-auth.md](references/config-and-auth.md) | (cross-cutting) | config.toml, profiles, sandbox, features, auth |
-| [references/jaunt-integration.md](references/jaunt-integration.md) | (Jaunt) | A Codex `GeneratorBackend` — the aider parallel |
+| [references/jaunt-integration.md](references/jaunt-integration.md) | (Jaunt) | Real shipped `codex exec` CodexBackend |
 
 Version this skill was written against: **codex-cli 0.142.0**. Codex moves fast;
 `app-server` is explicitly experimental. When in doubt, regenerate the protocol
@@ -40,12 +42,13 @@ schema (`codex app-server generate-json-schema --out <dir>`) or read
 ```
 codex exec        Non-interactive one-shot. Prompt in (arg/stdin), work happens,
                   process exits. --json gives a JSONL event stream. Best for
-                  scripts, CI, and "fire a task, read the result."
+                  scripts, CI, and "fire a task, read the result." This is the
+                  shipped Jaunt embedding path.
 
 codex mcp-server  Codex speaks the Model Context Protocol over stdio. Exposes two
                   tools: `codex` (start a session) and `codex-reply` (continue a
                   thread). A long-lived process you talk to as an MCP client.
-                  This is OpenAI's recommended *embedding* path.
+                  Background alternative; Jaunt does not use it today.
 
 codex app-server  Codex speaks bidirectional JSON-RPC 2.0 (stdio / unix / ws).
                   Full surface: threads, turns, items, approvals, fs APIs,
@@ -61,12 +64,15 @@ Agents SDK        Not a Codex mode — the OpenAI Agents SDK launches `codex
 
 - **"Run a task and read what it did."** → `codex exec`. Simplest. Subprocess,
   `--json` for structured events, `--output-last-message` / `--output-schema`
-  for a clean result. This is what `cdx` (your alias) wraps.
+  for a clean result. This is what `cdx` (your alias) wraps, and it is what
+  Jaunt's shipped CodexBackend uses as a per-call subprocess.
 - **"Embed Codex in a long-running Python process; reuse sessions; one task →
   follow-up."** → `codex mcp-server`. Thread-based, structured tool I/O, one
-  process serves many calls. **The Jaunt harness uses this.**
+  process serves many calls. Background alternative; Jaunt does not use it
+  today.
 - **"I need approvals, per-item events, fs/exec control, or I'm building an
-  editor-like UI."** → `codex app-server`.
+  editor-like UI."** → `codex app-server`. Background alternative; Jaunt does
+  not use it today.
 - **"Orchestrate several specialized agents that each delegate coding to
   Codex."** → Agents SDK (which itself uses `mcp-server` under the hood).
 
@@ -108,7 +114,9 @@ the same across every mode and are documented once in
    (e.g. Claude Code's auto mode), that outer harness may block the bypass flag
    and refuse to let an agent self-add the allow-rule — a **human** must add
    `"Bash(codex exec --dangerously-bypass-approvals-and-sandbox:*)"` to the
-   project's permission allowlist. See [references/exec.md](references/exec.md).
+   project's permission allowlist. Jaunt's shipped backend does **not** use the
+   bypass flag; it confines Codex with `--sandbox` inside throwaway temp
+   workspaces. See [references/exec.md](references/exec.md).
 
 6. **`app-server` is experimental.** Method names and shapes change between
    versions. Generate the schema/types from your installed binary rather than

@@ -44,7 +44,7 @@ the prompt inside a `<stdin>` block — handy for feeding logs/diffs as context.
 ### Model / config
 | Flag | Effect |
 |------|--------|
-| `-m, --model <MODEL>` | Model override (e.g. `gpt-5.2-codex`). |
+| `-m, --model <MODEL>` | Model override (e.g. `gpt-5.5`). |
 | `-c, --config <key=value>` | Override any `config.toml` value (TOML-parsed; dotted paths). Repeatable. |
 | `-p, --profile <NAME>` | Layer `$CODEX_HOME/<NAME>.config.toml` on the base config. |
 | `--enable <FEATURE>` / `--disable <FEATURE>` | Toggle a feature (e.g. `multi_agent`). |
@@ -142,9 +142,24 @@ picks the newest. Sessions persist by default; `--ephemeral` opts out.
 ## Exit status & errors
 
 `codex exec` exits `0` on success and non-zero on failure. For programmatic
-control, **don't rely on exit codes alone** — parse the `--json` stream for
-`turn.failed` / `error` events (they carry the actionable detail), or check the
-`--output-last-message` file. Wrap runs in a timeout; an agent can loop.
+control, **don't rely on exit codes alone**. Jaunt's `CodexBackend` treats a
+real exec failure as any of:
+
+- the JSONL stream contains a `turn.failed` event;
+- the JSONL stream contains a top-level `error` event;
+- the subprocess return code is non-zero;
+- the stream never emits `turn.completed` (protocol failure).
+
+The backend raises `JauntGenerationError` with Codex stderr included (truncated)
+so the builder reports the real failure. A target file that is unchanged from
+the seed is **not** an exec failure: a completed turn may legitimately write
+identical or low-quality content, and that remains a validation concern for
+`generate_with_retry` / `validate_generated_source`.
+
+Outside Jaunt, use the same shape: parse `--json` for `turn.failed` / `error`
+events, require `turn.completed`, check the return code, or use
+`--output-last-message` for a final message. Wrap runs in a timeout; an agent can
+loop.
 
 ## CI / automation guidance
 
