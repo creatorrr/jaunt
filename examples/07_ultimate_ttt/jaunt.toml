@@ -1,0 +1,18 @@
+version = 1
+
+[paths]
+source_roots = ["src"]
+test_roots = ["tests"]
+generated_dir = "__generated__"
+
+[agent]
+engine = "codex"
+
+[codex]
+model = "gpt-5.5"
+reasoning_effort = "high"
+sandbox = "workspace-write"
+
+[test]
+pytest_args = ["-q"]
+auto_class_tests = true
