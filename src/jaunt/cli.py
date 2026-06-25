@@ -605,6 +605,28 @@ sandbox = "workspace-write"
 """
 
 
+_INIT_SPEC_TEMPLATE = '''\
+# Starter spec: `jaunt build` implements this module into `__generated__/`.
+import jaunt
+
+
+@jaunt.magic()
+def slugify(text: str) -> str:
+    """
+    Convert a string to a URL-safe slug: lowercase, spaces and runs of
+    non-alphanumeric chars collapsed to single hyphens, leading/trailing
+    hyphens stripped.
+    """
+    ...
+
+
+@jaunt.test(targets=slugify)
+def test_slugify() -> str:
+    """Generate pytest coverage for words, punctuation runs, and surrounding spaces."""
+    ...
+'''
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     json_mode = _is_json_mode(args)
     root = Path(args.root).resolve() if args.root else Path.cwd().resolve()
@@ -622,9 +644,17 @@ def cmd_init(args: argparse.Namespace) -> int:
     (root / "tests").mkdir(parents=True, exist_ok=True)
 
     toml_path.write_text(_INIT_TEMPLATE, encoding="utf-8")
+    spec_path = root / "src" / "specs.py"
+    spec_created = False
+    if not spec_path.exists():
+        spec_path.write_text(_INIT_SPEC_TEMPLATE, encoding="utf-8")
+        spec_created = True
 
     if json_mode:
-        _emit_json({"command": "init", "ok": True, "path": str(toml_path)})
+        payload = {"command": "init", "ok": True, "path": str(toml_path)}
+        if spec_created:
+            payload["spec_path"] = str(spec_path)
+        _emit_json(payload)
 
     return EXIT_OK
 

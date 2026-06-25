@@ -76,6 +76,52 @@ def test_cmd_init_creates_src_dir(tmp_path: Path, monkeypatch) -> None:
     assert (tmp_path / "src").is_dir()
 
 
+def test_cmd_init_creates_example_spec(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    ns = jaunt.cli.parse_args(["init"])
+    rc = jaunt.cli.cmd_init(ns)
+    assert rc == 0
+
+    spec_path = tmp_path / "src" / "specs.py"
+    content = spec_path.read_text()
+    assert "@jaunt.magic" in content
+    assert "slugify" in content
+    assert "@jaunt.test" in content
+
+
+def test_cmd_init_does_not_overwrite_existing_example_spec(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    spec_path = src_dir / "specs.py"
+    sentinel = "# sentinel spec\n"
+    spec_path.write_text(sentinel)
+
+    ns = jaunt.cli.parse_args(["init"])
+    rc = jaunt.cli.cmd_init(ns)
+    assert rc == 0
+    assert spec_path.read_text() == sentinel
+
+    ns = jaunt.cli.parse_args(["init", "--force"])
+    rc = jaunt.cli.cmd_init(ns)
+    assert rc == 0
+    assert spec_path.read_text() == sentinel
+
+
+def test_cmd_init_example_spec_is_valid_python(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    ns = jaunt.cli.parse_args(["init"])
+    rc = jaunt.cli.cmd_init(ns)
+    assert rc == 0
+
+    spec_path = tmp_path / "src" / "specs.py"
+    compile(spec_path.read_text(), str(spec_path), "exec")
+
+
 def test_cmd_init_creates_tests_dir(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     ns = jaunt.cli.parse_args(["init"])
@@ -97,6 +143,27 @@ def test_cmd_init_json_output(tmp_path: Path, monkeypatch, capsys) -> None:
     assert data["command"] == "init"
     assert data["ok"] is True
     assert "path" in data
+    assert data["spec_path"] == str(tmp_path / "src" / "specs.py")
+
+
+def test_cmd_init_json_omits_spec_path_when_example_spec_exists(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    (src_dir / "specs.py").write_text("# sentinel spec\n")
+
+    ns = jaunt.cli.parse_args(["init", "--json"])
+    rc = jaunt.cli.cmd_init(ns)
+    assert rc == 0
+
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert data["command"] == "init"
+    assert data["ok"] is True
+    assert "path" in data
+    assert "spec_path" not in data
 
 
 def test_cmd_init_json_output_on_existing(tmp_path: Path, monkeypatch, capsys) -> None:

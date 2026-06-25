@@ -64,9 +64,34 @@ codex login                 # authenticate the Codex engine
 uv run jaunt --version
 ```
 
+For your own project, run tests with the source root importable, e.g. `PYTHONPATH=src`.
+
 See `docs-site/` for rendered docs, or `DOCS.md` for a plain-text walkthrough.
 
 All examples live under `examples/`. See `examples/README.md` for the full list.
+
+### Your First Spec
+
+`jaunt init` creates a starter `src/specs.py` like this:
+
+```python
+import jaunt
+
+@jaunt.magic()
+def slugify(text: str) -> str:
+    """Convert a string to a URL-safe slug: lowercase, collapse non-alphanumeric runs."""
+    ...
+
+@jaunt.test(targets=slugify)
+def test_slugify() -> str:
+    """Check words, punctuation, and surrounding spaces."""
+    ...
+```
+
+```bash
+uv run jaunt build
+PYTHONPATH=src uv run jaunt test
+```
 
 ### Hackathon Demo (JWT Auth)
 
