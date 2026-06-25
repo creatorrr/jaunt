@@ -169,7 +169,7 @@ def test_codex_engine_defaults_load(tmp_path: Path) -> None:
     cfg = load_config(root=tmp_path)
 
     assert cfg.agent.engine == "codex"
-    assert cfg.codex.model == ""
+    assert cfg.codex.model == "gpt-5.5"
     assert cfg.codex.reasoning_effort == "high"
     assert cfg.codex.sandbox == "workspace-write"
     assert cfg.codex.features == []

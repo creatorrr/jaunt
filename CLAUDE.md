@@ -105,7 +105,7 @@ version = 1
 engine = "codex"          # the only supported engine
 
 [codex]
-model = "gpt-5.2-codex"
+model = "gpt-5.5"
 reasoning_effort = "high"  # low | medium | high
 sandbox = "workspace-write"
 

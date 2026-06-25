@@ -233,7 +233,7 @@ method is not used by the build flow; headers/cache use this config function.)
   engine = "codex"
 
   [codex]
-  model = "gpt-5.2-codex"
+  model = "gpt-5.5"
   reasoning_effort = "high"      # matches the user's standing default
   sandbox = "workspace-write"
   # features = ["multi_agent"]   # optional --enable passthrough

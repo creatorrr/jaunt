@@ -74,7 +74,7 @@ class AgentConfig:
 
 @dataclass(frozen=True)
 class CodexConfig:
-    model: str = ""
+    model: str = "gpt-5.5"
     reasoning_effort: str = "high"
     sandbox: str = "workspace-write"
     features: list[str] = field(default_factory=list)
@@ -349,7 +349,7 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     if "model" in codex_tbl:
         codex_model = _as_str(codex_tbl["model"], name="codex.model")
     else:
-        codex_model = ""
+        codex_model = "gpt-5.5"
 
     if "reasoning_effort" in codex_tbl:
         codex_reasoning_effort = _as_str(

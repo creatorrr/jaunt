@@ -15,7 +15,7 @@ from jaunt.generate.base import TokenUsage
 
 def _executor() -> CodexExecutor:
     return CodexExecutor(
-        CodexConfig(),
+        CodexConfig(model="gpt-test"),
         LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY"),
     )
 

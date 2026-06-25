@@ -189,7 +189,7 @@ failure — no Codex-side retry loop needed.
 engine = "codex"
 
 [codex]
-model = "gpt-5.2-codex"
+model = "gpt-5.5"
 sandbox = "workspace-write"
 reasoning_effort = "high"
 ```

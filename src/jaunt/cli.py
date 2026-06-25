@@ -605,7 +605,7 @@ pytest_args = ["-q"]
 engine = "codex"
 
 [codex]
-model = "gpt-5.2"
+model = "gpt-5.5"
 reasoning_effort = "high"
 sandbox = "workspace-write"
 # features = []

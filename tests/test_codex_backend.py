@@ -32,7 +32,7 @@ def _ctx(**overrides):
 
 def _backend() -> CodexBackend:
     return CodexBackend(
-        CodexConfig(),
+        CodexConfig(model="gpt-test"),
         LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY"),
     )
 
