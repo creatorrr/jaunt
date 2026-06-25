@@ -2,8 +2,8 @@
 
 This example is intentionally ambitious. It exercises:
 
-- the Aider-backed Jaunt runtime
-- `gpt-5.4` with `reasoning_effort = "high"`
+- the Codex engine
+- `gpt-5.5` with `reasoning_effort = "high"`
 - an explicit user-managed Rich skill built through `jaunt skill build`
 - a multi-module spec graph
 - a Rich-rendered terminal UI on top of pure minimax game logic
@@ -13,7 +13,10 @@ This example is intentionally ambitious. It exercises:
 From the repo root:
 
 ```bash
-uv sync --extra aider
+uv sync
+
+# The Codex CLI must be installed and authenticated (one-time setup):
+codex login
 
 # Build the checked-in Rich skill scaffold into a real user skill first.
 uv run jaunt skill build --root examples/rich_tictactoe rich

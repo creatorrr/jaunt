@@ -30,6 +30,7 @@ uv run ty check
 cd examples/jwt_auth && uv run --project ../.. jaunt build
 
 # Optional extras:
+pip install jaunt[test]      # pytest, required to run `jaunt test`
 # - pytest markers for async tests
 pip install jaunt[async]     # for pytest-asyncio marker
 pip install jaunt[anyio]     # for anyio marker
@@ -131,6 +132,11 @@ jobs = 4
 infer_deps = true
 pytest_args = ["-q"]
 
+[skills]
+auto = true                 # auto-generate PyPI helper skills into build prompts
+max_chars_per_skill = 8000  # cap injected skill text to keep prompts lean
+inject_user_skills = []     # user-skill names to always inject (default: none)
+
 [contract]
 battery_dir = "tests/contract"     # where derived contract batteries are written
 derive = ["examples", "errors"]    # case kinds derived from docstring prose
@@ -151,6 +157,7 @@ test_module = ""
 jaunt build                   # Generate implementations for @jaunt.magic specs
 jaunt build --force           # Force full regeneration
 jaunt build --target my_app.specs  # Build specific module only
+jaunt build --no-auto-skills  # Disable auto-skill injection into build prompts
 
 jaunt test                    # Generate tests and run pytest
 jaunt test --no-build         # Skip build step
