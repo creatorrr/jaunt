@@ -1,11 +1,22 @@
 # Codex as Jaunt's sole code-generation engine — Design
 
 **Date:** 2026-06-24
-**Status:** Accepted (design); implementation pending
+**Status:** IMPLEMENTED on `feat/codex-engine` (607 unit tests + ruff + ty green; whole-class E2E proven).
 **Supersedes:** `docs/superpowers/specs/2026-06-24-whole-class-aider-design.md` and
 `docs/superpowers/plans/2026-06-24-whole-class-aider.md` (whole-class is delivered
 natively by Codex; see §3). Those documents are retained for their Codex-review
 history but should carry a "superseded by this spec" header.
+
+> **Implementation notes (2026-06-24) — where the build diverged from this design:**
+> - **D3/D4 pivoted from `codex mcp-server` to `codex exec`.** The real E2E surfaced three
+>   mcp-server integration bugs the mocked tests hid: Codex won't write a non-git temp
+>   workspace without `--skip-git-repo-check`; the vanilla MCP SDK rejects Codex's custom
+>   `codex/event` notifications; the long-lived `stdio_client` pool hit anyio cancel-scope
+>   errors across asyncio tasks. `CodexBackend` now runs one `codex exec` subprocess per
+>   module (naturally task-local), so the D4 session pool and the `mcp` dependency were
+>   dropped. Treat §5.2 (the pool) and the mcp-specific text below as historical.
+> - **Default model is `gpt-5.5`** (accepts Codex's default verbosity; no
+>   `model_verbosity="medium"` workaround, unlike `gpt-5.2-codex`).
 
 ---
 
