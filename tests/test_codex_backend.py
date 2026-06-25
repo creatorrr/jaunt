@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import AsyncMock
 
 from jaunt.config import CodexConfig, LLMConfig
 from jaunt.generate.base import TokenUsage
@@ -30,42 +30,150 @@ def _ctx(**overrides):
     return SimpleNamespace(**values)
 
 
-def _backend(pool_size: int = 1) -> CodexBackend:
+def _backend() -> CodexBackend:
     return CodexBackend(
         CodexConfig(),
         LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY"),
-        pool_size=pool_size,
     )
+
+
+class _FakeProc:
+    """Stand-in for the object returned by asyncio.create_subprocess_exec.
+
+    Records the stdin (the prompt) it is handed into *captured["prompt"]* so
+    tests can assert on prompt assembly without reassigning bound methods.
+    """
+
+    def __init__(
+        self,
+        stdout: bytes,
+        stderr: bytes = b"",
+        returncode: int = 0,
+        captured: dict[str, object] | None = None,
+    ) -> None:
+        self._stdout = stdout
+        self._stderr = stderr
+        self.returncode = returncode
+        self._captured = captured
+
+    async def communicate(self, stdin: bytes | None = None) -> tuple[bytes, bytes]:
+        if self._captured is not None:
+            self._captured["prompt"] = (stdin or b"").decode("utf-8")
+        return self._stdout, self._stderr
+
+
+def _usage_jsonl(final_message: str, *, input_tokens: int, output_tokens: int) -> bytes:
+    lines = [
+        json.dumps({"type": "thread.started", "thread_id": "abc"}),
+        json.dumps({"type": "turn.started"}),
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {"id": "item_0", "type": "agent_message", "text": final_message},
+            }
+        ),
+        json.dumps(
+            {
+                "type": "turn.completed",
+                "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+            }
+        ),
+    ]
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _install_fake_exec(monkeypatch, *, on_run, stdout: bytes, returncode: int = 0):
+    """Patch asyncio.create_subprocess_exec with a fake that calls on_run(args)."""
+    captured: dict[str, object] = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["args"] = list(args)
+        captured["stdin"] = kwargs.get("stdin")
+        on_run(list(args))
+        return _FakeProc(stdout, b"", returncode, captured)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    return captured
+
+
+def _cwd_from_args(args: list[str]) -> Path:
+    idx = args.index("-C")
+    return Path(args[idx + 1])
 
 
 def test_generate_module_returns_written_source_and_writes_seed(monkeypatch) -> None:
     async def run() -> None:
         backend = _backend()
         seen: dict[str, str] = {}
-        session = SimpleNamespace()
 
-        async def call_tool(name, args):
-            target = Path(args["cwd"]) / "pkg/__generated__/thing.py"
-            seen["tool"] = name
+        def on_run(args: list[str]) -> None:
+            root = _cwd_from_args(args)
+            target = root / "pkg/__generated__/thing.py"
             seen["seed"] = target.read_text(encoding="utf-8")
+            seen["spec"] = (root / "_context/spec_0.py").read_text(encoding="utf-8")
+            seen["dep"] = (root / "_context/dep_0.pyi").read_text(encoding="utf-8")
             target.write_text(
                 "def alpha():\n    return 1\n\ndef beta():\n    return 2\n",
                 encoding="utf-8",
             )
-            return SimpleNamespace(
-                structuredContent={"usage": {"input_tokens": 10, "output_tokens": 5}}
-            )
 
-        session.call_tool = AsyncMock(side_effect=call_tool)
-        monkeypatch.setattr(backend, "_spawn_slot", AsyncMock(return_value=session))
+        _install_fake_exec(
+            monkeypatch,
+            on_run=on_run,
+            stdout=_usage_jsonl("done", input_tokens=10, output_tokens=5),
+        )
 
         source, usage = await backend.generate_module(
             _ctx(seed_target_content="# previous candidate\n")
         )
 
-        assert seen == {"tool": "codex", "seed": "# previous candidate\n"}
+        assert seen["seed"] == "# previous candidate\n"
+        assert "def alpha(): ..." in seen["spec"]
+        assert "def helper() -> str: ..." in seen["dep"]
         assert source == "def alpha():\n    return 1\n\ndef beta():\n    return 2\n"
         assert usage == TokenUsage(10, 5, model="gpt-test", provider="codex")
+
+    asyncio.run(run())
+
+
+def test_generate_module_command_line_flags(monkeypatch) -> None:
+    async def run() -> None:
+        backend = _backend()
+
+        def on_run(args: list[str]) -> None:
+            root = _cwd_from_args(args)
+            (root / "pkg/__generated__/thing.py").write_text(
+                "def alpha():\n    return 1\n\ndef beta():\n    return 2\n",
+                encoding="utf-8",
+            )
+
+        captured = _install_fake_exec(
+            monkeypatch,
+            on_run=on_run,
+            stdout=_usage_jsonl("done", input_tokens=1, output_tokens=1),
+        )
+
+        await backend.generate_module(_ctx())
+
+        args = cast(list[str], captured["args"])
+        assert args[0] == "codex"
+        assert args[1] == "exec"
+        assert "--skip-git-repo-check" in args
+        # sandbox must be workspace-write for a build (writes the target file)
+        si = args.index("--sandbox")
+        assert args[si + 1] == "workspace-write"
+        assert "-C" in args
+        # approval policy pinned to never via -c; dangerous bypass never used
+        assert '-c' in args and 'approval_policy="never"' in args
+        assert "--dangerously-bypass-approvals-and-sandbox" not in args
+        # model + reasoning effort
+        mi = args.index("-m")
+        assert args[mi + 1] == "gpt-test"
+        assert any(a.startswith("model_reasoning_effort=") for a in args)
+        # JSON streaming + prompt on stdin (trailing "-")
+        assert "--json" in args
+        assert args[-1] == "-"
+        assert captured["stdin"] == asyncio.subprocess.PIPE
 
     asyncio.run(run())
 
@@ -74,23 +182,23 @@ def test_generate_module_writes_whole_class_contract_file(monkeypatch) -> None:
     async def run() -> None:
         backend = _backend()
         seen: dict[str, object] = {}
-        session = SimpleNamespace()
 
-        async def call_tool(name, args):
-            root = Path(args["cwd"])
+        def on_run(args: list[str]) -> None:
+            root = _cwd_from_args(args)
             seen["seed"] = (root / "pkg/__generated__/thing.py").read_text(encoding="utf-8")
             seen["contract"] = (root / "_context/whole_class_contract.md").read_text(
                 encoding="utf-8"
             )
-            seen["prompt"] = args["prompt"]
             (root / "pkg/__generated__/thing.py").write_text(
                 "def alpha():\n    return 1\n\ndef beta():\n    return 2\n",
                 encoding="utf-8",
             )
-            return SimpleNamespace(structuredContent={})
 
-        session.call_tool = AsyncMock(side_effect=call_tool)
-        monkeypatch.setattr(backend, "_spawn_slot", AsyncMock(return_value=session))
+        _install_fake_exec(
+            monkeypatch,
+            on_run=on_run,
+            stdout=_usage_jsonl("done", input_tokens=1, output_tokens=1),
+        )
 
         await backend.generate_module(
             _ctx(
@@ -101,9 +209,6 @@ def test_generate_module_writes_whole_class_contract_file(monkeypatch) -> None:
 
         assert seen["seed"] == "class Stack:\n    ...\n"
         assert seen["contract"] == "# contract\nfill Stack.push\n"
-        prompt = seen["prompt"]
-        assert isinstance(prompt, str)
-        assert "_context/whole_class_contract.md" in prompt
 
     asyncio.run(run())
 
@@ -111,29 +216,26 @@ def test_generate_module_writes_whole_class_contract_file(monkeypatch) -> None:
 def test_generate_module_prompt_assembly(monkeypatch) -> None:
     async def run() -> None:
         backend = _backend()
-        seen: dict[str, object] = {}
-        session = SimpleNamespace()
 
-        async def call_tool(name, args):
-            seen["args"] = args
-            target = Path(args["cwd"]) / "pkg/__generated__/thing.py"
-            target.write_text(
+        def on_run(args: list[str]) -> None:
+            root = _cwd_from_args(args)
+            (root / "pkg/__generated__/thing.py").write_text(
                 "def alpha():\n    pass\n\ndef beta():\n    pass\n",
                 encoding="utf-8",
             )
-            return SimpleNamespace(structuredContent={})
 
-        session.call_tool = AsyncMock(side_effect=call_tool)
-        monkeypatch.setattr(backend, "_spawn_slot", AsyncMock(return_value=session))
+        captured = _install_fake_exec(
+            monkeypatch,
+            on_run=on_run,
+            stdout=_usage_jsonl("done", input_tokens=1, output_tokens=1),
+        )
 
         await backend.generate_module(
             _ctx(),
             extra_error_context=["missing alpha", "missing beta"],
         )
 
-        args = cast(dict[str, object], seen["args"])
-        prompt = args["prompt"]
-        assert isinstance(prompt, str)
+        prompt = cast(str, captured["prompt"])
         assert "alpha, beta" in prompt
         assert "_context/spec_" in prompt
         assert "Edit ONLY the target file" in prompt
@@ -142,78 +244,61 @@ def test_generate_module_prompt_assembly(monkeypatch) -> None:
     asyncio.run(run())
 
 
-def test_complete_text_returns_structured_final_message_and_uses_read_only(monkeypatch) -> None:
+def test_complete_text_returns_final_message_and_uses_read_only(monkeypatch) -> None:
     async def run() -> None:
         backend = _backend()
-        seen: dict[str, object] = {}
-        session = SimpleNamespace()
 
-        async def call_tool(name, args):
-            seen["name"] = name
-            seen["args"] = args
-            return SimpleNamespace(structuredContent={"lastAgentMessage": "HELLO"})
+        def on_run(_args: list[str]) -> None:
+            return None
 
-        session.call_tool = AsyncMock(side_effect=call_tool)
-        monkeypatch.setattr(backend, "_spawn_slot", AsyncMock(return_value=session))
+        captured = _install_fake_exec(
+            monkeypatch,
+            on_run=on_run,
+            stdout=_usage_jsonl("HELLO", input_tokens=3, output_tokens=2),
+        )
 
         result = await backend.complete_text(system="system", user="user")
 
         assert result == "HELLO"
-        assert seen["name"] == "codex"
-        args = cast(dict[str, object], seen["args"])
-        assert args["sandbox"] == "read-only"
+        args = cast(list[str], captured["args"])
+        si = args.index("--sandbox")
+        assert args[si + 1] == "read-only"
 
     asyncio.run(run())
 
 
-def test_pool_spawns_up_to_pool_size_and_aclose_resets(monkeypatch) -> None:
+def test_aclose_is_noop() -> None:
     async def run() -> None:
-        backend = _backend(pool_size=2)
-        spawn_count = 0
-
-        async def spawn_slot():
-            nonlocal spawn_count
-            spawn_count += 1
-            session = SimpleNamespace()
-
-            async def call_tool(name, args):
-                await asyncio.sleep(0)
-                target = Path(args["cwd"]) / "pkg/__generated__/thing.py"
-                target.write_text(
-                    f"def alpha():\n    return {spawn_count}\n\ndef beta():\n    return 2\n",
-                    encoding="utf-8",
-                )
-                return SimpleNamespace(structuredContent={})
-
-            session.call_tool = AsyncMock(side_effect=call_tool)
-            return session
-
-        monkeypatch.setattr(backend, "_spawn_slot", spawn_slot)
-
-        await asyncio.gather(backend.generate_module(_ctx()), backend.generate_module(_ctx()))
-
-        assert spawn_count == 2
-        assert backend._started == 2
-        assert backend._pool is not None
-        assert backend._pool.qsize() == 2
-
-        fake_stack = SimpleNamespace(aclose=AsyncMock())
-        backend._stack = fake_stack
-        await backend.aclose()
-
-        fake_stack.aclose.assert_awaited_once()
-        assert backend._stack is None
-        assert backend._pool is None
-        assert backend._started == 0
+        backend = _backend()
+        await backend.aclose()  # must not raise
 
     asyncio.run(run())
 
 
-def test_extract_usage_handles_present_and_absent_usage() -> None:
-    backend = _backend()
+def test_usage_parsed_from_json_and_absent_usage(monkeypatch) -> None:
+    async def run() -> None:
+        backend = _backend()
 
-    assert backend._extract_usage(
-        SimpleNamespace(structuredContent={"usage": {"input_tokens": 10, "output_tokens": 5}})
-    ) == TokenUsage(10, 5, model="gpt-test", provider="codex")
-    assert backend._extract_usage(SimpleNamespace(structuredContent=None)) is None
-    assert backend._extract_usage(SimpleNamespace()) is None
+        def on_run(args: list[str]) -> None:
+            root = _cwd_from_args(args)
+            (root / "pkg/__generated__/thing.py").write_text(
+                "def alpha():\n    return 1\n\ndef beta():\n    return 2\n",
+                encoding="utf-8",
+            )
+
+        # No turn.completed usage event -> usage is None.
+        no_usage = (
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "done"},
+                }
+            )
+            + "\n"
+        ).encode("utf-8")
+        _install_fake_exec(monkeypatch, on_run=on_run, stdout=no_usage)
+
+        _source, usage = await backend.generate_module(_ctx())
+        assert usage is None
+
+    asyncio.run(run())

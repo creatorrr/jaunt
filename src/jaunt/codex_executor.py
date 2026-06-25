@@ -1,4 +1,4 @@
-"""Codex-backed shared executor for Jaunt agent tasks."""
+"""Codex exec-backed shared executor for Jaunt agent tasks."""
 
 from __future__ import annotations
 
@@ -12,7 +12,8 @@ from jaunt.agent_runtime import (
     AgentTaskResult,
 )
 from jaunt.config import CodexConfig, LLMConfig
-from jaunt.generate.codex_backend import CodexBackend
+from jaunt.generate.base import TokenUsage
+from jaunt.generate.codex_backend import run_codex_exec
 
 
 class CodexExecutor(AgentExecutor):
@@ -20,7 +21,6 @@ class CodexExecutor(AgentExecutor):
         self._codex = codex
         self._llm = llm
         self._model = codex.model or llm.model
-        self._backend = CodexBackend(codex, llm, pool_size=1)
 
     @property
     def engine_name(self) -> str:
@@ -57,45 +57,45 @@ class CodexExecutor(AgentExecutor):
             ]
         )
 
-    async def run_task(self, task: AgentTask) -> AgentTaskResult:
-        session = await self._backend._checkout()
-        try:
-            with tempfile.TemporaryDirectory(prefix="jaunt-codex-") as tmp:
-                root = Path(tmp).resolve()
-                target_path = self._write_workspace(root, task)
-                prompt = self._build_prompt(task)
-                try:
-                    res = await session.call_tool(
-                        "codex",
-                        {
-                            "prompt": prompt,
-                            "cwd": str(root),
-                            "sandbox": self._codex.sandbox,
-                            "approval-policy": "never",
-                            "model": self._model,
-                            "config": {
-                                "model_reasoning_effort": self._codex.reasoning_effort,
-                                **(self._codex.config or {}),
-                            },
-                        },
-                    )
-                except Exception as e:
-                    output = ""
-                    try:
-                        if target_path.exists():
-                            output = target_path.read_text(encoding="utf-8")
-                    except Exception:
-                        output = ""
-                    raise AgentTaskExecutionError(str(e), output=output, usage=None) from e
+    def _usage_from(self, usage_input: int | None, usage_output: int | None) -> TokenUsage | None:
+        if isinstance(usage_input, int) and isinstance(usage_output, int):
+            return TokenUsage(
+                prompt_tokens=usage_input,
+                completion_tokens=usage_output,
+                model=self._model,
+                provider="codex",
+            )
+        return None
 
-                output = target_path.read_text(encoding="utf-8")
-                return AgentTaskResult(
-                    output=output,
-                    usage=self._backend._extract_usage(res),
-                    trace_dir=None,
+    async def run_task(self, task: AgentTask) -> AgentTaskResult:
+        with tempfile.TemporaryDirectory(prefix="jaunt-codex-") as tmp:
+            root = Path(tmp).resolve()
+            target_path = self._write_workspace(root, task)
+            prompt = self._build_prompt(task)
+            try:
+                result = await run_codex_exec(
+                    prompt=prompt,
+                    cwd=str(root),
+                    sandbox=self._codex.sandbox,
+                    model=self._model,
+                    reasoning_effort=self._codex.reasoning_effort,
+                    extra_config=dict(self._codex.config or {}),
                 )
-        finally:
-            self._backend._return(session)
+            except Exception as e:
+                output = ""
+                try:
+                    if target_path.exists():
+                        output = target_path.read_text(encoding="utf-8")
+                except Exception:
+                    output = ""
+                raise AgentTaskExecutionError(str(e), output=output, usage=None) from e
+
+            output = target_path.read_text(encoding="utf-8")
+            return AgentTaskResult(
+                output=output,
+                usage=self._usage_from(result.usage_input, result.usage_output),
+                trace_dir=None,
+            )
 
     async def aclose(self) -> None:
-        await self._backend.aclose()
+        return None

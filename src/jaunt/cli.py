@@ -523,7 +523,7 @@ def _discover_static_targeted_test_entries(*, root: Path, cfg: JauntConfig) -> l
 def _build_backend(cfg: JauntConfig):
     from jaunt.generate.codex_backend import CodexBackend
 
-    return CodexBackend(cfg.codex, cfg.llm, cfg.prompts, pool_size=cfg.build.jobs)
+    return CodexBackend(cfg.codex, cfg.llm, cfg.prompts)
 
 
 def _is_json_mode(args: argparse.Namespace) -> bool:

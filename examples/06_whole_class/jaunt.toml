@@ -15,6 +15,11 @@ model = "gpt-5.2-codex"
 reasoning_effort = "high"
 sandbox = "workspace-write"
 
+[codex.config]
+# gpt-5.2-codex only accepts verbosity "medium"; codex's default of "low"
+# is rejected by the API for this model.
+model_verbosity = "medium"
+
 [test]
 pytest_args = ["-q"]
 auto_class_tests = true

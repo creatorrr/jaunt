@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
-from types import SimpleNamespace
 from typing import cast
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -21,26 +20,58 @@ def _executor() -> CodexExecutor:
     )
 
 
+class _FakeProc:
+    def __init__(
+        self, stdout: bytes, returncode: int = 0, captured: dict[str, object] | None = None
+    ) -> None:
+        self._stdout = stdout
+        self.returncode = returncode
+        self._captured = captured
+
+    async def communicate(self, stdin: bytes | None = None) -> tuple[bytes, bytes]:
+        if self._captured is not None:
+            self._captured["prompt"] = (stdin or b"").decode("utf-8")
+        return self._stdout, b""
+
+
+def _usage_jsonl(input_tokens: int, output_tokens: int) -> bytes:
+    lines = [
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "done"},
+            }
+        ),
+        json.dumps(
+            {
+                "type": "turn.completed",
+                "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+            }
+        ),
+    ]
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _cwd_from_args(args: list[str]) -> Path:
+    idx = args.index("-C")
+    return Path(args[idx + 1])
+
+
 def test_codex_executor_writes_workspace_and_returns_target(monkeypatch) -> None:
     async def run() -> None:
         executor = _executor()
         seen: dict[str, object] = {}
-        session = SimpleNamespace()
 
-        async def call_tool(name, args):
-            args = cast(dict[str, object], args)
-            root = Path(cast(str, args["cwd"]))
-            seen["name"] = name
-            seen["prompt"] = args["prompt"]
+        async def fake_exec(*args, **kwargs):
+            args_list = list(args)
+            root = _cwd_from_args(args_list)
+            seen["args"] = args_list
             seen["target_seed"] = (root / "workspace/SKILL.md").read_text(encoding="utf-8")
             seen["read_only"] = (root / "context/readme.md").read_text(encoding="utf-8")
             (root / "workspace/SKILL.md").write_text("# skill\nUpdated.\n", encoding="utf-8")
-            return SimpleNamespace(
-                structuredContent={"usage": {"input_tokens": 10, "output_tokens": 5}}
-            )
+            return _FakeProc(_usage_jsonl(10, 5), captured=seen)
 
-        session.call_tool = AsyncMock(side_effect=call_tool)
-        monkeypatch.setattr(executor._backend, "_spawn_slot", AsyncMock(return_value=session))
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
 
         result = await executor.run_task(
             AgentTask(
@@ -54,11 +85,13 @@ def test_codex_executor_writes_workspace_and_returns_target(monkeypatch) -> None
             )
         )
 
-        assert seen["name"] == "codex"
+        args = cast(list[str], seen["args"])
+        assert args[0] == "codex"
+        assert args[1] == "exec"
+        assert "--skip-git-repo-check" in args
         assert seen["target_seed"] == "# old\n"
         assert seen["read_only"] == "# README\n"
-        prompt = seen["prompt"]
-        assert isinstance(prompt, str)
+        prompt = cast(str, seen["prompt"])
         assert "workspace/SKILL.md" in prompt
         assert "context/readme.md" in prompt
         assert "skill_mode" not in prompt
@@ -73,16 +106,13 @@ def test_codex_executor_writes_workspace_and_returns_target(monkeypatch) -> None
 def test_codex_executor_raises_execution_error_with_partial_output(monkeypatch) -> None:
     async def run() -> None:
         executor = _executor()
-        session = SimpleNamespace()
 
-        async def call_tool(name, args):
-            args = cast(dict[str, object], args)
-            root = Path(cast(str, args["cwd"]))
+        async def fake_exec(*args, **kwargs):
+            root = _cwd_from_args(list(args))
             (root / "workspace/SKILL.md").write_text("partial\n", encoding="utf-8")
             raise RuntimeError("boom")
 
-        session.call_tool = AsyncMock(side_effect=call_tool)
-        monkeypatch.setattr(executor._backend, "_spawn_slot", AsyncMock(return_value=session))
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
 
         with pytest.raises(AgentTaskExecutionError) as exc_info:
             await executor.run_task(

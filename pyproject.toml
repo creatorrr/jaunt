@@ -15,7 +15,7 @@ classifiers = [
   "Topic :: Software Development :: Testing",
   "Typing :: Typed",
 ]
-dependencies = ["mcp>=1.0.0"]
+dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/creatorrr/jaunt"

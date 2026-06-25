@@ -1,18 +1,145 @@
-"""Codex MCP-backed generation backend."""
+"""Codex exec-backed generation backend.
+
+This backend drives the `codex exec` subprocess (one process per call). Each
+call is its own subprocess, so it is naturally task-local: there is no
+long-lived MCP session/pool to leak across asyncio tasks, no custom MCP
+notifications to decode, and -- critically -- with `--skip-git-repo-check`
+Codex will write files inside the non-git temp workspace we seed for it.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
-from contextlib import AsyncExitStack
 from pathlib import Path
-from typing import Any
-
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
 
 from jaunt.config import CodexConfig, LLMConfig, PromptsConfig
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext, TokenUsage
+
+
+class CodexExecResult:
+    """Parsed result of a single `codex exec --json` run."""
+
+    __slots__ = ("returncode", "final_message", "usage_input", "usage_output", "stderr")
+
+    def __init__(
+        self,
+        *,
+        returncode: int,
+        final_message: str,
+        usage_input: int | None,
+        usage_output: int | None,
+        stderr: str,
+    ) -> None:
+        self.returncode = returncode
+        self.final_message = final_message
+        self.usage_input = usage_input
+        self.usage_output = usage_output
+        self.stderr = stderr
+
+
+async def run_codex_exec(
+    *,
+    prompt: str,
+    cwd: str,
+    sandbox: str,
+    model: str,
+    reasoning_effort: str,
+    extra_config: dict[str, object] | None = None,
+) -> CodexExecResult:
+    """Run `codex exec` once, passing *prompt* on stdin, and parse the JSONL events.
+
+    The approval policy is pinned to ``never`` and ``--skip-git-repo-check`` is
+    always passed so Codex will operate (and write) inside the non-git temp
+    workspace. We never use the dangerous full-access bypass: Codex is confined
+    to the workspace via ``--sandbox``.
+    """
+
+    args: list[str] = [
+        "codex",
+        "exec",
+        "--skip-git-repo-check",
+        "-C",
+        cwd,
+        "--sandbox",
+        sandbox,
+        "-c",
+        'approval_policy="never"',
+        "-m",
+        model,
+        "-c",
+        f"model_reasoning_effort={_toml_value(reasoning_effort)}",
+    ]
+    for key, value in (extra_config or {}).items():
+        args += ["-c", f"{key}={_toml_value(value)}"]
+    # Stream events as JSONL so we can parse the final agent message + token usage.
+    args += ["--json", "-"]
+
+    proc = await asyncio.create_subprocess_exec(
+        *args,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout_bytes, stderr_bytes = await proc.communicate(prompt.encode("utf-8"))
+    stdout = stdout_bytes.decode("utf-8", errors="replace")
+    stderr = stderr_bytes.decode("utf-8", errors="replace")
+
+    final_message, usage_input, usage_output = _parse_jsonl(stdout)
+    return CodexExecResult(
+        returncode=proc.returncode if proc.returncode is not None else -1,
+        final_message=final_message,
+        usage_input=usage_input,
+        usage_output=usage_output,
+        stderr=stderr,
+    )
+
+
+def _toml_value(value: object) -> str:
+    """Render *value* as a `-c key=value` TOML scalar for `codex exec`."""
+
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    # Strings are quoted so codex parses them as TOML strings (not bare idents).
+    return json.dumps(str(value))
+
+
+def _parse_jsonl(stdout: str) -> tuple[str, int | None, int | None]:
+    """Extract the final agent message and token usage from `codex exec --json` output."""
+
+    final_message = ""
+    usage_input: int | None = None
+    usage_output: int | None = None
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        etype = event.get("type")
+        if etype == "item.completed":
+            item = event.get("item")
+            if isinstance(item, dict) and item.get("type") == "agent_message":
+                text = item.get("text")
+                if isinstance(text, str):
+                    final_message = text
+        elif etype == "turn.completed":
+            usage = event.get("usage")
+            if isinstance(usage, dict):
+                pin = usage.get("input_tokens")
+                pout = usage.get("output_tokens")
+                if isinstance(pin, int):
+                    usage_input = pin
+                if isinstance(pout, int):
+                    usage_output = pout
+    return final_message, usage_input, usage_output
 
 
 class CodexBackend(GeneratorBackend):
@@ -21,19 +148,11 @@ class CodexBackend(GeneratorBackend):
         codex: CodexConfig,
         llm: LLMConfig,
         prompts: PromptsConfig | None = None,
-        *,
-        pool_size: int = 1,
     ) -> None:
         self._codex = codex
         self._llm = llm
         self._prompts = prompts
         self._model = codex.model or llm.model
-        self._pool_size = max(1, pool_size)
-        self._pool: asyncio.Queue[ClientSession] | None = None
-        self._stack: AsyncExitStack | None = None
-        self._started = 0
-        self._lock = asyncio.Lock()
-        self._closed = False
 
     @property
     def provider_name(self) -> str:
@@ -43,56 +162,10 @@ class CodexBackend(GeneratorBackend):
     def supports_structured_output(self) -> bool:
         return False
 
-    async def _ensure_pool(self) -> None:
-        async with self._lock:
-            if self._closed:
-                raise RuntimeError("CodexBackend is closed.")
-            if self._pool is None:
-                self._pool = asyncio.Queue()
-                self._stack = AsyncExitStack()
-
-    async def _spawn_slot(self) -> ClientSession:
-        if self._stack is None:
-            raise RuntimeError("CodexBackend pool was not initialized.")
-        params = StdioServerParameters(command="codex", args=["mcp-server"])
-        read, write = await self._stack.enter_async_context(stdio_client(params))
-        session = await self._stack.enter_async_context(ClientSession(read, write))
-        await session.initialize()
-        return session
-
-    async def _checkout(self) -> ClientSession:
-        await self._ensure_pool()
-        pool = self._pool
-        if pool is None:
-            raise RuntimeError("CodexBackend pool was not initialized.")
-
-        spawn_now = False
-        async with self._lock:
-            if pool.empty() and self._started < self._pool_size:
-                self._started += 1
-                spawn_now = True
-
-        if spawn_now:
-            try:
-                return await self._spawn_slot()
-            except Exception:
-                async with self._lock:
-                    self._started -= 1
-                raise
-
-        return await pool.get()
-
-    def _return(self, session: ClientSession) -> None:
-        if self._pool is not None and not self._closed:
-            self._pool.put_nowait(session)
-
     async def aclose(self) -> None:
-        self._closed = True
-        if self._stack is not None:
-            await self._stack.aclose()
-        self._stack = None
-        self._pool = None
-        self._started = 0
+        # No long-lived resources; each call is its own subprocess. Kept for
+        # lifecycle compatibility with the GeneratorBackend protocol.
+        return None
 
     async def generate_module(
         self,
@@ -100,51 +173,41 @@ class CodexBackend(GeneratorBackend):
         *,
         extra_error_context: list[str] | None = None,
     ) -> tuple[str, TokenUsage | None]:
-        session = await self._checkout()
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                target = root / (ctx.generated_module.replace(".", "/") + ".py")
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(getattr(ctx, "seed_target_content", "") or "", encoding="utf-8")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / (ctx.generated_module.replace(".", "/") + ".py")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(getattr(ctx, "seed_target_content", "") or "", encoding="utf-8")
 
-                ctx_dir = root / "_context"
-                ctx_dir.mkdir()
-                for i, (ref, src) in enumerate(
-                    sorted(ctx.spec_sources.items(), key=lambda kv: str(kv[0]))
-                ):
-                    (ctx_dir / f"spec_{i}.py").write_text(f"# {ref}\n{src}", encoding="utf-8")
-                for i, (ref, api) in enumerate(
-                    sorted(ctx.dependency_apis.items(), key=lambda kv: str(kv[0]))
-                ):
-                    (ctx_dir / f"dep_{i}.pyi").write_text(f"# {ref}\n{api}", encoding="utf-8")
+            ctx_dir = root / "_context"
+            ctx_dir.mkdir()
+            for i, (ref, src) in enumerate(
+                sorted(ctx.spec_sources.items(), key=lambda kv: str(kv[0]))
+            ):
+                (ctx_dir / f"spec_{i}.py").write_text(f"# {ref}\n{src}", encoding="utf-8")
+            for i, (ref, api) in enumerate(
+                sorted(ctx.dependency_apis.items(), key=lambda kv: str(kv[0]))
+            ):
+                (ctx_dir / f"dep_{i}.pyi").write_text(f"# {ref}\n{api}", encoding="utf-8")
 
-                contract_block = getattr(ctx, "whole_class_contract_block", "") or ""
-                if contract_block.strip():
-                    (ctx_dir / "whole_class_contract.md").write_text(
-                        contract_block.rstrip() + "\n", encoding="utf-8"
-                    )
-
-                prompt = self._build_prompt(ctx, target.relative_to(root), extra_error_context)
-                res = await session.call_tool(
-                    "codex",
-                    {
-                        "prompt": prompt,
-                        "cwd": str(root),
-                        "sandbox": self._codex.sandbox,
-                        "approval-policy": "never",
-                        "model": self._model,
-                        "config": {
-                            "model_reasoning_effort": self._codex.reasoning_effort,
-                            **(self._codex.config or {}),
-                        },
-                    },
+            contract_block = getattr(ctx, "whole_class_contract_block", "") or ""
+            if contract_block.strip():
+                (ctx_dir / "whole_class_contract.md").write_text(
+                    contract_block.rstrip() + "\n", encoding="utf-8"
                 )
-                source = target.read_text(encoding="utf-8")
-                usage = self._extract_usage(res)
-                return source, usage
-        finally:
-            self._return(session)
+
+            prompt = self._build_prompt(ctx, target.relative_to(root), extra_error_context)
+            result = await run_codex_exec(
+                prompt=prompt,
+                cwd=str(root),
+                sandbox=self._codex.sandbox,
+                model=self._model,
+                reasoning_effort=self._codex.reasoning_effort,
+                extra_config=dict(self._codex.config or {}),
+            )
+            source = target.read_text(encoding="utf-8")
+            usage = self._usage_from(result)
+            return source, usage
 
     def _build_prompt(
         self,
@@ -180,54 +243,29 @@ class CodexBackend(GeneratorBackend):
         return "\n\n".join(b for b in blocks if b)
 
     async def complete_text(self, *, system: str, user: str) -> str:
-        session = await self._checkout()
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                prompt = "\n\n".join(
-                    [
-                        system.strip(),
-                        user.strip(),
-                        "Return ONLY the requested text. Do not run any commands or edit "
-                        "any files.",
-                    ]
-                )
-                res = await session.call_tool(
-                    "codex",
-                    {
-                        "prompt": prompt,
-                        "cwd": str(tmp),
-                        "sandbox": "read-only",
-                        "approval-policy": "never",
-                        "model": self._model,
-                        "config": {"model_reasoning_effort": self._codex.reasoning_effort},
-                    },
-                )
-                return self._final_message(res)
-        finally:
-            self._return(session)
+        with tempfile.TemporaryDirectory() as tmp:
+            prompt = "\n\n".join(
+                [
+                    system.strip(),
+                    user.strip(),
+                    "Return ONLY the requested text. Do not run any commands or edit "
+                    "any files.",
+                ]
+            )
+            result = await run_codex_exec(
+                prompt=prompt,
+                cwd=tmp,
+                sandbox="read-only",
+                model=self._model,
+                reasoning_effort=self._codex.reasoning_effort,
+            )
+            return result.final_message
 
-    def _final_message(self, res: Any) -> str:
-        sc = getattr(res, "structuredContent", None) or {}
-        for key in ("lastAgentMessage", "agent_message", "message", "result"):
-            val = sc.get(key) if isinstance(sc, dict) else None
-            if isinstance(val, str) and val:
-                return val
-        parts = []
-        for item in getattr(res, "content", None) or []:
-            text = getattr(item, "text", None)
-            if isinstance(text, str):
-                parts.append(text)
-        return "".join(parts)
-
-    def _extract_usage(self, res: Any) -> TokenUsage | None:
-        sc = getattr(res, "structuredContent", None)
-        if not isinstance(sc, dict):
+    def _usage_from(self, result: CodexExecResult | None) -> TokenUsage | None:
+        if result is None:
             return None
-        usage = sc.get("usage")
-        if not isinstance(usage, dict):
-            return None
-        pin = usage.get("input_tokens", usage.get("prompt_tokens"))
-        pout = usage.get("output_tokens", usage.get("completion_tokens"))
+        pin = result.usage_input
+        pout = result.usage_output
         if isinstance(pin, int) and isinstance(pout, int):
             return TokenUsage(
                 prompt_tokens=pin,
