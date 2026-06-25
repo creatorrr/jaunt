@@ -11,7 +11,7 @@ import pytest
 from jaunt.config import CodexConfig, LLMConfig
 from jaunt.errors import JauntGenerationError
 from jaunt.generate.base import TokenUsage
-from jaunt.generate.codex_backend import CodexBackend
+from jaunt.generate.codex_backend import CodexBackend, _is_model_config_error
 
 
 def _ctx(**overrides):
@@ -94,15 +94,27 @@ def _usage_jsonl(
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
-def _install_fake_exec(monkeypatch, *, on_run, stdout: bytes, returncode: int = 0):
+def _failed_jsonl(message: str) -> bytes:
+    return (
+        json.dumps({"type": "turn.started"})
+        + "\n"
+        + json.dumps({"type": "turn.failed", "error": {"message": message}})
+        + "\n"
+    ).encode("utf-8")
+
+
+def _install_fake_exec(monkeypatch, *, on_run, stdout, returncode=0):
     """Patch asyncio.create_subprocess_exec with a fake that calls on_run(args)."""
     captured: dict[str, object] = {}
 
     async def fake_exec(*args, **kwargs):
-        captured["args"] = list(args)
+        arg_list = list(args)
+        captured["args"] = arg_list
         captured["stdin"] = kwargs.get("stdin")
-        on_run(list(args))
-        return _FakeProc(stdout, b"", returncode, captured)
+        on_run(arg_list)
+        current_stdout = stdout(arg_list) if callable(stdout) else stdout
+        current_returncode = returncode(arg_list) if callable(returncode) else returncode
+        return _FakeProc(current_stdout, b"", current_returncode, captured)
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
     return captured
@@ -188,6 +200,128 @@ def test_generate_module_command_line_flags(monkeypatch) -> None:
         assert captured["stdin"] == asyncio.subprocess.PIPE
 
     asyncio.run(run())
+
+
+def test_generate_module_retries_once_without_offending_config_key(monkeypatch) -> None:
+    async def run() -> None:
+        backend = CodexBackend(
+            CodexConfig(model="gpt-test", config={"verbosity": "low"}),
+            LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY"),
+        )
+        calls: list[list[str]] = []
+        failed = _failed_jsonl(
+            "Unsupported parameter: verbosity is not supported with this model"
+        )
+        success = _usage_jsonl("done", input_tokens=10, output_tokens=5)
+
+        def on_run(args: list[str]) -> None:
+            calls.append(args)
+            if len(calls) == 2:
+                root = _cwd_from_args(args)
+                (root / "pkg/__generated__/thing.py").write_text(
+                    "def alpha():\n    return 1\n\ndef beta():\n    return 2\n",
+                    encoding="utf-8",
+                )
+
+        _install_fake_exec(
+            monkeypatch,
+            on_run=on_run,
+            stdout=lambda _args: failed if len(calls) == 1 else success,
+        )
+
+        source, usage = await backend.generate_module(_ctx())
+
+        assert len(calls) == 2
+        retry_args = calls[1]
+        assert not any(arg.startswith("verbosity=") for arg in retry_args)
+        assert not any(arg.startswith("model_verbosity=") for arg in retry_args)
+        assert source == "def alpha():\n    return 1\n\ndef beta():\n    return 2\n"
+        assert usage == TokenUsage(10, 5, model="gpt-test", provider="codex")
+
+    asyncio.run(run())
+
+
+def test_generate_module_config_retry_failure_propagates_without_third_try(monkeypatch) -> None:
+    async def run() -> None:
+        backend = CodexBackend(
+            CodexConfig(model="gpt-test", config={"verbosity": "low"}),
+            LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY"),
+        )
+        calls: list[list[str]] = []
+        failed = _failed_jsonl(
+            "Unsupported parameter: verbosity is not supported with this model"
+        )
+
+        def on_run(args: list[str]) -> None:
+            calls.append(args)
+
+        _install_fake_exec(monkeypatch, on_run=on_run, stdout=failed)
+
+        with pytest.raises(JauntGenerationError, match="Unsupported parameter"):
+            await backend.generate_module(_ctx())
+
+        assert len(calls) == 2
+
+    asyncio.run(run())
+
+
+def test_generate_module_non_config_failure_does_not_retry(monkeypatch) -> None:
+    async def run() -> None:
+        backend = CodexBackend(
+            CodexConfig(model="gpt-test", config={"verbosity": "low"}),
+            LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY"),
+        )
+        calls: list[list[str]] = []
+
+        def on_run(args: list[str]) -> None:
+            calls.append(args)
+
+        _install_fake_exec(
+            monkeypatch,
+            on_run=on_run,
+            stdout=_failed_jsonl("model overloaded"),
+        )
+
+        with pytest.raises(JauntGenerationError, match="model overloaded"):
+            await backend.generate_module(_ctx())
+
+        assert len(calls) == 1
+
+    asyncio.run(run())
+
+
+def test_generate_module_config_failure_without_extra_config_does_not_retry(monkeypatch) -> None:
+    async def run() -> None:
+        backend = _backend()
+        calls: list[list[str]] = []
+
+        def on_run(args: list[str]) -> None:
+            calls.append(args)
+
+        _install_fake_exec(
+            monkeypatch,
+            on_run=on_run,
+            stdout=_failed_jsonl(
+                "Unsupported parameter: verbosity is not supported with this model"
+            ),
+        )
+
+        with pytest.raises(JauntGenerationError, match="Unsupported parameter"):
+            await backend.generate_module(_ctx())
+
+        assert len(calls) == 1
+
+    asyncio.run(run())
+
+
+def test_is_model_config_error_classifies_conservatively() -> None:
+    assert _is_model_config_error(
+        "turn.failed: Unsupported parameter: verbosity is not supported with this model"
+    )
+    assert not _is_model_config_error("exit code 17")
+    assert not _is_model_config_error("model overloaded")
+    assert not _is_model_config_error("no turn.completed event (protocol failure)")
+    assert not _is_model_config_error("bad request")
 
 
 def test_generate_module_writes_whole_class_contract_file(monkeypatch) -> None:

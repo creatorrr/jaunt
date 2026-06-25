@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
 from typing import cast
 
@@ -251,6 +252,35 @@ def _truncate_stderr(stderr: str, *, limit: int = 4000) -> str:
     return stderr[:limit] + "\n... [stderr truncated]"
 
 
+def _is_model_config_error(message: str) -> bool:
+    """Return whether *message* looks like a model-level config rejection."""
+
+    lower = message.casefold()
+    signals = (
+        "verbosity",
+        "unsupported parameter",
+        "unsupported value",
+        "not supported",
+        "unknown parameter",
+        "invalid value for",
+        "unexpected parameter",
+        "does not support",
+    )
+    return any(signal in lower for signal in signals)
+
+
+def _offending_config_key(message: str, keys: Iterable[str]) -> str | None:
+    """Return the first config key whose full name or final segment appears in *message*."""
+
+    lower = message.casefold()
+    for key in keys:
+        folded = key.casefold()
+        last_segment = folded.rsplit(".", 1)[-1]
+        if folded in lower or last_segment in lower:
+            return key
+    return None
+
+
 class CodexBackend(GeneratorBackend):
     def __init__(
         self,
@@ -306,14 +336,34 @@ class CodexBackend(GeneratorBackend):
                 )
 
             prompt = self._build_prompt(ctx, target.relative_to(root), extra_error_context)
-            result = await run_codex_exec(
-                prompt=prompt,
-                cwd=str(root),
-                sandbox=self._codex.sandbox,
-                model=self._model,
-                reasoning_effort=self._codex.reasoning_effort,
-                extra_config=dict(self._codex.config or {}),
-            )
+            extra_config = dict(self._codex.config or {})
+            try:
+                result = await run_codex_exec(
+                    prompt=prompt,
+                    cwd=str(root),
+                    sandbox=self._codex.sandbox,
+                    model=self._model,
+                    reasoning_effort=self._codex.reasoning_effort,
+                    extra_config=extra_config,
+                )
+            except JauntGenerationError as exc:
+                message = str(exc)
+                if not extra_config or not _is_model_config_error(message):
+                    raise
+                offending_key = _offending_config_key(message, extra_config.keys())
+                retry_config = dict(extra_config)
+                if offending_key is None:
+                    retry_config.clear()
+                else:
+                    retry_config.pop(offending_key, None)
+                result = await run_codex_exec(
+                    prompt=prompt,
+                    cwd=str(root),
+                    sandbox=self._codex.sandbox,
+                    model=self._model,
+                    reasoning_effort=self._codex.reasoning_effort,
+                    extra_config=retry_config,
+                )
             source = target.read_text(encoding="utf-8")
             usage = self._usage_from(result)
             return source, usage
