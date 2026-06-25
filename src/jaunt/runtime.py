@@ -150,14 +150,37 @@ def _not_built_error(spec_ref: SpecRef) -> JauntNotBuiltError:
     )
 
 
+@overload
+def magic() -> Callable[[F], Any]: ...
+
+
+@overload
+def magic(obj: F) -> F: ...
+
+
+@overload
 def magic(
+    obj: None = ...,
+    *,
+    deps: object | None = ...,
+    prompt: object | None = ...,
+    infer_deps: object | None = ...,
+    test: object | None = ...,
+) -> Callable[[F], F]: ...
+
+
+def magic(
+    obj: F | None = None,
     *,
     deps: object | None = None,
     prompt: object | None = None,
     infer_deps: object | None = None,
     test: object | None = None,
 ):
-    """Decorator factory for declaring magic specs."""
+    """Decorator for declaring magic specs.
+
+    Accepts ``@jaunt.magic`` and ``@jaunt.magic()``.
+    """
 
     def _decorate(obj: object):
         # Guard: reject classmethod/staticmethod descriptors (wrong decorator order).
@@ -289,6 +312,8 @@ def magic(
 
         return _wrapper
 
+    if obj is not None:
+        return _decorate(obj)
     return _decorate
 
 
@@ -365,7 +390,24 @@ def _make_method_wrapper(
     return _method_wrapper
 
 
+@overload
+def test(obj: F) -> F: ...
+
+
+@overload
 def test(
+    obj: None = ...,
+    *,
+    deps: object | None = ...,
+    targets: object | None = ...,
+    prompt: object | None = ...,
+    infer_deps: object | None = ...,
+    public_api_only: object | None = ...,
+) -> Callable[[F], F]: ...
+
+
+def test(
+    obj: F | None = None,
     *,
     deps: object | None = None,
     targets: object | None = None,
@@ -373,7 +415,10 @@ def test(
     infer_deps: object | None = None,
     public_api_only: object | None = None,
 ):
-    """Decorator factory for declaring test specs."""
+    """Decorator for declaring test specs.
+
+    Accepts ``@jaunt.test`` and ``@jaunt.test()``.
+    """
 
     def _decorate(fn: F) -> F:
         _classify_qualname(fn)  # rejects closures/deep nesting
@@ -418,6 +463,8 @@ def test(
         f.__test__ = False
         return fn
 
+    if obj is not None:
+        return _decorate(obj)
     return _decorate
 
 

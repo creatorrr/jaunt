@@ -74,6 +74,33 @@ def test_registers_function_spec(monkeypatch: pytest.MonkeyPatch) -> None:
     assert callable(wrapped)
 
 
+def test_bare_and_called_forms_register_function_spec(monkeypatch: pytest.MonkeyPatch) -> None:
+    def gen_fn(x: int) -> int:
+        return x + 100
+
+    def _import(_name: str) -> Any:
+        return SimpleNamespace(**{top_level_fn.__qualname__: gen_fn})
+
+    monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+    wrapped_bare = magic(top_level_fn)
+    expected_ref = normalize_spec_ref(f"{top_level_fn.__module__}:{top_level_fn.__qualname__}")
+    reg = get_magic_registry()
+    assert expected_ref in reg
+    assert reg[expected_ref].kind == "magic"
+    assert callable(wrapped_bare)
+    assert wrapped_bare(1) == 101
+
+    clear_registries()
+
+    wrapped_called = magic()(top_level_fn)
+    reg = get_magic_registry()
+    assert expected_ref in reg
+    assert reg[expected_ref].kind == "magic"
+    assert callable(wrapped_called)
+    assert wrapped_called(1) == 101
+
+
 def test_registers_class_spec(monkeypatch: pytest.MonkeyPatch) -> None:
     def _import(_name: str) -> Any:
         raise ModuleNotFoundError(_name)

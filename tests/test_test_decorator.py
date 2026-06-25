@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from typing import Any, cast
 
 import pytest
 
@@ -27,6 +28,30 @@ def test_registers_test_spec_and_sets_pytest_flag() -> None:
     assert fn.__test__ is False
 
     expected_ref = normalize_spec_ref(f"{fn.__module__}:{fn.__qualname__}")
+    reg = get_test_registry()
+    assert expected_ref in reg
+    assert reg[expected_ref].kind == "test"
+
+
+def test_bare_and_called_forms_register_test_spec_and_set_pytest_flag() -> None:
+    cast(Any, top_level_test_spec).__test__ = True
+
+    bare_fn = jaunt_test(top_level_test_spec)
+    assert bare_fn is top_level_test_spec
+    assert bare_fn.__test__ is False
+
+    expected_ref = normalize_spec_ref(f"{bare_fn.__module__}:{bare_fn.__qualname__}")
+    reg = get_test_registry()
+    assert expected_ref in reg
+    assert reg[expected_ref].kind == "test"
+
+    clear_registries()
+    cast(Any, top_level_test_spec).__test__ = True
+
+    called_fn = jaunt_test()(top_level_test_spec)
+    assert called_fn is top_level_test_spec
+    assert called_fn.__test__ is False
+
     reg = get_test_registry()
     assert expected_ref in reg
     assert reg[expected_ref].kind == "test"
