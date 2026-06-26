@@ -63,7 +63,7 @@ def ensure_pytest_available() -> None:
         return
     raise JauntConfigError(
         "pytest is not installed, so generated tests cannot be run. "
-        "Install it with: pip install 'jaunt[test]'  (or: uv sync --extra test)"
+        "Reinstall jaunt; pytest is now a core dependency."
     )
 
 

@@ -42,8 +42,9 @@ See `examples/contract_slugify/` for a Contract-mode walkthrough.
 ```bash
 pip install jaunt
 
-# Running `jaunt test` requires pytest:
-pip install 'jaunt[test]'    # or: uv sync --extra test
+# The base install is batteries-included (rich, watchfiles, pytest,
+# pytest-asyncio, anyio). The only optional extra is the MCP server:
+pip install 'jaunt[mcp]'     # for jaunt mcp serve
 
 # Jaunt drives the external OpenAI Codex CLI, which you install and
 # authenticate separately:

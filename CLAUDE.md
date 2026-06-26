@@ -29,11 +29,9 @@ uv run ty check
 # Build an example project (requires the `codex` CLI, authenticated via `codex login`)
 cd examples/jwt_auth && uv run --project ../.. jaunt build
 
-# Optional extras:
-pip install jaunt[test]      # pytest, required to run `jaunt test`
-# - pytest markers for async tests
-pip install jaunt[async]     # for pytest-asyncio marker
-pip install jaunt[anyio]     # for anyio marker
+# Batteries included: pytest, pytest-asyncio, anyio, rich, and watchfiles
+# ship in the base install. The only optional extra is the MCP server:
+pip install jaunt[mcp]       # fastmcp, for jaunt mcp serve
 
 # Run with JSON output (for programmatic consumption)
 jaunt build --json

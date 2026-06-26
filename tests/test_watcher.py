@@ -32,7 +32,7 @@ def test_check_watchfiles_available_raises_when_missing(monkeypatch) -> None:
 
     from jaunt.watcher import check_watchfiles_available
 
-    with pytest.raises(ImportError, match="pip install jaunt\\[watch\\]"):
+    with pytest.raises(ImportError, match="core dependency"):
         check_watchfiles_available()
 
 

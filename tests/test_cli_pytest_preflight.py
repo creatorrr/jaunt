@@ -101,7 +101,7 @@ def test_ensure_pytest_available_raises_actionable_error(
     with pytest.raises(JauntConfigError) as excinfo:
         tester.ensure_pytest_available()
 
-    assert "pip install 'jaunt[test]'" in str(excinfo.value)
+    assert "pytest is now a core dependency" in str(excinfo.value)
 
 
 def test_cmd_test_preflights_pytest_before_run_tests(
@@ -137,7 +137,7 @@ def test_cmd_test_preflights_pytest_before_run_tests(
     captured = capsys.readouterr()
     assert rc == jaunt.cli.EXIT_CONFIG_OR_DISCOVERY
     assert "pytest is not installed" in captured.err
-    assert "pip install 'jaunt[test]'" in captured.err
+    assert "pytest is now a core dependency" in captured.err
 
 
 def test_cmd_test_no_run_skips_pytest_preflight(
