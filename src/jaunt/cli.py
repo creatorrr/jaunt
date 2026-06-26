@@ -1202,9 +1202,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
         source_dirs = [root / sr for sr in cfg.paths.source_roots]
 
         skills_block = ""
-        auto_skills_on = bool(cfg.skills.auto) and not bool(
-            getattr(args, "no_auto_skills", False)
-        )
+        auto_skills_on = bool(cfg.skills.auto) and not bool(getattr(args, "no_auto_skills", False))
         if auto_skills_on:
             try:
                 from jaunt import skills_auto
@@ -1664,9 +1662,7 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
         cost_tracker = CostTracker(max_cost=cfg.llm.max_cost_per_build)
         backend = _build_backend(cfg)
         build_skills_block = ""
-        auto_skills_on = bool(cfg.skills.auto) and not bool(
-            getattr(args, "no_auto_skills", False)
-        )
+        auto_skills_on = bool(cfg.skills.auto) and not bool(getattr(args, "no_auto_skills", False))
         if auto_skills_on:
             try:
                 from jaunt.skill_manager import build_skills_block as _build_skills_block
@@ -1739,8 +1735,7 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
 
         if not json_mode:
             print(
-                f"Generated {len(result.generated)} test module(s), "
-                f"skipped {len(result.skipped)}."
+                f"Generated {len(result.generated)} test module(s), skipped {len(result.skipped)}."
             )
 
         if json_mode:

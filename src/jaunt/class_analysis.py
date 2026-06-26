@@ -224,9 +224,7 @@ def build_class_scaffold(class_segment: str) -> str:
     for name in split.preserved:
         clone = ast.parse(ast.unparse(methods[name])).body[0]
         assert isinstance(clone, (ast.FunctionDef, ast.AsyncFunctionDef))
-        clone.decorator_list = [
-            d for d in clone.decorator_list if not is_preserve_decorator(d)
-        ]
+        clone.decorator_list = [d for d in clone.decorator_list if not is_preserve_decorator(d)]
         new_body.append(clone)
 
     for name in split.stubs:

@@ -188,7 +188,7 @@ def test_generate_module_command_line_flags(monkeypatch) -> None:
         assert args[si + 1] == "workspace-write"
         assert "-C" in args
         # approval policy pinned to never via -c; dangerous bypass never used
-        assert '-c' in args and 'approval_policy="never"' in args
+        assert "-c" in args and 'approval_policy="never"' in args
         assert "--dangerously-bypass-approvals-and-sandbox" not in args
         # model + reasoning effort
         mi = args.index("-m")
@@ -209,9 +209,7 @@ def test_generate_module_retries_once_without_offending_config_key(monkeypatch) 
             LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY"),
         )
         calls: list[list[str]] = []
-        failed = _failed_jsonl(
-            "Unsupported parameter: verbosity is not supported with this model"
-        )
+        failed = _failed_jsonl("Unsupported parameter: verbosity is not supported with this model")
         success = _usage_jsonl("done", input_tokens=10, output_tokens=5)
 
         def on_run(args: list[str]) -> None:
@@ -248,9 +246,7 @@ def test_generate_module_config_retry_failure_propagates_without_third_try(monke
             LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY"),
         )
         calls: list[list[str]] = []
-        failed = _failed_jsonl(
-            "Unsupported parameter: verbosity is not supported with this model"
-        )
+        failed = _failed_jsonl("Unsupported parameter: verbosity is not supported with this model")
 
         def on_run(args: list[str]) -> None:
             calls.append(args)
@@ -500,9 +496,7 @@ def test_top_level_error_event_raises_generation_error(monkeypatch) -> None:
         def on_run(_args: list[str]) -> None:
             return None
 
-        errored = (json.dumps({"type": "error", "message": "bad request"}) + "\n").encode(
-            "utf-8"
-        )
+        errored = (json.dumps({"type": "error", "message": "bad request"}) + "\n").encode("utf-8")
         _install_fake_exec(monkeypatch, on_run=on_run, stdout=errored)
 
         with pytest.raises(JauntGenerationError, match="error event: bad request"):

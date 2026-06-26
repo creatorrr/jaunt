@@ -407,8 +407,7 @@ class CodexBackend(GeneratorBackend):
                 [
                     system.strip(),
                     user.strip(),
-                    "Return ONLY the requested text. Do not run any commands or edit "
-                    "any files.",
+                    "Return ONLY the requested text. Do not run any commands or edit any files.",
                 ]
             )
             result = await run_codex_exec(

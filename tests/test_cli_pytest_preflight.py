@@ -166,9 +166,7 @@ def test_cmd_test_no_run_skips_pytest_preflight(
     monkeypatch.setattr(tester, "run_tests", fake_run_tests)
 
     try:
-        args = jaunt.cli.parse_args(
-            ["test", "--root", str(project), "--no-build", "--no-run"]
-        )
+        args = jaunt.cli.parse_args(["test", "--root", str(project), "--no-build", "--no-run"])
         rc = jaunt.cli.cmd_test(args)
     finally:
         sys.path[:] = orig_sys_path

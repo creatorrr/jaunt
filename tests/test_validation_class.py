@@ -108,10 +108,7 @@ def test_dropped_param_warns_not_fails() -> None:
 
 
 def test_fails_when_stub_left_unfilled_even_if_sentinel_stripped() -> None:
-    src = (
-        'class C:\n    "A class."\n'
-        "    def do(self):\n        raise NotImplementedError\n"
-    )
+    src = 'class C:\n    "A class."\n    def do(self):\n        raise NotImplementedError\n'
     errs = validate_build_class_source(src, **BASE_KW)
     assert any("stub" in e for e in errs)
 
@@ -142,19 +139,13 @@ def test_fails_when_class_attribute_dropped() -> None:
 
 
 def test_fails_when_class_attribute_value_changed() -> None:
-    src = (
-        'class C:\n    "A class."\n    CAPACITY = None\n'
-        "    def do(self):\n        return 1\n"
-    )
+    src = 'class C:\n    "A class."\n    CAPACITY = None\n    def do(self):\n        return 1\n'
     kw = _kw(class_attributes={"CAPACITY": "CAPACITY: int = 10"})
     errs = validate_build_class_source(src, **kw)
     assert any("CAPACITY" in e for e in errs)
 
 
 def test_passes_when_class_attribute_retained() -> None:
-    src = (
-        'class C:\n    "A class."\n    CAPACITY: int = 10\n'
-        "    def do(self):\n        return 1\n"
-    )
+    src = 'class C:\n    "A class."\n    CAPACITY: int = 10\n    def do(self):\n        return 1\n'
     kw = _kw(class_attributes={"CAPACITY": "CAPACITY: int = 10"})
     assert validate_build_class_source(src, **kw) == []

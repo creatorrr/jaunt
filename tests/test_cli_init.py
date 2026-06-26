@@ -90,9 +90,7 @@ def test_cmd_init_creates_example_spec(tmp_path: Path, monkeypatch) -> None:
     assert "@jaunt.test" in content
 
 
-def test_cmd_init_does_not_overwrite_existing_example_spec(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_cmd_init_does_not_overwrite_existing_example_spec(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     src_dir = tmp_path / "src"
     src_dir.mkdir()
