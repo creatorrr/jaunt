@@ -11,10 +11,9 @@ Jaunt works when you can picture the loop: specs in, generated modules out, and 
 You write specs
   -> Jaunt discovers them (source_roots / test_roots)
   -> builds a dependency graph (explicit deps + best-effort inference)
-  -> picks a generation runtime (Aider by default, or legacy)
   -> for each module:
        - build prompt = system template + your spec source segment (+ extras)
-       - LLM generates Python
+       - Jaunt drives `codex exec` to generate Python
        - Jaunt validates + writes to __generated__/
   -> at runtime, @jaunt.magic forwards calls into __generated__/
 ```
@@ -30,19 +29,17 @@ At build time, Jaunt sends the backend a prompt composed of:
 
 The job is simple: implement the contract implied by your spec.
 
-## Agent Runtimes
+## The Codex Engine
 
-Jaunt now has two internal ways to execute generation:
+Jaunt has a single generation engine: the OpenAI **Codex CLI**. For each
+module, Jaunt spawns one `codex exec` subprocess, passes it the rendered
+prompt, lets Codex edit inside a sandbox, then validates the result before
+writing it into `__generated__/`.
 
-- `aider`: Jaunt creates an isolated temp workspace, lets Aider edit the target
-  file, then validates the result before writing it back
-- `legacy`: Jaunt calls the provider SDK directly
+Everything around that step — discovery, staleness, validators, generated file
+locations, and the runtime forwarding model — is owned by Jaunt.
 
-This changes the planning and editing loop, but not the rest of the product
-surface. Discovery, staleness, validators, generated file locations, and the
-runtime forwarding model are the same either way.
-
-See: [Aider Runtime](/docs/reference/aider-runtime).
+See: [Codex Engine](/docs/reference/codex-engine).
 
 ## Incremental Rebuilds (Digests)
 
@@ -52,8 +49,8 @@ matches.
 
 You change a spec, Jaunt regenerates just what’s stale.
 
-Jaunt also fingerprints the generation runtime. Switching from `legacy` to
-`aider`, changing Aider mode, or changing relevant prompt/runtime settings can
+Jaunt also fingerprints the Codex runtime. Changing `codex.model`,
+`codex.sandbox`, `codex.reasoning_effort`, or the prompt template content can
 also mark generated files stale.
 
 See: [Output Locations](/docs/reference/output).

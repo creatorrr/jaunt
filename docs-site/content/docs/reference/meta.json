@@ -1,4 +1,4 @@
 {
   "title": "Reference",
-  "pages": ["cli", "config", "output", "openai-backend", "aider-runtime", "limitations"]
+  "pages": ["cli", "config", "output", "codex-engine", "limitations"]
 }

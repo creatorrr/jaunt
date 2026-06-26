@@ -31,24 +31,13 @@ test_roots = ["tests"]
 generated_dir = "__generated__"
 
 [llm]
-# Supported by the CLI: "openai", "anthropic", or "cerebras".
+# Informational under the Codex engine. The model that actually runs is set in
+# [codex] below, and Codex authenticates via `codex login` / CODEX_API_KEY —
+# Jaunt does not read an api_key_env for generation.
 provider = "openai"
-# Model name passed to the backend (default: "gpt-5.2").
-model = "gpt-5.2"
-# Environment variable used for the API key (default: "OPENAI_API_KEY").
-api_key_env = "OPENAI_API_KEY"
+model = "gpt-5.5"
 # Optional hard ceiling for accumulated API spend during a build/test command.
 # max_cost_per_build = 5.0
-# Optional pass-through for OpenAI/Cerebras.
-# Common values: "low", "medium", "high".
-# reasoning_effort = "medium"
-# Optional Anthropic thinking budget. If set, Jaunt sends:
-# thinking = { type = "enabled", budget_tokens = ... }.
-# anthropic_thinking_budget_tokens = 1024
-# Enable OpenAI prompt caching support when available.
-# prompt_cache = true
-# Optional explicit cache key prefix.
-# prompt_cache_key = "jaunt:shared-builds"
 
 [build]
 # Max parallel workers for build generation.
@@ -73,25 +62,23 @@ infer_deps = true
 pytest_args = ["-q"]
 
 [agent]
-# Internal generation runtime.
-# "aider" is the default task-runner runtime, "legacy" uses Jaunt's direct SDK backends.
-engine = "aider"
+# Code-generation engine. "codex" is the only supported value.
+engine = "codex"
 
-[aider]
-# Mode for build-module generation.
-build_mode = "architect"
-# Mode for generated pytest modules and skill workflows.
-test_mode = "code"
-skill_mode = "code"
-# Optional separate editor model for architect mode.
-editor_model = ""
-# Aider repository map token budget.
-map_tokens = 0
-# Keep temp trace workspaces instead of auto-cleaning them.
-save_traces = false
+[codex]
+# Model passed to `codex exec --model`.
+model = "gpt-5.5"
+# Reasoning effort: "low", "medium", or "high".
+reasoning_effort = "high"
+# Codex sandbox policy (`codex exec --sandbox`).
+sandbox = "workspace-write"
+# Optional Codex feature flags.
+# features = []
+# Raw `-c key=value` passthrough to `codex exec` (advanced).
+# [codex.config]
 
 [prompts]
-# If set, these are treated as file paths and read at runtime by the backend.
+# If set, these are treated as file paths and read at runtime by the engine.
 # Leave empty to use packaged defaults under src/jaunt/prompts/.
 build_system = ""
 build_module = ""
@@ -102,14 +89,14 @@ test_module = ""
 Notes:
 
 - `paths.source_roots`: the CLI picks the *first existing* source root as the output base for generated build modules.
-- `prompts.*` are treated as *file paths* and read at runtime by the configured backend.
-- Provider extras include the default Aider runtime. Install `jaunt[openai]`, `jaunt[anthropic]`, or `jaunt[cerebras]` (or `jaunt[all]`).
-- `jaunt[aider]` is still available as a runtime-only extra for custom install layouts.
+- `prompts.*` are treated as *file paths* and read at runtime by the engine.
+- Jaunt is batteries-included: `rich`, `watchfiles`, `pytest`, `pytest-asyncio`, and `anyio` ship as core dependencies. There is nothing to install for watch mode, tests, or rich output.
+- The only optional extra is `jaunt[mcp]` (for `jaunt mcp serve`).
+- Generation requires the external `codex` CLI on your `PATH`, authenticated
+  via `codex login`. See [Codex Engine](/docs/reference/codex-engine).
+- `[llm]` is informational under the Codex engine. Codex handles its own
+  authentication; `llm.api_key_env` is not used for generation.
 - There is no `[mcp]` config section; MCP is started explicitly via `jaunt mcp serve`.
 - `build.async_runner` controls the pytest marker selected for generated async tests.
-- For Aider, using the provider's canonical API key env var name
-  (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `CEREBRAS_API_KEY`) avoids an
-  internal env-remap lock. If you set `llm.api_key_env` to a different name,
-  Jaunt currently preserves correctness by serializing those Aider tasks.
 
 Next: [Output Locations](/docs/reference/output).

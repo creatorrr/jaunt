@@ -6,7 +6,7 @@ description: "Zero to generated code in 5 minutes (copy-pasteable)."
 This is the shortest path to an "aha": write one tiny spec, run `jaunt build`, and call real generated code like normal Python.
 
 <Callout type="warning">
-  `jaunt build` calls your configured LLM provider (default: OpenAI) and will spend tokens. Set `OPENAI_API_KEY` first.
+  `jaunt build` drives the OpenAI **Codex CLI** (`codex exec`) and will spend tokens. Install the `codex` CLI and run `codex login` first.
 </Callout>
 
 ## Project Layout
@@ -27,37 +27,33 @@ myproj/
 
 ## 1) Install
 
+Jaunt drives the OpenAI **Codex CLI** as its generation engine, so you need
+the `codex` CLI installed and authenticated. Install it (see the OpenAI Codex
+docs for your platform), then:
+
+```bash
+codex login
+```
+
 Jaunt is an MVP and is typically installed from a local checkout.
 
 If you’re working from the Jaunt repo:
 
 ```bash
 uv sync
-export OPENAI_API_KEY=...
 uv run jaunt --version
 ```
 
-If you’re adding Jaunt to your own project, install it however you vend it (local path, internal index, or git). You also need pytest for `jaunt test`:
+If you’re adding Jaunt to your own project, install it however you vend it
+(local path, internal index, or git). The base install is batteries-included:
 
 ```bash
 # Example (from package index):
-uv add "jaunt[openai]"   # or jaunt[anthropic], jaunt[cerebras]
-uv add pytest
-export OPENAI_API_KEY=...
+uv add jaunt   # includes pytest, pytest-asyncio, anyio, rich, and watchfiles
 ```
 
-If you install Jaunt from a local editable path, also install the provider SDK
-and Aider runtime you plan to use in that environment. The package extras above
-already bundle both. For a manual local setup, add the matching provider SDK
-plus `aider-chat`.
-
-If you prefer Jaunt's legacy direct-SDK runtime instead of the default Aider runtime,
-set this in `jaunt.toml`:
-
-```toml
-[agent]
-engine = "legacy"
-```
+Codex handles its own authentication (`codex login`, or the `CODEX_API_KEY`
+env var) — there is no provider SDK or API key for Jaunt itself to configure.
 
 ## 2) Create `jaunt.toml`
 
@@ -109,7 +105,7 @@ From `myproj/`:
 jaunt build
 ```
 
-Jaunt reads your spec, sends it to OpenAI, validates the output, and writes a real module to:
+Jaunt reads your spec, drives `codex exec` to generate the code, validates the output, and writes a real module to:
 
 ```text
 src/my_app/__generated__/specs.py
@@ -163,41 +159,33 @@ Jaunt writes generated tests under:
 
 - `tests/__generated__/specs_email.py`
 
-## 7) Optional: Switch To Aider Mode
+## 7) Optional: Tune The Codex Engine
 
-The commands stay the same. You only change the internal runtime in
-`jaunt.toml`:
+Codex is the only engine, but you can tune the model, reasoning effort, and
+sandbox in `jaunt.toml`:
 
 ```toml
-[agent]
-engine = "aider"
-
-[aider]
-build_mode = "architect"
-test_mode = "code"
-skill_mode = "code"
-editor_model = ""
-map_tokens = 0
-save_traces = false
+[codex]
+model = "gpt-5.5"
+reasoning_effort = "high"   # low | medium | high
+sandbox = "workspace-write"
 ```
 
-Then keep using:
+The commands stay the same:
 
 ```bash
 jaunt build
 PYTHONPATH=src jaunt test
 ```
 
-If you use Aider, the safest high-throughput setup is to leave
-`llm.api_key_env` on the provider's canonical env var name, such as
-`OPENAI_API_KEY`.
+See the [Codex Engine](/docs/reference/codex-engine) reference for details.
 
 ## What Next
 
 <Cards>
   <Card title="How It Works" href="/docs/how-it-works" />
   <Card title="Writing Better Specs" href="/docs/writing-specs/tips" />
-  <Card title="Aider Runtime" href="/docs/reference/aider-runtime" />
+  <Card title="Codex Engine" href="/docs/reference/codex-engine" />
   <Card title="JWT Walkthrough (Hero Demo)" href="/docs/guides/jwt-walkthrough" />
 </Cards>
 

@@ -6,7 +6,7 @@ description: "The hero 'wow gap' demo: ~50 lines of spec, 100+ lines of correct 
 This is the Jaunt story in one page: a readable spec stub becomes a pile of boring correctness work — strict parsing, HMAC verification, expiry checks, and runnable tests.
 
 <Callout type="warning">
-  Running this guide calls the OpenAI API and will spend tokens. Make sure `OPENAI_API_KEY` is set.
+  Running this guide drives the OpenAI **Codex CLI** (`codex exec`) and will spend tokens. Make sure the `codex` CLI is installed and you've run `codex login`.
 </Callout>
 
 ## What We're Building
@@ -99,7 +99,7 @@ From the repo root:
 
 ```bash
 uv sync
-export OPENAI_API_KEY=...
+codex login   # one-time Codex authentication
 uv run jaunt build --root examples/jwt_auth
 ```
 

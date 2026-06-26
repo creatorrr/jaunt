@@ -7,23 +7,28 @@ This guide is for using Jaunt as a tool inside an existing Python repo, not for 
 
 ## 1) Install Jaunt
 
-Install Jaunt however you vend it (local path, internal index, or git). You’ll also want pytest for `jaunt test`.
+First, install the OpenAI **Codex CLI** (Jaunt's generation engine) and
+authenticate it:
+
+```bash
+codex login
+```
+
+Then install Jaunt however you vend it (local path, internal index, or git).
+You’ll also want pytest for `jaunt test`.
 
 Examples:
 
 ```bash
 # Package index:
-uv add "jaunt[openai]"   # or jaunt[anthropic]
+uv add jaunt
 
 # Local checkout (editable):
 uv add --editable /path/to/jaunt
-
-# Ensure pytest is installed for `jaunt test`:
-uv add pytest
 ```
 
-If you use an editable local path install, also install the matching provider
-SDK (`openai`, `anthropic`, or `cerebras`) and `aider-chat` in that environment.
+There are no provider SDK extras to install — Codex handles its own
+authentication (`codex login`, or `CODEX_API_KEY`).
 
 ## 2) Add `jaunt.toml`
 
@@ -52,18 +57,6 @@ Avoid (for now):
 - high-performance hot paths
 - complex stateful systems with tight invariants
 
-## Optional: Switch The Internal Runtime To Legacy
-
-Jaunt now defaults to the Aider-backed planning/editing loop. If you want the
-older direct-SDK runtime instead, add this to `jaunt.toml`:
-
-```toml
-[agent]
-engine = "legacy"
-```
-
-You still run `jaunt build` and `jaunt test` the same way.
-
 ## 4) Write Spec Stubs In Your Normal Source Tree
 
 Put `@jaunt.magic` specs in real modules under your package, next to the code that will call them. Treat them as your public API.
@@ -71,7 +64,6 @@ Put `@jaunt.magic` specs in real modules under your package, next to the code th
 ## 5) Run `jaunt build`
 
 ```bash
-export OPENAI_API_KEY=...
 jaunt build
 ```
 

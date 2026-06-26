@@ -12,10 +12,8 @@ There are two related skill workflows in Jaunt:
 - automatic PyPI skill generation during `jaunt build`
 - explicit user-managed skill authoring through `jaunt skill build <name>`
 
-Both respect `[agent].engine`, so if you switch to `agent.engine = "aider"`,
-Jaunt uses the Aider runtime for those skill-generation steps too.
-With current defaults, that means the Aider runtime is used unless you opt back
-to `agent.engine = "legacy"`.
+Both run through the Codex engine, so the skill-generation steps drive
+`codex exec` just like `jaunt build` and `jaunt test` do.
 
 ## What It Does
 
@@ -29,7 +27,7 @@ On every `jaunt build`:
 - Resolves the remaining imports to installed **PyPI distributions + versions** (from your current environment).
 - Ensures there is exactly one skill per distribution at:
   - `<project_root>/.agents/skills/<dist-normalized>/SKILL.md`
-- Fetches the README for the exact `<dist>==<version>` from PyPI, then uses an OpenAI "skills generator" to produce `SKILL.md`.
+- Fetches the README for the exact `<dist>==<version>` from PyPI, then uses the Codex "skills generator" to produce `SKILL.md`.
 - Concatenates all generated skills into a single block and injects it into the build LLM prompt so the builder can use accurate library patterns.
 
 If any piece fails (resolution, PyPI fetch, generation, write), Jaunt prints a warning and continues building without those missing skills.

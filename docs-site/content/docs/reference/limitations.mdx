@@ -5,32 +5,18 @@ description: "Current behavioral constraints in the MVP implementation."
 
 Jaunt is an MVP. These are the sharp edges you should know about.
 
-## Provider Support
+## Code-Generation Engine
 
-The CLI supports `llm.provider = "openai"`, `llm.provider = "anthropic"`, and
-`llm.provider = "cerebras"`.
+Jaunt uses the OpenAI Codex CLI (`codex exec`) as its sole code-generation
+engine. Install the `codex` CLI and authenticate with `codex login` before
+running generation commands.
 
-Practical gotcha: provider SDKs are optional dependencies. You need the matching extra installed in the environment that runs Jaunt:
+Jaunt is batteries-included: runtime helpers (`rich`, `watchfiles`) and the test
+stack (`pytest`, `pytest-asyncio`, `anyio`) are core dependencies. There are no
+extras to install for watch mode, tests, or rich output.
 
-- `pip install jaunt[openai]`
-- `pip install jaunt[anthropic]`
-- `pip install jaunt[cerebras]`
-- or `pip install jaunt[all]`
-
-Those provider extras now include Jaunt's default Aider runtime too. If you manage
-dependencies manually, make sure the environment includes both the provider SDK
-and `aider-chat`.
-
-Known gotcha: `aider-chat 0.86.2` currently pins `numpy==1.26.4`. That means
-`jaunt[all]` can fail to resolve in environments that already require
-`numpy>=2`.
-
-If you hit that conflict:
-
-- prefer running Jaunt in an isolated tool environment, for example:
-  `uv tool run --from 'jaunt[all]' jaunt build --root .`
-- or install `jaunt[all-sdk]` instead, which keeps the same Jaunt CLI and
-  provider/tooling extras but omits `aider-chat`
+The only optional extra is `jaunt[mcp]`, which enables the MCP server
+integration.
 
 ## Hardcoded `__generated__` Dir Name
 
@@ -56,23 +42,13 @@ The skills system adds extra network calls (to PyPI for README fetches) and extr
 
 This means build output can vary based on your environment, network connectivity, and what's installed in the active venv. If reproducibility matters, commit the generated `.agents/skills/` directory.
 
-## Aider + Custom API Key Env Names
+## Codex Authentication
 
-The Aider runtime currently expects the provider's canonical API key env var
-name (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `CEREBRAS_API_KEY`).
+Jaunt delegates generation to the `codex` CLI. Authenticate that CLI with
+`codex login`, or provide `CODEX_API_KEY` in the environment that runs Jaunt.
 
-Jaunt supports `llm.api_key_env` pointing at a different variable name, but for
-`agent.engine = "aider"` it has to remap that key through `os.environ` while
-the task runs. To keep concurrent Aider tasks from clobbering each other's
-credentials, Jaunt protects that remap with a process-wide lock.
-
-Effectively:
-
-- canonical provider env var name: parallel Aider tasks can run concurrently
-- custom `llm.api_key_env` name: Aider tasks stay correct, but they serialize
-
-This is a known limitation, not the intended long-term design. The follow-up is
-to pass the resolved API key directly into the Aider/litellm model path so the
-global env remap can be removed.
+The `[llm]` config section is retained for compatibility, but under Codex
+`llm.api_key_env` is informational and does not configure generation
+authentication.
 
 Next: [Development](/docs/development/contributing).
