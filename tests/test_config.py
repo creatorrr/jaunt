@@ -355,3 +355,32 @@ def test_auto_class_tests_defaults_false_and_parses(tmp_path) -> None:
     (tmp_path / "jaunt2.toml").write_text("version = 1\n")
     cfg2 = load_config(config_path=tmp_path / "jaunt2.toml", root=tmp_path)
     assert cfg2.test.auto_class_tests is False
+
+
+def test_context_config_defaults(tmp_path: Path) -> None:
+    (tmp_path / "jaunt.toml").write_text("version = 1\n", encoding="utf-8")
+    from jaunt.config import load_config
+
+    cfg = load_config(root=tmp_path, config_path=tmp_path / "jaunt.toml")
+    assert cfg.context.repo_map is True
+    assert cfg.context.repo_map_file == "treedocs.yaml"
+    assert cfg.context.enrich is False
+    assert cfg.context.max_chars == 6000
+    assert cfg.context.search.enabled is False
+    assert cfg.context.search.internal_retrieval is True
+    assert cfg.context.search.max_hits == 8
+
+
+def test_context_config_parsed(tmp_path: Path) -> None:
+    (tmp_path / "jaunt.toml").write_text(
+        "version = 1\n\n[context]\nrepo_map = false\nmax_chars = 4000\n"
+        "\n[context.search]\nenabled = true\nmax_hits = 12\n",
+        encoding="utf-8",
+    )
+    from jaunt.config import load_config
+
+    cfg = load_config(root=tmp_path, config_path=tmp_path / "jaunt.toml")
+    assert cfg.context.repo_map is False
+    assert cfg.context.max_chars == 4000
+    assert cfg.context.search.enabled is True
+    assert cfg.context.search.max_hits == 12
