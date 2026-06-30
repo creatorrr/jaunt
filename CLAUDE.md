@@ -213,6 +213,9 @@ jaunt clean --dry-run         # Show what would be removed
 jaunt status                  # Show which modules are stale, including upstream API fallout
 jaunt status --json           # Machine-readable status
 
+jaunt instructions            # Print a project-aware agent primer (load into an agent's context)
+jaunt instructions --json     # {command, ok, text, project} for tooling/MCP
+
 jaunt tree                    # Maintain treedocs.yaml (1-line descriptions of dirs + .py files)
 jaunt tree --check            # CI gate: exit 4 if the tree is stale (new/ghost paths or edited files)
 jaunt tree --enrich           # Force LLM enrichment of descriptions this run

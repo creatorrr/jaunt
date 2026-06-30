@@ -11,7 +11,7 @@ description: "Use Jaunt inside Claude Code with dedicated commands, hooks, and M
 
 | Skill | Type | Purpose |
 |-------|------|---------|
-| `jaunt` | Background knowledge | Keeps Claude’s context aligned with Jaunt workflows and spec style. |
+| `jaunt` | Background knowledge | Thin pointer to `jaunt instructions` — the project-aware agent primer that is the single source of truth for the Jaunt workflow (so it can’t drift from the CLI). |
 | `/jaunt-build` | Command | Runs `jaunt build`. |
 | `/jaunt-test` | Command | Runs `jaunt test`. |
 | `/jaunt-status` | Command (auto-invocable) | Checks stale vs fresh modules. |
