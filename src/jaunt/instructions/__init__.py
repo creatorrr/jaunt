@@ -38,9 +38,7 @@ COMMANDS: list[tuple[str, str]] = [
 # Real subcommands intentionally NOT surfaced in the primer (advanced / rare).
 # The drift-guard test requires every real subcommand to be in COMMANDS or here,
 # so adding a new command forces an explicit decision.
-OMITTED_COMMANDS: frozenset[str] = frozenset(
-    {"tree", "eval", "cache", "mcp", "skill", "skills"}
-)
+OMITTED_COMMANDS: frozenset[str] = frozenset({"tree", "eval", "cache", "mcp", "skill", "skills"})
 
 EXIT_CODES: list[tuple[int, str]] = [
     (0, "Success."),
@@ -86,9 +84,7 @@ def _project_block(project: dict | None, note: str | None) -> str:
     src = " · ".join(f"`{p}`" for p in paths["source_roots"]) or "(none)"
     tst = " · ".join(f"`{p}`" for p in paths["test_roots"]) or "(none)"
     gate = project["semantic_gate"]
-    gate_txt = (
-        f"enabled (`{gate['model']}`)" if gate.get("enabled") else "disabled"
-    )
+    gate_txt = f"enabled (`{gate['model']}`)" if gate.get("enabled") else "disabled"
     lines += [
         f"- **Root:** `{project['root']}`",
         f"- **Source roots:** {src}",

@@ -425,9 +425,7 @@ def legacy_module_digest(
 ) -> str:
     """Recompute the old (scheme-1) module digest for migration detection."""
 
-    return module_digest(
-        module_name, module_specs, specs, spec_graph, local_fn=legacy_local_digest
-    )
+    return module_digest(module_name, module_specs, specs, spec_graph, local_fn=legacy_local_digest)
 
 
 @dataclass(frozen=True, slots=True)
