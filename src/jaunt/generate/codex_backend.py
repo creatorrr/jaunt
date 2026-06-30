@@ -335,6 +335,9 @@ class CodexBackend(GeneratorBackend):
                     contract_block.rstrip() + "\n", encoding="utf-8"
                 )
 
+            for name, content in getattr(ctx, "relevant_context_files", ()) or ():
+                (ctx_dir / name).write_text(content, encoding="utf-8")
+
             prompt = self._build_prompt(ctx, target.relative_to(root), extra_error_context)
             extra_config = dict(self._codex.config or {})
             try:

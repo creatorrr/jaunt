@@ -1026,6 +1026,8 @@ async def run_build(
     generation_fingerprint: str = "",
     skills_block: str = "",
     repo_map_block: str = "",
+    search_enabled: bool = False,
+    search_max_hits: int = 8,
     jobs: int = 4,
     progress: object | None = None,
     response_cache: ResponseCache | None = None,
@@ -1285,6 +1287,21 @@ async def run_build(
                     )
                     for e in whole.values()
                 )
+            relevant_block = ""
+            relevant_files: tuple[tuple[str, str], ...] = ()
+            if search_enabled:
+                from jaunt.repo_context import search as rc_search
+
+                query_text = (
+                    " ".join(component_expected) + " " + " ".join(decorator_prompts.values())
+                )
+                hits = rc_search.query(query_text, root=package_dir, max_hits=search_max_hits)
+                if hits:
+                    relevant_files = tuple(
+                        (f"relevant_{i}.py", f"# {h.file}\n{h.snippet}\n")
+                        for i, h in enumerate(hits)
+                    )
+                    relevant_block = rc_search.render_relevant_block(list(hits))
             ctx = ModuleSpecContext(
                 kind="build",
                 spec_module=module_name,
@@ -1299,6 +1316,8 @@ async def run_build(
                 decorator_apis=decorator_apis,
                 skills_block=skills_block,
                 repo_map_block=repo_map_block,
+                relevant_context_block=relevant_block,
+                relevant_context_files=relevant_files,
                 module_contract_block=component_contract.module_contract_block,
                 base_contract_block=component_contract.base_contract_block,
                 blueprint_source=component_contract.blueprint_source,

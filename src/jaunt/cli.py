@@ -1458,6 +1458,12 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
         response_cache = ResponseCache(cache_dir, enabled=not no_cache)
         cost_tracker = CostTracker(max_cost=cfg.llm.max_cost_per_build)
 
+        search_enabled = cfg.context.search.enabled and cfg.context.search.internal_retrieval
+        if cfg.context.search.enabled:
+            from jaunt.repo_context import search as rc_search
+
+            rc_search.ensure_index(package_dir)
+
         jobs = int(args.jobs) if args.jobs is not None else int(cfg.build.jobs)
         report = await builder.run_build(
             package_dir=package_dir,
@@ -1473,6 +1479,8 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             generation_fingerprint=build_generation_fingerprint,
             skills_block=skills_block,
             repo_map_block=repo_map_block,
+            search_enabled=search_enabled,
+            search_max_hits=cfg.context.search.max_hits,
             jobs=jobs,
             progress=progress,
             response_cache=response_cache,
