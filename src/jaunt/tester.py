@@ -608,6 +608,8 @@ class RepairBuildContext:
     jobs: int = 1
     async_runner: str = "asyncio"
     build_instructions: list[str] = field(default_factory=list)
+    check_generated_imports: bool = True
+    generated_import_allowlist: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1188,6 +1190,8 @@ async def run_tests(
                 builtin_skill_names=repair_build_context.builtin_skill_names,
                 skills_digest=repair_build_context.skills_digest,
                 build_instructions=repair_build_context.build_instructions,
+                check_generated_imports=repair_build_context.check_generated_imports,
+                generated_import_allowlist=repair_build_context.generated_import_allowlist,
                 initial_error_context_by_module={
                     module_name: repair_lines for module_name in implicated_build_modules
                 },

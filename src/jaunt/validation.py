@@ -7,9 +7,32 @@ has the right shape.
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterable
+import functools
+import sys
+import tomllib
+from collections.abc import Iterable, Sequence
+from importlib import metadata
+from pathlib import Path
 
 from jaunt.class_analysis import is_stub_body
+from jaunt.external_imports import pep503_normalize
+
+_SKIP_LOCAL_DIRS = {
+    ".cache",
+    ".git",
+    ".jaunt",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+    "site-packages",
+    "venv",
+}
 
 
 def _syntax_error_to_str(err: SyntaxError) -> str:
@@ -76,6 +99,12 @@ def validate_build_generated_source(
     *,
     spec_module: str,
     handwritten_names: Iterable[str],
+    generated_module: str | None = None,
+    project_dir: Path | None = None,
+    source_roots: Sequence[Path] | None = None,
+    first_party_modules: Iterable[str] = (),
+    check_imports: bool = False,
+    import_allowlist: Iterable[str] = (),
 ) -> list[str]:
     errors, mod = _base_validation(source, expected_names)
     if mod is None:
@@ -89,6 +118,17 @@ def validate_build_generated_source(
             handwritten_names=handwritten_names,
         )
     )
+    if check_imports:
+        errors.extend(
+            _validate_generated_import_provenance(
+                mod,
+                generated_module=generated_module or spec_module,
+                project_dir=project_dir or Path.cwd(),
+                source_roots=source_roots or (),
+                first_party_modules=first_party_modules,
+                allowlist=import_allowlist,
+            )
+        )
     return errors
 
 
@@ -130,6 +170,193 @@ def _validate_build_contract_only(
                 f"{name!r}. Import or reuse {name!r} from {spec_module!r} instead."
             )
     return errors
+
+
+def validate_generated_import_provenance(
+    source: str,
+    *,
+    generated_module: str,
+    project_dir: Path,
+    source_roots: Sequence[Path] | None = None,
+    first_party_modules: Iterable[str] = (),
+    allowlist: Iterable[str] = (),
+) -> list[str]:
+    try:
+        mod = ast.parse(source or "")
+    except SyntaxError:
+        return []
+    return _validate_generated_import_provenance(
+        mod,
+        generated_module=generated_module,
+        project_dir=project_dir,
+        source_roots=source_roots or (),
+        first_party_modules=first_party_modules,
+        allowlist=allowlist,
+    )
+
+
+def _validate_generated_import_provenance(
+    mod: ast.Module,
+    *,
+    generated_module: str,
+    project_dir: Path,
+    source_roots: Sequence[Path],
+    first_party_modules: Iterable[str],
+    allowlist: Iterable[str],
+) -> list[str]:
+    stdlib = getattr(sys, "stdlib_module_names", set())
+    allowed_first_party = _first_party_top_levels(
+        project_dir=project_dir,
+        source_roots=source_roots,
+        configured=first_party_modules,
+    )
+    allowlist_norm = {pep503_normalize(name) for name in allowlist if name.strip()}
+    declared_dists = _declared_project_dependencies(_find_pyproject(project_dir))
+
+    errors: list[str] = []
+    for imported in sorted(_top_level_imports(mod)):
+        top = imported.split(".", 1)[0]
+        if not top:
+            continue
+        if top in stdlib:
+            continue
+        if top in allowed_first_party:
+            continue
+        if pep503_normalize(top) in allowlist_norm:
+            continue
+        if _import_resolves_to_declared_dependency(top, declared_dists=declared_dists):
+            continue
+
+        errors.append(
+            f"Generated module {generated_module!r} imports undeclared package {top!r}. "
+            "Add it to [project.dependencies], make it a first-party module, or add it to "
+            "build.generated_import_allowlist if intentional."
+        )
+    return errors
+
+
+def _top_level_imports(mod: ast.Module) -> set[str]:
+    imports: set[str] = set()
+    for node in ast.walk(mod):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name:
+                    imports.add(alias.name.split(".", 1)[0])
+        elif isinstance(node, ast.ImportFrom):
+            if int(getattr(node, "level", 0) or 0) > 0:
+                continue
+            if node.module:
+                imports.add(node.module.split(".", 1)[0])
+    return imports
+
+
+def _first_party_top_levels(
+    *,
+    project_dir: Path,
+    source_roots: Sequence[Path],
+    configured: Iterable[str],
+) -> set[str]:
+    roots = [project_dir, *source_roots]
+    first_party = {name.split(".", 1)[0] for name in configured if name.strip()}
+    for root in roots:
+        first_party.update(_local_top_levels(root))
+    return first_party
+
+
+def _local_top_levels(root: Path) -> set[str]:
+    try:
+        root = root.resolve()
+    except Exception:
+        return set()
+    if not root.is_dir():
+        return set()
+
+    out: set[str] = set()
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        return out
+    for child in children:
+        name = child.name
+        if name in _SKIP_LOCAL_DIRS or name.startswith("."):
+            continue
+        if child.is_file() and child.suffix == ".py" and child.stem.isidentifier():
+            out.add(child.stem)
+            continue
+        if child.is_dir() and name.isidentifier():
+            if (child / "__init__.py").is_file() or any(child.glob("*.py")):
+                out.add(name)
+    return out
+
+
+def _find_pyproject(start: Path) -> Path | None:
+    try:
+        cur = start.resolve()
+    except Exception:
+        cur = start
+    if cur.is_file():
+        cur = cur.parent
+    while True:
+        candidate = cur / "pyproject.toml"
+        if candidate.is_file():
+            return candidate
+        if cur.parent == cur:
+            return None
+        cur = cur.parent
+
+
+@functools.lru_cache(maxsize=128)
+def _declared_project_dependencies(pyproject_path: Path | None) -> frozenset[str]:
+    if pyproject_path is None:
+        return frozenset()
+    try:
+        data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    except Exception:
+        return frozenset()
+    project = data.get("project")
+    if not isinstance(project, dict):
+        return frozenset()
+    raw_deps = project.get("dependencies")
+    if not isinstance(raw_deps, list):
+        return frozenset()
+
+    deps: set[str] = set()
+    for dep in raw_deps:
+        if not isinstance(dep, str):
+            continue
+        name = _dependency_distribution_name(dep)
+        if name:
+            deps.add(pep503_normalize(name))
+    return frozenset(deps)
+
+
+def _dependency_distribution_name(requirement: str) -> str:
+    text = requirement.strip()
+    if not text:
+        return ""
+    for marker in (";", "[", "<", ">", "=", "!", "~", "@", " "):
+        if marker in text:
+            text = text.split(marker, 1)[0]
+    return text.strip()
+
+
+def _import_resolves_to_declared_dependency(
+    top_level: str,
+    *,
+    declared_dists: frozenset[str],
+) -> bool:
+    if not declared_dists:
+        return False
+    if pep503_normalize(top_level) in declared_dists:
+        return True
+    try:
+        packages_to_dists = metadata.packages_distributions()
+    except Exception:
+        packages_to_dists = {}
+    for dist in packages_to_dists.get(top_level, []):
+        if pep503_normalize(dist) in declared_dists:
+            return True
+    return False
 
 
 def validate_test_generated_source(

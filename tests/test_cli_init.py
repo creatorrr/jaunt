@@ -210,6 +210,8 @@ def test_cmd_init_template_includes_all_supported_sections(tmp_path: Path, monke
     content = (tmp_path / "jaunt.toml").read_text()
     assert "[build]" in content
     assert "include_target_tests = false" in content
+    assert "check_generated_imports = true" in content
+    assert "generated_import_allowlist" in content
     assert "instructions =" in content
     assert "[test]" in content
     assert "[prompts]" in content

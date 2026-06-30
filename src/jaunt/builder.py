@@ -1037,6 +1037,8 @@ async def run_build(
     ty_retry_attempts: int | None = None,
     async_runner: str = "asyncio",
     build_instructions: Sequence[str] | None = None,
+    check_generated_imports: bool = True,
+    generated_import_allowlist: Sequence[str] | None = None,
     initial_error_context_by_module: dict[str, list[str]] | None = None,
     targeted_test_entries: dict[str, list[SpecEntry]] | None = None,
 ) -> BuildReport:
@@ -1055,6 +1057,12 @@ async def run_build(
 
     if not stale:
         return BuildReport(generated=set(), skipped=skipped, failed={})
+
+    first_party_modules = {
+        generated_dir,
+        *(module_name.split(".", 1)[0] for module_name in module_specs),
+    }
+    generated_import_allowlist = tuple(generated_import_allowlist or ())
 
     # Induce a subgraph over stale modules.
     deps_in_stale: dict[str, set[str]] = {}
@@ -1342,12 +1350,38 @@ async def run_build(
             component_expected: list[str],
             handwritten_names: tuple[str, ...],
         ) -> tuple[Callable[[str], list[str]], Callable[[str], list[str]]]:
+            generated_module = paths.spec_module_to_generated_module(
+                module_name, generated_dir=generated_dir
+            )
+
+            def _validate_imports(source: str) -> list[str]:
+                if not check_generated_imports:
+                    return []
+                return validate_build_generated_source(
+                    source,
+                    [],
+                    spec_module=module_name,
+                    handwritten_names=(),
+                    generated_module=generated_module,
+                    project_dir=package_dir,
+                    source_roots=(package_dir,),
+                    first_party_modules=first_party_modules,
+                    check_imports=True,
+                    import_allowlist=generated_import_allowlist,
+                )
+
             def _validate_candidate(source: str) -> list[str]:
                 errs = validate_build_generated_source(
                     source,
                     component_expected,
                     spec_module=module_name,
                     handwritten_names=handwritten_names,
+                    generated_module=generated_module,
+                    project_dir=package_dir,
+                    source_roots=(package_dir,),
+                    first_party_modules=first_party_modules,
+                    check_imports=check_generated_imports,
+                    import_allowlist=generated_import_allowlist,
                 )
                 if errs:
                     return errs
@@ -1368,6 +1402,9 @@ async def run_build(
                     spec_module=module_name,
                     handwritten_names=handwritten_names,
                 )
+                if errs:
+                    return errs
+                errs = _validate_imports(source)
                 if errs:
                     return errs
                 whole = _whole_class_specs(component_entries)
@@ -1403,6 +1440,14 @@ async def run_build(
                 expected,
                 spec_module=module_name,
                 handwritten_names=handwritten_names,
+                generated_module=paths.spec_module_to_generated_module(
+                    module_name, generated_dir=generated_dir
+                ),
+                project_dir=package_dir,
+                source_roots=(package_dir,),
+                first_party_modules=first_party_modules,
+                check_imports=check_generated_imports,
+                import_allowlist=generated_import_allowlist,
             )
             if errs:
                 return errs

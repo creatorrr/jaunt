@@ -28,6 +28,8 @@ def test_load_minimal_config_defaults_apply(tmp_path: Path) -> None:
     assert cfg.build.ty_retry_attempts == 1
     assert cfg.build.async_runner == "asyncio"
     assert cfg.build.include_target_tests is False
+    assert cfg.build.check_generated_imports is True
+    assert cfg.build.generated_import_allowlist == []
     assert cfg.build.instructions == []
 
     assert cfg.test.jobs == 4
@@ -39,6 +41,7 @@ def test_load_minimal_config_defaults_apply(tmp_path: Path) -> None:
     assert cfg.prompts.test_system == ""
     assert cfg.prompts.test_module == ""
     assert cfg.agent.engine == "codex"
+    assert cfg.codex.fingerprint_cli_version is True
 
 
 def test_load_config_overrides_work(tmp_path: Path) -> None:
@@ -65,6 +68,8 @@ def test_load_config_overrides_work(tmp_path: Path) -> None:
                 "ty_retry_attempts = 2",
                 'async_runner = "anyio"',
                 "include_target_tests = true",
+                "check_generated_imports = false",
+                'generated_import_allowlist = ["intentional_extra"]',
                 'instructions = ["Prefer helpers.", "Stay close to the spec."]',
                 "",
                 "[test]",
@@ -84,6 +89,7 @@ def test_load_config_overrides_work(tmp_path: Path) -> None:
                 "[codex]",
                 'model = "gpt-5.2-codex"',
                 'reasoning_effort = "medium"',
+                "fingerprint_cli_version = false",
                 "",
             ]
         )
@@ -107,6 +113,8 @@ def test_load_config_overrides_work(tmp_path: Path) -> None:
     assert cfg.build.ty_retry_attempts == 2
     assert cfg.build.async_runner == "anyio"
     assert cfg.build.include_target_tests is True
+    assert cfg.build.check_generated_imports is False
+    assert cfg.build.generated_import_allowlist == ["intentional_extra"]
     assert cfg.build.instructions == ["Prefer helpers.", "Stay close to the spec."]
 
     assert cfg.test.jobs == 3
@@ -120,6 +128,7 @@ def test_load_config_overrides_work(tmp_path: Path) -> None:
     assert cfg.agent.engine == "codex"
     assert cfg.codex.model == "gpt-5.2-codex"
     assert cfg.codex.reasoning_effort == "medium"
+    assert cfg.codex.fingerprint_cli_version is False
 
 
 def test_codex_config_parsing(tmp_path: Path) -> None:
@@ -153,6 +162,7 @@ def test_codex_config_parsing(tmp_path: Path) -> None:
     assert cfg.codex.model == "gpt-5.2-codex"
     assert cfg.codex.reasoning_effort == "medium"
     assert cfg.codex.sandbox == "workspace-write"
+    assert cfg.codex.fingerprint_cli_version is True
     assert cfg.codex.features == ["multi_agent", "search"]
     assert cfg.codex.config == {
         "model_verbosity": "low",
