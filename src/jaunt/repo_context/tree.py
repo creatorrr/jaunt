@@ -11,6 +11,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from jaunt.repo_context import describe as describe_mod
 from jaunt.repo_context.describe import ast_describe, describe_dir
 from jaunt.repo_context.digests import TreeCache, source_digest
 
@@ -145,6 +146,50 @@ def _insert(tree: dict, parts: list[str], description: str, *, is_dir: bool) -> 
         node[leaf] = description
 
 
+def _apply_enrichment(
+    *,
+    tree: dict,
+    cache: TreeCache,
+    backend,
+    entry_paths: dict[str, Path],
+    stale: list[str],
+) -> None:
+    """Enrich added/restaled entries via the model, updating tree + cache in place.
+
+    Synchronous wrapper around the async ``describe.enrich``; falls back to the
+    AST baseline (already in tree/cache) on any failure.
+    """
+    import asyncio
+
+    items = [(rel, entry_paths[rel]) for rel in stale if rel in entry_paths]
+    if not items:
+        return
+    ast_descriptions = {
+        rel: rec.description for rel in stale if (rec := cache.get(rel)) is not None
+    }
+    try:
+        enriched = asyncio.run(
+            describe_mod.enrich(items, backend=backend, ast_descriptions=ast_descriptions)
+        )
+    except Exception:  # noqa: BLE001 - never block the map on enrichment failures
+        return
+    for rel, _ in items:
+        new_desc = enriched.get(rel)
+        if not new_desc:
+            continue
+        rec = cache.get(rel)
+        if rec is None:
+            continue
+        is_enriched = new_desc != ast_descriptions.get(rel)
+        cache.set(
+            rel,
+            source_digest=rec.source_digest,
+            description=new_desc,
+            enriched=is_enriched,
+        )
+        _insert(tree, rel.split("/"), new_desc, is_dir=False)
+
+
 def sync(
     *,
     repo_root: Path,
@@ -154,15 +199,19 @@ def sync(
     project_name: str,
     project_version: str,
     today: str,
+    enrich: bool = False,
+    backend=None,
 ) -> tuple[TreeDoc, SyncResult]:
     result = SyncResult()
     tree: dict = {}
     seen: set[str] = set()
     dirs: set[Path] = set()
+    entry_paths: dict[str, Path] = {}
 
     for path in sorted(_iter_entries(source_roots=source_roots, generated_dir=generated_dir)):
         rel = path.resolve().relative_to(repo_root.resolve()).as_posix()
         seen.add(rel)
+        entry_paths[rel] = path
         digest = source_digest(path)
         rec = cache.get(rel)
         if rec is None:
@@ -174,12 +223,28 @@ def sync(
             if rec is not None and rec.source_digest == digest
             else ast_describe(path)
         )
-        cache.set(rel, source_digest=digest, description=description, enriched=False)
+        cache.set(
+            rel,
+            source_digest=digest,
+            description=description,
+            enriched=bool(rec.enriched)
+            if rec is not None and rec.source_digest == digest
+            else False,
+        )
         _insert(tree, rel.split("/"), description, is_dir=False)
         for parent in path.resolve().parents:
             if parent == repo_root.resolve():
                 break
             dirs.add(parent)
+
+    if enrich and backend is not None:
+        _apply_enrichment(
+            tree=tree,
+            cache=cache,
+            backend=backend,
+            entry_paths=entry_paths,
+            stale=result.added + result.restaled,
+        )
 
     for d in sorted(dirs):
         rel = d.resolve().relative_to(repo_root.resolve()).as_posix()

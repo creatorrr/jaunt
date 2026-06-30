@@ -13,8 +13,49 @@ def _source_roots(root: Path, cfg) -> list[Path]:
     return [root / sr for sr in cfg.paths.source_roots]
 
 
+class _JsonBackendAdapter:
+    """Thin wrapper exposing ``complete_json`` over the Codex text backend.
+
+    Used only when build-time enrichment is enabled. Parses the model's reply as
+    JSON; returns ``{}`` on any parse failure (which triggers the AST fallback).
+    """
+
+    def __init__(self, backend) -> None:
+        self._backend = backend
+
+    async def complete_json(self, prompt: str) -> dict:
+        import json
+
+        text = await self._backend.complete_text(
+            system="You produce strict JSON for a repository map.",
+            user=prompt,
+        )
+        text = text.strip()
+        if text.startswith("```"):
+            # Strip a fenced ```json ... ``` block if the model wraps it.
+            lines = text.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+        try:
+            parsed = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+
+def _build_enrich_backend(cfg):
+    from jaunt.generate.codex_backend import CodexBackend
+
+    return _JsonBackendAdapter(CodexBackend(cfg.codex, cfg.llm, cfg.prompts))
+
+
 def sync_tree(*, root: Path, cfg, today: str, enrich: bool | None = None):
     cache = TreeCache(root / ".jaunt" / "tree-cache.json")
+    effective_enrich = cfg.context.enrich if enrich is None else enrich
+    backend = _build_enrich_backend(cfg) if effective_enrich else None
     doc, result = tree_mod.sync(
         repo_root=root,
         source_roots=_source_roots(root, cfg),
@@ -23,6 +64,8 @@ def sync_tree(*, root: Path, cfg, today: str, enrich: bool | None = None):
         project_name=root.name,
         project_version=str(cfg.version),
         today=today,
+        enrich=effective_enrich,
+        backend=backend,
     )
     cache.save()
     doc.write(root / cfg.context.repo_map_file)

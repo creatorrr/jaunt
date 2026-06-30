@@ -60,3 +60,44 @@ def describe_dir(path: Path, *, max_len: int = 100) -> str:
     if children:
         return _cap("package: " + ", ".join(children[:6]), max_len)
     return _cap(f"{path.name} package", max_len)
+
+
+async def enrich(
+    items: list[tuple[str, Path]],
+    *,
+    backend,
+    ast_descriptions: dict[str, str],
+    head_lines: int = 40,
+    max_len: int = 100,
+) -> dict[str, str]:
+    """Batched one-line enrichment. Falls back to ast_descriptions on any failure.
+
+    `backend` must expose `async complete_json(prompt) -> dict[path, str]`.
+    """
+    result = dict(ast_descriptions)
+    if not items:
+        return result
+    parts: list[str] = [
+        "For each file below, return STRICT JSON mapping the exact path to a single "
+        "concise one-line description (<= 100 chars) of what the file does. "
+        "Return only the JSON object.\n"
+    ]
+    for rel, path in items:
+        try:
+            head = "\n".join(path.read_text(encoding="utf-8").splitlines()[:head_lines])
+        except OSError:
+            head = ""
+        parts.append(
+            f"### {rel}\nAST summary: {ast_descriptions.get(rel, '')}\n```python\n{head}\n```\n"
+        )
+    try:
+        raw = await backend.complete_json("\n".join(parts))
+    except Exception:  # noqa: BLE001 - any failure -> AST baseline
+        return result
+    if not isinstance(raw, dict):
+        return result
+    for rel, _ in items:
+        val = raw.get(rel)
+        if isinstance(val, str) and val.strip():
+            result[rel] = _cap(val, max_len)
+    return result
