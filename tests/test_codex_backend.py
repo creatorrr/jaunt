@@ -625,3 +625,20 @@ def test_generate_writes_relevant_context_files(monkeypatch) -> None:
     )
     asyncio.run(backend.generate_module(ctx))
     assert "relevant_0.py" in written and "def f()" in written["relevant_0.py"]
+
+
+def test_build_prompt_test_kind_has_tester_section() -> None:
+    backend = _backend()
+    ctx = _ctx(kind="test")
+    prompt = backend._build_prompt(ctx, Path("pkg/__generated__/m.py"), None)
+    assert "Tester role:" in prompt
+    assert "Implementer role:" not in prompt
+    assert "jaunt_tier" in prompt
+
+
+def test_build_prompt_build_kind_has_implementer_section() -> None:
+    backend = _backend()
+    ctx = _ctx()
+    prompt = backend._build_prompt(ctx, Path("pkg/__generated__/m.py"), None)
+    assert "Implementer role:" in prompt
+    assert "Tester role:" not in prompt

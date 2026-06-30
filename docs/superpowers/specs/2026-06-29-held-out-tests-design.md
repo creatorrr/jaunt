@@ -367,6 +367,17 @@ asserted free of expected values.
 - **Iterating repair (future).** If repair is ever made to loop, derived-informed
   retries must get an explicit query budget (adaptive-holdout bound); the single-pass
   property is what keeps the current redaction sufficient.
+- **Repair routing can mutate the held-out oracle (Codex review of the implementation).**
+  jaunt infers which modules a failure implicates from the pytest output *paths*; a plain
+  derived assertion failure (`assert add_one(1) == 42`) usually names only the generated
+  *test* file, so `implicated_build_modules` stays empty and the **test** is regenerated
+  (`tester.py:1495`/`1545`) rather than the implementation — i.e. the held-out oracle can
+  rewrite itself to fit the code (an orchestration-level tautology). This is *pre-existing*
+  routing, untouched by this work (which only redacts feedback *content*), but the held-out
+  principle puts it in tension. Follow-up: on a derived-tier failure, bias toward
+  regenerating the *implementation*, and never silently regenerate the very held-out test
+  that failed — while still allowing a genuinely buggy test to be fixed deliberately. Out
+  of scope for this PR.
 - **Plugin delivery.** Confirm during planning how the jaunt pytest plugin is made
   available to the generated test run (entry-point plugin vs. injected `conftest.py`)
   and that `jaunt clean` removes any structured-report artifact it writes.

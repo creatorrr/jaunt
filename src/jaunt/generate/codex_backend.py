@@ -428,6 +428,32 @@ class CodexBackend(GeneratorBackend):
             "Edit ONLY the target file. Do not create other files, run tests, or modify "
             "anything else. Output the full module - no placeholders."
         )
+        # This is the load-bearing prompt path; prompts/*.md are not rendered by Codex.
+        if ctx.kind == "test":
+            blocks.append(
+                "Tester role:\n"
+                "- The Implementer sees only redacted pass/fail, so your suite is the sole "
+                "gate - make derived cases adversarial, not mirrors of the examples.\n"
+                "- Derive every expected value from the contract (the spec docstrings), "
+                "NEVER from observed implementation behavior; precommit the expected value "
+                "into the assertion.\n"
+                "- Tag every test with a tier marker: "
+                '@pytest.mark.jaunt_tier("example") for docstring canonical examples, '
+                'otherwise @pytest.mark.jaunt_tier("derived") for derived cases.\n'
+                "- Name derived cases opaquely, e.g. test_derived_01, NOT "
+                "test_empty_list_returns_zero, so the name leaks nothing."
+            )
+        else:
+            blocks.append(
+                "Implementer role:\n"
+                "- A separate Tester writes the tests; you will never see them.\n"
+                "- On repair, derived-tier failures arrive as {case-id, exception-class} "
+                "with no expected values, by design.\n"
+                "- Do not probe or pattern-match to the hidden cases.\n"
+                "- When example checks pass but derived checks fail, re-read the contract "
+                "for the general rule, not the specific failing case.\n"
+                "- Rationale: this is a closed-book exam graded by an independent examiner."
+            )
         relevant = getattr(ctx, "relevant_context_block", "") or ""
         if relevant.strip():
             blocks.append(relevant)
