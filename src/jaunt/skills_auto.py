@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -14,14 +14,11 @@ if TYPE_CHECKING:  # pragma: no cover
     from jaunt.config import AgentConfig, CodexConfig, LLMConfig, SkillsConfig
 
 
-_HEADER_PREFIX = "<!-- jaunt:skill=pypi"
-
-
 @dataclass(frozen=True, slots=True)
-class SkillsAutoResult:
-    skills_block: str
+class PyPISkillsResult:
     warnings: list[str]
     generation_failures: int = 0
+    dists: dict[str, str] = field(default_factory=dict)
 
 
 def skill_md_path(*, project_root: Path, dist: str) -> Path:
@@ -29,34 +26,50 @@ def skill_md_path(*, project_root: Path, dist: str) -> Path:
     return (project_root / ".agents" / "skills" / dist_norm / "SKILL.md").resolve()
 
 
-def _parse_generated_header(first_line: str) -> tuple[str, str] | None:
-    line = (first_line or "").strip()
-    if not (line.startswith("<!--") and line.endswith("-->")):
+def _read_frontmatter(text: str) -> dict[str, str] | None:
+    raw = text or ""
+    if not raw.startswith("---\n"):
         return None
-    inner = line[len("<!--") : -len("-->")].strip()
-    if not inner.startswith("jaunt:skill=pypi"):
+    end = raw.find("\n---", 4)
+    if end == -1:
         return None
+    block = raw[4:end]
+    meta: dict[str, str] = {}
+    for line in block.splitlines():
+        if ":" not in line:
+            continue
+        key, _, val = line.partition(":")
+        meta[key.strip()] = val.strip().strip('"')
+    return meta
 
-    dist: str | None = None
-    version: str | None = None
-    for part in inner.split()[1:]:
-        if part.startswith("dist="):
-            dist = part[len("dist=") :]
-        elif part.startswith("version="):
-            version = part[len("version=") :]
 
+def parse_generated_skill_meta(text: str) -> tuple[str, str] | None:
+    """Return (dist, version) for a Jaunt-generated skill, else None."""
+    meta = _read_frontmatter(text)
+    if not meta:
+        return None
+    dist = meta.get("x-jaunt-dist")
+    version = meta.get("x-jaunt-version")
     if dist and version:
         return dist, version
     return None
 
 
 def _format_generated_skill_file(*, dist: str, version: str, body_md: str) -> str:
-    hdr = f"{_HEADER_PREFIX} dist={dist} version={version} -->"
+    description = f"Use when generating Python code that imports or uses the {dist} library."
     body = (body_md or "").strip()
-    return hdr + "\n" + body + "\n"
+    fm = (
+        "---\n"
+        f'name: "{dist}"\n'
+        f'description: "{description}"\n'
+        f"x-jaunt-dist: {dist}\n"
+        f"x-jaunt-version: {version}\n"
+        "---\n"
+    )
+    return fm + body + "\n"
 
 
-async def ensure_pypi_skills_and_block(
+async def ensure_pypi_skills(
     *,
     project_root: Path,
     source_roots: Sequence[Path],
@@ -65,14 +78,10 @@ async def ensure_pypi_skills_and_block(
     agent: AgentConfig | None = None,
     codex: CodexConfig | None = None,
     skills: SkillsConfig | None = None,
-) -> SkillsAutoResult:
-    """Best-effort: ensure skills exist for imported external PyPI libs.
-
-    Returns a single concatenated injection block to pass to the code generator.
-    """
-
+) -> PyPISkillsResult:
+    """Ensure SKILL.md files exist (frontmatter format) for imported PyPI libs."""
     if skills is not None and not skills.auto:
-        return SkillsAutoResult(skills_block="", warnings=[], generation_failures=0)
+        return PyPISkillsResult(warnings=[], generation_failures=0, dists={})
 
     warnings: list[str] = []
     dists, scan_warnings = discover_external_distributions_with_warnings(
@@ -82,7 +91,6 @@ async def ensure_pypi_skills_and_block(
 
     generation_failures = 0
     if dists:
-        # Phase 1+2: generate skills for PyPI dists that need it.
         generation_failures = await _generate_pypi_skills(
             project_root=project_root,
             dists=dists,
@@ -91,21 +99,8 @@ async def ensure_pypi_skills_and_block(
             codex=codex,
             warnings=warnings,
         )
-
-    # Phase 3: Build injection block from ALL skills on disk (auto + user).
-    from jaunt.skill_manager import build_skills_block
-
-    if skills is None:
-        skills_block = build_skills_block(project_root, pypi_dists=dists)
-    else:
-        skills_block = build_skills_block(
-            project_root,
-            pypi_dists=dists,
-            inject_user_skills=set(skills.inject_user_skills),
-            max_chars_per_skill=skills.max_chars_per_skill,
-        )
-    return SkillsAutoResult(
-        skills_block=skills_block, warnings=warnings, generation_failures=generation_failures
+    return PyPISkillsResult(
+        warnings=warnings, generation_failures=generation_failures, dists=dict(dists)
     )
 
 
@@ -139,8 +134,7 @@ async def _generate_pypi_skills(
         else:
             try:
                 txt = path.read_text(encoding="utf-8")
-                first = txt.splitlines()[0] if txt else ""
-                existing_header = _parse_generated_header(first)
+                existing_header = parse_generated_skill_meta(txt)
             except Exception as e:  # noqa: BLE001
                 warnings.append(
                     f"failed reading existing skill for {dist}: {type(e).__name__}: {e}"

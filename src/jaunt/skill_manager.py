@@ -1,4 +1,4 @@
-"""Core skill management: discovery, CRUD, import, and injection block building."""
+"""Core skill management: discovery, CRUD, and import."""
 
 from __future__ import annotations
 
@@ -118,7 +118,7 @@ def validate_skill_name(name: str) -> str:
 
 def discover_all_skills(project_root: Path) -> list[SkillInfo]:
     """Glob */SKILL.md under .agents/skills/, classify auto vs user."""
-    from jaunt.skills_auto import _parse_generated_header
+    from jaunt.skills_auto import parse_generated_skill_meta
 
     sd = skills_dir(project_root)
     if not sd.is_dir():
@@ -132,8 +132,7 @@ def discover_all_skills(project_root: Path) -> list[SkillInfo]:
         except Exception:  # noqa: BLE001
             continue
 
-        first_line = txt.splitlines()[0] if txt.strip() else ""
-        header = _parse_generated_header(first_line)
+        header = parse_generated_skill_meta(txt)
         if header is not None:
             dist, version = header
             results.append(
@@ -146,114 +145,6 @@ def discover_all_skills(project_root: Path) -> list[SkillInfo]:
 
     results.sort(key=lambda s: s.name.lower())
     return results
-
-
-def _cap_skill_body(body: str, max_chars: int | None) -> str:
-    if max_chars is None or max_chars < 0 or len(body) <= max_chars:
-        return body
-
-    lines = body.splitlines()
-    capped_lines: list[str] = []
-    in_fence = False
-    fence_start = ""
-    fence_inner: list[str] = []
-
-    def flush_fence() -> None:
-        nonlocal fence_inner, fence_start
-        fence_body = "\n".join(fence_inner)
-        capped_lines.append(fence_start)
-        if len(fence_body) > 400:
-            capped_lines.append("# ... (example elided to slim prompt)")
-        else:
-            capped_lines.extend(fence_inner)
-        fence_inner = []
-        fence_start = ""
-
-    for line in lines:
-        if line.startswith("```"):
-            if in_fence:
-                flush_fence()
-                capped_lines.append(line)
-                in_fence = False
-            else:
-                in_fence = True
-                fence_start = line
-                fence_inner = []
-            continue
-
-        if in_fence:
-            fence_inner.append(line)
-        else:
-            capped_lines.append(line)
-
-    if in_fence:
-        flush_fence()
-
-    slimmed = "\n".join(capped_lines)
-    if len(slimmed) <= max_chars:
-        return slimmed
-    return slimmed[:max_chars].rstrip() + "\n\n[TRUNCATED]"
-
-
-def build_skills_block(
-    project_root: Path,
-    *,
-    pypi_dists: dict[str, str] | None = None,
-    inject_user_skills: set[str] | None = None,
-    max_chars_per_skill: int | None = None,
-) -> str:
-    """Build injection block from ALL skills on disk (auto + user).
-
-    Returns a deterministic string suitable for LLM prompt injection.
-    """
-    from jaunt.skills_auto import _parse_generated_header
-
-    sd = skills_dir(project_root)
-    if not sd.is_dir():
-        return ""
-
-    from jaunt.external_imports import pep503_normalize
-
-    # When pypi_dists is provided, only include auto skills whose dist is
-    # still actively imported.  User skills are always included.
-    active_dists: set[str] | None = None
-    if pypi_dists is not None:
-        active_dists = {pep503_normalize(d) for d in pypi_dists}
-
-    sections: list[str] = []
-
-    # Collect all SKILL.md files, sorted by directory name for determinism.
-    for skill_md in sorted(sd.glob("*/SKILL.md"), key=lambda p: p.parent.name.lower()):
-        dir_name = skill_md.parent.name
-        try:
-            txt = skill_md.read_text(encoding="utf-8")
-        except Exception:  # noqa: BLE001
-            continue
-
-        lines = txt.splitlines()
-        first_line = lines[0] if lines else ""
-        header = _parse_generated_header(first_line)
-
-        if header is not None:
-            dist, version = header
-            # Skip auto skills for distributions no longer imported.
-            if active_dists is not None and pep503_normalize(dist) not in active_dists:
-                continue
-            body = "\n".join(lines[1:]).lstrip("\n")
-            heading = f"{dist}=={version}"
-        else:
-            if inject_user_skills is not None and dir_name not in inject_user_skills:
-                continue
-            body = txt
-            heading = dir_name
-
-        body = (body or "").strip()
-        if not body:
-            continue
-        body = _cap_skill_body(body, max_chars_per_skill)
-        sections.append(f"## {heading}\n{body}\n")
-
-    return "\n".join(sections).strip()
 
 
 def read_skill_meta(project_root: Path, name: str) -> SkillMeta | None:

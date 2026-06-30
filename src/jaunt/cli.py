@@ -1302,7 +1302,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             try:
                 from jaunt import skills_auto
 
-                skills_res = await skills_auto.ensure_pypi_skills_and_block(
+                skills_res = await skills_auto.ensure_pypi_skills(
                     project_root=root,
                     source_roots=[d for d in source_dirs if d.exists()],
                     generated_dir=cfg.paths.generated_dir,
@@ -1313,7 +1313,6 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                 )
                 for w in skills_res.warnings:
                     _eprint(f"warn: {w}")
-                skills_block = skills_res.skills_block
             except Exception as e:  # noqa: BLE001 - best-effort; never block build
                 _eprint(f"warn: failed ensuring external library skills: {type(e).__name__}: {e}")
 
@@ -1772,18 +1771,6 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
         cost_tracker = CostTracker(max_cost=cfg.llm.max_cost_per_build)
         backend = _build_backend(cfg)
         build_skills_block = ""
-        auto_skills_on = bool(cfg.skills.auto) and not bool(getattr(args, "no_auto_skills", False))
-        if auto_skills_on:
-            try:
-                from jaunt.skill_manager import build_skills_block as _build_skills_block
-
-                build_skills_block = _build_skills_block(
-                    root,
-                    inject_user_skills=set(cfg.skills.inject_user_skills),
-                    max_chars_per_skill=cfg.skills.max_chars_per_skill,
-                )
-            except Exception:
-                build_skills_block = ""
 
         build_generation_fingerprint = generation_fingerprint(
             cfg,
@@ -2168,7 +2155,7 @@ def cmd_skill(args: argparse.Namespace) -> int:
             from jaunt import skills_auto
 
             res = asyncio.run(
-                skills_auto.ensure_pypi_skills_and_block(
+                skills_auto.ensure_pypi_skills(
                     project_root=root,
                     source_roots=[d for d in source_dirs if d.exists()],
                     generated_dir=cfg.paths.generated_dir,

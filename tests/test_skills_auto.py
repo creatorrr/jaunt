@@ -5,7 +5,7 @@ from pathlib import Path
 
 from jaunt.config import AgentConfig, CodexConfig, LLMConfig, SkillsConfig
 from jaunt.external_imports import discover_external_distributions
-from jaunt.skills_auto import ensure_pypi_skills_and_block, skill_md_path
+from jaunt.skills_auto import _format_generated_skill_file, ensure_pypi_skills, skill_md_path
 
 
 def _write(path: Path, text: str) -> None:
@@ -56,6 +56,15 @@ def test_skill_path_layout(tmp_path: Path) -> None:
     assert p == (tmp_path / ".agents" / "skills" / "typing-extensions" / "SKILL.md").resolve()
 
 
+def test_frontmatter_roundtrip():
+    from jaunt.skills_auto import _format_generated_skill_file, parse_generated_skill_meta
+
+    text = _format_generated_skill_file(dist="httpx", version="0.25.0", body_md="# httpx\nbody\n")
+    assert text.startswith("---\n")
+    assert parse_generated_skill_meta(text) == ("httpx", "0.25.0")
+    assert parse_generated_skill_meta("# just a heading\n") is None
+
+
 def test_auto_false_disables_injection(tmp_path: Path, monkeypatch) -> None:
     import jaunt.skills_auto as sa
 
@@ -69,7 +78,7 @@ def test_auto_false_disables_injection(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(sa, "discover_external_distributions_with_warnings", fail_discover)
 
     res = asyncio.run(
-        ensure_pypi_skills_and_block(
+        ensure_pypi_skills(
             project_root=tmp_path,
             source_roots=[],
             generated_dir="__generated__",
@@ -77,7 +86,9 @@ def test_auto_false_disables_injection(tmp_path: Path, monkeypatch) -> None:
             skills=SkillsConfig(auto=False),
         )
     )
-    assert res.skills_block == ""
+    assert res.warnings == []
+    assert res.generation_failures == 0
+    assert res.dists == {}
     assert discovery_called is False
 
 
@@ -85,7 +96,7 @@ def test_existing_generated_skill_same_version_skips_regen(tmp_path: Path, monke
     dist = "external-lib"
     version = "1.2.3"
     path = skill_md_path(project_root=tmp_path, dist=dist)
-    _write(path, f"<!-- jaunt:skill=pypi dist={dist} version={version} -->\nBODY\n")
+    _write(path, _format_generated_skill_file(dist=dist, version=version, body_md="BODY"))
 
     import jaunt.skills_auto as sa
 
@@ -99,7 +110,7 @@ def test_existing_generated_skill_same_version_skips_regen(tmp_path: Path, monke
     monkeypatch.setattr(sa, "fetch_readme", fail_fetch)
 
     res = asyncio.run(
-        ensure_pypi_skills_and_block(
+        ensure_pypi_skills(
             project_root=tmp_path,
             source_roots=[],
             generated_dir="__generated__",
@@ -108,8 +119,11 @@ def test_existing_generated_skill_same_version_skips_regen(tmp_path: Path, monke
         )
     )
     assert res.warnings == []
-    assert "BODY" in res.skills_block
-    assert "jaunt:skill=pypi" not in res.skills_block
+    assert res.dists == {dist: version}
+    assert path.is_file()
+    on_disk = path.read_text(encoding="utf-8")
+    assert "BODY" in on_disk
+    assert "x-jaunt-dist" in on_disk
 
 
 def test_existing_generated_skill_version_change_regenerates(tmp_path: Path, monkeypatch) -> None:
@@ -117,7 +131,7 @@ def test_existing_generated_skill_version_change_regenerates(tmp_path: Path, mon
     old_version = "0.1.0"
     new_version = "1.2.3"
     path = skill_md_path(project_root=tmp_path, dist=dist)
-    _write(path, f"<!-- jaunt:skill=pypi dist={dist} version={old_version} -->\nOLD\n")
+    _write(path, _format_generated_skill_file(dist=dist, version=old_version, body_md="OLD"))
 
     import jaunt.skillgen as sg
     import jaunt.skills_auto as sa
@@ -142,7 +156,7 @@ def test_existing_generated_skill_version_change_regenerates(tmp_path: Path, mon
     monkeypatch.setattr(sg, "CodexSkillGenerator", DummyGen)
 
     res = asyncio.run(
-        ensure_pypi_skills_and_block(
+        ensure_pypi_skills(
             project_root=tmp_path,
             source_roots=[],
             generated_dir="__generated__",
@@ -153,10 +167,10 @@ def test_existing_generated_skill_version_change_regenerates(tmp_path: Path, mon
     assert calls == [(dist, new_version)]
 
     on_disk = path.read_text(encoding="utf-8")
-    assert f"version={new_version}" in on_disk.splitlines()[0]
+    assert f"x-jaunt-version: {new_version}" in on_disk
+    assert "x-jaunt-dist" in on_disk
     assert "NEW SKILL" in on_disk
-    assert "NEW SKILL" in res.skills_block
-    assert "jaunt:skill=pypi" not in res.skills_block
+    assert res.dists == {dist: new_version}
 
 
 def test_resolve_dist_by_name_heuristic_is_memoized(monkeypatch) -> None:
@@ -221,7 +235,7 @@ def test_skill_generation_runs_concurrently(tmp_path: Path, monkeypatch) -> None
     monkeypatch.setattr(sg, "CodexSkillGenerator", ConcurrencyTrackingGen)
 
     res = asyncio.run(
-        ensure_pypi_skills_and_block(
+        ensure_pypi_skills(
             project_root=tmp_path,
             source_roots=[],
             generated_dir="__generated__",
@@ -236,15 +250,18 @@ def test_skill_generation_runs_concurrently(tmp_path: Path, monkeypatch) -> None
     assert concurrency_high_water[0] > 1, (
         f"Expected concurrent generation but high water mark was {concurrency_high_water[0]}"
     )
+    for dist, version in dists.items():
+        path = skill_md_path(project_root=tmp_path, dist=dist)
+        assert path.is_file()
+        on_disk = path.read_text(encoding="utf-8")
+        assert f"x-jaunt-version: {version}" in on_disk
+        assert "x-jaunt-dist" in on_disk
 
 
-def test_skills_block_includes_non_pypi_user_skills(tmp_path: Path, monkeypatch) -> None:
-    """Regression: user skills should appear in skills_block even with zero PyPI dists."""
+def test_no_pypi_dists_leaves_user_skills_untouched(tmp_path: Path, monkeypatch) -> None:
     # Create a user skill (NOT matching any detected PyPI dist)
-    _write(
-        tmp_path / ".agents" / "skills" / "my-internal-api" / "SKILL.md",
-        "# my-internal-api\nInternal API docs\n",
-    )
+    path = tmp_path / ".agents" / "skills" / "my-internal-api" / "SKILL.md"
+    _write(path, "# my-internal-api\nInternal API docs\n")
 
     import jaunt.skills_auto as sa
 
@@ -256,15 +273,15 @@ def test_skills_block_includes_non_pypi_user_skills(tmp_path: Path, monkeypatch)
     )
 
     res = asyncio.run(
-        ensure_pypi_skills_and_block(
+        ensure_pypi_skills(
             project_root=tmp_path,
             source_roots=[],
             generated_dir="__generated__",
             llm=LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY"),
         )
     )
-    assert "Internal API docs" in res.skills_block
-    assert "my-internal-api" in res.skills_block
+    assert res.dists == {}
+    assert path.read_text(encoding="utf-8") == "# my-internal-api\nInternal API docs\n"
 
 
 def test_user_managed_skill_never_overwritten(tmp_path: Path, monkeypatch) -> None:
@@ -285,7 +302,7 @@ def test_user_managed_skill_never_overwritten(tmp_path: Path, monkeypatch) -> No
     monkeypatch.setattr(sa, "fetch_readme", fail_fetch)
 
     res = asyncio.run(
-        ensure_pypi_skills_and_block(
+        ensure_pypi_skills(
             project_root=tmp_path,
             source_roots=[],
             generated_dir="__generated__",
@@ -293,7 +310,7 @@ def test_user_managed_skill_never_overwritten(tmp_path: Path, monkeypatch) -> No
         )
     )
     assert path.read_text(encoding="utf-8") == "USER SKILL\n"
-    assert "USER SKILL" in res.skills_block
+    assert res.dists == {dist: version}
 
 
 def test_codex_skill_generator_selected_when_agent_engine_is_codex(
@@ -339,7 +356,7 @@ def test_codex_skill_generator_selected_when_agent_engine_is_codex(
     monkeypatch.setattr(sg, "CodexSkillGenerator", DummyCodexGen)
 
     res = asyncio.run(
-        ensure_pypi_skills_and_block(
+        ensure_pypi_skills(
             project_root=tmp_path,
             source_roots=[],
             generated_dir="__generated__",
@@ -351,4 +368,6 @@ def test_codex_skill_generator_selected_when_agent_engine_is_codex(
     assert res.warnings == []
     assert calls[0] == ("init", "codex")
     assert calls[1] == (dist, version)
-    assert "x" in res.skills_block
+    on_disk = skill_md_path(project_root=tmp_path, dist=dist).read_text(encoding="utf-8")
+    assert "x-jaunt-dist" in on_disk
+    assert "x" in on_disk
