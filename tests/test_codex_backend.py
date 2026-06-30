@@ -160,6 +160,35 @@ def test_generate_module_returns_written_source_and_writes_seed(monkeypatch) -> 
     asyncio.run(run())
 
 
+def test_generate_module_seeds_skills(monkeypatch) -> None:
+    async def run() -> None:
+        backend = _backend()
+        seen: dict[str, object] = {}
+
+        def on_run(args: list[str]) -> None:
+            root = _cwd_from_args(args)
+            skills_root = root / ".agents" / "skills"
+            seen["skills"] = sorted(p.name for p in skills_root.glob("*"))
+            (root / "pkg/__generated__/thing.py").write_text(
+                "def alpha():\n    pass\n\ndef beta():\n    pass\n",
+                encoding="utf-8",
+            )
+
+        captured = _install_fake_exec(
+            monkeypatch,
+            on_run=on_run,
+            stdout=_usage_jsonl("done", input_tokens=1, output_tokens=1),
+        )
+
+        await backend.generate_module(_ctx(builtin_skill_names=("ruff", "pytest")))
+
+        prompt = cast(str, captured["prompt"])
+        assert seen["skills"] == ["pytest", "ruff"]
+        assert "## What it is" not in prompt
+
+    asyncio.run(run())
+
+
 def test_generate_module_command_line_flags(monkeypatch) -> None:
     async def run() -> None:
         backend = _backend()
