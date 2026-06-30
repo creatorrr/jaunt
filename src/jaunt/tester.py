@@ -1165,7 +1165,6 @@ async def run_tests(
                 ),
                 backend=repair_build_context.backend,
                 generation_fingerprint=repair_build_context.generation_fingerprint,
-                skills_block=repair_build_context.skills_block,
                 jobs=repair_build_context.jobs,
                 progress=None,
                 response_cache=None,

@@ -1296,7 +1296,6 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
 
         source_dirs = [root / sr for sr in cfg.paths.source_roots]
 
-        skills_block = ""
         auto_skills_on = bool(cfg.skills.auto) and not bool(getattr(args, "no_auto_skills", False))
         if auto_skills_on:
             try:
@@ -1476,7 +1475,6 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             allowed_modules=allowed_modules,
             backend=_build_backend(cfg),
             generation_fingerprint=build_generation_fingerprint,
-            skills_block=skills_block,
             repo_map_block=repo_map_block,
             search_enabled=search_enabled,
             search_max_hits=cfg.context.search.max_hits,
