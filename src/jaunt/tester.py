@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
-from jaunt import paths
+from jaunt import heldout, paths
 from jaunt.agent_docs import ensure_agent_docs
 from jaunt.builder import (
     RefreezeOutcome,
@@ -1377,6 +1377,7 @@ async def run_tests(
     project_root: Path | None = None,
     builtin_skill_names: Sequence[str] = (),
     skills_digest: str = "",
+    no_redact_derived: bool = False,
     repair_build_context: RepairBuildContext | None = None,
 ) -> PytestResult:
     generated_files: list[Path] = []
@@ -1445,151 +1446,172 @@ async def run_tests(
             skipped=skipped,
         )
 
-    pytest_result = _run_pytest_capture(
-        generated_files,
-        pytest_args=pytest_args,
-        pythonpath=pythonpath,
-        cwd=cwd,
-    )
-    pytest_exit_code = pytest_result.exit_code
-
-    if (
-        pytest_exit_code != 0
-        and not gen_failed
-        and not no_generate
-        and module_specs is not None
-        and specs is not None
-        and spec_graph is not None
-        and module_dag is not None
-        and backend is not None
-    ):
-        repair_lines = _compact_failure_context(pytest_result.stdout, pytest_result.stderr)
-        test_paths_by_module = _collect_generated_test_paths_by_module(
-            project_dir=project_dir,
-            tests_package=tests_package,
-            generated_dir=generated_dir,
-            module_specs=module_specs,
-            test_roots=test_roots,
-        )
-        build_paths_by_module: dict[str, Path] = {}
-        if repair_build_context is not None:
-            build_paths_by_module = _collect_generated_build_paths_by_module(
-                package_dir=repair_build_context.package_dir,
-                generated_dir=repair_build_context.generated_dir,
-                module_specs=repair_build_context.module_specs,
-            )
-
-        failed_test_modules, implicated_build_modules = _implicated_modules_from_pytest(
-            stdout=pytest_result.stdout,
-            stderr=pytest_result.stderr,
-            test_paths_by_module=test_paths_by_module,
-            build_paths_by_module=build_paths_by_module,
+    with tempfile.NamedTemporaryFile(prefix="jaunt-heldout-", suffix=".json", delete=False) as f:
+        heldout_report_path = Path(f.name)
+    previous_heldout_report = os.environ.get(heldout.REPORT_ENV)
+    os.environ[heldout.REPORT_ENV] = str(heldout_report_path)
+    heldout_pytest_args = [*(pytest_args or []), "-p", "jaunt.heldout"]
+    try:
+        pytest_result = _run_pytest_capture(
+            generated_files,
+            pytest_args=heldout_pytest_args,
+            pythonpath=pythonpath,
             cwd=cwd,
         )
+        pytest_exit_code = pytest_result.exit_code
 
-        if implicated_build_modules and repair_build_context is not None:
-            from jaunt import builder
-
-            repaired_build = await builder.run_build(
-                package_dir=repair_build_context.package_dir,
-                generated_dir=repair_build_context.generated_dir,
-                module_specs=repair_build_context.module_specs,
-                specs=repair_build_context.specs,
-                spec_graph=repair_build_context.spec_graph,
-                module_dag=repair_build_context.module_dag,
-                stale_modules=builder.expand_stale_modules(
-                    repair_build_context.module_dag,
-                    implicated_build_modules,
-                ),
-                backend=repair_build_context.backend,
-                generation_fingerprint=repair_build_context.generation_fingerprint,
-                jobs=repair_build_context.jobs,
-                progress=None,
-                response_cache=None,
-                cost_tracker=cost_tracker,
-                async_runner=repair_build_context.async_runner,
-                project_root=repair_build_context.project_root,
-                source_roots=repair_build_context.source_roots,
-                builtin_skill_names=repair_build_context.builtin_skill_names,
-                skills_digest=repair_build_context.skills_digest,
-                build_instructions=repair_build_context.build_instructions,
-                check_generated_imports=repair_build_context.check_generated_imports,
-                generated_import_allowlist=repair_build_context.generated_import_allowlist,
-                initial_error_context_by_module={
-                    module_name: repair_lines for module_name in implicated_build_modules
-                },
-                targeted_test_entries=repair_build_context.targeted_test_entries,
+        if (
+            pytest_exit_code != 0
+            and not gen_failed
+            and not no_generate
+            and module_specs is not None
+            and specs is not None
+            and spec_graph is not None
+            and module_dag is not None
+            and backend is not None
+        ):
+            # INVARIANT: the Implementer must never receive held-out expected values.
+            # Repair feedback is redacted by tier (derived failures surface only as
+            # {opaque-id, exception-class}); only example-tier failures keep full detail.
+            heldout_report = heldout.load_report(heldout_report_path)
+            repair_lines = heldout.build_repair_feedback(
+                heldout_report, redact=not no_redact_derived
             )
-            if repaired_build.failed:
-                return PytestResult(
-                    exit_code=3,
-                    passed=False,
-                    failed=True,
-                    failures=repair_lines,
-                    generation_failed=repaired_build.failed,
-                )
-
-        if failed_test_modules:
-            repaired_tests = await run_test_generation(
-                project_dir=project_dir,
-                tests_package=tests_package,
-                generated_dir=generated_dir,
-                test_roots=test_roots,
-                dependency_apis=dependency_apis,
-                module_specs=module_specs,
-                specs=specs,
-                spec_graph=spec_graph,
-                module_dag=module_dag,
-                stale_modules=failed_test_modules,
-                backend=backend,
-                generation_fingerprint=generation_fingerprint,
-                target_api_digests=target_api_digests,
-                jobs=jobs,
-                progress=None,
-                response_cache=None,
-                cost_tracker=cost_tracker,
-                async_runner=async_runner,
-                project_root=project_root,
-                builtin_skill_names=builtin_skill_names,
-                skills_digest=skills_digest,
-                initial_error_context_by_module={
-                    module_name: repair_lines for module_name in failed_test_modules
-                },
-            )
-            if repaired_tests.failed:
-                return PytestResult(
-                    exit_code=3,
-                    passed=False,
-                    failed=True,
-                    failures=repair_lines,
-                    generation_failed=repaired_tests.failed,
-                )
-
-        if implicated_build_modules or failed_test_modules:
-            generated_files = _collect_existing_generated_test_files(
+            test_paths_by_module = _collect_generated_test_paths_by_module(
                 project_dir=project_dir,
                 tests_package=tests_package,
                 generated_dir=generated_dir,
                 module_specs=module_specs,
                 test_roots=test_roots,
             )
-            pytest_result = _run_pytest_capture(
-                generated_files,
-                pytest_args=pytest_args,
-                pythonpath=pythonpath,
+            build_paths_by_module: dict[str, Path] = {}
+            if repair_build_context is not None:
+                build_paths_by_module = _collect_generated_build_paths_by_module(
+                    package_dir=repair_build_context.package_dir,
+                    generated_dir=repair_build_context.generated_dir,
+                    module_specs=repair_build_context.module_specs,
+                )
+
+            failed_test_modules, implicated_build_modules = _implicated_modules_from_pytest(
+                stdout=pytest_result.stdout,
+                stderr=pytest_result.stderr,
+                test_paths_by_module=test_paths_by_module,
+                build_paths_by_module=build_paths_by_module,
                 cwd=cwd,
             )
-            pytest_exit_code = pytest_result.exit_code
 
-    exit_code = 3 if gen_failed else pytest_exit_code
-    return PytestResult(
-        exit_code=exit_code,
-        passed=exit_code == 0,
-        failed=bool(gen_failed) or pytest_exit_code != 0,
-        failures=_compact_failure_context(pytest_result.stdout, pytest_result.stderr)
-        if pytest_exit_code != 0
-        else [],
-        generation_failed=gen_failed,
-        generated=generated,
-        skipped=skipped,
-    )
+            if implicated_build_modules and repair_build_context is not None:
+                from jaunt import builder
+
+                repaired_build = await builder.run_build(
+                    package_dir=repair_build_context.package_dir,
+                    generated_dir=repair_build_context.generated_dir,
+                    module_specs=repair_build_context.module_specs,
+                    specs=repair_build_context.specs,
+                    spec_graph=repair_build_context.spec_graph,
+                    module_dag=repair_build_context.module_dag,
+                    stale_modules=builder.expand_stale_modules(
+                        repair_build_context.module_dag,
+                        implicated_build_modules,
+                    ),
+                    backend=repair_build_context.backend,
+                    generation_fingerprint=repair_build_context.generation_fingerprint,
+                    jobs=repair_build_context.jobs,
+                    progress=None,
+                    response_cache=None,
+                    cost_tracker=cost_tracker,
+                    async_runner=repair_build_context.async_runner,
+                    project_root=repair_build_context.project_root,
+                    source_roots=repair_build_context.source_roots,
+                    builtin_skill_names=repair_build_context.builtin_skill_names,
+                    skills_digest=repair_build_context.skills_digest,
+                    build_instructions=repair_build_context.build_instructions,
+                    check_generated_imports=repair_build_context.check_generated_imports,
+                    generated_import_allowlist=repair_build_context.generated_import_allowlist,
+                    initial_error_context_by_module={
+                        module_name: repair_lines for module_name in implicated_build_modules
+                    },
+                    targeted_test_entries=repair_build_context.targeted_test_entries,
+                )
+                if repaired_build.failed:
+                    return PytestResult(
+                        exit_code=3,
+                        passed=False,
+                        failed=True,
+                        failures=repair_lines,
+                        generation_failed=repaired_build.failed,
+                    )
+
+            if failed_test_modules:
+                repaired_tests = await run_test_generation(
+                    project_dir=project_dir,
+                    tests_package=tests_package,
+                    generated_dir=generated_dir,
+                    test_roots=test_roots,
+                    dependency_apis=dependency_apis,
+                    module_specs=module_specs,
+                    specs=specs,
+                    spec_graph=spec_graph,
+                    module_dag=module_dag,
+                    stale_modules=failed_test_modules,
+                    backend=backend,
+                    generation_fingerprint=generation_fingerprint,
+                    target_api_digests=target_api_digests,
+                    jobs=jobs,
+                    progress=None,
+                    response_cache=None,
+                    cost_tracker=cost_tracker,
+                    async_runner=async_runner,
+                    project_root=project_root,
+                    builtin_skill_names=builtin_skill_names,
+                    skills_digest=skills_digest,
+                    initial_error_context_by_module={
+                        module_name: repair_lines for module_name in failed_test_modules
+                    },
+                )
+                if repaired_tests.failed:
+                    return PytestResult(
+                        exit_code=3,
+                        passed=False,
+                        failed=True,
+                        failures=repair_lines,
+                        generation_failed=repaired_tests.failed,
+                    )
+
+            if implicated_build_modules or failed_test_modules:
+                generated_files = _collect_existing_generated_test_files(
+                    project_dir=project_dir,
+                    tests_package=tests_package,
+                    generated_dir=generated_dir,
+                    module_specs=module_specs,
+                    test_roots=test_roots,
+                )
+                pytest_result = _run_pytest_capture(
+                    generated_files,
+                    pytest_args=heldout_pytest_args,
+                    pythonpath=pythonpath,
+                    cwd=cwd,
+                )
+                pytest_exit_code = pytest_result.exit_code
+
+        exit_code = 3 if gen_failed else pytest_exit_code
+        return PytestResult(
+            exit_code=exit_code,
+            passed=exit_code == 0,
+            failed=bool(gen_failed) or pytest_exit_code != 0,
+            failures=_compact_failure_context(pytest_result.stdout, pytest_result.stderr)
+            if pytest_exit_code != 0
+            else [],
+            generation_failed=gen_failed,
+            generated=generated,
+            skipped=skipped,
+        )
+    finally:
+        if previous_heldout_report is None:
+            os.environ.pop(heldout.REPORT_ENV, None)
+        else:
+            os.environ[heldout.REPORT_ENV] = previous_heldout_report
+        try:
+            heldout_report_path.unlink()
+        except FileNotFoundError:
+            pass

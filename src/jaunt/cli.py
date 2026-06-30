@@ -166,6 +166,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Force every normalized-digest change to rebuild (skip the Layer B "
         "semantic gate). Layer A linter-resistance still applies.",
     )
+    test_p.add_argument(
+        "--no-redact-derived",
+        action="store_true",
+        dest="no_redact_derived",
+        help="Feed FULL derived-tier failure detail (expected values, tracebacks) into "
+        "repair. DANGER: defeats the held-out barrier; for debugging only.",
+    )
 
     init_p = subparsers.add_parser("init", help="Initialize a new jaunt project.")
     init_p.add_argument(
@@ -1585,6 +1592,12 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
         root, cfg = _load_config(args)
         _maybe_load_dotenv(root)
         _sync_generated_dir_env(cfg)
+        if bool(getattr(args, "no_redact_derived", False)):
+            _eprint(
+                "WARNING: --no-redact-derived feeds full held-out (derived-tier) failure "
+                "detail — expected values and tracebacks — into the Implementer's repair "
+                "context. This DEFEATS the held-out barrier and is for debugging only."
+            )
         include_target_tests = _effective_include_target_tests(cfg, args)
         build_instructions = _effective_build_instructions(cfg, args)
 
@@ -1922,6 +1935,7 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             cost_tracker=cost_tracker,
             async_runner=cfg.build.async_runner,
             repair_build_context=repair_build_context,
+            no_redact_derived=bool(getattr(args, "no_redact_derived", False)),
             project_root=root,
             builtin_skill_names=builtin_skill_names,
             skills_digest=test_skills_digest,

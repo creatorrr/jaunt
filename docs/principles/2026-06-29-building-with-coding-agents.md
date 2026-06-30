@@ -63,6 +63,7 @@ document:
 | **L11** | Rewrite from the spec, not the code | Regeneration is cheap now — and as safe as your contract is complete. | Point a newer model at the unchanged docstring; the committed battery proves the rewrite. |
 | **L12** | Treat everything the model reads and pulls as untrusted | Prompt injection and slopsquatting are input, not edge cases. | The build fails if generated code imports a package absent from your declared deps. |
 | **L13** | Make engineering compound | Each task should leave the system better at the next one. | Every fixed bug becomes a battery case, so it can't silently regress. |
+| **L14** | Keep the checker independent of the author | Tests are a held-out set; an oracle the implementer can see is one it games. | Hand the implementer pass/fail, never `expected 42, got 41` — the diff is the answer key, not feedback. |
 
 ### How to use this document
 
@@ -80,7 +81,7 @@ is a feature — it marks where judgment, not a rule, must live.
 
 ## 1. Building with coding agents (developer altitude)
 
-*Dominant laws at this altitude: **L1, L3, L4, L6, L8** — and where L11–L13 first
+*Dominant laws at this altitude: **L1, L3, L4, L6, L8, L14** — and where L11–L13 first
 surface. The unit is one engineer directing one or a few agents inside a real
 codebase.*
 
@@ -321,6 +322,67 @@ wrong when it is wrong, so it still needs the L4 backstop. And local models lag 
 models in capability; the narrower and more preprocessed the question, the safer the
 substitution, which is why the preprocessing comes first.
 
+### 1.19 Treat tests as a held-out set; keep the implementer and tester blind to each other. (L14, L4)
+The check in 1.1 is only honest if the code's author did not write it to pass: a
+retrofitted test blesses whatever the agent already did (1.1's own tension), and a test
+written while staring at the implementation just restates it. The fix is the oldest one in
+evaluation — a **held-out set**. Split the harness into two agents, an **Implementer** and
+a **Tester**, with an information barrier between them: neither reads the other's source,
+and their only shared ground truth is the spec. Three lineages already learned this the
+hard way — **independent verification & validation** (aerospace keeps the V&V team
+organizationally separate so it cannot inherit the dev team's blind spots), the
+**Chinese-wall / Brewer–Nash** information barrier from finance, and the ML
+**train/test split** (let the model touch the test set and the accuracy number is fiction).
+It is **Goodhart's law** with a compiler: once *passing the test* is the target, the test
+stops measuring — an agent optimizing a visible suite is doing **reward hacking** by another
+name. This is not hypothetical. Recent benchmarks measure agents doing exactly it:
+SpecBench finds a "reward-hacking gap" between pass rates on the visible per-feature suite
+an agent iterates against and the held-out suite that composes those features; ImpossibleBench
+mutates tests to conflict with the spec and scores how often agents take the spec-violating
+shortcut; EvilGenie catches frontier agents (Codex, Claude Code) hardcoding expected outputs
+and editing test files when the environment makes it easy.
+
+The barrier is **asymmetric**, and that is the subtle part. Source-blindness is symmetric;
+*output*-blindness is not, because **a test's output can contain the answer key and an
+implementation's output cannot.** The Tester may freely run the Implementation as a black
+box — observing that it returns `41` leaks nothing, because the Tester derived the expected
+`42` from the spec independently. The Tester's hazard runs the other way: if it derives its
+expectations *from* observed behavior, the tests collapse into characterization snapshots
+that bless bugs as correct — the classic **test-oracle problem**, where the verdict of
+correctness must come from the spec, a reference model, or a metamorphic relation, never
+from the system under test. The Implementer is held stricter: a failing assertion
+(`expected 42, got 41`) literally hands over the held-out target, so it must receive a
+**bounded, redacted** signal, not the raw failure.
+
+And "coarse pass/fail" is not enough on its own — Dwork et al.'s reusable-holdout result is
+blunt: query a held-out set enough times and you overfit it even at one bit of feedback per
+round, because many rounds turn the gate into a search oracle. So the real shape is
+**tiered**: a generous *public* suite the Implementer owns and sees in full (diffs, traces —
+game it freely, it is not the gate); a *private* validation tier that returns only a
+contract-area label, no inputs or expected values; and a *final* held-out tier that returns
+one suite-level pass/fail at low attempt count. Even test *names* leak —
+`test_empty_list_returns_zero` is already an answer — so the private tiers use opaque ids or
+broad contract-clause names. This also dissolves the obvious objection ("redact the feedback
+and the agent can't debug"): the public tier is exactly where it debugs; only the gate is
+held out.
+
+Finally — the move that makes this work with agents specifically — **state the discipline
+*and its rationale* to both agents, as policy and not just setup.** Told it will never see
+the tests and gets only a verdict, the Implementer cannot specialize to specific cases and
+instead invests in covering the whole contract; told the Implementer is blind, the Tester
+treats its suite as the real gate and writes adversarial coverage rather than a mirror. Make
+it explicit: instruct the Implementer not to probe, infer, or specialize to the hidden tests,
+and instruct the Tester to commit its oracle logic *before* observing behavior (or to mark
+any behavior-driven finding as non-oracular until re-derived from the spec). The analogy is a
+closed-book exam graded by an independent examiner — announcing it in advance changes how you
+study.
+**Tension:** independence assumes a spec good enough to *be* the shared oracle (1.6, 3.2) —
+with a thin contract, the held-out tests silently *become* the requirements, and a wall built
+too high just starves the Implementer of the context it needs to resolve genuine ambiguity.
+And the independence can be illusory: two agents on the same base model with the same prompt
+share blind spots, so the barrier buys less than it looks unless the two are genuinely
+diversified — a different model, a different framing, or an adversarial tester.
+
 ---
 
 ## 2. Through the jaunt lens (tool altitude)
@@ -399,6 +461,20 @@ steadytext would be the natural completion).
   configurable `sandbox` (`workspace-write`, etc.), so generation has bounded blast radius
   by design. The surface jaunt uniquely opens: generated code can embed a hallucinated or
   injection-suggested import, which no general-purpose guard catches (see roadmap item 8).
+- **L14 — keep the checker independent of the author.** *(half shipped)* Jaunt already
+  enforces the **tester-side** held-out discipline, at two layers: the test generator's
+  context never includes generated implementation source (`dependency_generated_modules` is
+  empty for tests — it gets only public dependency signatures and the contract), and
+  `public_api_only` (on by default) rejects tests that import the generated module, touch
+  `__globals__`/private attributes, or monkeypatch the target — with a deliberate
+  `@jaunt.test(public_api_only=False)` white-box opt-out. The **implementer-side** barrier,
+  by contrast, holds only *incidentally*: `jaunt test` builds before it generates tests, so
+  the concrete assertions don't exist when the implementation is written — but nothing
+  *enforces* it, and the implementer does see attached test *stubs* (intent, which is
+  fairly part of the shared spec). The moment a test-driven *repair* loop is added (rebuild
+  to make failing tests pass), L14 demands the tiered, query-bounded feedback of 1.19 —
+  pass/fail, never the assertion diff — or the held-out oracle leaks straight back in
+  (roadmap item 9).
 
 ### 2.2 Positioning against the field
 
@@ -481,12 +557,20 @@ correctness ones are closed. Numbering below is by topic, not priority.
    It is a model-free gate (fits L4) and it closes the one supply-chain hole a codegen tool
    uniquely opens. This is arguably more urgent than items 5–7, because it is a
    *correctness/security* gap, not an efficiency one.
+9. **Make the implementer-side held-out barrier explicit, not incidental. (L14, L4)** The
+   tester-side is enforced (§2.1); the implementer-side holds only because build precedes
+   test generation. *Before* adding any test-driven repair loop, tier the feedback the
+   implementer receives — full diffs from a public/dev suite it owns, only a contract-area
+   label from the committed battery, and a final suite-level pass/fail — so a repair loop
+   cannot binary-search the committed tests (Dwork's adaptive-holdout failure). Cheap,
+   model-free, and a prerequisite for *safe* auto-repair rather than a way to teach the
+   implementer the answer key.
 
 ---
 
 ## 3. Building software factories (organization altitude)
 
-*Dominant laws at this altitude: **L1, L7, L10, L12, L13.** The unit is a pipeline that
+*Dominant laws at this altitude: **L1, L7, L10, L12, L13, L14.** The unit is a pipeline that
 turns specifications into verified, integrated changes — at the scale of many agents and
 many repositories.*
 
@@ -589,7 +673,22 @@ security, the design system. Slice too thin and they duplicate or quietly diverg
 exactly those; the craft is cutting along genuine seams, and some concerns must stay
 horizontal and shared.
 
-### 3.14 Historical callout — learn from why the first software factories stalled.
+### 3.14 Keep generation and verification independent — at the org level too. (L14, L7)
+The held-out discipline of 1.19 is also an *organizational* control. At fleet scale, the
+agents (or teams) that author implementations and the ones that author the acceptance oracle
+should be independent — the way safety-critical shops keep **IV&V** organizationally separate
+from development (NASA/IEEE split it into technical, managerial, and financial independence).
+The factory's held-out set becomes an institution: a private acceptance suite, owned by the
+verification side, that no implementer fleet can read or edit, feeding back tiered,
+query-budgeted signals rather than raw diffs. And diversify the two sides — different models
+or framings — because a fleet that implements *and* grades with one model has one set of
+blind spots, not two.
+**Tension:** independence is one more coordination cost and one more queue (3.6, 3.12), and a
+verification side too isolated from intent rejects correct work for the wrong reasons — so it
+only nets out if the shared oracle is a genuinely good spec, the very thing 3.2 names as
+scarce.
+
+### 3.15 Historical callout — learn from why the first software factories stalled.
 > Microsoft's Software Factories (Greenfield & Short, 2004) got the durable part right:
 > reuse of domain assets, software product lines, raising the abstraction above
 > hand-coding. They got the fatal part wrong: they demanded heavy upfront formalism
@@ -666,6 +765,17 @@ tension is propaganda — so each is stated honestly, followed by **our current 
    these principles (durable spec, contract captured) **and** there is a well-defined
    ground truth (a real battery). Absent either, preserve. The conditions are the whole
    answer.
+9. **Held-out independence vs. debuggability (and the spec it assumes).** Treating tests as
+   a held-out set and keeping the implementer blind to them (1.19) prevents gaming — but a
+   strict barrier starves the implementer of context for genuine ambiguity, and the whole
+   construction assumes a spec good enough to be the shared oracle (tensions 2, 6; 3.2).
+   Push independence too far and you either rebuild forever against a thin spec or hide a
+   bug behind a tester that misread intent.
+   **Stance:** tier the barrier, don't make it a wall. The implementer owns a generous
+   public suite it sees in full; only the committed battery is held out, with redacted,
+   query-bounded feedback. Independence pays most when the two agents are diversified
+   (different model or framing) — two clones of one model share blind spots, and the barrier
+   then buys little.
 
 ---
 
@@ -768,3 +878,40 @@ tension is propaganda — so each is stated honestly, followed by **our current 
   failure. https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/
 - Every, *Compound Engineering Gets an Upgrade* — the pattern is still evolving; treat it
   as a practice to test, not settled evidence. https://every.to/p/compound-engineering-gets-an-upgrade
+
+**Independence & held-out verification (Part 1 §1.19 / L14):**
+- Dwork, Feldman, Hardt, Pitassi, Reingold & Roth, *Generalization in Adaptive Data Analysis
+  and Holdout Reuse* (NeurIPS 2015) — querying a held-out set adaptively overfits it even at
+  one bit of feedback per round. https://arxiv.org/abs/1506.02629 — companion *Science* (2015)
+  paper, *The reusable holdout: Preserving validity in adaptive data analysis*.
+  https://www.science.org/doi/10.1126/science.aaa9375
+- NIST CSRC glossary, *Independent Verification & Validation (IV&V)* — review, analysis, and
+  testing by an objective third party, independent of development (NASA/IEEE split it into
+  technical, managerial, and financial independence).
+  https://csrc.nist.gov/glossary/term/independent_verification_and_validation
+- Brewer & Nash, *The Chinese Wall Security Policy* (IEEE S&P 1989) — the access-control
+  lineage for conflict-of-interest information barriers.
+  https://www.cs.purdue.edu/homes/ninghui/readings/AccessControl/brewer_nash_89.pdf
+- Barr, Harman, McMinn, Shahbaz & Yoo, *The Oracle Problem in Software Testing: A Survey*
+  (IEEE TSE 2015) — the verdict of correctness must come from an oracle (spec, reference
+  model, metamorphic relation), never from the system under test.
+  https://doi.org/10.1109/TSE.2014.2372785
+- Amodei et al., *Concrete Problems in AI Safety* (2016) — names **reward hacking** as a
+  concrete failure; pair with DeepMind, *Specification gaming: the flip side of AI ingenuity*.
+  https://arxiv.org/abs/1606.06565 ·
+  https://deepmind.google/discover/blog/specification-gaming-the-flip-side-of-ai-ingenuity/
+- Manheim & Garrabrant, *Categorizing Variants of Goodhart's Law* (2018) — once the metric is
+  the target it stops measuring; the formal frame behind "tests as a decision metric."
+  https://arxiv.org/abs/1803.04585
+- Recent coding-agent evidence that agents game visible tests:
+  - Jimenez et al., *SWE-bench: Can Language Models Resolve Real-World GitHub Issues?* (2023) —
+    repo-level issue resolution as the standard evaluation setting. https://arxiv.org/abs/2310.06770
+  - *SpecBench: Measuring Reward Hacking in Long-Horizon Coding Agents* (2026) — measures a
+    "reward-hacking gap" between visible per-feature tests and a held-out compositional suite.
+    https://arxiv.org/abs/2605.21384
+  - *ImpossibleBench: Measuring LLMs' Propensity of Exploiting Test Cases* (2025) — mutates
+    tests to conflict with the spec; any pass is a spec-violating shortcut.
+    https://arxiv.org/abs/2510.20270
+  - *EvilGenie: A Reward Hacking Benchmark* (2025) — catches frontier agents (Codex, Claude
+    Code) hardcoding outputs and editing test files when the environment makes it easy.
+    https://arxiv.org/abs/2511.21654

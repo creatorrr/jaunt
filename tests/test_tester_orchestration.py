@@ -276,6 +276,10 @@ def test_generated():
     assert result.exit_code == 0
     assert backend.extra_contexts[0] is None
     assert backend.extra_contexts[1] is not None
-    assert any(
-        "assert False" in line or "FAILED" in line for line in backend.extra_contexts[1] or []
-    )
+    # The generated test carries no jaunt_tier marker, so it is treated as
+    # derived-tier and the repair feedback is redacted: the Implementer sees
+    # only an opaque id + exception class, never the raw "assert False" detail.
+    repair_context = backend.extra_contexts[1] or []
+    assert any("derived#" in line for line in repair_context)
+    assert any("AssertionError" in line for line in repair_context)
+    assert all("assert False" not in line for line in repair_context)
