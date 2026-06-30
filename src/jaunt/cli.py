@@ -1065,6 +1065,24 @@ def cmd_status(args: argparse.Namespace) -> int:
         source_dirs = [root / sr for sr in cfg.paths.source_roots]
         _prepend_sys_path([*source_dirs, root])
 
+        tree_drift = None
+        if cfg.context.repo_map:
+            from jaunt.repo_context import api as rc_api
+
+            try:
+                d = rc_api.check_drift(root=root, cfg=cfg)
+                tree_drift = (
+                    None
+                    if d is None
+                    else {
+                        "added": len(d.added),
+                        "removed": len(d.removed),
+                        "restaled": len(d.restaled),
+                    }
+                )
+            except Exception:  # noqa: BLE001
+                tree_drift = None
+
         from jaunt import discovery, registry
         from jaunt.deps import build_spec_graph, collapse_to_module_dag
 
@@ -1144,6 +1162,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                         "fresh": [],
                         "contracts": contract_rows,
                         "contract_review": sorted(review_refs),
+                        "tree": tree_drift,
                     }
                 )
             else:
@@ -1154,6 +1173,8 @@ def cmd_status(args: argparse.Namespace) -> int:
                     for row in contract_rows:
                         flag = " [review]" if row["review"] else ""
                         print(f"- {row['ref']}: {row['state']} (strength {row['strength']})" + flag)
+                if tree_drift is not None:
+                    print(f"tree: {tree_drift} (run jaunt tree)")
             return EXIT_OK
 
         infer_default = bool(cfg.build.infer_deps) and (not bool(args.no_infer_deps))
@@ -1235,6 +1256,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                     "fresh": sorted(fresh),
                     "contracts": contract_rows,
                     "contract_review": sorted(review_refs),
+                    "tree": tree_drift,
                 }
             )
         else:
@@ -1252,6 +1274,8 @@ def cmd_status(args: argparse.Namespace) -> int:
                 for row in contract_rows:
                     flag = " [review]" if row["review"] else ""
                     print(f"- {row['ref']}: {row['state']} (strength {row['strength']})" + flag)
+            if tree_drift is not None:
+                print(f"tree: {tree_drift} (run jaunt tree)")
 
         return EXIT_OK
     except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError, KeyError) as e:
