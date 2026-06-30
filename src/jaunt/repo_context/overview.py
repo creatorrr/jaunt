@@ -1,0 +1,106 @@
+"""Digest-cached, model-written project-overview generator."""
+
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+
+from jaunt.generate.shared import load_prompt, render_template
+from jaunt.registry import SpecEntry
+
+
+_DOC_SOURCES = (
+    ("README.md", "README"),
+    ("AGENTS.md", "AGENTS.md"),
+    ("CLAUDE.md", "CLAUDE.md"),
+)
+
+
+def _doc_intro(path: Path, max_chars: int) -> str:
+    text = path.read_text(encoding="utf-8")
+    out_lines: list[str] = []
+    for line in text.splitlines():
+        if out_lines and line.startswith("## "):
+            break
+        out_lines.append(line)
+    intro = "\n".join(out_lines).strip()
+    if len(intro) > max_chars:
+        intro = intro[:max_chars].rstrip() + "\n...[truncated]"
+    return intro
+
+
+def build_project_docs_block(root: Path, *, max_chars: int) -> str:
+    """Inject README and AGENTS/CLAUDE intros (each capped). AGENTS preferred over CLAUDE."""
+    sections: list[str] = []
+    seen_agent_doc = False
+    for filename, heading in _DOC_SOURCES:
+        if heading in ("AGENTS.md", "CLAUDE.md"):
+            if seen_agent_doc:
+                continue  # AGENTS.md wins if both exist (often a symlink anyway)
+        path = root / filename
+        if not path.is_file():
+            continue
+        intro = _doc_intro(path, max_chars)
+        if not intro:
+            continue
+        if heading in ("AGENTS.md", "CLAUDE.md"):
+            seen_agent_doc = True
+        sections.append(f"### {heading}\n{intro}")
+    return "\n\n".join(sections)
+
+
+def project_spec_digest(module_specs: dict[str, list[SpecEntry]], repo_map_block: str) -> str:
+    """SHA-256 over sorted spec sources and the repo map block."""
+    h = hashlib.sha256()
+    for module_name in sorted(module_specs):
+        for entry in module_specs[module_name]:
+            h.update(str(entry.spec_ref).encode())
+            h.update(b"\x00")
+            h.update(Path(entry.source_file).read_text(encoding="utf-8").encode())
+            h.update(b"\x00")
+    h.update(repo_map_block.encode())
+    return h.hexdigest()
+
+
+async def load_or_build_overview(
+    backend,
+    *,
+    repo_map_block: str,
+    project_docs: str,
+    digest: str,
+    state_dir: Path,
+    enabled: bool,
+    prompts,
+) -> str:
+    """Return cached or freshly-generated project overview prose.
+
+    Returns '' immediately when enabled is False.
+    Uses state_dir/PROJECT_OVERVIEW.md as cache; invalidates when
+    state_dir/project_overview.digest does not match digest.
+    """
+    if not enabled:
+        return ""
+    overview_path = state_dir / "PROJECT_OVERVIEW.md"
+    digest_path = state_dir / "project_overview.digest"
+    if (
+        digest_path.is_file()
+        and digest_path.read_text(encoding="utf-8").strip() == digest
+        and overview_path.is_file()
+    ):
+        return overview_path.read_text(encoding="utf-8")
+
+    system = load_prompt(
+        "project_overview_system.md",
+        getattr(prompts, "project_overview_system", None) or None,
+    )
+    user_tmpl = load_prompt(
+        "project_overview_user.md",
+        getattr(prompts, "project_overview_user", None) or None,
+    )
+    user = render_template(user_tmpl, {"project_docs": project_docs, "repo_map": repo_map_block})
+    prose = (await backend.complete_text(system=system, user=user)).strip()
+
+    state_dir.mkdir(parents=True, exist_ok=True)
+    overview_path.write_text(prose, encoding="utf-8")
+    digest_path.write_text(digest, encoding="utf-8")
+    return prose
