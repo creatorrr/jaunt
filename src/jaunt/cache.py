@@ -109,7 +109,7 @@ def cache_key_from_context(
     h.update(b"\x00")
     h.update((ctx.relevant_context_block or "").encode())
     h.update(b"\x00")
-    h.update((getattr(ctx, "project_overview_block", "") or "").encode())
+    h.update((ctx.project_overview_block or "").encode())
     h.update(b"\x00")
     h.update(generation_fingerprint.encode())
     return h.hexdigest()

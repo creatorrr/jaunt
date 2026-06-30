@@ -6,7 +6,8 @@ import sys
 from pathlib import Path
 
 import jaunt.cli
-from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
+from jaunt.generate.codex_backend import CodexBackend
+from jaunt.generate.base import ModuleSpecContext
 
 
 def _write(path: Path, text: str) -> None:
@@ -72,30 +73,13 @@ def _make_cli_build_project_with_overview(root: Path) -> tuple[Path, str]:
     return project, "app"
 
 
-class _OverviewCapturingBackend(GeneratorBackend):
-    """Backend that captures the full prompt from _build_prompt and returns valid stubs."""
+def test_overview_block_appears_in_rendered_prompt(tmp_path: Path, monkeypatch) -> None:
+    """When context.overview = true, 'OVERVIEW PROSE' appears in the rendered _build_prompt.
 
-    def __init__(self) -> None:
-        self.captured_prompts: list[str] = []
-
-    async def generate_module(
-        self, ctx: ModuleSpecContext, *, extra_error_context: list[str] | None = None
-    ) -> tuple[str, None]:
-        # Build the prompt the same way CodexBackend would so we can inspect it.
-        # We reach into the codex backend's _build_prompt via the context.
-        # Since we are the backend and we receive ctx, we store the overview block.
-        self.captured_prompts.append(getattr(ctx, "project_overview_block", "") or "")
-        lines: list[str] = []
-        for name in ctx.expected_names:
-            lines.append(f"def {name}() -> None:\n    assert True\n")
-        return "\n".join(lines).rstrip() + "\n", None
-
-    async def complete_text(self, *, system: str, user: str) -> str:
-        return "OVERVIEW PROSE"
-
-
-def test_overview_block_propagated_to_ctx_when_enabled(tmp_path: Path, monkeypatch) -> None:
-    """When context.overview = true, project_overview_block arrives on each ModuleSpecContext."""
+    Uses the real CodexBackend so that _build_prompt assembles the prompt exactly as
+    production does. Only complete_text (returns the overview prose) and generate_module
+    (captures the rendered prompt, returns valid stubs) are monkeypatched.
+    """
     project, prefix = _make_cli_build_project_with_overview(tmp_path)
     before = {
         prefix: sys.modules.get(prefix),
@@ -103,8 +87,24 @@ def test_overview_block_propagated_to_ctx_when_enabled(tmp_path: Path, monkeypat
     }
     orig_sys_path = list(sys.path)
 
-    backend = _OverviewCapturingBackend()
-    monkeypatch.setattr(jaunt.cli, "_build_backend", lambda cfg: backend)
+    captured: dict[str, str] = {}
+
+    async def _fake_complete_text(self: CodexBackend, *, system: str, user: str) -> str:
+        return "OVERVIEW PROSE"
+
+    async def _fake_generate_module(
+        self: CodexBackend,
+        ctx: ModuleSpecContext,
+        *,
+        extra_error_context: list[str] | None = None,
+    ) -> tuple[str, None]:
+        # Render the full prompt exactly as the real backend would.
+        captured["prompt"] = self._build_prompt(ctx, Path("x.py"), None)
+        lines = [f"def {name}() -> None:\n    assert True\n" for name in ctx.expected_names]
+        return "\n".join(lines).rstrip() + "\n", None
+
+    monkeypatch.setattr(CodexBackend, "complete_text", _fake_complete_text)
+    monkeypatch.setattr(CodexBackend, "generate_module", _fake_generate_module)
 
     try:
         rc = jaunt.cli.main(["build", "--root", str(project)])
@@ -113,14 +113,14 @@ def test_overview_block_propagated_to_ctx_when_enabled(tmp_path: Path, monkeypat
         _restore_modules([prefix], before=before)
 
     assert rc == jaunt.cli.EXIT_OK
-    assert backend.captured_prompts, "generate_module was never called — no prompts captured"
-    assert all("OVERVIEW PROSE" in p for p in backend.captured_prompts), (
-        f"Expected 'OVERVIEW PROSE' in project_overview_block, got: {backend.captured_prompts!r}"
+    assert "prompt" in captured, "generate_module was never called — no prompt captured"
+    assert "OVERVIEW PROSE" in captured["prompt"], (
+        f"Expected 'OVERVIEW PROSE' in rendered prompt, got:\n{captured['prompt'][:500]}"
     )
 
 
 def test_overview_block_absent_when_disabled(tmp_path: Path, monkeypatch) -> None:
-    """When context.overview = false (default), project_overview_block is empty."""
+    """When context.overview = false (default), complete_text is never called."""
     project = tmp_path / "proj2"
     project.mkdir(parents=True, exist_ok=True)
     _write(
@@ -162,8 +162,25 @@ def test_overview_block_absent_when_disabled(tmp_path: Path, monkeypatch) -> Non
     }
     orig_sys_path = list(sys.path)
 
-    backend = _OverviewCapturingBackend()
-    monkeypatch.setattr(jaunt.cli, "_build_backend", lambda cfg: backend)
+    complete_text_called = {"count": 0}
+    captured: dict[str, str] = {}
+
+    async def _fake_complete_text(self: CodexBackend, *, system: str, user: str) -> str:
+        complete_text_called["count"] += 1
+        return "SHOULD NOT APPEAR"
+
+    async def _fake_generate_module(
+        self: CodexBackend,
+        ctx: ModuleSpecContext,
+        *,
+        extra_error_context: list[str] | None = None,
+    ) -> tuple[str, None]:
+        captured["prompt"] = self._build_prompt(ctx, Path("x.py"), None)
+        lines = [f"def {name}() -> None:\n    assert True\n" for name in ctx.expected_names]
+        return "\n".join(lines).rstrip() + "\n", None
+
+    monkeypatch.setattr(CodexBackend, "complete_text", _fake_complete_text)
+    monkeypatch.setattr(CodexBackend, "generate_module", _fake_generate_module)
 
     try:
         rc = jaunt.cli.main(["build", "--root", str(project)])
@@ -172,8 +189,10 @@ def test_overview_block_absent_when_disabled(tmp_path: Path, monkeypatch) -> Non
         _restore_modules([prefix], before=before)
 
     assert rc == jaunt.cli.EXIT_OK
-    assert backend.captured_prompts, "generate_module was never called — no prompts captured"
-    # complete_text should NOT have been called, and overview block should be empty
-    assert all(p == "" for p in backend.captured_prompts), (
-        f"Expected empty project_overview_block when disabled, got: {backend.captured_prompts!r}"
+    assert "prompt" in captured, "generate_module was never called — no prompt captured"
+    assert complete_text_called["count"] == 0, (
+        "complete_text should NOT be called when overview is disabled"
+    )
+    assert "SHOULD NOT APPEAR" not in captured["prompt"], (
+        f"Overview prose leaked into prompt when disabled:\n{captured['prompt'][:500]}"
     )
