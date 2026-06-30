@@ -42,7 +42,7 @@ Two weaknesses make this needlessly expensive:
    contract.
 
 The fix is two independent layers: a deterministic digest that ignores cosmetic
-noise (Layer A), and a cheap `gpt-5.4-nano` gate that judges whether a *real* text
+noise (Layer A), and a cheap `gpt-5.4-mini` gate that judges whether a *real* text
 change is behaviorally meaningful before paying for `gpt-5.5` (Layer B).
 
 ## 2. Goals / Non-goals
@@ -51,7 +51,7 @@ change is behaviorally meaningful before paying for `gpt-5.5` (Layer B).
 - Ruff reformatting, comment edits, and whitespace/quote/indent changes to specs
   **never** trigger a rebuild (deterministic, no model call, build + test).
 - A genuine but **behaviorally-equivalent docstring reword** does not trigger a
-  `gpt-5.5` rebuild: a `gpt-5.4-nano@high` gate judges it and the module is
+  `gpt-5.5` rebuild: a `gpt-5.4-mini@high` gate judges it and the module is
   **re-frozen** (header digests rewritten on the unchanged, validated body) instead.
 - Never silently skip a *needed* rebuild (low false-KEEP): fail-safe to REBUILD on
   any ambiguity, error, structural change, or failed validation.
@@ -177,7 +177,7 @@ contracts and diff against the stored per-spec sub-digests:
    missing) → classify the spec **MEANINGFUL**. No model call.
 2. **Prose-only change** (only the prose sub-digest differs) → **Layer B nano call**:
 
-   > Prompt (read-only `codex exec`, model `gpt-5.4-nano`, `reasoning_effort=high`):
+   > Prompt (read-only `codex exec`, model `gpt-5.4-mini`, `reasoning_effort=high`):
    > "A Python symbol's behavioral contract is its docstring. Signature is
    > unchanged: `<signature>`. OLD docstring: `<old prose>`. NEW docstring:
    > `<new prose>`. Does the NEW docstring demand any behavior the OLD one did not,
@@ -238,7 +238,7 @@ gates a fresh build would.
 ```toml
 [semantic_gate]
 enabled = true                # default-on, conservative
-model = "gpt-5.4-nano"
+model = "gpt-5.4-mini"
 reasoning_effort = "high"
 ```
 

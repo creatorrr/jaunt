@@ -42,6 +42,7 @@ from jaunt.cost import CostTracker
 from jaunt.digest import (
     contract_snapshot,
     extract_source_segment,
+    legacy_module_digest,
     module_digest,
     prose_digest,
     structural_digest,
@@ -307,6 +308,23 @@ def _test_module_digest(
     return hashlib.sha256(raw).hexdigest()
 
 
+def _legacy_test_module_digest(
+    module_name: str,
+    entries: list[SpecEntry],
+    specs: dict[SpecRef, SpecEntry],
+    spec_graph: dict[SpecRef, set[SpecRef]],
+) -> str:
+    """Recompute the old (scheme-1) test module digest for migration detection.
+
+    Auto test modules hash raw test-spec source already (scheme-independent), so
+    only non-auto modules need the legacy raw-source local digest.
+    """
+
+    if not _is_auto_test_module(module_name):
+        return legacy_module_digest(module_name, entries, specs, spec_graph)
+    return _test_module_digest(module_name, entries, specs, spec_graph)
+
+
 def _resolve_test_roots(
     *,
     project_dir: Path,
@@ -485,6 +503,7 @@ def _write_generated_test_module(
             break
 
     local_fields = dict(header_fields)
+    local_fields.pop("legacy_module_digest", None)
     if spec_digests is not None:
         local_fields["spec_digests"] = spec_digests
         local_fields["digest_scheme"] = 2
@@ -582,7 +601,11 @@ def refreeze_test_module(
 
 
 def _migration_test_header_matches(existing: str, header_fields: dict[str, object]) -> bool:
-    if not _header_field_matches(existing, header_fields, "module_digest", extract_module_digest):
+    # Match the on-disk (scheme-1) test module digest against the recomputed legacy
+    # digest, not the new normalized one (see builder._migration_header_matches).
+    if not _header_field_matches(
+        existing, header_fields, "legacy_module_digest", extract_module_digest
+    ):
         return False
     return all(
         (

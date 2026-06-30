@@ -6,6 +6,7 @@ import ast
 import hashlib
 import json
 import textwrap
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -356,6 +357,7 @@ def graph_digest(
     spec_graph: dict[SpecRef, set[SpecRef]],
     *,
     cache: dict[SpecRef, str] | None = None,
+    local_fn: Callable[[SpecEntry], str] = local_digest,
 ) -> str:
     """Digest for a spec including transitive dependency digests (memoized)."""
 
@@ -369,7 +371,7 @@ def graph_digest(
             raise JauntDependencyCycleError(f"Dependency cycle detected while hashing: {sr!s}")
 
         visiting.add(sr)
-        local = local_digest(specs[sr])
+        local = local_fn(specs[sr])
         dep_digests = [
             compute(dep) for dep in sorted(spec_graph.get(sr, set()), key=lambda x: str(x))
         ]
@@ -387,16 +389,45 @@ def module_digest(
     module_specs: list[SpecEntry],
     specs: dict[SpecRef, SpecEntry],
     spec_graph: dict[SpecRef, set[SpecRef]],
+    *,
+    local_fn: Callable[[SpecEntry], str] = local_digest,
 ) -> str:
     """Digest for a module based on the graph_digests of its specs."""
 
     cache: dict[SpecRef, str] = {}
     digests: list[str] = []
     for entry in sorted(module_specs, key=lambda e: str(e.spec_ref)):
-        digests.append(graph_digest(entry.spec_ref, specs, spec_graph, cache=cache))
+        digests.append(
+            graph_digest(entry.spec_ref, specs, spec_graph, cache=cache, local_fn=local_fn)
+        )
 
     payload = "\n".join(sorted(digests)).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def legacy_local_digest(entry: SpecEntry) -> str:
+    """Pre-scheme-2 local digest: raw source segment + normalized decorator kwargs.
+
+    Kept only so the migration escape hatch can recompute the *old* (scheme-1)
+    module digest and recognize a generated file as genuinely fresh under the old
+    scheme. Must stay byte-identical to the pre-normalization ``local_digest``.
+    """
+
+    seg = extract_source_segment(entry)
+    return _sha(seg + "\n" + _stable_decorator_kwargs(entry))
+
+
+def legacy_module_digest(
+    module_name: str,
+    module_specs: list[SpecEntry],
+    specs: dict[SpecRef, SpecEntry],
+    spec_graph: dict[SpecRef, set[SpecRef]],
+) -> str:
+    """Recompute the old (scheme-1) module digest for migration detection."""
+
+    return module_digest(
+        module_name, module_specs, specs, spec_graph, local_fn=legacy_local_digest
+    )
 
 
 @dataclass(frozen=True, slots=True)

@@ -1512,6 +1512,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                 module_digest_fn = builder.module_digest
             except AttributeError:
                 from jaunt.digest import module_digest as module_digest_fn
+            from jaunt.digest import legacy_module_digest
 
             header_fields_by_module: dict[str, dict[str, object]] = {}
             for module_name in expanded_stale:
@@ -1523,6 +1524,9 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                     "kind": "build",
                     "source_module": module_name,
                     "module_digest": module_digest_fn(module_name, entries, specs, spec_graph),
+                    "legacy_module_digest": legacy_module_digest(
+                        module_name, entries, specs, spec_graph
+                    ),
                     "generation_fingerprint": build_generation_fingerprint,
                     "module_context_digest": build_module_context_digests.get(module_name, ""),
                     "module_api_digest": module_api_digest(entries),
@@ -1889,6 +1893,12 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
                     "kind": "test",
                     "source_module": module_name,
                     "module_digest": tester._test_module_digest(
+                        module_name,
+                        entries,
+                        specs,
+                        spec_graph,
+                    ),
+                    "legacy_module_digest": tester._legacy_test_module_digest(
                         module_name,
                         entries,
                         specs,

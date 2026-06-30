@@ -87,6 +87,7 @@ class _GateSpy:
         model: str,
         reasoning_effort: str,
         extra_config: dict[str, object] | None = None,
+        ignore_user_config: bool = False,
     ) -> SimpleNamespace:
         self.calls.append(
             {

@@ -126,7 +126,7 @@ class ContractConfig:
 @dataclass(frozen=True)
 class SemanticGateConfig:
     enabled: bool = True
-    model: str = "gpt-5.4-nano"
+    model: str = "gpt-5.4-mini"
     reasoning_effort: str = "high"
 
 
@@ -561,7 +561,7 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     if "model" in semantic_gate_tbl:
         semantic_gate_model = _as_str(semantic_gate_tbl["model"], name="semantic_gate.model")
     else:
-        semantic_gate_model = "gpt-5.4-nano"
+        semantic_gate_model = "gpt-5.4-mini"
 
     if "reasoning_effort" in semantic_gate_tbl:
         semantic_gate_reasoning_effort = _as_str(

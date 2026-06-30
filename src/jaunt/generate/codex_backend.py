@@ -90,6 +90,7 @@ async def run_codex_exec(
     model: str,
     reasoning_effort: str,
     extra_config: dict[str, object] | None = None,
+    ignore_user_config: bool = False,
 ) -> CodexExecResult:
     """Run `codex exec` once, passing *prompt* on stdin, and parse the JSONL events.
 
@@ -103,6 +104,12 @@ async def run_codex_exec(
         "codex",
         "exec",
         "--skip-git-repo-check",
+    ]
+    if ignore_user_config:
+        # Hermetic run: skip ~/.codex/config.toml so user MCP servers / web_search
+        # tools are not attached (faster, and avoids tools small models reject).
+        args.append("--ignore-user-config")
+    args += [
         "-C",
         cwd,
         "--sandbox",

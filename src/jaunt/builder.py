@@ -370,6 +370,7 @@ def refreeze_module(
     spec_digests = cast(dict[str, dict[str, str]] | None, header_fields.get("spec_digests"))
     local_fields = dict(header_fields)
     local_fields.pop("spec_digests", None)
+    local_fields.pop("legacy_module_digest", None)
     write_generated_module(
         package_dir=package_dir,
         generated_dir=generated_dir,
@@ -407,7 +408,12 @@ def _header_field_matches(
 
 
 def _migration_header_matches(existing: str, header_fields: dict[str, object]) -> bool:
-    if not _header_field_matches(existing, header_fields, "module_digest", extract_module_digest):
+    # Compare the on-disk (scheme-1, raw-source) module digest against the
+    # *recomputed legacy* digest, not the new normalized one -- otherwise a real
+    # pre-upgrade file never matches and every module gets rebuilt on first build.
+    if not _header_field_matches(
+        existing, header_fields, "legacy_module_digest", extract_module_digest
+    ):
         return False
     return all(
         (

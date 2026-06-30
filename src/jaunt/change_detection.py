@@ -119,6 +119,7 @@ async def gate_prose(
                 sandbox="read-only",
                 model=cfg.model,
                 reasoning_effort=cfg.reasoning_effort,
+                ignore_user_config=True,
             )
 
         final_message = getattr(result, "final_message", "")

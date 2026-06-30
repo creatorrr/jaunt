@@ -53,7 +53,7 @@
 
 ### `config.py` (Task CONFIG)
 - `@dataclass(frozen=True) SemanticGateConfig`: `enabled: bool = True`,
-  `model: str = "gpt-5.4-nano"`, `reasoning_effort: str = "high"`.
+  `model: str = "gpt-5.4-mini"`, `reasoning_effort: str = "high"`.
 - `JauntConfig.semantic_gate: SemanticGateConfig` (default factory).
 - Parse `[semantic_gate]` in `load_config` with the existing `_as_*` validators;
   validate `reasoning_effort in {"low","medium","high"}`.
