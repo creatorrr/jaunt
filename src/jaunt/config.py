@@ -52,6 +52,8 @@ class BuildConfig:
     ty_retry_attempts: int = 1
     async_runner: str = "asyncio"
     include_target_tests: bool = False
+    check_generated_imports: bool = True
+    generated_import_allowlist: list[str] = field(default_factory=list)
     instructions: list[str] = field(default_factory=list)
 
 
@@ -83,6 +85,7 @@ class CodexConfig:
     model: str = "gpt-5.5"
     reasoning_effort: str = "high"
     sandbox: str = "workspace-write"
+    fingerprint_cli_version: bool = True
     features: list[str] = field(default_factory=list)
     config: dict[str, Any] = field(default_factory=dict)
 
@@ -195,6 +198,15 @@ def _as_float(value: Any, *, name: str) -> float:
     return float(value)
 
 
+def _resolve_prompt_override(value: str, *, root: Path) -> str:
+    if not value:
+        return ""
+    path = Path(value)
+    if path.is_absolute():
+        return str(path)
+    return str((root / path).resolve())
+
+
 def load_config(*, root: Path | None = None, config_path: Path | None = None) -> JauntConfig:
     """Load and validate `jaunt.toml`.
 
@@ -211,6 +223,8 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             root = config_path.parent
 
     assert root is not None
+    root = root.resolve()
+    config_path = config_path.resolve()
 
     try:
         raw = config_path.read_bytes()
@@ -330,6 +344,22 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     else:
         include_target_tests = False
 
+    if "check_generated_imports" in build_tbl:
+        check_generated_imports = _as_bool(
+            build_tbl["check_generated_imports"],
+            name="build.check_generated_imports",
+        )
+    else:
+        check_generated_imports = True
+
+    if "generated_import_allowlist" in build_tbl:
+        generated_import_allowlist = _as_str_list(
+            build_tbl["generated_import_allowlist"],
+            name="build.generated_import_allowlist",
+        )
+    else:
+        generated_import_allowlist = []
+
     if "instructions" in build_tbl:
         build_instructions = _as_str_list(build_tbl["instructions"], name="build.instructions")
     else:
@@ -356,22 +386,34 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
         auto_class_tests = False
 
     if "build_system" in prompts_tbl:
-        build_system = _as_str(prompts_tbl["build_system"], name="prompts.build_system")
+        build_system = _resolve_prompt_override(
+            _as_str(prompts_tbl["build_system"], name="prompts.build_system"),
+            root=root,
+        )
     else:
         build_system = ""
 
     if "build_module" in prompts_tbl:
-        build_module = _as_str(prompts_tbl["build_module"], name="prompts.build_module")
+        build_module = _resolve_prompt_override(
+            _as_str(prompts_tbl["build_module"], name="prompts.build_module"),
+            root=root,
+        )
     else:
         build_module = ""
 
     if "test_system" in prompts_tbl:
-        test_system = _as_str(prompts_tbl["test_system"], name="prompts.test_system")
+        test_system = _resolve_prompt_override(
+            _as_str(prompts_tbl["test_system"], name="prompts.test_system"),
+            root=root,
+        )
     else:
         test_system = ""
 
     if "test_module" in prompts_tbl:
-        test_module = _as_str(prompts_tbl["test_module"], name="prompts.test_module")
+        test_module = _resolve_prompt_override(
+            _as_str(prompts_tbl["test_module"], name="prompts.test_module"),
+            root=root,
+        )
     else:
         test_module = ""
 
@@ -396,6 +438,14 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
         codex_sandbox = _as_str(codex_tbl["sandbox"], name="codex.sandbox").strip()
     else:
         codex_sandbox = "workspace-write"
+
+    if "fingerprint_cli_version" in codex_tbl:
+        codex_fingerprint_cli_version = _as_bool(
+            codex_tbl["fingerprint_cli_version"],
+            name="codex.fingerprint_cli_version",
+        )
+    else:
+        codex_fingerprint_cli_version = True
 
     if "features" in codex_tbl:
         codex_features = _as_str_list(codex_tbl["features"], name="codex.features")
@@ -548,6 +598,8 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             ty_retry_attempts=build_ty_retry_attempts,
             async_runner=async_runner,
             include_target_tests=include_target_tests,
+            check_generated_imports=check_generated_imports,
+            generated_import_allowlist=generated_import_allowlist,
             instructions=build_instructions,
         ),
         test=TestConfig(
@@ -567,6 +619,7 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             model=codex_model,
             reasoning_effort=codex_reasoning_effort,
             sandbox=codex_sandbox,
+            fingerprint_cli_version=codex_fingerprint_cli_version,
             features=codex_features,
             config=codex_config,
         ),

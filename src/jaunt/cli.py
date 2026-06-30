@@ -596,6 +596,10 @@ ty_retry_attempts = 1
 async_runner = "asyncio"
 # Keep target test source out of build prompts by default.
 include_target_tests = false
+# Deterministically reject generated imports that are not stdlib, declared
+# dependencies, first-party modules, or explicitly allowed extras.
+check_generated_imports = true
+# generated_import_allowlist = ["intentional_extra"]
 # Add persistent extra instructions that apply to build generation.
 # instructions = [
 #   "Prefer small composable helpers over monolithic functions.",
@@ -620,6 +624,8 @@ engine = "codex"
 model = "gpt-5.5"
 reasoning_effort = "high"
 sandbox = "workspace-write"
+# Include `codex --version` in build/test freshness fingerprints.
+# fingerprint_cli_version = true
 # features = []
 # Raw passthrough to `codex` (advanced):
 # [codex.config]
@@ -1494,6 +1500,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             repo_map_block=repo_map_block,
             search_enabled=search_enabled,
             search_max_hits=cfg.context.search.max_hits,
+            source_roots=[d for d in source_dirs if d.exists()],
             jobs=jobs,
             progress=progress,
             response_cache=response_cache,
@@ -1501,6 +1508,8 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             ty_retry_attempts=cfg.build.ty_retry_attempts,
             async_runner=cfg.build.async_runner,
             build_instructions=build_instructions,
+            check_generated_imports=cfg.build.check_generated_imports,
+            generated_import_allowlist=cfg.build.generated_import_allowlist,
             targeted_test_entries=targeted_test_entries,
             project_root=root,
             builtin_skill_names=builtin_skill_names,
@@ -1816,9 +1825,12 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             project_root=root,
             builtin_skill_names=builtin_skill_names,
             skills_digest=test_skills_digest,
+            source_roots=[d for d in source_dirs if d.exists()],
             jobs=int(cfg.build.jobs),
             async_runner=cfg.build.async_runner,
             build_instructions=build_instructions,
+            check_generated_imports=cfg.build.check_generated_imports,
+            generated_import_allowlist=cfg.build.generated_import_allowlist,
         )
 
         result = tester.run_tests(

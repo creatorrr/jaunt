@@ -603,11 +603,14 @@ class RepairBuildContext:
     generation_fingerprint: str
     targeted_test_entries: dict[str, list[SpecEntry]] = field(default_factory=dict)
     project_root: Path | None = None
+    source_roots: list[Path] = field(default_factory=list)
     builtin_skill_names: tuple[str, ...] = ()
     skills_digest: str = ""
     jobs: int = 1
     async_runner: str = "asyncio"
     build_instructions: list[str] = field(default_factory=list)
+    check_generated_imports: bool = True
+    generated_import_allowlist: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1185,9 +1188,12 @@ async def run_tests(
                 cost_tracker=cost_tracker,
                 async_runner=repair_build_context.async_runner,
                 project_root=repair_build_context.project_root,
+                source_roots=repair_build_context.source_roots,
                 builtin_skill_names=repair_build_context.builtin_skill_names,
                 skills_digest=repair_build_context.skills_digest,
                 build_instructions=repair_build_context.build_instructions,
+                check_generated_imports=repair_build_context.check_generated_imports,
+                generated_import_allowlist=repair_build_context.generated_import_allowlist,
                 initial_error_context_by_module={
                     module_name: repair_lines for module_name in implicated_build_modules
                 },

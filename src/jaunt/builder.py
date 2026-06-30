@@ -1028,6 +1028,7 @@ async def run_build(
     search_enabled: bool = False,
     search_max_hits: int = 8,
     project_root: Path | None = None,
+    source_roots: Sequence[Path] | None = None,
     builtin_skill_names: Sequence[str] = (),
     skills_digest: str = "",
     jobs: int = 4,
@@ -1037,6 +1038,8 @@ async def run_build(
     ty_retry_attempts: int | None = None,
     async_runner: str = "asyncio",
     build_instructions: Sequence[str] | None = None,
+    check_generated_imports: bool = True,
+    generated_import_allowlist: Sequence[str] | None = None,
     initial_error_context_by_module: dict[str, list[str]] | None = None,
     targeted_test_entries: dict[str, list[SpecEntry]] | None = None,
 ) -> BuildReport:
@@ -1053,8 +1056,58 @@ async def run_build(
     stale = expanded & set(module_specs.keys())
     skipped = set(module_specs.keys()) - stale
 
+    first_party_modules = {
+        generated_dir,
+        *(module_name.split(".", 1)[0] for module_name in module_specs),
+    }
+    generated_import_allowlist = tuple(generated_import_allowlist or ())
+    validation_source_roots = tuple(
+        (root if root.is_absolute() else package_dir / root).resolve()
+        for root in (source_roots or (package_dir,))
+    )
+
+    def _validate_skipped_generated_modules(modules: set[str]) -> dict[str, list[str]]:
+        if not check_generated_imports:
+            return {}
+        failures: dict[str, list[str]] = {}
+        for module_name in sorted(modules):
+            relpath = _generated_relpath(module_name, generated_dir=generated_dir)
+            gen_path = package_dir / relpath
+            try:
+                source = gen_path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                failures[module_name] = [f"Failed reading generated module: {exc}"]
+                continue
+            errs = validate_build_generated_source(
+                source,
+                [],
+                spec_module=module_name,
+                handwritten_names=(),
+                generated_module=paths.spec_module_to_generated_module(
+                    module_name, generated_dir=generated_dir
+                ),
+                project_dir=package_dir,
+                source_roots=validation_source_roots,
+                first_party_modules=first_party_modules,
+                check_imports=True,
+                import_allowlist=generated_import_allowlist,
+            )
+            if errs:
+                failures[module_name] = errs
+        return failures
+
+    # For a targeted build (`allowed_modules` set, e.g. `jaunt build --target`),
+    # `skipped` spans the whole project; only validate skipped modules within the
+    # requested closure so an unrelated, out-of-target module never fails a
+    # targeted build. A full build (`allowed_modules is None`) validates all skipped.
+    skipped_to_validate = skipped if allowed_modules is None else skipped & set(allowed_modules)
+    skipped_failures = _validate_skipped_generated_modules(skipped_to_validate)
+    skipped -= set(skipped_failures)
+
     if not stale:
-        return BuildReport(generated=set(), skipped=skipped, failed={})
+        return BuildReport(generated=set(), skipped=skipped, failed=skipped_failures)
 
     # Induce a subgraph over stale modules.
     deps_in_stale: dict[str, set[str]] = {}
@@ -1080,7 +1133,7 @@ async def run_build(
     generated: set[str] = set()
     # Track generated source for dependency context injection.
     generated_sources: dict[str, str] = {}
-    failed: dict[str, list[str]] = {}
+    failed: dict[str, list[str]] = dict(skipped_failures)
     completed: set[str] = set()
     ty_cmd = _resolve_ty_cmd() if ty_attempts is not None else None
     llm_slots = asyncio.Semaphore(jobs)
@@ -1342,12 +1395,38 @@ async def run_build(
             component_expected: list[str],
             handwritten_names: tuple[str, ...],
         ) -> tuple[Callable[[str], list[str]], Callable[[str], list[str]]]:
+            generated_module = paths.spec_module_to_generated_module(
+                module_name, generated_dir=generated_dir
+            )
+
+            def _validate_imports(source: str) -> list[str]:
+                if not check_generated_imports:
+                    return []
+                return validate_build_generated_source(
+                    source,
+                    [],
+                    spec_module=module_name,
+                    handwritten_names=(),
+                    generated_module=generated_module,
+                    project_dir=package_dir,
+                    source_roots=validation_source_roots,
+                    first_party_modules=first_party_modules,
+                    check_imports=True,
+                    import_allowlist=generated_import_allowlist,
+                )
+
             def _validate_candidate(source: str) -> list[str]:
                 errs = validate_build_generated_source(
                     source,
                     component_expected,
                     spec_module=module_name,
                     handwritten_names=handwritten_names,
+                    generated_module=generated_module,
+                    project_dir=package_dir,
+                    source_roots=validation_source_roots,
+                    first_party_modules=first_party_modules,
+                    check_imports=check_generated_imports,
+                    import_allowlist=generated_import_allowlist,
                 )
                 if errs:
                     return errs
@@ -1368,6 +1447,9 @@ async def run_build(
                     spec_module=module_name,
                     handwritten_names=handwritten_names,
                 )
+                if errs:
+                    return errs
+                errs = _validate_imports(source)
                 if errs:
                     return errs
                 whole = _whole_class_specs(component_entries)
@@ -1403,6 +1485,14 @@ async def run_build(
                 expected,
                 spec_module=module_name,
                 handwritten_names=handwritten_names,
+                generated_module=paths.spec_module_to_generated_module(
+                    module_name, generated_dir=generated_dir
+                ),
+                project_dir=package_dir,
+                source_roots=validation_source_roots,
+                first_party_modules=first_party_modules,
+                check_imports=check_generated_imports,
+                import_allowlist=generated_import_allowlist,
             )
             if errs:
                 return errs

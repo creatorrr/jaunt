@@ -53,6 +53,18 @@ class FakeBackend(GeneratorBackend):
         return "\n".join(lines).rstrip() + "\n", None
 
 
+class SourceBackend(GeneratorBackend):
+    def __init__(self, source: str) -> None:
+        self.source = source
+        self.calls: list[str] = []
+
+    async def generate_module(
+        self, ctx: ModuleSpecContext, *, extra_error_context: list[str] | None = None
+    ) -> tuple[str, None]:
+        self.calls.append(ctx.spec_module)
+        return self.source, None
+
+
 def test_expand_stale_modules_respects_allowed_modules() -> None:
     module_dag = {
         "pkg.dep": set(),
@@ -214,6 +226,168 @@ def test_run_build_allowed_modules_skips_out_of_closure_dependents(tmp_path: Pat
     assert report.generated == {"pkg.dep", "pkg.target"}
     assert report.skipped == {"pkg.other"}
     assert "pkg.other" not in backend.calls
+
+
+def test_run_build_rejects_undeclared_generated_import(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    spec_path = tmp_path / "specs.py"
+    _write(spec_path, "def Play():\n    return 1\n")
+    entry = _entry(module="pkg.specs", qualname="Play", source_file=str(spec_path))
+    specs = {entry.spec_ref: entry}
+    spec_graph = build_spec_graph(specs, infer_default=False)
+    module_specs = {"pkg.specs": [entry]}
+    module_dag = {"pkg.specs": set()}
+
+    report = asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"pkg.specs"},
+            backend=SourceBackend("import hallucinated_pkg\n\ndef Play():\n    return 1\n"),
+            jobs=1,
+        )
+    )
+
+    assert report.generated == set()
+    assert "pkg.specs" in report.failed
+    joined = "\n".join(report.failed["pkg.specs"])
+    assert "hallucinated_pkg" in joined
+    assert "pkg.__generated__.specs" in joined
+
+
+def test_run_build_accepts_first_party_import_from_second_source_root(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    helpers = tmp_path / "helpers.py"
+    spec_path = tmp_path / "specs.py"
+    _write(helpers, "def helper() -> int:\n    return 1\n")
+    _write(spec_path, "def Play():\n    return 1\n")
+    entry = _entry(module="pkg.specs", qualname="Play", source_file=str(spec_path))
+    specs = {entry.spec_ref: entry}
+    spec_graph = build_spec_graph(specs, infer_default=False)
+    module_specs = {"pkg.specs": [entry]}
+    module_dag = {"pkg.specs": set()}
+
+    report = asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"pkg.specs"},
+            backend=SourceBackend("import helpers\n\ndef Play():\n    return helpers.helper()\n"),
+            source_roots=[src, tmp_path],
+            jobs=1,
+        )
+    )
+
+    assert report.failed == {}
+    assert report.generated == {"pkg.specs"}
+
+
+def test_run_build_revalidates_fresh_generated_import_policy(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    spec_path = tmp_path / "specs.py"
+    _write(spec_path, "def Play():\n    return 1\n")
+    entry = _entry(module="pkg.specs", qualname="Play", source_file=str(spec_path))
+    specs = {entry.spec_ref: entry}
+    spec_graph = build_spec_graph(specs, infer_default=False)
+    module_specs = {"pkg.specs": [entry]}
+    module_dag = {"pkg.specs": set()}
+
+    first_backend = SourceBackend("import hallucinated_pkg\n\ndef Play():\n    return 1\n")
+    first = asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"pkg.specs"},
+            backend=first_backend,
+            check_generated_imports=False,
+            jobs=1,
+        )
+    )
+    assert first.failed == {}
+    assert first.generated == {"pkg.specs"}
+
+    second_backend = SourceBackend("def Play():\n    return 2\n")
+    second = asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules=set(),
+            backend=second_backend,
+            check_generated_imports=True,
+            jobs=1,
+        )
+    )
+
+    assert second.generated == set()
+    assert second.skipped == set()
+    assert second_backend.calls == []
+    assert "pkg.specs" in second.failed
+    assert "hallucinated_pkg" in "\n".join(second.failed["pkg.specs"])
+
+
+def test_run_build_targeted_skips_out_of_scope_import_validation(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    bad_path = tmp_path / "bad.py"
+    target_path = tmp_path / "target.py"
+    _write(bad_path, "def Bad():\n    return 1\n")
+    _write(target_path, "def Target():\n    return 1\n")
+    bad = _entry(module="pkg.bad", qualname="Bad", source_file=str(bad_path))
+    target = _entry(module="pkg.target", qualname="Target", source_file=str(target_path))
+
+    # First, generate pkg.bad with an undeclared import (gate off) so the file lands on disk.
+    asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs={"pkg.bad": [bad]},
+            specs={bad.spec_ref: bad},
+            spec_graph=build_spec_graph({bad.spec_ref: bad}, infer_default=False),
+            module_dag={"pkg.bad": set()},
+            stale_modules={"pkg.bad"},
+            backend=SourceBackend("import hallucinated_pkg\n\ndef Bad():\n    return 1\n"),
+            check_generated_imports=False,
+            jobs=1,
+        )
+    )
+
+    # Targeted build at pkg.target with the gate ON. pkg.bad is out of the requested
+    # closure (skipped, not in allowed_modules) and must NOT be import-validated.
+    specs = {bad.spec_ref: bad, target.spec_ref: target}
+    report = asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs={"pkg.bad": [bad], "pkg.target": [target]},
+            specs=specs,
+            spec_graph=build_spec_graph(specs, infer_default=False),
+            module_dag={"pkg.bad": set(), "pkg.target": set()},
+            stale_modules={"pkg.target"},
+            allowed_modules={"pkg.target"},
+            backend=SourceBackend("def Target():\n    return 1\n"),
+            check_generated_imports=True,
+            jobs=1,
+        )
+    )
+
+    assert report.failed == {}
+    assert "pkg.bad" not in report.failed
+    assert "pkg.target" in report.generated
 
 
 def test_non_stale_modules_are_skipped(tmp_path: Path) -> None:

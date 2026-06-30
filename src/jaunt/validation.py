@@ -7,9 +7,31 @@ has the right shape.
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterable
+import sys
+import tomllib
+from collections.abc import Iterable, Sequence
+from importlib import metadata
+from pathlib import Path
 
 from jaunt.class_analysis import is_stub_body
+from jaunt.external_imports import pep503_normalize
+
+_SKIP_LOCAL_DIRS = {
+    ".cache",
+    ".git",
+    ".jaunt",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+    "site-packages",
+    "venv",
+}
 
 
 def _syntax_error_to_str(err: SyntaxError) -> str:
@@ -76,6 +98,12 @@ def validate_build_generated_source(
     *,
     spec_module: str,
     handwritten_names: Iterable[str],
+    generated_module: str | None = None,
+    project_dir: Path | None = None,
+    source_roots: Sequence[Path] | None = None,
+    first_party_modules: Iterable[str] = (),
+    check_imports: bool = False,
+    import_allowlist: Iterable[str] = (),
 ) -> list[str]:
     errors, mod = _base_validation(source, expected_names)
     if mod is None:
@@ -89,6 +117,17 @@ def validate_build_generated_source(
             handwritten_names=handwritten_names,
         )
     )
+    if check_imports:
+        errors.extend(
+            _validate_generated_import_provenance(
+                mod,
+                generated_module=generated_module or spec_module,
+                project_dir=project_dir or Path.cwd(),
+                source_roots=source_roots or (),
+                first_party_modules=first_party_modules,
+                allowlist=import_allowlist,
+            )
+        )
     return errors
 
 
@@ -130,6 +169,322 @@ def _validate_build_contract_only(
                 f"{name!r}. Import or reuse {name!r} from {spec_module!r} instead."
             )
     return errors
+
+
+def validate_generated_import_provenance(
+    source: str,
+    *,
+    generated_module: str,
+    project_dir: Path,
+    source_roots: Sequence[Path] | None = None,
+    first_party_modules: Iterable[str] = (),
+    allowlist: Iterable[str] = (),
+) -> list[str]:
+    try:
+        mod = ast.parse(source or "")
+    except SyntaxError:
+        return []
+    return _validate_generated_import_provenance(
+        mod,
+        generated_module=generated_module,
+        project_dir=project_dir,
+        source_roots=source_roots or (),
+        first_party_modules=first_party_modules,
+        allowlist=allowlist,
+    )
+
+
+def _validate_generated_import_provenance(
+    mod: ast.Module,
+    *,
+    generated_module: str,
+    project_dir: Path,
+    source_roots: Sequence[Path],
+    first_party_modules: Iterable[str],
+    allowlist: Iterable[str],
+) -> list[str]:
+    stdlib = getattr(sys, "stdlib_module_names", set())
+    allowed_first_party = _first_party_top_levels(
+        project_dir=project_dir,
+        source_roots=source_roots,
+        configured=first_party_modules,
+    )
+    allowlist_norm = {pep503_normalize(name) for name in allowlist if name.strip()}
+    declared_dists = _declared_project_dependencies(_find_pyproject(project_dir))
+
+    importlib_aliases, direct_dynamic_names = _importlib_dynamic_bindings(mod)
+
+    errors: list[str] = []
+    errors.extend(
+        _nonconstant_dynamic_import_errors(
+            mod,
+            generated_module=generated_module,
+            importlib_aliases=importlib_aliases,
+            direct_dynamic_names=direct_dynamic_names,
+        )
+    )
+
+    for imported in sorted(
+        _top_level_imports(
+            mod,
+            importlib_aliases=importlib_aliases,
+            direct_dynamic_names=direct_dynamic_names,
+        )
+    ):
+        top = imported.split(".", 1)[0]
+        if not top:
+            continue
+        if top in stdlib:
+            continue
+        if top in allowed_first_party:
+            continue
+        if pep503_normalize(top) in allowlist_norm:
+            continue
+        if _import_resolves_to_declared_dependency(top, declared_dists=declared_dists):
+            continue
+
+        errors.append(
+            f"Generated module {generated_module!r} imports undeclared package {top!r}. "
+            "Add it to [project.dependencies], make it a first-party module, or add it to "
+            "build.generated_import_allowlist if intentional."
+        )
+    return errors
+
+
+def _importlib_dynamic_bindings(mod: ast.Module) -> tuple[set[str], set[str]]:
+    """Resolve the names in this module that can perform a dynamic import.
+
+    Returns ``(importlib_aliases, direct_dynamic_names)``:
+    - ``importlib_aliases``: names bound to the ``importlib`` module, used for
+      attribute calls like ``X.import_module(...)`` / ``X.__import__(...)`` —
+      seeded with ``"importlib"`` and extended by ``import importlib as X``.
+    - ``direct_dynamic_names``: names that are themselves dynamic-import
+      callables, used for ``X(...)`` — seeded with the always-available builtin
+      ``__import__`` and extended by ``from importlib import import_module as X``.
+    """
+    importlib_aliases: set[str] = {"importlib"}
+    direct_dynamic_names: set[str] = {"__import__"}
+    for node in ast.walk(mod):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "importlib":
+                    importlib_aliases.add(alias.asname or "importlib")
+        elif isinstance(node, ast.ImportFrom):
+            if int(getattr(node, "level", 0) or 0) > 0:
+                continue
+            if node.module == "importlib":
+                for alias in node.names:
+                    if alias.name in {"import_module", "__import__"}:
+                        direct_dynamic_names.add(alias.asname or alias.name)
+    return importlib_aliases, direct_dynamic_names
+
+
+def _top_level_imports(
+    mod: ast.Module,
+    *,
+    importlib_aliases: set[str],
+    direct_dynamic_names: set[str],
+) -> set[str]:
+    imports: set[str] = set()
+    for node in ast.walk(mod):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name:
+                    imports.add(alias.name.split(".", 1)[0])
+        elif isinstance(node, ast.ImportFrom):
+            if int(getattr(node, "level", 0) or 0) > 0:
+                continue
+            if node.module:
+                imports.add(node.module.split(".", 1)[0])
+        elif isinstance(node, ast.Call):
+            dynamic_import = _constant_dynamic_import_target(
+                node,
+                importlib_aliases=importlib_aliases,
+                direct_dynamic_names=direct_dynamic_names,
+            )
+            if dynamic_import:
+                imports.add(dynamic_import.split(".", 1)[0])
+    return imports
+
+
+def _constant_dynamic_import_target(
+    call: ast.Call,
+    *,
+    importlib_aliases: set[str],
+    direct_dynamic_names: set[str],
+) -> str | None:
+    if (
+        _dynamic_import_call_name(
+            call,
+            importlib_aliases=importlib_aliases,
+            direct_dynamic_names=direct_dynamic_names,
+        )
+        is None
+    ):
+        return None
+    if not call.args:
+        return None
+    target = call.args[0]
+    if isinstance(target, ast.Constant) and isinstance(target.value, str):
+        return target.value
+    return None
+
+
+def _nonconstant_dynamic_import_errors(
+    mod: ast.Module,
+    *,
+    generated_module: str,
+    importlib_aliases: set[str],
+    direct_dynamic_names: set[str],
+) -> list[str]:
+    errors: list[str] = []
+    for node in ast.walk(mod):
+        if not isinstance(node, ast.Call):
+            continue
+        call_name = _dynamic_import_call_name(
+            node,
+            importlib_aliases=importlib_aliases,
+            direct_dynamic_names=direct_dynamic_names,
+        )
+        if call_name is None:
+            continue
+        if (
+            node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            continue
+        lineno = getattr(node, "lineno", None)
+        loc = f" on line {lineno}" if lineno is not None else ""
+        errors.append(
+            f"Generated module {generated_module!r} uses non-constant dynamic import via "
+            f"{call_name}{loc}. Non-constant dynamic imports are not allowed in generated "
+            "code because their provenance cannot be checked."
+        )
+    return errors
+
+
+def _dynamic_import_call_name(
+    call: ast.Call,
+    *,
+    importlib_aliases: set[str],
+    direct_dynamic_names: set[str],
+) -> str | None:
+    func = call.func
+    if isinstance(func, ast.Name) and func.id in direct_dynamic_names:
+        return func.id
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+        if func.value.id in importlib_aliases and func.attr in {"import_module", "__import__"}:
+            return f"importlib.{func.attr}"
+    return None
+
+
+def _first_party_top_levels(
+    *,
+    project_dir: Path,
+    source_roots: Sequence[Path],
+    configured: Iterable[str],
+) -> set[str]:
+    roots = [project_dir, *source_roots]
+    first_party = {name.split(".", 1)[0] for name in configured if name.strip()}
+    for root in roots:
+        first_party.update(_local_top_levels(root))
+    return first_party
+
+
+def _local_top_levels(root: Path) -> set[str]:
+    try:
+        root = root.resolve()
+    except Exception:
+        return set()
+    if not root.is_dir():
+        return set()
+
+    out: set[str] = set()
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        return out
+    for child in children:
+        name = child.name
+        if name in _SKIP_LOCAL_DIRS or name.startswith("."):
+            continue
+        if child.is_file() and child.suffix == ".py" and child.stem.isidentifier():
+            out.add(child.stem)
+            continue
+        if child.is_dir() and name.isidentifier():
+            if (child / "__init__.py").is_file() or any(child.glob("*.py")):
+                out.add(name)
+    return out
+
+
+def _find_pyproject(start: Path) -> Path | None:
+    try:
+        cur = start.resolve()
+    except Exception:
+        cur = start
+    if cur.is_file():
+        cur = cur.parent
+    while True:
+        candidate = cur / "pyproject.toml"
+        if candidate.is_file():
+            return candidate
+        if cur.parent == cur:
+            return None
+        cur = cur.parent
+
+
+def _declared_project_dependencies(pyproject_path: Path | None) -> frozenset[str]:
+    if pyproject_path is None:
+        return frozenset()
+    try:
+        data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    except Exception:
+        return frozenset()
+    project = data.get("project")
+    if not isinstance(project, dict):
+        return frozenset()
+    raw_deps = project.get("dependencies")
+    if not isinstance(raw_deps, list):
+        return frozenset()
+
+    deps: set[str] = set()
+    for dep in raw_deps:
+        if not isinstance(dep, str):
+            continue
+        name = _dependency_distribution_name(dep)
+        if name:
+            deps.add(pep503_normalize(name))
+    return frozenset(deps)
+
+
+def _dependency_distribution_name(requirement: str) -> str:
+    text = requirement.strip()
+    if not text:
+        return ""
+    for marker in (";", "[", "<", ">", "=", "!", "~", "@", " "):
+        if marker in text:
+            text = text.split(marker, 1)[0]
+    return text.strip()
+
+
+def _import_resolves_to_declared_dependency(
+    top_level: str,
+    *,
+    declared_dists: frozenset[str],
+) -> bool:
+    if not declared_dists:
+        return False
+    if pep503_normalize(top_level) in declared_dists:
+        return True
+    try:
+        packages_to_dists = metadata.packages_distributions()
+    except Exception:
+        packages_to_dists = {}
+    for dist in packages_to_dists.get(top_level, []):
+        if pep503_normalize(dist) in declared_dists:
+            return True
+    return False
 
 
 def validate_test_generated_source(
