@@ -48,21 +48,21 @@ document:
 
 ### The cross-cutting laws (named once, threaded throughout)
 
-| # | Law | One line |
-|---|---|---|
-| **L1** | Value migrates to spec + verification | The two things worth scarce attention when typing is free. |
-| **L2** | The spec is the durable artifact; code is a projection | Maintain intent, not just output. |
-| **L3** | Push work down into deterministic layers | Spend the model only on the irreducible residue. |
-| **L4** | The model proposes; deterministic checks dispose | A wrong model verdict should cost money, never correctness. |
-| **L5** | Specify *what*, not *how* | Over-spec kills design latitude; under-spec passes wrong code. |
-| **L6** | Architecture is an amplifier | Bounded units multiply quality; tangle multiplies *confident* mistakes. |
-| **L7** | Verification capacity must scale with generation capacity | Or the constraint just moves to review. |
-| **L8** | Keep the human at the gate as director, not author | Taste = knowing what to trust. |
-| **L9** | Pin the artifact, not the sampler | LLMs aren't reproducible; regenerate only on input change. |
-| **L10** | Standardize the path, not the thought | Golden paths raise the floor without capping the ceiling. |
-| **L11** | Rewrite from the spec, not the code | Regeneration is cheap now — and as safe as your contract is complete. |
-| **L12** | Treat everything the model reads and pulls as untrusted | Prompt injection and slopsquatting are input, not edge cases. |
-| **L13** | Make engineering compound | Each task should leave the system better at the next one. |
+| # | Law | One line | Small example |
+|---|---|---|---|
+| **L1** | Value migrates to spec + verification | The two things worth scarce attention when typing is free. | A failing test handed to the agent does more than a paragraph describing the bug. |
+| **L2** | The spec is the durable artifact; code is a projection | Maintain intent, not just output. | Edit a `@jaunt.magic` docstring; the `__generated__/` body is rebuilt from it. |
+| **L3** | Push work down into deterministic layers | Spend the model only on the irreducible residue. | Strip formatting before deciding a spec "changed," so a reformat triggers no work. |
+| **L4** | The model proposes; deterministic checks dispose | A wrong model verdict should cost money, never correctness. | `jaunt check` reruns committed tests with no API key — the model never gives the verdict. |
+| **L5** | Specify *what*, not *how* | Over-spec kills design latitude; under-spec passes wrong code. | "Return results sorted by score, descending" — not `sorted(key=...)`. |
+| **L6** | Architecture is an amplifier | Bounded units multiply quality; tangle multiplies *confident* mistakes. | Ten focused files let the agent read only what it edits; one 2k-line module forces guessing. |
+| **L7** | Verification capacity must scale with generation capacity | Or the constraint just moves to review. | Merge 10× the PRs and it's review capacity, not generation, that decides throughput. |
+| **L8** | Keep the human at the gate as director, not author | Taste = knowing what to trust. | You approve the contract and the diff's intent; you don't hand-type the body. |
+| **L9** | Pin the artifact, not the sampler | LLMs aren't reproducible; regenerate only on input change. | The build re-runs only when the spec, model, or prompt-template digest changes. |
+| **L10** | Standardize the path, not the thought | Golden paths raise the floor without capping the ceiling. | `jaunt init` drops every project onto the same validated layout. |
+| **L11** | Rewrite from the spec, not the code | Regeneration is cheap now — and as safe as your contract is complete. | Point a newer model at the unchanged docstring; the committed battery proves the rewrite. |
+| **L12** | Treat everything the model reads and pulls as untrusted | Prompt injection and slopsquatting are input, not edge cases. | The build fails if generated code imports a package absent from your declared deps. |
+| **L13** | Make engineering compound | Each task should leave the system better at the next one. | Every fixed bug becomes a battery case, so it can't silently regress. |
 
 ### How to use this document
 
