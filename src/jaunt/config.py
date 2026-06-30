@@ -74,6 +74,7 @@ class PromptsConfig:
     build_module: str
     test_system: str
     test_module: str
+    build_preamble: str = ""
 
 
 @dataclass(frozen=True)
@@ -403,6 +404,11 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     else:
         build_system = ""
 
+    if "build_preamble" in prompts_tbl:
+        build_preamble = _as_str(prompts_tbl["build_preamble"], name="prompts.build_preamble")
+    else:
+        build_preamble = ""
+
     if "build_module" in prompts_tbl:
         build_module = _resolve_prompt_override(
             _as_str(prompts_tbl["build_module"], name="prompts.build_module"),
@@ -641,6 +647,7 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             auto_class_tests=auto_class_tests,
         ),
         prompts=PromptsConfig(
+            build_preamble=build_preamble,
             build_system=build_system,
             build_module=build_module,
             test_system=test_system,

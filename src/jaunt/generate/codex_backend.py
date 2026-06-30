@@ -19,6 +19,7 @@ from typing import cast
 from jaunt.config import CodexConfig, LLMConfig, PromptsConfig
 from jaunt.errors import JauntGenerationError
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext, TokenUsage
+from jaunt.generate.shared import load_prompt
 from jaunt.skill_seed import seed_skills_into_workspace
 
 
@@ -394,7 +395,12 @@ class CodexBackend(GeneratorBackend):
         target_rel: Path,
         extra_error_context: list[str] | None,
     ) -> str:
-        blocks = [
+        preamble = load_prompt(
+            "codex_preamble.md",
+            self._prompts.build_preamble if self._prompts is not None else None,
+        )
+        blocks = [preamble.strip()]
+        blocks += [
             f"Write a complete Python module to `{target_rel}` that exports: "
             f"{', '.join(ctx.expected_names)}.",
             "The spec stubs and their docstrings in `_context/spec_*.py` are the "
