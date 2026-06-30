@@ -16,6 +16,14 @@ other") and **§2.3 roadmap item 9** in
 > is already sitting in the text handed to the model — plus the **fail-safe-to-held-
 > out** default that guards it.
 
+> **Codex review (2026-06-29, `gpt-5.5@high`, read-only against source):** verdict
+> *basically sound directionally.* Four fixes were folded in before planning — the
+> role briefings must live in `CodexBackend._build_prompt`, not the `prompts/*.md`
+> templates (§4); the per-item structured report must carry full detail so the redactor
+> never falls back to global pytest stdout (§5/§6); the fail-safe needs an explicit
+> collection/import-phase policy (§6); and `public_api_only` is a *partial* guard, not a
+> hard white-box block (§8). See the inline "(Codex review)" notes and §10.
+
 ---
 
 ## 1. Context & motivation
@@ -122,10 +130,16 @@ feedback** along a public/held-out tier line.
 
 ## 4. The two roles + policy prompts (component 1 — the centerpiece)
 
-The barrier is primarily carried here. Two prompt sections are added, gated to their
-pass. The Implementer's section goes in the build system/module prompt
-(`prompts/build_system.md` / `build_module.md`); the Tester's in the test
-system/module prompt (`prompts/test_system.md` / `test_module.md`).
+The barrier is primarily carried here. Two prompt sections are added, gated by
+`ctx.kind`. **Important (Codex review):** the Codex backend assembles the `codex exec`
+prompt **inline** in `CodexBackend._build_prompt` (`codex_backend.py:391`) from
+`ctx.*` blocks and does **not** render the `prompts/*.md` templates (the same gap as
+principle roadmap item 1 — those templates aren't even in the Codex fingerprint). So
+editing `prompts/*.md` alone would be dead under the Codex engine. The held-out
+sections must be injected **into `_build_prompt` directly**, branched on `ctx.kind`:
+the Implementer section on the build/implementation pass, the Tester section when
+`ctx.kind == "test"`. (If the `prompts/*.md` templates are kept in sync for non-Codex
+documentation, that's fine — but `_build_prompt` is the load-bearing path.)
 
 **Implementer — "held-out regime" section (build prompt):**
 - A separate Tester writes the acceptance tests. **You will never see them.**
@@ -160,18 +174,26 @@ These sections are the bulk of the work and the bulk of the behavior change. Mec
 
 - **Marker:** `@pytest.mark.jaunt_tier("example" | "derived")` on each generated test
   function, emitted by the Tester per §4. A small **jaunt pytest plugin** registers
-  the marker (no "unknown mark" warnings) and records, per test, `{nodeid, tier,
-  outcome, exception_class}`.
+  the marker (no "unknown mark" warnings) and records, **per test item and per phase
+  (setup/call/teardown)**, `{nodeid, tier, outcome, exception_class, longrepr,
+  captured_stdout, captured_stderr, warnings}`. Capturing the full detail **up front,
+  per item** is what lets the redactor (§6) build `example` feedback without ever
+  touching global pytest stdout (Codex review — otherwise derived leaks re-enter
+  through the shared output).
 - **Default (the one mechanical safety we insist on):** a test with **no**
   `jaunt_tier` marker, or an unrecognized value, is classified **`derived`**
   (held-out). So a model mistag or omission fails toward **over-redaction** (the
   Implementer loses a little debug detail), never toward leak (the answer key
   escapes). This keeps the barrier off the model's good behavior for the one property
   that matters.
-- **Structured output, not stdout scraping:** the plugin writes a structured report
-  (JSON: `nodeid → {tier, outcome, exception_class}`) that the repair-context builder
-  consumes, replacing the `_compact_failure_context` stdout/stderr scrape
-  (`tester.py:951`). This is what makes per-test, tier-aware redaction reliable.
+- **Structured output, fully replacing stdout scraping:** the plugin writes a
+  structured per-item report (JSON) that the repair-context builder consumes, **fully
+  replacing** the `_compact_failure_context` stdout/stderr scrape (`tester.py:951`) — the
+  redactor must never fall back to global pytest stdout, because that text mixes tiers
+  (warning summaries, captured stdout/stderr, collection text, parametrized-id strings,
+  global sections) and would re-introduce derived leaks. `longrepr`/captured-output/
+  warnings are surfaced **only for `example`-tier** items; for `derived` the redactor
+  keeps nothing but the opaque id + exception class.
 
 ## 6. Redaction in the repair path (component 5 — the irreducible mechanism)
 
@@ -186,6 +208,15 @@ with a **tiered redactor** built from the §5 structured report:
   expected/actual, no failing input, no traceback, no descriptive test name. The
   plugin assigns each derived nodeid a **stable opaque id** (`derived#<n>`), so the
   name never reaches the Implementer.
+- **Collection / import / pre-item failures (Codex review — the main residual leak
+  edge):** a syntax error, import error, or module-level side effect that fails *before*
+  test items exist has **no `Item` and therefore no `jaunt_tier` to read** — and its
+  traceback can contain generated **test source**. Policy: treat any such failure as
+  `derived` (redact to `{exception-class, failing-module}`, no traceback) **unless it
+  can be proven to originate only in example-tier code**. `xfail`/`skip` are fine *only
+  if their reasons are never surfaced* to the Implementer; a `strict` xpass follows the
+  same tier rules as a failure. This is the fail-safe extended to the phases where no
+  marker exists.
 - **Budget:** repair stays **single-pass** (it already is — `tester.py` runs one
   repair cycle, not loop-to-green; per-generation attempts remain `2 + ty_attempts`,
   `builder.py:1499`). No new iteration is introduced. *If* a future change makes repair
@@ -221,8 +252,15 @@ Per the user's steer (enforcement is more work than it is worth here):
 
 - **Component 3 (oracle discipline):** carried by the Tester prompt section in §4
   ("derive from the contract, precommit before considering behavior"). No heavy new
-  lint: the existing `public_api_only` validator already blocks the worst white-box
-  reaches; the characterization-snapshot risk is a *prompt* concern, addressed in §4.
+  lint: the existing `public_api_only` validator blocks the most common white-box
+  reaches **inside the expected test functions**. *Caveat (Codex review):* it validates
+  only those expected functions (`validation.py:551`), and base validation allows extra
+  top-level helpers (`validation.py:570`) — so a helper that reaches into generated-module
+  internals and is called by a clean-looking test slips through. We accept this as a
+  *partial* guard under the "minimal mechanism" steer; extending validation to helpers
+  reachable from public tests (or validating the whole generated test module) is listed
+  as optional hardening (§12). The characterization-snapshot risk is a *prompt* concern,
+  addressed in §4.
 - **Component 7 (contract-mode alignment):** the same two role sections apply to both
   the magic-mode test path and contract mode. Contract mode already embodies the
   oracle discipline — its deriver produces falsifiable checks *from the docstring* and
@@ -267,6 +305,14 @@ Two read-only code investigations (Explore) and one Codex consult
 - **User decisions:** prompts/roles do the heavy lifting; component 2 explicit-not-
   enforced; provenance model-declared **with** the fail-safe-to-held-out default
   (§5); de-correlation parked.
+- **Codex design review (2026-06-29, `gpt-5.5@high`, read-only):** verdict "basically
+  sound directionally"; four fixes folded in — (1) role sections belong in
+  `CodexBackend._build_prompt`, not `prompts/*.md` (§4); (2) the per-item structured
+  report carries full detail so the redactor never touches global stdout (§5/§6); (3) an
+  explicit collection/import-phase fail-safe (§6); (4) `public_api_only` is a *partial*
+  guard, softened + listed as optional hardening (§8/§12). Grounding checks (repair
+  feeds raw pytest stdout, `include_target_tests` default False,
+  `dependency_generated_modules={}`, single repair cycle) all confirmed accurate.
 
 ## 11. Testing
 
@@ -308,6 +354,12 @@ asserted free of expected values.
   `Examples:` block) that classifies provenance structurally instead of trusting the
   marker — this is the stronger L4/L14 form and dovetails with contract mode's
   `examples` derivation.
+- **Helper-function white-box gap (optional hardening, Codex review).**
+  `public_api_only` validates only the expected test functions, not helper functions
+  they call (`validation.py:551`/`570`), so a helper reaching generated-module internals
+  can slip past the guard. Extending validation to helpers reachable from public tests —
+  or validating the whole generated test module — would close it; deferred under the
+  "minimal mechanism" steer.
 - **De-correlation (parked).** Implementer and Tester share one engine/model today, so
   they share blind spots — the independence is partial. A `[test]`/`[codex]` knob to
   run test generation on a different model/effort/framing is a cheap future addition,
