@@ -37,6 +37,7 @@ class LLMConfig:
 _VALID_ASYNC_RUNNERS = ("asyncio", "anyio")
 _VALID_AGENT_ENGINES = ("codex",)
 _VALID_DERIVE = ("examples", "errors")
+_VALID_REASONING_EFFORTS = ("low", "medium", "high")
 
 
 def _default_builtin_skills() -> tuple[str, ...]:
@@ -123,6 +124,13 @@ class ContractConfig:
 
 
 @dataclass(frozen=True)
+class SemanticGateConfig:
+    enabled: bool = True
+    model: str = "gpt-5.4-nano"
+    reasoning_effort: str = "high"
+
+
+@dataclass(frozen=True)
 class JauntConfig:
     version: int
     paths: PathsConfig
@@ -135,6 +143,7 @@ class JauntConfig:
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     contract: ContractConfig = field(default_factory=ContractConfig)
     context: ContextConfig = field(default_factory=ContextConfig)
+    semantic_gate: SemanticGateConfig = field(default_factory=SemanticGateConfig)
 
 
 def find_project_root(start: Path) -> Path:
@@ -256,6 +265,7 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     codex_tbl = _as_table(data.get("codex"), name="codex")
     skills_tbl = _as_table(data.get("skills"), name="skills")
     contract_tbl = _as_table(data.get("contract"), name="contract")
+    semantic_gate_tbl = _as_table(data.get("semantic_gate"), name="semantic_gate")
 
     if "source_roots" in paths_tbl:
         source_roots = _as_str_list(paths_tbl["source_roots"], name="paths.source_roots")
@@ -543,6 +553,23 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     else:
         search_max_hits = 8
 
+    if "enabled" in semantic_gate_tbl:
+        semantic_gate_enabled = _as_bool(semantic_gate_tbl["enabled"], name="semantic_gate.enabled")
+    else:
+        semantic_gate_enabled = True
+
+    if "model" in semantic_gate_tbl:
+        semantic_gate_model = _as_str(semantic_gate_tbl["model"], name="semantic_gate.model")
+    else:
+        semantic_gate_model = "gpt-5.4-nano"
+
+    if "reasoning_effort" in semantic_gate_tbl:
+        semantic_gate_reasoning_effort = _as_str(
+            semantic_gate_tbl["reasoning_effort"], name="semantic_gate.reasoning_effort"
+        ).strip()
+    else:
+        semantic_gate_reasoning_effort = "high"
+
     # Validation
     if not any((root / sr).exists() for sr in source_roots):
         raise JauntConfigError(
@@ -564,6 +591,11 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
         raise JauntConfigError(
             f"Invalid config: build.async_runner must be one of {_VALID_ASYNC_RUNNERS!r}, "
             f"got {async_runner!r}."
+        )
+    if semantic_gate_reasoning_effort not in _VALID_REASONING_EFFORTS:
+        raise JauntConfigError(
+            f"Invalid config: semantic_gate.reasoning_effort must be one of "
+            f"{_VALID_REASONING_EFFORTS!r}, got {semantic_gate_reasoning_effort!r}."
         )
     if agent_engine not in _VALID_AGENT_ENGINES:
         raise JauntConfigError(
@@ -645,5 +677,10 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
                 internal_retrieval=search_internal,
                 max_hits=search_max_hits,
             ),
+        ),
+        semantic_gate=SemanticGateConfig(
+            enabled=semantic_gate_enabled,
+            model=semantic_gate_model,
+            reasoning_effort=semantic_gate_reasoning_effort,
         ),
     )

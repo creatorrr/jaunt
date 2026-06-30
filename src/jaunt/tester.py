@@ -14,22 +14,46 @@ import os
 import subprocess
 import sys
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 from jaunt import paths
 from jaunt.agent_docs import ensure_agent_docs
-from jaunt.builder import _build_expected_names
+from jaunt.builder import (
+    RefreezeOutcome,
+    RefreezePlan,
+    _build_expected_names,
+    _header_field_matches,
+    _strip_header,
+    expand_stale_modules,
+)
 from jaunt.cache import CacheEntry, ResponseCache, cache_key_from_context
+from jaunt.change_detection import (
+    assess_specs,
+    classify_change,
+    read_contract_sidecar,
+    sidecar_path,
+    write_contract_sidecar,
+)
+from jaunt.config import SemanticGateConfig
 from jaunt.cost import CostTracker
-from jaunt.digest import extract_source_segment, module_digest
+from jaunt.digest import (
+    contract_snapshot,
+    extract_source_segment,
+    module_digest,
+    prose_digest,
+    structural_digest,
+)
 from jaunt.errors import JauntConfigError, JauntGenerationError
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
 from jaunt.header import (
+    extract_digest_scheme,
     extract_generation_fingerprint,
     extract_module_context_digest,
     extract_module_digest,
+    extract_spec_digests,
     format_header,
 )
 from jaunt.module_contract import (
@@ -149,6 +173,27 @@ def _normalize_digest(digest: str | None) -> str | None:
     if digest.startswith("sha256:"):
         return digest.split(":", 1)[1]
     return digest
+
+
+def _compute_spec_digests(entries: list[SpecEntry]) -> dict[str, dict[str, str]]:
+    out: dict[str, dict[str, str]] = {}
+    for entry in entries:
+        out[str(entry.spec_ref)] = {"s": structural_digest(entry), "p": prose_digest(entry)}
+    return out
+
+
+def _compute_snapshots(entries: list[SpecEntry]) -> dict[str, dict]:
+    return {str(entry.spec_ref): contract_snapshot(entry) for entry in entries}
+
+
+def _header_fields_with_spec_digests(
+    header_fields: dict[str, object],
+    entries: list[SpecEntry],
+) -> dict[str, object]:
+    local_fields = dict(header_fields)
+    if "spec_digests" not in local_fields:
+        local_fields["spec_digests"] = _compute_spec_digests(entries)
+    return local_fields
 
 
 def combine_module_context_digest(
@@ -332,6 +377,53 @@ def _auto_test_output_path(
     return (project_dir / rel).with_suffix(".py")
 
 
+def _test_output_path_for_module(
+    *,
+    project_dir: Path,
+    module_name: str,
+    entries: list[SpecEntry],
+    generated_dir: str,
+    tests_package: str,
+    test_roots: Sequence[Path] | None,
+) -> Path:
+    if ".__auto__." in module_name:
+        return _auto_test_output_path(
+            project_dir=project_dir,
+            module_name=module_name,
+            generated_dir=generated_dir,
+            tests_package=tests_package,
+        )
+    return _resolve_test_output_path(
+        project_dir=project_dir,
+        source_file=entries[0].source_file,
+        generated_dir=generated_dir,
+        tests_package=tests_package,
+        test_roots=test_roots,
+    )
+
+
+def _read_generated_test(
+    project_dir: Path,
+    generated_dir: str,
+    module_name: str,
+    entries: list[SpecEntry],
+    tests_package: str,
+    test_roots: Sequence[Path] | None,
+) -> str | None:
+    try:
+        out_path = _test_output_path_for_module(
+            project_dir=project_dir,
+            module_name=module_name,
+            entries=entries,
+            generated_dir=generated_dir,
+            tests_package=tests_package,
+            test_roots=test_roots,
+        )
+        return out_path.read_text(encoding="utf-8")
+    except Exception:
+        return None
+
+
 def _ensure_init_files(project_dir: Path, relpath: Path) -> None:
     parts = list(relpath.parts)
     if not parts:
@@ -351,6 +443,8 @@ def _write_generated_test_module(
     generated_dir: str,
     source: str,
     header_fields: dict[str, object],
+    spec_digests: dict[str, dict[str, str]] | None = None,
+    snapshots: dict[str, dict] | None = None,
     out_path: Path | None = None,
     tests_package: str | None = None,
     module_name: str | None = None,
@@ -390,7 +484,11 @@ def _write_generated_test_module(
             ensure_agent_docs(parent)
             break
 
-    hdr = format_header(**header_fields)  # type: ignore[arg-type]
+    local_fields = dict(header_fields)
+    if spec_digests is not None:
+        local_fields["spec_digests"] = spec_digests
+        local_fields["digest_scheme"] = 2
+    hdr = format_header(**local_fields)
     content = hdr + "\n" + (source or "").rstrip() + "\n"
 
     fd, tmp = tempfile.mkstemp(
@@ -405,12 +503,236 @@ def _write_generated_test_module(
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, out_path)
+        if snapshots is not None:
+            write_contract_sidecar(sidecar_path(out_path), snapshots)
     finally:
         try:
             os.unlink(tmp)
         except FileNotFoundError:
             pass
     return out_path
+
+
+def refreeze_test_module(
+    *,
+    project_dir: Path,
+    generated_dir: str,
+    module_name: str,
+    entries: list[SpecEntry],
+    tests_package: str,
+    test_roots: Sequence[Path] | None,
+    header_fields: dict[str, object],
+    snapshots: dict[str, dict],
+    validate_body: Callable[[str], list[str]] | None = None,
+) -> RefreezeOutcome:
+    try:
+        module_path = _test_output_path_for_module(
+            project_dir=project_dir,
+            module_name=module_name,
+            entries=entries,
+            generated_dir=generated_dir,
+            tests_package=tests_package,
+            test_roots=test_roots,
+        )
+    except Exception as exc:
+        return RefreezeOutcome(
+            refrozen=False,
+            needs_rebuild=True,
+            errors=(f"Unable to resolve generated test module {module_name}: {exc}",),
+        )
+    try:
+        existing = module_path.read_text(encoding="utf-8")
+    except Exception as exc:
+        return RefreezeOutcome(
+            refrozen=False,
+            needs_rebuild=True,
+            errors=(f"Unable to read generated test module {module_name}: {exc}",),
+        )
+
+    body = _strip_header(existing)
+    if body is None:
+        return RefreezeOutcome(
+            refrozen=False,
+            needs_rebuild=True,
+            errors=(f"Generated test module {module_name} has no Jaunt header.",),
+        )
+
+    if validate_body is None:
+        from jaunt.validation import compile_check
+
+        errors = compile_check(body, module_name)
+    else:
+        errors = validate_body(body)
+    if errors:
+        return RefreezeOutcome(refrozen=False, needs_rebuild=True, errors=tuple(errors))
+
+    spec_digests = cast(dict[str, dict[str, str]] | None, header_fields.get("spec_digests"))
+    local_fields = dict(header_fields)
+    local_fields.pop("spec_digests", None)
+    _write_generated_test_module(
+        project_dir=project_dir,
+        out_path=module_path,
+        generated_dir=generated_dir,
+        source=body,
+        header_fields=local_fields,
+        spec_digests=spec_digests,
+        snapshots=snapshots,
+    )
+    return RefreezeOutcome(refrozen=True, needs_rebuild=False)
+
+
+def _migration_test_header_matches(existing: str, header_fields: dict[str, object]) -> bool:
+    if not _header_field_matches(existing, header_fields, "module_digest", extract_module_digest):
+        return False
+    return all(
+        (
+            _header_field_matches(
+                existing,
+                header_fields,
+                "generation_fingerprint",
+                extract_generation_fingerprint,
+            ),
+            _header_field_matches(
+                existing,
+                header_fields,
+                "module_context_digest",
+                extract_module_context_digest,
+            ),
+        )
+    )
+
+
+async def plan_test_refreeze_or_rebuild(
+    *,
+    project_dir: Path,
+    generated_dir: str,
+    module_specs: dict[str, list[SpecEntry]],
+    specs: dict[SpecRef, SpecEntry],
+    spec_graph: dict[SpecRef, set[SpecRef]],
+    module_dag: dict[str, set[str]],
+    stale_modules: set[str],
+    header_fields_by_module: dict[str, dict[str, object]],
+    cfg: SemanticGateConfig,
+    tests_package: str = "tests",
+    test_roots: Sequence[Path] | None = None,
+    gate_enabled: bool = True,
+    validators_by_module: dict[str, Callable[[str], list[str]]] | None = None,
+    run_exec=None,
+) -> RefreezePlan:
+    del specs, spec_graph
+
+    rebuild: set[str] = set()
+    refrozen: set[str] = set()
+    failed_refreeze: set[str] = set()
+    gate_modules: set[str] = set()
+    validators = validators_by_module or {}
+
+    for module_name in sorted(stale_modules):
+        entries = module_specs.get(module_name, [])
+        header_fields = _header_fields_with_spec_digests(
+            header_fields_by_module.get(module_name, {}),
+            entries,
+        )
+        snapshots = _compute_snapshots(entries)
+        existing = _read_generated_test(
+            project_dir,
+            generated_dir,
+            module_name,
+            entries,
+            tests_package,
+            test_roots,
+        )
+        if existing is None:
+            rebuild.add(module_name)
+            continue
+
+        scheme = extract_digest_scheme(existing)
+        if scheme is not None and scheme >= 2 and extract_spec_digests(existing) is None:
+            pass
+        if scheme is None or scheme < 2:
+            if _migration_test_header_matches(existing, header_fields):
+                outcome = refreeze_test_module(
+                    project_dir=project_dir,
+                    generated_dir=generated_dir,
+                    module_name=module_name,
+                    entries=entries,
+                    tests_package=tests_package,
+                    test_roots=test_roots,
+                    header_fields=header_fields,
+                    snapshots=snapshots,
+                    validate_body=validators.get(module_name),
+                )
+                if outcome.needs_rebuild:
+                    failed_refreeze.add(module_name)
+                    rebuild.add(module_name)
+                elif outcome.refrozen:
+                    refrozen.add(module_name)
+                continue
+        gate_modules.add(module_name)
+
+    meaningful_modules: set[str] = set()
+    for module_name in sorted(gate_modules):
+        entries = module_specs.get(module_name, [])
+        try:
+            module_file = _test_output_path_for_module(
+                project_dir=project_dir,
+                module_name=module_name,
+                entries=entries,
+                generated_dir=generated_dir,
+                tests_package=tests_package,
+                test_roots=test_roots,
+            )
+        except Exception:
+            rebuild.add(module_name)
+            continue
+        old_snapshots = read_contract_sidecar(sidecar_path(module_file))
+        if gate_enabled:
+            if run_exec is not None:
+                verdicts = await assess_specs(entries, old_snapshots, cfg, run_exec=run_exec)
+            else:
+                verdicts = await assess_specs(entries, old_snapshots, cfg)
+            if any(verdicts.get(entry.spec_ref) == "MEANINGFUL" for entry in entries):
+                meaningful_modules.add(module_name)
+        elif any(
+            classify_change(old_snapshots.get(str(entry.spec_ref)), entry) != "none"
+            for entry in entries
+        ):
+            meaningful_modules.add(module_name)
+
+    rebuild |= expand_stale_modules(
+        module_dag,
+        set(meaningful_modules),
+        changed_modules=set(meaningful_modules),
+        allowed_modules=set(stale_modules),
+    )
+    rebuild &= set(stale_modules)
+
+    for module_name in sorted(set(stale_modules) - rebuild - failed_refreeze - refrozen):
+        entries = module_specs.get(module_name, [])
+        header_fields = _header_fields_with_spec_digests(
+            header_fields_by_module.get(module_name, {}),
+            entries,
+        )
+        outcome = refreeze_test_module(
+            project_dir=project_dir,
+            generated_dir=generated_dir,
+            module_name=module_name,
+            entries=entries,
+            tests_package=tests_package,
+            test_roots=test_roots,
+            header_fields=header_fields,
+            snapshots=_compute_snapshots(entries),
+            validate_body=validators.get(module_name),
+        )
+        if outcome.needs_rebuild:
+            failed_refreeze.add(module_name)
+            rebuild.add(module_name)
+        elif outcome.refrozen:
+            refrozen.add(module_name)
+
+    rebuild &= set(stale_modules)
+    refrozen -= rebuild
+    return RefreezePlan(rebuild=rebuild, refrozen=refrozen, failed_refreeze=failed_refreeze)
 
 
 def detect_stale_test_modules(
@@ -437,21 +759,14 @@ def detect_stale_test_modules(
             continue
 
         try:
-            if ".__auto__." in module_name:
-                out_path = _auto_test_output_path(
-                    project_dir=project_dir,
-                    module_name=module_name,
-                    generated_dir=generated_dir,
-                    tests_package=tests_package,
-                )
-            else:
-                out_path = _resolve_test_output_path(
-                    project_dir=project_dir,
-                    source_file=entries[0].source_file,
-                    generated_dir=generated_dir,
-                    tests_package=tests_package,
-                    test_roots=test_roots,
-                )
+            out_path = _test_output_path_for_module(
+                project_dir=project_dir,
+                module_name=module_name,
+                entries=entries,
+                generated_dir=generated_dir,
+                tests_package=tests_package,
+                test_roots=test_roots,
+            )
         except Exception:
             stale.add(module_name)
             continue
@@ -514,21 +829,14 @@ def _collect_existing_generated_test_files(
         if not entries:
             continue
         try:
-            if ".__auto__." in module_name:
-                out_path = _auto_test_output_path(
-                    project_dir=project_dir,
-                    module_name=module_name,
-                    generated_dir=generated_dir,
-                    tests_package=tests_package,
-                )
-            else:
-                out_path = _resolve_test_output_path(
-                    project_dir=project_dir,
-                    source_file=entries[0].source_file,
-                    generated_dir=generated_dir,
-                    tests_package=tests_package,
-                    test_roots=test_roots,
-                )
+            out_path = _test_output_path_for_module(
+                project_dir=project_dir,
+                module_name=module_name,
+                entries=entries,
+                generated_dir=generated_dir,
+                tests_package=tests_package,
+                test_roots=test_roots,
+            )
         except Exception:
             continue
         if out_path.exists():
@@ -549,21 +857,14 @@ def _collect_generated_test_paths_by_module(
         if not entries:
             continue
         try:
-            if ".__auto__." in module_name:
-                out[module_name] = _auto_test_output_path(
-                    project_dir=project_dir,
-                    module_name=module_name,
-                    generated_dir=generated_dir,
-                    tests_package=tests_package,
-                )
-            else:
-                out[module_name] = _resolve_test_output_path(
-                    project_dir=project_dir,
-                    source_file=entries[0].source_file,
-                    generated_dir=generated_dir,
-                    tests_package=tests_package,
-                    test_roots=test_roots,
-                )
+            out[module_name] = _test_output_path_for_module(
+                project_dir=project_dir,
+                module_name=module_name,
+                entries=entries,
+                generated_dir=generated_dir,
+                tests_package=tests_package,
+                test_roots=test_roots,
+            )
         except Exception:
             continue
     return out
@@ -908,28 +1209,25 @@ async def run_test_generation(
             "module_context_digest": module_context_digest,
             "spec_refs": [str(e.spec_ref) for e in entries],
         }
+        spec_digests = _compute_spec_digests(entries)
+        snapshots = _compute_snapshots(entries)
 
-        if ".__auto__." in module_name:
-            out_path = _auto_test_output_path(
-                project_dir=project_dir,
-                module_name=module_name,
-                generated_dir=generated_dir,
-                tests_package=tests_package,
-            )
-        else:
-            out_path = _resolve_test_output_path(
-                project_dir=project_dir,
-                source_file=entries[0].source_file,
-                generated_dir=generated_dir,
-                tests_package=tests_package,
-                test_roots=test_roots,
-            )
+        out_path = _test_output_path_for_module(
+            project_dir=project_dir,
+            module_name=module_name,
+            entries=entries,
+            generated_dir=generated_dir,
+            tests_package=tests_package,
+            test_roots=test_roots,
+        )
         out = _write_generated_test_module(
             project_dir=project_dir,
             out_path=out_path,
             generated_dir=generated_dir,
             source=result_source,
             header_fields=header_fields,
+            spec_digests=spec_digests,
+            snapshots=snapshots,
         )
         return True, [], out
 

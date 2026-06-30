@@ -133,6 +133,13 @@ def _build_parser() -> argparse.ArgumentParser:
     build_p.add_argument(
         "--no-repo-map", action="store_true", help="Disable repo-map injection for this build."
     )
+    build_p.add_argument(
+        "--no-semantic-gate",
+        action="store_true",
+        dest="no_semantic_gate",
+        help="Force every normalized-digest change to rebuild (skip the Layer B "
+        "semantic gate). Layer A linter-resistance still applies.",
+    )
 
     test_p = subparsers.add_parser("test", help="Generate tests and run pytest.")
     _add_common_flags(test_p)
@@ -144,6 +151,13 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help="Extra args appended to pytest (repeatable).",
+    )
+    test_p.add_argument(
+        "--no-semantic-gate",
+        action="store_true",
+        dest="no_semantic_gate",
+        help="Force every normalized-digest change to rebuild (skip the Layer B "
+        "semantic gate). Layer A linter-resistance still applies.",
     )
 
     init_p = subparsers.add_parser("init", help="Initialize a new jaunt project.")
@@ -1171,6 +1185,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                         "command": "status",
                         "ok": True,
                         "stale": [],
+                        "stale_changes": {},
                         "fresh": [],
                         "contracts": contract_rows,
                         "contract_review": sorted(review_refs),
@@ -1259,12 +1274,40 @@ def cmd_status(args: argparse.Namespace) -> int:
         fresh = all_mods - stale
         contract_rows, review_refs = _contract_rows(infer_default)
 
+        from jaunt.digest import prose_digest, structural_digest
+        from jaunt.header import extract_spec_digests
+
+        def _norm(d: str | None) -> str | None:
+            if not d:
+                return None
+            return d.split(":", 1)[1] if d.startswith("sha256:") else d
+
+        def _label_change(module_name: str) -> str:
+            existing = builder._read_generated(package_dir, cfg.paths.generated_dir, module_name)
+            on_disk = extract_spec_digests(existing) if existing else None
+            entries = module_specs.get(module_name, [])
+            if not on_disk:
+                return "structural"
+            any_prose = False
+            for entry in entries:
+                stored = on_disk.get(str(entry.spec_ref))
+                if stored is None:
+                    return "structural"
+                if _norm(stored.get("s")) != _norm(structural_digest(entry)):
+                    return "structural"
+                if _norm(stored.get("p")) != _norm(prose_digest(entry)):
+                    any_prose = True
+            return "prose" if any_prose else "structural"
+
+        stale_changes = {m: _label_change(m) for m in sorted(stale)}
+
         if json_mode:
             _emit_json(
                 {
                     "command": "status",
                     "ok": True,
                     "stale": sorted(stale),
+                    "stale_changes": stale_changes,
                     "fresh": sorted(fresh),
                     "contracts": contract_rows,
                     "contract_review": sorted(review_refs),
@@ -1277,7 +1320,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             print(f"Status: {len(all_mods)} module(s) total")
             print(f"Stale ({len(stale_sorted)}):")
             for mod in stale_sorted:
-                print(f"- {mod}")
+                print(f"- {mod} ({stale_changes.get(mod, 'structural')})")
             print(f"Fresh ({len(fresh_sorted)}):")
             for mod in fresh_sorted:
                 print(f"- {mod}")
@@ -1369,7 +1412,14 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
         if not specs:
             if json_mode:
                 _emit_json(
-                    {"command": "build", "ok": True, "generated": [], "skipped": [], "failed": {}}
+                    {
+                        "command": "build",
+                        "ok": True,
+                        "generated": [],
+                        "skipped": [],
+                        "refrozen": [],
+                        "failed": {},
+                    }
                 )
             return EXIT_OK
 
@@ -1456,6 +1506,49 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             changed_modules=api_changed,
             allowed_modules=allowed_modules,
         )
+        refrozen_modules: set[str] = set()
+        if (not bool(args.force)) and expanded_stale:
+            try:
+                module_digest_fn = builder.module_digest
+            except AttributeError:
+                from jaunt.digest import module_digest as module_digest_fn
+
+            header_fields_by_module: dict[str, dict[str, object]] = {}
+            for module_name in expanded_stale:
+                entries = module_specs.get(module_name)
+                if entries is None:
+                    continue
+                header_fields_by_module[module_name] = {
+                    "tool_version": "",
+                    "kind": "build",
+                    "source_module": module_name,
+                    "module_digest": module_digest_fn(module_name, entries, specs, spec_graph),
+                    "generation_fingerprint": build_generation_fingerprint,
+                    "module_context_digest": build_module_context_digests.get(module_name, ""),
+                    "module_api_digest": module_api_digest(entries),
+                    "spec_refs": [str(e.spec_ref) for e in entries],
+                }
+            plan = await builder.plan_refreeze_or_rebuild(
+                package_dir=package_dir,
+                generated_dir=cfg.paths.generated_dir,
+                module_specs=module_specs,
+                specs=specs,
+                spec_graph=spec_graph,
+                module_dag=module_dag,
+                stale_modules=expanded_stale & set(module_specs.keys()),
+                header_fields_by_module=header_fields_by_module,
+                cfg=cfg.semantic_gate,
+                gate_enabled=cfg.semantic_gate.enabled
+                and not bool(getattr(args, "no_semantic_gate", False)),
+            )
+            refrozen_modules = set(plan.refrozen)
+            expanded_stale = set(plan.rebuild)
+            # The planner already rolled MEANINGFUL verdicts up the dependency
+            # graph into `plan.rebuild`. Drop re-frozen modules from the API-changed
+            # set so run_build's own dependent expansion cannot resurrect a module
+            # whose only change was judged EQUIVALENT (semantic caching).
+            api_changed = api_changed - refrozen_modules
+        stale = expanded_stale
         progress = None
         if (
             expanded_stale
@@ -1535,6 +1628,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                     "ok": not report.failed,
                     "generated": sorted(report.generated),
                     "skipped": sorted(report.skipped),
+                    "refrozen": sorted(refrozen_modules),
                     "failed": {k: v for k, v in sorted(report.failed.items())},
                     "cost": cost_tracker.summary_dict(),
                     "cache": {"hits": response_cache.hits, "misses": response_cache.misses},
@@ -1719,7 +1813,7 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
                 specs[entry.spec_ref] = entry
         if not specs:
             if json_mode:
-                _emit_json({"command": "test", "ok": True, "exit_code": 0})
+                _emit_json({"command": "test", "ok": True, "exit_code": 0, "refrozen": []})
             return EXIT_OK
         targeted_test_entries = group_test_entries_by_target_module(list(specs.values()))
         if include_target_tests:
@@ -1782,6 +1876,45 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
         if target_mods:
             allowed = _deps_closure(target_mods, module_dag=module_dag)
             stale = {m for m in stale if m in allowed}
+
+        test_refrozen_modules: set[str] = set()
+        if (not bool(args.force)) and stale:
+            test_header_fields_by_module: dict[str, dict[str, object]] = {}
+            for module_name in stale:
+                entries = module_specs.get(module_name)
+                if entries is None:
+                    continue
+                test_header_fields_by_module[module_name] = {
+                    "tool_version": "",
+                    "kind": "test",
+                    "source_module": module_name,
+                    "module_digest": tester._test_module_digest(
+                        module_name,
+                        entries,
+                        specs,
+                        spec_graph,
+                    ),
+                    "generation_fingerprint": test_generation_fingerprint,
+                    "module_context_digest": test_module_context_digests.get(module_name, ""),
+                    "spec_refs": [str(e.spec_ref) for e in entries],
+                }
+            test_plan = await tester.plan_test_refreeze_or_rebuild(
+                project_dir=root,
+                generated_dir=cfg.paths.generated_dir,
+                module_specs=module_specs,
+                specs=specs,
+                spec_graph=spec_graph,
+                module_dag=module_dag,
+                stale_modules=stale & set(module_specs.keys()),
+                header_fields_by_module=test_header_fields_by_module,
+                cfg=cfg.semantic_gate,
+                tests_package=tests_package,
+                test_roots=existing_test_dirs,
+                gate_enabled=cfg.semantic_gate.enabled
+                and not bool(getattr(args, "no_semantic_gate", False)),
+            )
+            test_refrozen_modules = set(test_plan.refrozen)
+            stale = set(test_plan.rebuild)
 
         progress = None
         total = len(stale & set(module_specs.keys()))
@@ -1883,6 +2016,7 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
                     "command": "test",
                     "ok": exit_code == 0 and not gen_failed,
                     "exit_code": exit_code,
+                    "refrozen": sorted(test_refrozen_modules),
                     "generation_failed": {k: v for k, v in sorted(gen_failed.items())},
                 }
             )

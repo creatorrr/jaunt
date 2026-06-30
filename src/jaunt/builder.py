@@ -22,16 +22,31 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
-from jaunt import paths
+from jaunt import header, paths
 from jaunt.agent_docs import ensure_agent_docs
 from jaunt.cache import CacheEntry, ResponseCache, cache_key_from_context
+from jaunt.change_detection import (
+    assess_specs,
+    classify_change,
+    read_contract_sidecar,
+    sidecar_path,
+    write_contract_sidecar,
+)
+from jaunt.config import SemanticGateConfig
 from jaunt.cost import CostTracker
 from jaunt.decorator_analysis import _is_magic_decorator
-from jaunt.digest import extract_source_segment, module_digest
+from jaunt.digest import (
+    contract_snapshot,
+    extract_source_segment,
+    module_digest,
+    prose_digest,
+    structural_digest,
+)
 from jaunt.errors import JauntDependencyCycleError, JauntGenerationError
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
 from jaunt.generate.shared import fmt_kv_block
 from jaunt.header import (
+    extract_digest_scheme,
     extract_generation_fingerprint,
     extract_module_api_digest,
     extract_module_context_digest,
@@ -76,6 +91,14 @@ def _generated_relpath(module_name: str, *, generated_dir: str) -> Path:
     return paths.generated_module_to_relpath(generated_module, generated_dir=generated_dir)
 
 
+def _read_generated(package_dir: Path, generated_dir: str, module_name: str) -> str | None:
+    relpath = _generated_relpath(module_name, generated_dir=generated_dir)
+    try:
+        return (package_dir / relpath).read_text(encoding="utf-8")
+    except Exception:
+        return None
+
+
 def _ensure_init_files(package_dir: Path, relpath: Path) -> None:
     # Ensure all parent package dirs contain __init__.py so imports work.
     parts = list(relpath.parts)
@@ -97,6 +120,8 @@ def write_generated_module(
     module_name: str,
     source: str,
     header_fields: dict[str, object],
+    spec_digests: dict[str, dict[str, str]] | None = None,
+    snapshots: dict[str, dict] | None = None,
 ) -> Path:
     """Atomically write a generated module file with a Jaunt header."""
 
@@ -116,7 +141,11 @@ def write_generated_module(
             ensure_agent_docs(parent)
             break
 
-    hdr = format_header(**header_fields)  # type: ignore[arg-type]
+    local_fields = dict(header_fields)
+    if spec_digests is not None:
+        local_fields["spec_digests"] = spec_digests
+        local_fields["digest_scheme"] = 2
+    hdr = format_header(**local_fields)
     content = hdr + "\n" + (source or "").rstrip() + "\n"
 
     # Write atomically: temp file in the same directory then os.replace.
@@ -132,12 +161,28 @@ def write_generated_module(
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, out_path)
+        if snapshots is not None:
+            write_contract_sidecar(sidecar_path(out_path), snapshots)
     finally:
         try:
             os.unlink(tmp)
         except FileNotFoundError:
             pass
     return out_path
+
+
+def _compute_spec_digests(entries: list[SpecEntry]) -> dict[str, dict[str, str]]:
+    out: dict[str, dict[str, str]] = {}
+    for entry in entries:
+        out[str(entry.spec_ref)] = {
+            "s": structural_digest(entry),
+            "p": prose_digest(entry),
+        }
+    return out
+
+
+def _compute_snapshots(entries: list[SpecEntry]) -> dict[str, dict]:
+    return {str(entry.spec_ref): contract_snapshot(entry) for entry in entries}
 
 
 def detect_stale_modules(
@@ -252,6 +297,246 @@ def expand_stale_modules(
             expanded.add(dep)
             queue.append(dep)
     return expanded
+
+
+@dataclass(frozen=True, slots=True)
+class RefreezeOutcome:
+    refrozen: bool
+    needs_rebuild: bool
+    errors: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class RefreezePlan:
+    rebuild: set[str]
+    refrozen: set[str]
+    failed_refreeze: set[str]
+
+
+def _strip_header(existing: str) -> str | None:
+    lines = existing.splitlines(keepends=True)
+    if not lines or lines[0].rstrip("\r\n") != header.HEADER_MARKER:
+        return None
+    try:
+        header.parse_header(existing)
+    except Exception:
+        return None
+
+    i = 1
+    while i < len(lines) and lines[i].startswith("# jaunt:"):
+        i += 1
+    if i < len(lines) and lines[i].strip() == "":
+        i += 1
+    return "".join(lines[i:])
+
+
+def refreeze_module(
+    *,
+    package_dir: Path,
+    generated_dir: str,
+    module_name: str,
+    header_fields: dict[str, object],
+    snapshots: dict[str, dict],
+    validate_body: Callable[[str], list[str]] | None = None,
+) -> RefreezeOutcome:
+    relpath = _generated_relpath(module_name, generated_dir=generated_dir)
+    module_path = package_dir / relpath
+    try:
+        existing = module_path.read_text(encoding="utf-8")
+    except Exception as exc:
+        return RefreezeOutcome(
+            refrozen=False,
+            needs_rebuild=True,
+            errors=(f"Unable to read generated module {module_name}: {exc}",),
+        )
+
+    body = _strip_header(existing)
+    if body is None:
+        return RefreezeOutcome(
+            refrozen=False,
+            needs_rebuild=True,
+            errors=(f"Generated module {module_name} has no Jaunt header.",),
+        )
+
+    if validate_body is None:
+        from jaunt.validation import compile_check
+
+        errors = compile_check(body, module_name)
+    else:
+        errors = validate_body(body)
+    if errors:
+        return RefreezeOutcome(refrozen=False, needs_rebuild=True, errors=tuple(errors))
+
+    spec_digests = cast(dict[str, dict[str, str]] | None, header_fields.get("spec_digests"))
+    local_fields = dict(header_fields)
+    local_fields.pop("spec_digests", None)
+    write_generated_module(
+        package_dir=package_dir,
+        generated_dir=generated_dir,
+        module_name=module_name,
+        source=body,
+        header_fields=local_fields,
+        spec_digests=spec_digests,
+        snapshots=snapshots,
+    )
+    return RefreezeOutcome(refrozen=True, needs_rebuild=False)
+
+
+def _header_fields_with_spec_digests(
+    header_fields: dict[str, object],
+    entries: list[SpecEntry],
+) -> dict[str, object]:
+    local_fields = dict(header_fields)
+    if "spec_digests" not in local_fields:
+        local_fields["spec_digests"] = _compute_spec_digests(entries)
+    return local_fields
+
+
+def _header_field_matches(
+    existing: str,
+    header_fields: dict[str, object],
+    key: str,
+    extractor: Callable[[str], str | None],
+) -> bool:
+    on_disk = _normalize_digest(extractor(existing))
+    raw_computed = header_fields.get(key)
+    computed = _normalize_digest(str(raw_computed)) if raw_computed is not None else None
+    if computed is None:
+        return on_disk is None
+    return on_disk == computed
+
+
+def _migration_header_matches(existing: str, header_fields: dict[str, object]) -> bool:
+    if not _header_field_matches(existing, header_fields, "module_digest", extract_module_digest):
+        return False
+    return all(
+        (
+            _header_field_matches(
+                existing,
+                header_fields,
+                "generation_fingerprint",
+                extract_generation_fingerprint,
+            ),
+            _header_field_matches(
+                existing,
+                header_fields,
+                "module_context_digest",
+                extract_module_context_digest,
+            ),
+            _header_field_matches(
+                existing,
+                header_fields,
+                "module_api_digest",
+                extract_module_api_digest,
+            ),
+        )
+    )
+
+
+async def plan_refreeze_or_rebuild(
+    *,
+    package_dir: Path,
+    generated_dir: str,
+    module_specs: dict[str, list[SpecEntry]],
+    specs: dict[SpecRef, SpecEntry],
+    spec_graph: dict[SpecRef, set[SpecRef]],
+    module_dag: dict[str, set[str]],
+    stale_modules: set[str],
+    header_fields_by_module: dict[str, dict[str, object]],
+    cfg: SemanticGateConfig,
+    gate_enabled: bool = True,
+    validators_by_module: dict[str, Callable[[str], list[str]]] | None = None,
+    run_exec=None,
+) -> RefreezePlan:
+    del specs, spec_graph
+
+    rebuild: set[str] = set()
+    refrozen: set[str] = set()
+    failed_refreeze: set[str] = set()
+    gate_modules: set[str] = set()
+    validators = validators_by_module or {}
+
+    for module_name in sorted(stale_modules):
+        entries = module_specs.get(module_name, [])
+        header_fields = _header_fields_with_spec_digests(
+            header_fields_by_module.get(module_name, {}),
+            entries,
+        )
+        snapshots = _compute_snapshots(entries)
+        existing = _read_generated(package_dir, generated_dir, module_name)
+        if existing is None:
+            rebuild.add(module_name)
+            continue
+
+        scheme = extract_digest_scheme(existing)
+        if scheme is None or scheme < 2:
+            if _migration_header_matches(existing, header_fields):
+                outcome = refreeze_module(
+                    package_dir=package_dir,
+                    generated_dir=generated_dir,
+                    module_name=module_name,
+                    header_fields=header_fields,
+                    snapshots=snapshots,
+                    validate_body=validators.get(module_name),
+                )
+                if outcome.needs_rebuild:
+                    failed_refreeze.add(module_name)
+                    rebuild.add(module_name)
+                elif outcome.refrozen:
+                    refrozen.add(module_name)
+                continue
+        gate_modules.add(module_name)
+
+    meaningful_modules: set[str] = set()
+    for module_name in sorted(gate_modules):
+        entries = module_specs.get(module_name, [])
+        relpath = _generated_relpath(module_name, generated_dir=generated_dir)
+        module_file = package_dir / relpath
+        old_snapshots = read_contract_sidecar(sidecar_path(module_file))
+        if gate_enabled:
+            if run_exec is not None:
+                verdicts = await assess_specs(entries, old_snapshots, cfg, run_exec=run_exec)
+            else:
+                verdicts = await assess_specs(entries, old_snapshots, cfg)
+            if any(verdicts.get(entry.spec_ref) == "MEANINGFUL" for entry in entries):
+                meaningful_modules.add(module_name)
+        elif any(
+            classify_change(old_snapshots.get(str(entry.spec_ref)), entry) != "none"
+            for entry in entries
+        ):
+            meaningful_modules.add(module_name)
+
+    rebuild |= expand_stale_modules(
+        module_dag,
+        set(meaningful_modules),
+        changed_modules=set(meaningful_modules),
+        allowed_modules=set(stale_modules),
+    )
+    rebuild &= set(stale_modules)
+
+    for module_name in sorted(set(stale_modules) - rebuild - failed_refreeze - refrozen):
+        entries = module_specs.get(module_name, [])
+        header_fields = _header_fields_with_spec_digests(
+            header_fields_by_module.get(module_name, {}),
+            entries,
+        )
+        outcome = refreeze_module(
+            package_dir=package_dir,
+            generated_dir=generated_dir,
+            module_name=module_name,
+            header_fields=header_fields,
+            snapshots=_compute_snapshots(entries),
+            validate_body=validators.get(module_name),
+        )
+        if outcome.needs_rebuild:
+            failed_refreeze.add(module_name)
+            rebuild.add(module_name)
+        elif outcome.refrozen:
+            refrozen.add(module_name)
+
+    rebuild &= set(stale_modules)
+    refrozen -= rebuild
+    return RefreezePlan(rebuild=rebuild, refrozen=refrozen, failed_refreeze=failed_refreeze)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1602,6 +1887,8 @@ async def run_build(
             "module_api_digest": module_api_digest(entries),
             "spec_refs": [str(e.spec_ref) for e in entries],
         }
+        spec_digests = _compute_spec_digests(entries)
+        snapshots = _compute_snapshots(entries)
 
         write_generated_module(
             package_dir=package_dir,
@@ -1609,6 +1896,8 @@ async def run_build(
             module_name=module_name,
             source=result_source,
             header_fields=header_fields,
+            spec_digests=spec_digests,
+            snapshots=snapshots,
         )
         return True, []
 

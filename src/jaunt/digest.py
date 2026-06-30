@@ -9,6 +9,7 @@ import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 
+from jaunt.class_analysis import is_preserve_decorator, is_stub_body, split_class_members
 from jaunt.errors import JauntDependencyCycleError
 from jaunt.registry import SpecEntry
 from jaunt.spec_ref import SpecRef, normalize_spec_refs
@@ -94,11 +95,134 @@ def _normalize_spec_refs_for_kwargs(value: object) -> list[str]:
     return out
 
 
-def local_digest(entry: SpecEntry) -> str:
-    """Compute a stable sha256 for the entry's local definition + decorator kwargs."""
+@dataclass(frozen=True, slots=True)
+class NormalizedContract:
+    ref: str
+    kind: str
+    signature: str
+    decorator_meta: str
+    prose: str
+    body: str
+    members: str
 
+
+def normalized_contract(entry: SpecEntry) -> NormalizedContract:
     seg = extract_source_segment(entry)
+    node = ast.parse(seg).body[0]
+    ref = str(entry.spec_ref)
+    is_method = "." in entry.qualname
 
+    cls_node = node if isinstance(node, ast.ClassDef) else None
+    target_method = _find_target_method(cls_node, entry.qualname) if is_method else None
+
+    if is_method:
+        kind = _method_kind(target_method)
+        primary_node = target_method
+        function_node = target_method
+    elif isinstance(node, ast.ClassDef):
+        kind = "class"
+        primary_node = node
+        function_node = None
+    elif isinstance(node, ast.AsyncFunctionDef):
+        kind = "async_function"
+        primary_node = node
+        function_node = node
+    else:
+        kind = "function"
+        primary_node = node if isinstance(node, ast.FunctionDef) else None
+        function_node = primary_node
+
+    if entry.effective_signature is not None:
+        signature = entry.effective_signature
+    elif kind == "class":
+        signature = ""
+    else:
+        signature = _function_signature(function_node)
+
+    decorator_meta = _decorator_meta(entry, primary_node)
+    if primary_node is None:
+        prose = ""
+    else:
+        prose = ast.get_docstring(primary_node, clean=True) or ""
+    body = "" if kind == "class" else _normalized_function_body(function_node)
+    if cls_node is not None and (kind == "class" or is_method):
+        members = _normalized_members(cls_node)
+    else:
+        members = ""
+
+    return NormalizedContract(
+        ref=ref,
+        kind=kind,
+        signature=signature,
+        decorator_meta=decorator_meta,
+        prose=prose,
+        body=body,
+        members=members,
+    )
+
+
+def structural_digest(entry: SpecEntry) -> str:
+    contract = normalized_contract(entry)
+    return _sha(
+        _stable_contract_payload(
+            {
+                "ref": contract.ref,
+                "kind": contract.kind,
+                "signature": contract.signature,
+                "decorator_meta": contract.decorator_meta,
+                "body": contract.body,
+                "members": contract.members,
+            }
+        )
+    )
+
+
+def prose_digest(entry: SpecEntry) -> str:
+    return _sha(normalized_contract(entry).prose)
+
+
+def local_digest(entry: SpecEntry) -> str:
+    """Compute a stable sha256 for the entry's normalized local contract."""
+
+    contract = normalized_contract(entry)
+    return _sha(
+        _stable_contract_payload(
+            {
+                "ref": contract.ref,
+                "kind": contract.kind,
+                "signature": contract.signature,
+                "decorator_meta": contract.decorator_meta,
+                "prose": contract.prose,
+                "body": contract.body,
+                "members": contract.members,
+            }
+        )
+    )
+
+
+def contract_snapshot(entry: SpecEntry) -> dict:
+    contract = normalized_contract(entry)
+    structural_payload = _stable_contract_payload(
+        {
+            "ref": contract.ref,
+            "kind": contract.kind,
+            "signature": contract.signature,
+            "decorator_meta": contract.decorator_meta,
+            "body": contract.body,
+            "members": contract.members,
+        }
+    )
+    return {
+        "kind": contract.kind,
+        "signature": contract.signature,
+        "decorator_meta": contract.decorator_meta,
+        "prose": contract.prose,
+        "structural_digest": _sha(structural_payload),
+        "prose_digest": _sha(contract.prose),
+    }
+
+
+def _stable_decorator_kwargs(entry: SpecEntry) -> str:
     kwargs: dict[str, object] = {}
     for k, v in entry.decorator_kwargs.items():
         if k in {"deps", "targets"}:
@@ -106,9 +230,124 @@ def local_digest(entry: SpecEntry) -> str:
         else:
             kwargs[k] = _jsonable(v)
 
-    stable = json.dumps(kwargs, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    payload = (seg + "\n" + stable).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
+    return json.dumps(kwargs, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _stable_contract_payload(payload: dict[str, str]) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _find_target_method(
+    cls_node: ast.ClassDef | None,
+    qualname: str,
+) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    if cls_node is None:
+        return None
+    target_name = qualname.split(".")[-1]
+    for child in cls_node.body:
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == target_name:
+            return child
+    return None
+
+
+def _method_kind(node: ast.FunctionDef | ast.AsyncFunctionDef | None) -> str:
+    return "async_method" if isinstance(node, ast.AsyncFunctionDef) else "method"
+
+
+def _function_signature(node: ast.FunctionDef | ast.AsyncFunctionDef | None) -> str:
+    if node is None:
+        return ""
+    return ast.unparse(node.args) + " -> " + (ast.unparse(node.returns) if node.returns else "")
+
+
+def _decorator_meta(
+    entry: SpecEntry,
+    node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef | None,
+) -> str:
+    stable_kwargs = _stable_decorator_kwargs(entry)
+    decorators = []
+    if node is not None:
+        decorators = sorted(
+            ast.unparse(dec) for dec in node.decorator_list if not _is_jaunt_decorator(dec)
+        )
+    return stable_kwargs + "\n" + "\n".join(decorators)
+
+
+def _is_jaunt_decorator(dec: ast.expr) -> bool:
+    target = dec.func if isinstance(dec, ast.Call) else dec
+    if isinstance(target, ast.Attribute):
+        return (
+            isinstance(target.value, ast.Name)
+            and target.value.id == "jaunt"
+            and target.attr in {"magic", "preserve", "test", "contract"}
+        )
+    if isinstance(target, ast.Name):
+        return target.id in {"magic", "preserve", "test", "contract"}
+    return False
+
+
+def _normalized_function_body(node: ast.FunctionDef | ast.AsyncFunctionDef | None) -> str:
+    if node is None or is_stub_body(node):
+        return ""
+    body = list(node.body)
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]
+    return "\n".join(ast.unparse(stmt) for stmt in body)
+
+
+def _normalized_members(cls_node: ast.ClassDef) -> str:
+    split = split_class_members(cls_node)
+    methods = {
+        n.name: n for n in cls_node.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    preserved = set(split.preserved)
+    class_attributes: dict[str, str] = {}
+
+    for node in cls_node.body:
+        if isinstance(node, ast.Assign):
+            rendered = ast.unparse(node)
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    class_attributes[target.id] = rendered
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            class_attributes[node.target.id] = ast.unparse(node)
+
+    method_contracts: dict[str, dict[str, str]] = {}
+    for name, method in methods.items():
+        record = {
+            "kind": _method_kind(method),
+            "signature": _function_signature(method),
+            "docstring": ast.get_docstring(method, clean=True) or "",
+            "body": "",
+        }
+        if name in preserved:
+            record["body"] = _normalized_preserved_method(method)
+        method_contracts[name] = record
+
+    members = {
+        "class_name": cls_node.name,
+        "bases": [ast.unparse(b) for b in cls_node.bases],
+        "keywords": [ast.unparse(k) for k in cls_node.keywords],
+        "class_decorators": sorted(
+            ast.unparse(d) for d in cls_node.decorator_list if not _is_jaunt_decorator(d)
+        ),
+        "class_attributes": class_attributes,
+        "methods": method_contracts,
+    }
+    return json.dumps(members, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _normalized_preserved_method(method: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+    clone = ast.parse(ast.unparse(method)).body[0]
+    if not isinstance(clone, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return ""
+    clone.decorator_list = [d for d in clone.decorator_list if not is_preserve_decorator(d)]
+    return ast.unparse(clone)
 
 
 def graph_digest(
