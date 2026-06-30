@@ -198,9 +198,7 @@ def test_overview_block_absent_when_disabled(tmp_path: Path, monkeypatch) -> Non
     )
 
 
-def test_overview_complete_text_failure_does_not_abort_build(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_overview_complete_text_failure_does_not_abort_build(tmp_path: Path, monkeypatch) -> None:
     """A complete_text failure with context.overview = true must not abort the build.
 
     The overview is best-effort: if the model call raises (auth, network, timeout, etc.)
