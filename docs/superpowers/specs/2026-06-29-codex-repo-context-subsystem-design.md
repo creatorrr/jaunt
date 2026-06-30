@@ -1,7 +1,7 @@
 # Repo-Context Subsystem for Jaunt
 
 **Date:** 2026-06-29
-**Status:** Design — pending approval
+**Status:** Design — revised after Codex second-opinion review
 **Branch:** `worktree-feat+repo-context`
 
 ## Summary
@@ -12,146 +12,183 @@ into the build prompt, and make searching that repository faster and more
 relevant via LightOn's `colgrep` (next-plaid). The tree is stored as a
 version-controlled `treedocs.yaml` (treedocs format v0.2.0) maintained entirely
 in Python so it is cross-platform and requires no external binary. `colgrep` is
-opt-in: when present it powers both internal context retrieval and an
-agent-facing search affordance, with graceful fallback when absent.
+opt-in: when present, Jaunt runs retrieval **before** `codex exec` and seeds the
+results into the generation workspace, with graceful fallback when absent.
 
-This is delivered as one integrated **repo-context subsystem**, but every piece
-lands behind config flags so it can ship incrementally.
+Delivered as one **repo-context subsystem**, but each piece is independently
+toggleable behind config flags so failure modes stay isolated.
+
+## Codex second-opinion: what changed (read this first)
+
+A grounded Codex review (it read the actual source) caught real errors in the
+first draft. Corrections folded into this revision:
+
+1. **`codex exec` runs in a throwaway temp dir, not the repo.**
+   `codex_backend.py:315-343` (`generate_module`) creates a
+   `tempfile.TemporaryDirectory()`, writes the target file plus
+   `_context/spec_*.py` / `_context/dep_*.pyi` (+ optional
+   `_context/whole_class_contract.md`), then calls
+   `run_codex_exec(cwd=<tempdir>)`. **Consequence:** the agent cannot run
+   `colgrep` against the real repo. Retrieval is therefore **pre-computed by
+   Jaunt and written into `_context/relevant_*.py`**, the same channel deps use.
+2. **Two cache layers must include any new prompt context** or builds reuse
+   stale output:
+   - the response cache key (`cache.py:33` `cache_key_from_context`), and
+   - the generated-file freshness digest (`builder.py:435`
+     `_build_context_digest`).
+3. **Staleness needs per-file source content digests.** The treedocs
+   `signature` covers descriptions only, and `ParseCache`
+   (`parse_cache.py:33`) is keyed by `sha256(path)` + Python tag and validated
+   by `mtime_ns`/size — **not** content. Neither can detect "the file changed,
+   its 1-line description is now stale." We store a per-entry source content
+   digest in a sidecar cache.
+4. **Prompt-cache hygiene:** volatile text (`last_updated`, the signature,
+   retrieval scores, nondeterministic ordering) is kept **out** of the prompt
+   body so it does not bust Codex's input-token cache on every build. Static
+   content goes in a stable prefix; the only volatile block (retrieval) goes
+   last.
+5. **Atomic writes + a lock** on `treedocs.yaml` (build and watch can overlap;
+   a failed build must not leave doc churn as its main side effect).
+6. Factual fixes: the existing package tree scans the **module's own
+   directory** (`Path(entries[0].source_file).parent.rglob("*.py")`,
+   `builder.py:659`), not the whole repo; `_cap_skill_body`
+   (`skill_manager.py:151`) elides long fenced code then hard-truncates (it does
+   not "drop deepest lines first"); CLI parser registration and dispatch live in
+   a large `_build_parser()` + `main()` (`cli.py`), not a tidy `118-260` range.
+
+**Posture decisions (user-confirmed, overriding Codex's more conservative
+advice):** repo-map defaults **ON** (AST-only); enrichment is **build-time**
+hybrid with AST fallback. Codex recommended default-off and manual enrichment;
+the user chose to keep the original aggressive posture. We mitigate Codex's
+nondeterminism/cost concerns by caching descriptions per source-content digest
+(identical repo state ⇒ identical prompt) and by the cache-layer + prompt-cache
+work above.
 
 ## Goals
 
 - Maintain a durable, reviewable, incrementally-updated tree of 1-line
   descriptions of the repo's directories and Python source files.
 - Inject that tree into the Codex build prompt so generation has a project-wide
-  map, alongside the existing per-module package tree and skills block.
-- Keep the default install **offline and free**: the always-on path is pure
-  Python (AST + YAML), no API calls, no external binaries.
-- Optionally enrich descriptions with a cheap batched LLM pass.
-- Instrument `colgrep` for faster, semantic search — both as internal retrieval
-  for prompt context and as an affordance the Codex agent can call — when the
-  binary is installed and the feature is enabled.
+  map, alongside the existing per-module package tree and skills block — without
+  breaking the response cache or generated-file freshness.
+- Keep the default build **offline and free** on the always-on path: AST + YAML
+  only, no API calls, no external binaries.
+- Optionally enrich descriptions with a cheap batched LLM pass (build-time,
+  cached, AST fallback).
+- Instrument `colgrep` for faster semantic retrieval, pre-computed by Jaunt and
+  seeded into the generation workspace, when the binary is installed and the
+  feature is enabled.
 
 ## Non-Goals
 
-- Depending on the macOS-only `treedocs` Swift binary (we adopt the *format*,
-  not the tool).
-- Making `colgrep` or LLM enrichment a hard dependency. Both are opt-in with
-  fallbacks.
-- Mutating the user's global Codex configuration by default (e.g. via
-  `colgrep --install-codex`). We surface colgrep to the agent through Jaunt's
-  own prompt, which Jaunt controls.
+- Depending on the macOS-only `treedocs` Swift binary (we adopt the *format*).
+- Making `colgrep` or LLM enrichment a hard dependency.
+- Having the Codex agent shell out to `colgrep` (impossible: temp-dir cwd).
+- Mutating the user's global Codex config (e.g. `colgrep --install-codex`).
 - Documenting non-Python files or descending into `__generated__`/cache dirs.
+- Per-directory nested `treedocs.yaml` files (documented as the v2 path).
 
-## Key Decisions (locked during brainstorming)
+## Key Decisions
 
-| Decision | Choice |
-|----------|--------|
-| Scope | All three asks as one integrated subsystem, flag-gated for incremental landing |
-| Description generation | Hybrid: AST baseline (default) + optional LLM enrichment |
-| treedocs | Adopt `treedocs.yaml` format v0.2.0; maintain it in Python |
-| colgrep | Both modes — internal `--json` retrieval + agent-facing affordance |
-| Repo-map default | **On by default**, AST-only (free/offline) |
-| Granularity | Directories + Python source files only (skip non-`.py`, generated, cache) |
+| Decision | Choice | Note |
+|----------|--------|------|
+| Scope | One subsystem, independently flag-toggleable | isolates failure modes (Codex) |
+| Description generation | Hybrid: AST baseline (default) + build-time LLM enrichment | enrichment cached per source digest |
+| treedocs | Adopt `treedocs.yaml` v0.2.0; maintain in Python | single root file for v1 |
+| colgrep | Pre-computed retrieval → `_context/relevant_*.py`; opt-in | agent-run mode dropped (temp dir) |
+| Repo-map default | **On** (AST-only) | user-confirmed over Codex's default-off |
+| Enrichment | **Build-time** hybrid + AST fallback | user-confirmed; bounded by digest cache |
+| Granularity | Directories + Python source files only | skip non-`.py`, generated, cache |
+| Staleness | Per-entry **source content digest** in a sidecar | treedocs signature can't detect it |
+| Caches | Extend response-cache key **and** freshness digest | + regression tests |
 
 ## Background: how Jaunt assembles the Codex prompt today
 
-(From a codebase survey; cited so the implementation plan targets the right
-seams.)
-
-- **Prompt assembly:** `src/jaunt/generate/codex_backend.py:_build_prompt()`
-  (~lines 371–402) concatenates ordered blocks pulled from a
-  `ModuleSpecContext`. The order today is, roughly: target/exports preamble →
-  contract instructions → `build_instructions_block` → `module_contract_block`
-  → `base_contract_block` → `package_context_block` → `skills_block` →
-  "edit only the target file" footer → optional retry error context.
-- **`ModuleSpecContext`:** `src/jaunt/generate/base.py:16–38` — the dataclass
-  holding every block. Populated in `src/jaunt/builder.py` `_component_payload()`
-  (~lines 1287–1311).
-- **Closest analog — skills injection:** `src/jaunt/skills_auto.py`
-  `ensure_pypi_skills_and_block()` (~59–109) discovers PyPI dists, generates
-  skills under `.agents/skills/<dist>/SKILL.md`, and
-  `src/jaunt/skill_manager.py:build_skills_block()` (~198–256) renders a
-  size-capped block (`_cap_skill_body()`, cap = `[skills] max_chars_per_skill`,
-  default 8000). The repo-map block mirrors this shape.
-- **Existing package tree:** `src/jaunt/builder.py:_build_package_context_block()`
-  (~647–705) already scans `package_root.rglob("*.py")` (excluding the generated
-  dir and `__pycache__`) and renders a `## Package tree`. We annotate its lines
-  with descriptions.
-- **Discovery:** `src/jaunt/discovery.py:discover_module_files()` (~126–184)
-  enumerates `(module_name, path)` under source roots, excluding generated dir,
-  exclude globs, and `__pycache__`. `_module_name_for_file()` (~103–123) maps
-  paths to dotted module names.
-- **Digests / cache:** `src/jaunt/digest.py` (`local_digest`, `graph_digest`,
-  `module_digest`) and `src/jaunt/parse_cache.py` (`ParseCache`, keyed by file
-  hash + Python version, validated by mtime/size). The repo-map reuses these for
-  staleness and for the treedocs `signature`.
-- **Config:** `src/jaunt/config.py` uses `tomllib`; optional sections parse via
-  `_as_*` helpers into frozen dataclasses (e.g. `SkillsConfig` at ~84–88, parsed
-  ~385–402). New config follows this pattern.
-- **CLI:** `src/jaunt/cli.py` uses `argparse`; subcommands registered in
-  `_build_parser()` (~118–260) with a dispatch in `main`. Common flags via
-  `_add_common_flags`.
+- **Generation workspace:** `codex_backend.py:315-343` — temp dir; target file +
+  `_context/spec_*.py` + `_context/dep_*.pyi` (+ `_context/whole_class_contract.md`);
+  `run_codex_exec(cwd=<tempdir>)`. Anything Codex should "see" must be a file in
+  that temp dir or text in the prompt.
+- **Prompt assembly:** `codex_backend.py:_build_prompt()` (~371-402) concatenates
+  ordered blocks from a `ModuleSpecContext`: preamble → whole-class instruction →
+  `build_instructions_block` → `module_contract_block` → `base_contract_block` →
+  `package_context_block` → `skills_block` → footer → optional retry context.
+- **`ModuleSpecContext`:** `generate/base.py:16-38` — block carrier. Populated in
+  `builder.py` `_component_payload()` (~1287-1311).
+- **Response cache key:** `cache.py:33` `cache_key_from_context()` hashes
+  provider/model/`kind`/`spec_module`/`generated_module`/`expected_names`/
+  `spec_sources`/… New context that affects generation MUST be added here.
+- **Generated freshness:** `builder.py:435` `_build_context_digest()` hashes a
+  fixed tuple of blocks (`module_contract`, `base_contract`, `blueprint_source`,
+  `build_instructions`, `attached_test_specs`, `package_context`). `status`
+  computes this separately from `build`; both must agree.
+- **Skills injection (analog):** `skills_auto.py:ensure_pypi_skills_and_block()`
+  (~59-109) + `skill_manager.py:build_skills_block()` (~198-256), capped by
+  `_cap_skill_body()` (`skill_manager.py:151`, default 8000): elides long fenced
+  examples, then hard-truncates with a marker.
+- **Package tree:** `builder.py:_build_package_context_block()` (~647-705) scans
+  `Path(entries[0].source_file).parent.rglob("*.py")` — the **module's
+  directory**, excluding generated dir and `__pycache__`.
+- **Discovery:** `discovery.py:discover_module_files()` (~126-184) enumerates
+  `(module_name, path)` under source roots; `_module_name_for_file()` (~103-123)
+  maps paths to dotted names. Note: multiple `source_roots` are supported, which
+  the tree must handle (root-prefix semantics).
+- **Digests / cache:** `digest.py` `local_digest` (per-`SpecEntry` source segment
+  + decorator kwargs), `module_digest` (spec-graph digests). There is **no**
+  generic source-file content digest today — the subsystem adds one.
+  `parse_cache.py:ParseCache` keyed by `sha256(path)` + py tag, validated by
+  mtime/size (memo fast path checks size only).
+- **CLI:** `cli.py` argparse; subcommands in `_build_parser()`, dispatch in
+  `main()`. `watcher.py:build_cycle_runner()` (~127) builds its own
+  build/test namespaces — new flags (`--no-repo-map`) must be plumbed there too.
+- **Config:** `config.py` `tomllib`; optional sections → frozen dataclasses via
+  `_as_*` helpers (`SkillsConfig` ~84-88).
 
 ## Architecture
-
-A new module owns tree maintenance; small, well-bounded helpers own colgrep and
-config; injection extends the existing prompt-assembly seams rather than
-replacing them.
 
 ```
 src/jaunt/
   repo_context/
     __init__.py
-    tree.py          # treedocs.yaml model: load, walk/diff (sync), write, signature
-    describe.py      # description generation: AST baseline + optional LLM enrichment
-    block.py         # render the capped repo-map block + per-module annotations
-    search.py        # colgrep detection, index freshness, --json retrieval, fallback
-  config.py          # + ContextConfig / ContextSearchConfig dataclasses + parsing
-  cli.py             # + `jaunt tree` subcommand and dispatch
-  builder.py         # call tree.sync() + retrieval; populate new ModuleSpecContext fields
+    tree.py          # treedocs.yaml model: load, walk/diff (sync), atomic write+lock, signature
+    digests.py       # per-file source content digest + sidecar cache (.jaunt/tree-cache.json)
+    describe.py      # AST baseline + build-time LLM enrichment (cached per source digest)
+    block.py         # render capped repo-map block + package-tree annotation (prompt-cache safe)
+    search.py        # colgrep: detect, ensure index, query --json, write _context/relevant_*.py, fallback
+  config.py          # + ContextConfig / ContextSearchConfig
+  cli.py             # + `jaunt tree` (+ --check, --enrich, --no-repo-map) and dispatch
+  cache.py           # cache_key_from_context() extended with new context fields
+  builder.py         # tree.sync() + retrieval; populate new ModuleSpecContext fields; _build_context_digest() extended
   generate/
-    base.py          # + repo_map_block, relevant_code_block, search_hint_block fields
-    codex_backend.py # append new blocks in _build_prompt()
+    base.py          # + repo_map_block, relevant_context_files, search done via _context
+    codex_backend.py # write _context/relevant_*.py; append repo_map_block; relevant pointer last
+  watcher.py         # plumb --no-repo-map / repo_map into build_cycle_runner
 ```
 
 ### Unit responsibilities
 
-- **`tree.py`** — *What:* owns the on-disk `treedocs.yaml` and its sync.
-  *Interface:* `load(path) -> TreeDoc`, `TreeDoc.sync(roots, exclude) -> SyncResult`
-  (adds new paths, drops ghost paths, marks stale entries by content digest),
-  `TreeDoc.write(path)`, `TreeDoc.signature() -> str`, `TreeDoc.is_drifted()`.
-  *Depends on:* `discovery`, `digest`, `paths`, `pyyaml`.
-- **`describe.py`** — *What:* produces a 1-line description for a file or dir.
-  *Interface:* `ast_describe(path) -> str` (deterministic), `enrich(entries,
-  backend) -> dict[path,str]` (batched, optional). *Depends on:* `parse_cache`,
-  the generator backend (only when enriching).
-- **`block.py`** — *What:* renders prompt text. *Interface:*
-  `render_repo_map(treedoc, max_chars) -> str`,
-  `annotate_package_tree(tree_text, treedoc) -> str`,
-  `render_search_hint() -> str`. *Depends on:* `tree.py` only.
-- **`search.py`** — *What:* all colgrep interaction. *Interface:*
-  `available() -> bool`, `ensure_index(root)`, `query(text, max_hits) ->
-  list[Hit]`, `fallback_query(...)`. *Depends on:* `subprocess`, `shutil.which`,
-  ripgrep fallback.
-
-Each unit is independently testable: `tree`/`describe`/`block` are pure given a
-filesystem and (for enrich) a mocked backend; `search` is mocked or skipped when
-the binary is absent.
+- **`tree.py`** — owns `treedocs.yaml`. `load(path)`, `sync(roots, exclude)`
+  (add new, drop ghosts, mark stale via `digests`), atomic `write(path)` (temp
+  file + `os.replace`, guarded by a file lock), `signature()` (over descriptions,
+  for manual-edit drift), `is_drifted()`.
+- **`digests.py`** — `source_digest(path) -> str` (sha256 of file content) and a
+  sidecar store mapping path → `{source_digest, description, enriched: bool}` in
+  `.jaunt/tree-cache.json`. This is what actually answers "is this description
+  stale?" and caches enrichment.
+- **`describe.py`** — `ast_describe(path) -> str` (deterministic);
+  `enrich(stale_entries, backend) -> dict[path,str]` (batched, optional, cached,
+  AST fallback).
+- **`block.py`** — `render_repo_map(treedoc, max_chars)` (stable ordering, no
+  volatile fields), `annotate_package_tree(text, treedoc)`. Pure given a tree.
+- **`search.py`** — `available()`, `ensure_index(root)`, `query(text, max_hits)
+  -> list[Hit]`, `write_context_files(hits, ctx_dir)`, `fallback_query(...)`.
+  All `subprocess`; every failure ⇒ "no hits", never fatal.
 
 ## The `treedocs.yaml` artifact
 
-Conforms to **treedocs schema v0.2.0**
-(`https://dandylyons.github.io/treedocs/schemas/0.2.0/treedocs.schema.json`).
-Lives at the project root, committed to git.
-
-Required top-level keys: `schema_version` (`"0.2.0"`), `project`
-(`name`, `version`, `last_updated` as `YYYY-MM-DD`), `signature`
-(`sha256:<64 hex>`), `tree`. Tree entries are either a **compact string**
-(the description) or a **structured object** with `_description`, `_doc`
-(directory docs), `_references`, `_link`, plus child keys for nesting.
-
-Jaunt writes the compact string form for files and uses `_doc` for directories,
-keeping the file lean and human-reviewable. Example:
+Conforms to **treedocs schema v0.2.0**. Lives at project root, committed.
+Top-level: `schema_version: "0.2.0"`, `project{name,version,last_updated}`,
+`signature: sha256:<64hex>`, `tree`. File entries use the compact string form;
+directories use `_doc`.
 
 ```yaml
 # yaml-language-server: $schema=https://dandylyons.github.io/treedocs/schemas/0.2.0/treedocs.schema.json
@@ -170,218 +207,219 @@ tree:
       "builder.py": "Build orchestration and parallel scheduling"
 ```
 
-### Signature and drift
+### Two kinds of "freshness" (kept separate)
 
-The `signature` is `sha256:` over a canonical serialization of the `tree`
-(stable key ordering, descriptions only — excluding the signature and
-`last_updated` themselves). Computed via the existing `digest` style hashing.
-`is_drifted()` = recomputed signature ≠ stored signature, **or** the set of
-real filesystem paths ≠ the set of tree paths (ghost/missing entries). This is
-what `jaunt tree --check` gates on — deterministic, no model.
+- **Manual-edit drift** — the treedocs `signature` (sha256 over canonical tree
+  *descriptions*, excluding `signature`/`last_updated`). Detects a human editing
+  the YAML by hand. Gated by `jaunt tree --check`.
+- **Source drift** — per-entry **source content digest** stored in
+  `.jaunt/tree-cache.json` (gitignored). `sync()` compares each file's current
+  content digest to the cached one to decide which descriptions to regenerate.
+  This is the one the signature alone cannot do. `--check` also fails if any
+  tracked file's source digest differs from its cached digest (stale
+  description) or filesystem paths ≠ tree paths (ghost/missing).
 
-> Note: treedocs allows a child folder to own its own nested `treedocs.yaml`.
-> Jaunt v1 uses a **single root `treedocs.yaml`** for the whole project and does
-> not split per-directory. (Forward-compatible: we can add nested files later.)
+### Multiple source roots & single file
+
+For multiple `source_roots`, the tree namespaces each root at the top level so
+paths are unambiguous. v1 uses a **single root `treedocs.yaml`**. Codex's
+dissent (per-directory files reduce merge conflicts and unrelated rebuild
+invalidation for large repos) is acknowledged; per-directory nesting is the
+documented **v2** path (treedocs supports it natively).
+
+### Atomic write + lock
+
+`write()` serializes to a temp file in the same directory and `os.replace()`s it
+into place, holding a lock file (e.g. `.jaunt/tree.lock`) for the read-modify-
+write so overlapping build/watch runs cannot corrupt or interleave. A failed or
+cancelled build must not commit partial doc churn.
 
 ## Description generation (hybrid)
 
 ### AST baseline — default, free, offline, always-on
 
-For each Python file, derive a 1-line description deterministically:
-1. If the module docstring exists, use its first non-empty line (trimmed,
-   single line, length-capped).
-2. Else synthesize from the public surface: top-level `def`/`class` names and
-   any `@jaunt.magic` / `@jaunt.test` / `@jaunt.contract` decorators
-   (e.g. `"magic specs: TokenStore, verify_jwt"`).
-3. Else a minimal fallback (`"Python module"`).
+Per Python file: (1) module docstring first non-empty line; else (2) synthesize
+from public `def`/`class` names + `@jaunt.magic`/`@jaunt.test`/`@jaunt.contract`
+decorators; else (3) `"Python module"`. Directories: `__init__.py` docstring
+first line, else a child rollup. Parsing reuses `ParseCache`.
 
-For directories: use the package `__init__.py` docstring first line if present,
-else a rollup naming a few notable children.
+### Build-time LLM enrichment — opt-in (`[context] enrich = true`)
 
-Parsing reuses `parse_cache` so ASTs are cached by content hash.
+When enabled and a backend is available, during `sync()`:
+- Select entries whose **source content digest changed** since the sidecar's
+  cached digest (so unchanged files are never re-enriched).
+- Issue **one batched** request (path + AST summary + short head per item) → JSON
+  `path -> one-line description`. Validate/trim to one capped line.
+- On any failure (no backend, bad JSON, timeout) ⇒ **AST baseline** for that
+  entry. Never errors the build.
+- Cache `{source_digest, description, enriched:true}` in the sidecar.
 
-### LLM enrichment — opt-in (`[context] enrich = true`)
-
-When enabled **and** a generator backend is available:
-- Collect entries whose content digest changed since their cached description.
-- Issue **one batched** request: each item carries its path, AST summary, and a
-  short head of the file; the model returns a JSON map `path -> one-line
-  description`. (Batched to avoid one `codex exec` per file.)
-- Validate/trim each result to a single capped line; on any failure or absent
-  backend, **fall back to the AST baseline** for that entry.
-- Cache each enriched description keyed by content digest in the parse-cache
-  directory, so unchanged files are never re-enriched.
-
-Enrichment never blocks a build: failures degrade to baseline, never error out.
+**Determinism guard (mitigates Codex):** the prompt only ever embeds the
+*cached* description for a given file content. Identical repo state ⇒ identical
+descriptions ⇒ identical prompt ⇒ no response-cache / prompt-cache churn.
+Enrichment changes a description only when the file's content already changed
+(which already triggers a rebuild).
 
 ## Injection into the Codex prompt
 
-Three new optional blocks on `ModuleSpecContext` (`generate/base.py`), appended
-in `codex_backend.py:_build_prompt()` in this order, **after**
-`package_context_block` and near `skills_block`:
+`codex_backend.generate_module()` already seeds `_context/`. Additions:
 
-1. **`repo_map_block`** — a whole-repo 1-line map rendered from `treedocs.yaml`,
-   size-capped to `[context] max_chars` (default 6000) using the same capping
-   strategy as `_cap_skill_body` (drop deepest/least-relevant lines first, mark
-   truncation). Header: `## Repository map`.
-2. **`relevant_code_block`** — (colgrep internal retrieval, see below) top-k
-   semantically relevant existing code units for this spec, capped. Header:
-   `## Relevant existing code`. Empty when retrieval is disabled/unavailable.
-3. **`search_hint_block`** — (colgrep agent affordance) a short instruction:
-   colgrep is available; run `colgrep --json "<intent>"` to find relevant code.
-   Empty when colgrep is disabled/unavailable.
+1. **`repo_map_block`** (new `ModuleSpecContext` field) — whole-repo 1-line map
+   from `treedocs.yaml`, capped to `[context] max_chars` (default 6000), **stable
+   ordering, no `last_updated`/signature/scores in the text**. Appended in
+   `_build_prompt()` after `package_context_block`, near `skills_block`. Header
+   `## Repository map`.
+2. **Annotated package tree** — `_build_package_context_block()`'s lines get
+   their descriptions appended (fallback: bare path). This mutates the existing
+   `package_context_block`, which is already in both cache layers.
+3. **Retrieval seeded as files** — when colgrep is enabled, Jaunt writes the top
+   hits into `_context/relevant_0.py …` in the temp workspace and adds a short
+   pointer line to the prompt ("Read `_context/relevant_*.py` for related code in
+   the repo."), placed **last** (it is the only volatile block). The agent reads
+   files; it never runs colgrep.
 
-Additionally, `_build_package_context_block()`'s `## Package tree` lines are
-annotated with their descriptions from `treedocs.yaml` (falling back to the
-bare path when no description exists).
+### Cache integration (mandatory, with tests)
 
-All blocks are omitted (empty string) when their feature is off, so prompts are
-unchanged for users who disable the subsystem.
+- `cache.py:cache_key_from_context()` gains: `repo_map_block`, the rendered
+  retrieval context (hash of the `_context/relevant_*.py` contents), and the
+  (already-included) `package_context_block` now carrying annotations.
+- `builder.py:_build_context_digest()` gains the same new blocks so generated-
+  file freshness and `status`/`build` agree.
+- Regression tests assert: changing the repo map or retrieval changes both keys;
+  unchanged state leaves them stable.
 
-## colgrep integration (opt-in, both modes)
+All blocks are empty when their feature is off ⇒ byte-identical prompts and keys
+for users who disable the subsystem (no forced cache invalidation on upgrade).
+
+## colgrep integration (opt-in, pre-computed retrieval)
 
 Gated by `[context.search] enabled = true` **and** `shutil.which("colgrep")`.
 
-- **Index freshness:** at the start of `build`/`watch`, if enabled, call
-  `colgrep init` once (idempotent) and rely on colgrep's own incremental
-  re-indexing (`state.json`) for changed files. Index lives in colgrep's
-  per-user data dir (`~/.local/share/colgrep/indices/...` on Linux) — not in the
-  repo.
-- **Internal retrieval (Mode B):** for each spec, query
-  `colgrep --json "<docstring + expected_names>"`, take up to
-  `[context.search] max_hits` (default 8) hits, and render them into
-  `relevant_code_block`. **Fallback:** when colgrep is absent/disabled, optional
-  ripgrep-over-expected-names / AST-dep selection produces a smaller block (or
-  the block is empty).
-- **Agent affordance (Mode A):** when
-  `[context.search] inject_agent_instructions = true`, add `search_hint_block`
-  so the Codex agent can call colgrep mid-generation. This is **scoped to
-  Jaunt's prompt**; we do not run `colgrep --install-codex` (which edits global
-  Codex config) by default. We may document `--install-codex` as an optional
-  user convenience.
-
-`search.py` shells out with `subprocess`, parses `--json` (absolute paths),
-times out defensively, and treats any failure as "no hits" (never fatal).
+- **Index freshness:** at `build`/`watch` start, `colgrep init` (idempotent);
+  colgrep's own `state.json` handles incremental re-index. Index lives in
+  colgrep's per-user data dir, not the repo.
+- **Retrieval:** per spec, `colgrep --json "<docstring + expected_names>"`, take
+  up to `[context.search] max_hits` (default 8), **deterministic tie-break**
+  (sort by score then path), write capped snippets into
+  `_context/relevant_*.py`, hash that rendered content into the cache key +
+  freshness digest.
+- **Fallback:** colgrep absent/disabled/error/timeout ⇒ no `_context/relevant_*`
+  files, empty pointer; optional ripgrep-over-expected-names fallback.
+- **No global Codex config mutation.** We do not run `colgrep --install-codex`
+  (documented as an optional user convenience only).
 
 ## Configuration
 
-New `[context]` section in `jaunt.toml`, parsed in `config.py` following the
-`SkillsConfig` pattern:
-
 ```toml
 [context]
-repo_map = true            # maintain treedocs.yaml + inject the repo map
+repo_map = true            # maintain treedocs.yaml + inject the map (AST-only by default)
 repo_map_file = "treedocs.yaml"
-enrich = false             # opt-in LLM enrichment of descriptions
+enrich = false             # opt-in build-time LLM enrichment
 max_chars = 6000           # cap for the injected repo-map block
 
 [context.search]           # colgrep
 enabled = false            # opt-in; requires the colgrep binary
-inject_agent_instructions = true
 internal_retrieval = true
 max_hits = 8
 ```
 
-Dataclasses (frozen): `ContextConfig` (with nested `ContextSearchConfig`).
-Defaults chosen so a fresh install is **offline + free**: repo-map on (AST-only),
-enrichment off, colgrep off.
+Frozen dataclasses `ContextConfig` (nested `ContextSearchConfig`), parsed via
+`_as_*`. `inject_agent_instructions` from the first draft is removed (agent-run
+colgrep is impossible). Defaults: repo-map on (AST-only), enrichment off,
+colgrep off.
+
+`pyyaml` is added as a base runtime dependency (the format requires real YAML
+round-tripping) but is **lazy-imported** inside `repo_context/` so it loads only
+when the repo-map path actually runs. (Codex flagged growing the 5-package base
+set; lazy import contains the cost and keeps `clean`/`status --json` import-light.)
 
 ## CLI
 
-Add a `tree` subcommand (argparse, via `_build_parser()` + dispatch):
-
-- `jaunt tree` — sync + (re)generate `treedocs.yaml`. Flags: `--force`
-  (regenerate all descriptions), `--no-enrich` (force AST-only even if config
-  enables enrichment), `--json` (machine-readable summary), plus common flags
-  (`--root`, `--config`).
-- `jaunt tree --check` — deterministic drift gate (ghost/missing paths or
-  signature mismatch). No model. **Exit code 4** on drift, matching the existing
-  `check` convention; 0 when clean.
-
-Integration into existing commands:
-- `build` (and `test` via build): run `tree.sync()` before prompt assembly when
-  `repo_map` is on; ensure colgrep index when search is enabled. Honors
-  `--no-auto-skills`-style opt-outs via a new `--no-repo-map` flag.
-- `watch`: on change, sync affected tree entries and let colgrep reindex.
-- `status`: report tree drift (counts of new/ghost/stale entries) in text and
-  `--json`.
+- `jaunt tree` — sync + regenerate `treedocs.yaml`. `--force` (regen all),
+  `--enrich`/`--no-enrich` (override config), `--json`, common flags.
+- `jaunt tree --check` — deterministic drift gate: ghost/missing paths,
+  signature mismatch (manual edit), or any tracked file whose source digest ≠
+  cached digest (stale description). No model. **Exit 4** on drift (matches
+  `check`), 0 clean.
+- `build`/`test`: run `tree.sync()` before prompt assembly when `repo_map` on;
+  ensure colgrep index when search enabled. `--no-repo-map` opt-out, plumbed
+  through `cli.py` **and** `watcher.build_cycle_runner()`.
+- `status` (+ `--json`): report tree drift counts (new/ghost/stale).
 
 ## Data flow (build)
 
 ```
 jaunt build
-  └─ load config → repo_map on?
-       ├─ tree.sync(roots): walk fs, diff vs treedocs.yaml
-       │     ├─ add new .py/dir entries, drop ghosts
-       │     ├─ for changed digests: describe.ast_describe()  (always)
-       │     └─ if enrich: describe.enrich(changed, backend)  (batched, fallback)
-       ├─ tree.write(treedocs.yaml) + recompute signature
+  └─ config: repo_map on?
+       ├─ tree.sync(roots): walk fs; diff vs treedocs.yaml + sidecar digests
+       │     ├─ add new .py/dir, drop ghosts
+       │     ├─ source digest changed? → describe.ast_describe()  (always)
+       │     └─ enrich on? → describe.enrich(changed, backend)    (batched, cached, fallback)
+       ├─ tree.write(treedocs.yaml)  (atomic + lock; recompute signature)
        └─ search enabled? → search.ensure_index(root)
   └─ per module → _component_payload():
-       ├─ block.render_repo_map(treedoc, max_chars)        → repo_map_block
-       ├─ search.query(spec_text)                           → relevant_code_block
-       ├─ block.render_search_hint()                        → search_hint_block
-       └─ block.annotate_package_tree(...)                  → package_context_block
-  └─ codex_backend._build_prompt() appends the blocks → codex exec
+       ├─ block.render_repo_map(treedoc, max_chars)         → repo_map_block        (stable text)
+       ├─ block.annotate_package_tree(...)                  → package_context_block
+       └─ search.query(spec) → write _context/relevant_*.py → prompt pointer (last) (volatile, hashed)
+  └─ cache_key_from_context() + _build_context_digest() include the new blocks
+  └─ codex_backend.generate_module(): seeds _context/, _build_prompt(), codex exec
 ```
 
 ## Error handling & graceful degradation
 
-- Missing/corrupt `treedocs.yaml` → rebuild from scratch (treat as empty),
-  log once.
-- **YAML dependency:** Jaunt has no YAML library today (base deps: `rich`,
-  `watchfiles`, `pytest`, `pytest-asyncio`, `anyio`). The treedocs format
-  requires real YAML round-tripping of human-edited files, so `pyyaml` is added
-  as a base dependency (ubiquitous, pure-Python fallback available). This is the
-  one new runtime dependency the subsystem introduces.
-- Enrichment failure (no backend, bad JSON, timeout) → AST baseline; build
-  proceeds.
-- colgrep absent/disabled/error/timeout → empty `relevant_code_block` +
-  `search_hint_block`; optional ripgrep fallback; build proceeds.
-- `jaunt tree --check` is the only place drift is fatal (exit 4), and only when
-  explicitly invoked.
+- Missing/corrupt `treedocs.yaml` ⇒ rebuild from empty, log once.
+- Missing/corrupt sidecar ⇒ treat all descriptions stale (full re-describe).
+- Enrichment failure ⇒ AST baseline; build proceeds.
+- colgrep absent/disabled/error/timeout ⇒ no retrieval files; build proceeds.
+- Atomic write + lock prevents partial/corrupt YAML under overlapping runs.
+- `jaunt tree --check` is the only fatal drift path (exit 4), only when invoked.
 
 ## Testing strategy
 
-- **Unit (offline, deterministic):**
-  - `describe.ast_describe()` over fixture modules (docstring / decorators /
-    empty) → exact strings.
-  - `tree.sync()` add/ghost/stale diffing against a temp tree; `signature()`
-    stability and drift detection.
-  - `block.render_repo_map()` capping behavior at `max_chars`.
-  - `config.py` parsing of `[context]` / `[context.search]` incl. defaults.
-  - CLI `jaunt tree` / `--check` exit codes via the existing CLI test harness.
-- **Mocked backend:** `describe.enrich()` with a fake backend returning JSON;
-  and the fallback path when the backend raises.
-- **colgrep:** `search.py` with `subprocess`/`which` mocked (present → parses
-  JSON; absent → fallback/empty). No test requires the real binary or network.
-- **Prompt assembly:** `_build_prompt()` includes/excludes each block per
-  config flag.
+- **Unit (offline, deterministic):** `ast_describe()` over fixtures;
+  `tree.sync()` add/ghost/stale via sidecar digests; `signature()` stability;
+  `render_repo_map()` capping + stable ordering; config parsing + defaults; CLI
+  `tree`/`--check` exit codes.
+- **Cache regression (critical):** adding/changing `repo_map_block` or retrieval
+  changes both `cache_key_from_context()` and `_build_context_digest()`;
+  unchanged state keeps them byte-stable; feature-off ⇒ keys identical to today.
+- **Mocked backend:** `enrich()` success + fallback-on-raise; digest-cache hit
+  skips re-enrichment.
+- **colgrep (mocked, no real binary/network):** present→parse JSON; absent→
+  fallback/empty; timeout; malformed JSON; deterministic tie ordering; `_context/
+  relevant_*.py` written + hashed into keys.
+- **Prompt assembly:** `_build_prompt()` includes/excludes each block per flag;
+  retrieval pointer is last.
 
-The full suite stays offline and key-free, consistent with Jaunt's existing
-mocked-backend tests.
+Suite stays offline and key-free.
 
-## Incremental landing plan (all behind flags)
+## Landing plan (one subsystem, isolated phases)
 
-1. **Tree core + injection:** `tree.py`, `describe.py` (AST only), `block.py`,
-   `ContextConfig`, `jaunt tree`/`--check`, repo-map injection + package-tree
-   annotation. Default on, offline.
-2. **Enrichment:** `describe.enrich()` + `[context] enrich`, batched + cached +
-   fallback.
-3. **colgrep:** `search.py`, `[context.search]`, `relevant_code_block` +
-   `search_hint_block`, index freshness, fallbacks.
+Repo-map is default-on, so phase 1 includes injection **and** the cache work
+(they cannot land apart safely).
+
+1. **Repo-map core + injection + cache integrity:** `tree.py` (atomic write +
+   lock), `digests.py` (sidecar), `describe.ast_describe()`, `block.py`,
+   `ContextConfig`, `jaunt tree` + `--check`, `repo_map_block` injection +
+   package-tree annotation, **extend `cache_key_from_context()` +
+   `_build_context_digest()` + status/build parity + regression tests**, pyyaml
+   (lazy). Default on, offline.
+2. **Build-time enrichment:** `describe.enrich()` + `[context] enrich`, batched,
+   digest-cached, AST fallback.
+3. **colgrep retrieval (opt-in):** `search.py`, `[context.search]`, pre-run
+   retrieval → `_context/relevant_*.py` + prompt pointer (hashed into keys),
+   index freshness, fallbacks, mocked tests.
 
 ## Open questions / risks
 
-- **Repo-map size vs. value:** a large repo could blow `max_chars`; capping
-  drops the least-relevant lines. We may later prioritize the building module's
-  neighborhood. Acceptable for v1.
-- **Enrichment cost cadence:** batching + digest-caching keeps it cheap, but on
-  a first full enrichment of a big repo it is one larger call. Documented;
-  `--no-enrich` and default-off mitigate.
-- **treedocs schema evolution:** pinned to v0.2.0; a schema bump is a follow-up.
-- **colgrep query relevance:** depends on the model colgrep uses; we expose
-  `max_hits` and treat hits as additive context, never authoritative.
+- **Token budget:** repo map + skills + package context + retrieval runs once per
+  stale module, in parallel. `max_chars` caps the map; retrieval is `max_hits`-
+  bounded. Revisit caps after measuring real prompt sizes.
+- **Single root file churn:** acknowledged; per-directory is the v2 mitigation.
+- **Enrichment first-run cost:** one larger batched call on first enrichment of a
+  big repo; digest-caching makes subsequent runs cheap. `--no-enrich` + default-
+  off mitigate.
+- **treedocs schema evolution:** pinned to v0.2.0; a bump is a follow-up.
 
 ## References
 
