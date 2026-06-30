@@ -204,6 +204,56 @@ def test_skills_config_defaults_and_parses(tmp_path: Path) -> None:
     assert cfg2.skills.inject_user_skills == ["local-api"]
 
 
+def test_skills_builtin_defaults(tmp_path: Path) -> None:
+    from jaunt.skills_builtin import DEFAULT_BUILTIN_SKILLS
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "jaunt.toml").write_text(
+        "\n".join(
+            [
+                "version = 1",
+                "",
+                "[paths]",
+                'source_roots = ["src"]',
+                "",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    cfg = load_config(root=tmp_path)
+
+    assert cfg.skills.builtin is True
+    assert cfg.skills.builtin_skills == list(DEFAULT_BUILTIN_SKILLS)
+
+
+def test_skills_builtin_overrides(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "jaunt.toml").write_text(
+        "\n".join(
+            [
+                "version = 1",
+                "",
+                "[paths]",
+                'source_roots = ["src"]',
+                "",
+                "[skills]",
+                "builtin = false",
+                'builtin_skills = ["ruff", "pytest"]',
+                "",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    cfg = load_config(root=tmp_path)
+
+    assert cfg.skills.builtin is False
+    assert cfg.skills.builtin_skills == ["ruff", "pytest"]
+
+
 def test_invalid_toml_raises(tmp_path: Path) -> None:
     p = tmp_path / "jaunt.toml"
     p.write_text("version = \n", encoding="utf-8")

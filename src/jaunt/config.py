@@ -39,6 +39,12 @@ _VALID_AGENT_ENGINES = ("codex",)
 _VALID_DERIVE = ("examples", "errors")
 
 
+def _default_builtin_skills() -> tuple[str, ...]:
+    from jaunt.skills_builtin import DEFAULT_BUILTIN_SKILLS
+
+    return DEFAULT_BUILTIN_SKILLS
+
+
 @dataclass(frozen=True)
 class BuildConfig:
     jobs: int
@@ -86,6 +92,8 @@ class SkillsConfig:
     auto: bool = True
     max_chars_per_skill: int = 8000
     inject_user_skills: list[str] = field(default_factory=list)
+    builtin: bool = True
+    builtin_skills: list[str] = field(default_factory=lambda: list(_default_builtin_skills()))
 
 
 @dataclass(frozen=True)
@@ -418,6 +426,18 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     else:
         skills_inject_user = []
 
+    if "builtin" in skills_tbl:
+        skills_builtin = _as_bool(skills_tbl["builtin"], name="skills.builtin")
+    else:
+        skills_builtin = True
+
+    if "builtin_skills" in skills_tbl:
+        skills_builtin_skills = _as_str_list(
+            skills_tbl["builtin_skills"], name="skills.builtin_skills"
+        )
+    else:
+        skills_builtin_skills = list(_default_builtin_skills())
+
     if "battery_dir" in contract_tbl:
         contract_battery_dir = _as_str(contract_tbl["battery_dir"], name="contract.battery_dir")
     else:
@@ -554,6 +574,8 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             auto=skills_auto,
             max_chars_per_skill=skills_max_chars_per_skill,
             inject_user_skills=skills_inject_user,
+            builtin=skills_builtin,
+            builtin_skills=skills_builtin_skills,
         ),
         contract=ContractConfig(
             battery_dir=contract_battery_dir,
