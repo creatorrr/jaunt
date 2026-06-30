@@ -75,6 +75,8 @@ class PromptsConfig:
     test_system: str
     test_module: str
     build_preamble: str = ""
+    project_overview_system: str = ""
+    project_overview_user: str = ""
 
 
 @dataclass(frozen=True)
@@ -115,6 +117,7 @@ class ContextConfig:
     enrich: bool = False
     max_chars: int = 6000
     search: ContextSearchConfig = field(default_factory=ContextSearchConfig)
+    overview: bool = False
 
 
 @dataclass(frozen=True)
@@ -433,6 +436,20 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     else:
         test_module = ""
 
+    if "project_overview_system" in prompts_tbl:
+        project_overview_system = _as_str(
+            prompts_tbl["project_overview_system"], name="prompts.project_overview_system"
+        )
+    else:
+        project_overview_system = ""
+
+    if "project_overview_user" in prompts_tbl:
+        project_overview_user = _as_str(
+            prompts_tbl["project_overview_user"], name="prompts.project_overview_user"
+        )
+    else:
+        project_overview_user = ""
+
     if "engine" in agent_tbl:
         agent_engine = _as_str(agent_tbl["engine"], name="agent.engine").strip()
     else:
@@ -543,6 +560,11 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     else:
         context_max_chars = 6000
 
+    if "overview" in context_tbl:
+        context_overview = _as_bool(context_tbl["overview"], name="context.overview")
+    else:
+        context_overview = False
+
     search_tbl = _as_table(context_tbl.get("search", {}), name="context.search")
     if "enabled" in search_tbl:
         search_enabled = _as_bool(search_tbl["enabled"], name="context.search.enabled")
@@ -652,6 +674,8 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             build_module=build_module,
             test_system=test_system,
             test_module=test_module,
+            project_overview_system=project_overview_system,
+            project_overview_user=project_overview_user,
         ),
         agent=AgentConfig(engine=agent_engine),
         codex=CodexConfig(
@@ -684,6 +708,7 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
                 internal_retrieval=search_internal,
                 max_hits=search_max_hits,
             ),
+            overview=context_overview,
         ),
         semantic_gate=SemanticGateConfig(
             enabled=semantic_gate_enabled,

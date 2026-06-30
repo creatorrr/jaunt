@@ -31,6 +31,7 @@ def _make_ctx(**overrides: object) -> ModuleSpecContext:
         whole_class=overrides.get("whole_class", False),  # type: ignore[arg-type]
         repo_map_block=overrides.get("repo_map_block", ""),  # type: ignore[arg-type]
         relevant_context_block=overrides.get("relevant_context_block", ""),  # type: ignore[arg-type]
+        project_overview_block=overrides.get("project_overview_block", ""),  # type: ignore[arg-type]
     )
 
 
@@ -264,6 +265,19 @@ def test_relevant_block_changes_cache_key() -> None:
     k1 = cache_key_from_context(_make_ctx(), model="m", provider="p")
     k2 = cache_key_from_context(
         _make_ctx(relevant_context_block="see _context/relevant_0.py"),
+        model="m",
+        provider="p",
+    )
+    assert k1 != k2
+
+
+def test_project_overview_block_changes_cache_key() -> None:
+    """Two contexts differing only in project_overview_block must produce different cache keys."""
+    from jaunt.cache import cache_key_from_context
+
+    k1 = cache_key_from_context(_make_ctx(), model="m", provider="p")
+    k2 = cache_key_from_context(
+        _make_ctx(project_overview_block="This project implements a slugifier."),
         model="m",
         provider="p",
     )

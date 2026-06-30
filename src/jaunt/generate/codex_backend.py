@@ -413,6 +413,7 @@ class CodexBackend(GeneratorBackend):
                 "the public API the docstring implies."
             )
         blocks += [
+            getattr(ctx, "project_overview_block", "") or "",
             getattr(ctx, "build_instructions_block", "") or "",
             getattr(ctx, "module_contract_block", "") or "",
             getattr(ctx, "base_contract_block", "") or "",

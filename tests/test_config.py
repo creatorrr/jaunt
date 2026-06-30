@@ -444,3 +444,48 @@ def test_context_config_parsed(tmp_path: Path) -> None:
     assert cfg.context.max_chars == 4000
     assert cfg.context.search.enabled is True
     assert cfg.context.search.max_hits == 12
+
+
+def test_context_overview_default_false(tmp_path: Path) -> None:
+    """context.overview defaults to False when not set in jaunt.toml."""
+    (tmp_path / "jaunt.toml").write_text("version = 1\n", encoding="utf-8")
+    from jaunt.config import load_config
+
+    cfg = load_config(root=tmp_path)
+    assert cfg.context.overview is False
+
+
+def test_context_overview_can_be_enabled(tmp_path: Path) -> None:
+    """context.overview = true is parsed correctly."""
+    (tmp_path / "jaunt.toml").write_text(
+        "version = 1\n\n[context]\noverview = true\n", encoding="utf-8"
+    )
+    from jaunt.config import load_config
+
+    cfg = load_config(root=tmp_path)
+    assert cfg.context.overview is True
+
+
+def test_prompts_config_project_overview_defaults(tmp_path: Path) -> None:
+    """prompts.project_overview_system and _user default to empty string."""
+    (tmp_path / "jaunt.toml").write_text("version = 1\n", encoding="utf-8")
+    from jaunt.config import load_config
+
+    cfg = load_config(root=tmp_path)
+    assert cfg.prompts.project_overview_system == ""
+    assert cfg.prompts.project_overview_user == ""
+
+
+def test_prompts_config_project_overview_parsed(tmp_path: Path) -> None:
+    """prompts.project_overview_system and _user are read from [prompts]."""
+    (tmp_path / "jaunt.toml").write_text(
+        "version = 1\n\n[prompts]\n"
+        'project_overview_system = "custom-sys"\n'
+        'project_overview_user = "custom-user"\n',
+        encoding="utf-8",
+    )
+    from jaunt.config import load_config
+
+    cfg = load_config(root=tmp_path)
+    assert cfg.prompts.project_overview_system == "custom-sys"
+    assert cfg.prompts.project_overview_user == "custom-user"

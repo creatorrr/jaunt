@@ -37,6 +37,7 @@ class ModuleSpecContext:
     repo_map_block: str = ""
     relevant_context_block: str = ""
     relevant_context_files: tuple[tuple[str, str], ...] = ()
+    project_overview_block: str = ""
     module_context_digest: str = ""
     async_runner: str = "asyncio"
     seed_target_content: str = ""

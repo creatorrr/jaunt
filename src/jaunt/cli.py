@@ -1341,6 +1341,18 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
 
         module_specs = registry.get_specs_by_module("magic")
 
+        overview_block = ""
+        if cfg.context.overview:
+            from jaunt.repo_context import overview as rc_overview
+
+            overview_block = await rc_overview.project_overview_block_for_build(
+                root=root,
+                cfg=cfg,
+                module_specs=module_specs,
+                repo_map_block=repo_map_block,
+                backend=_build_backend(cfg),
+            )
+
         package_dir = next((d for d in source_dirs if d.exists()), None)
         if package_dir is None:
             raise JauntConfigError("No existing source_roots to build into.")
@@ -1494,6 +1506,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             backend=_build_backend(cfg),
             generation_fingerprint=build_generation_fingerprint,
             repo_map_block=repo_map_block,
+            project_overview_block=overview_block,
             search_enabled=search_enabled,
             search_max_hits=cfg.context.search.max_hits,
             source_roots=[d for d in source_dirs if d.exists()],

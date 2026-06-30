@@ -62,6 +62,34 @@ def project_spec_digest(module_specs: dict[str, list[SpecEntry]], repo_map_block
     return h.hexdigest()
 
 
+async def project_overview_block_for_build(
+    *,
+    root,
+    cfg,
+    module_specs,
+    repo_map_block: str,
+    backend,
+) -> str:
+    """Return the project overview prose block for injection into build prompts.
+
+    Returns '' immediately if cfg.context.overview is False.
+    Delegates to load_or_build_overview for caching and model calls.
+    """
+    if not cfg.context.overview:
+        return ""
+    digest = project_spec_digest(module_specs, repo_map_block)
+    docs = build_project_docs_block(root, max_chars=cfg.context.max_chars)
+    return await load_or_build_overview(
+        backend,
+        repo_map_block=repo_map_block,
+        project_docs=docs,
+        digest=digest,
+        state_dir=root / ".jaunt",
+        enabled=True,
+        prompts=cfg.prompts,
+    )
+
+
 async def load_or_build_overview(
     backend,
     *,

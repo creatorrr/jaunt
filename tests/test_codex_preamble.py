@@ -60,7 +60,12 @@ def test_build_prompt_preamble_contains_required_terms() -> None:
     lower = prompt.lower()
 
     required_terms = [
-        "jaunt", "spec-driven", "signature", "docstring", "__generated__", "no placeholder"
+        "jaunt",
+        "spec-driven",
+        "signature",
+        "docstring",
+        "__generated__",
+        "no placeholder",
     ]
     for term in required_terms:
         assert term.lower() in lower, f"Required term {term!r} not found in prompt"
