@@ -25,7 +25,7 @@ def _ctx(**overrides):
         "module_contract_block": "",
         "base_contract_block": "",
         "package_context_block": "",
-        "skills_block": "",
+        "skills_digest": "",
         "seed_target_content": "",
         "whole_class_contract_block": "",
     }
