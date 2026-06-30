@@ -1314,7 +1314,6 @@ async def run_build(
                 dependency_apis=dep_apis,
                 dependency_generated_modules=dep_gen,
                 decorator_apis=decorator_apis,
-                skills_block=skills_block,
                 repo_map_block=repo_map_block,
                 relevant_context_block=relevant_block,
                 relevant_context_files=relevant_files,

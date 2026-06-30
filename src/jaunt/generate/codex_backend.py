@@ -19,6 +19,7 @@ from typing import cast
 from jaunt.config import CodexConfig, LLMConfig, PromptsConfig
 from jaunt.errors import JauntGenerationError
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext, TokenUsage
+from jaunt.skill_seed import seed_skills_into_workspace
 
 
 class CodexExecResult:
@@ -338,6 +339,15 @@ class CodexBackend(GeneratorBackend):
             for name, content in getattr(ctx, "relevant_context_files", ()) or ():
                 (ctx_dir / name).write_text(content, encoding="utf-8")
 
+            # Best-effort: seed builtin + project skills into the workspace so
+            # `codex exec` can discover them under `.agents/skills/`. Warnings are
+            # non-fatal and intentionally not raised.
+            seed_skills_into_workspace(
+                root,
+                project_root=getattr(ctx, "project_root", None),
+                builtin_names=list(getattr(ctx, "builtin_skill_names", ()) or ()),
+            )
+
             prompt = self._build_prompt(ctx, target.relative_to(root), extra_error_context)
             extra_config = dict(self._codex.config or {})
             try:
@@ -395,8 +405,11 @@ class CodexBackend(GeneratorBackend):
             getattr(ctx, "base_contract_block", "") or "",
             getattr(ctx, "package_context_block", "") or "",
             getattr(ctx, "repo_map_block", "") or "",
-            getattr(ctx, "skills_block", "") or "",
         ]
+        blocks.append(
+            "Relevant library and tooling skills are available in `.agents/skills/`. "
+            "Consult them when they apply."
+        )
         blocks.append(
             "Edit ONLY the target file. Do not create other files, run tests, or modify "
             "anything else. Output the full module - no placeholders."

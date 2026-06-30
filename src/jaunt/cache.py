@@ -84,7 +84,7 @@ def cache_key_from_context(
     )
     h.update(b"\x00")
     h.update((ctx.skills_digest or "").encode())
-    h.update(b"\0")
+    h.update(b"\x00")
     h.update(json.dumps(sorted(ctx.builtin_skill_names)).encode())
     h.update(b"\x00")
     h.update((ctx.module_contract_block or "").encode())
