@@ -1768,7 +1768,6 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
         response_cache = ResponseCache(cache_dir, enabled=not no_cache)
         cost_tracker = CostTracker(max_cost=cfg.llm.max_cost_per_build)
         backend = _build_backend(cfg)
-        build_skills_block = ""
 
         build_generation_fingerprint = generation_fingerprint(
             cfg,
@@ -1786,7 +1785,9 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             backend=backend,
             generation_fingerprint=build_generation_fingerprint,
             targeted_test_entries=build_targeted_test_entries,
-            skills_block=build_skills_block,
+            project_root=root,
+            builtin_skill_names=(),
+            skills_digest="",
             jobs=int(cfg.build.jobs),
             async_runner=cfg.build.async_runner,
             build_instructions=build_instructions,

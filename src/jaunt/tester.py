@@ -602,7 +602,9 @@ class RepairBuildContext:
     backend: GeneratorBackend
     generation_fingerprint: str
     targeted_test_entries: dict[str, list[SpecEntry]] = field(default_factory=dict)
-    skills_block: str = ""
+    project_root: Path | None = None
+    builtin_skill_names: tuple[str, ...] = ()
+    skills_digest: str = ""
     jobs: int = 1
     async_runner: str = "asyncio"
     build_instructions: list[str] = field(default_factory=list)
@@ -707,6 +709,9 @@ async def run_test_generation(
     response_cache: ResponseCache | None = None,
     cost_tracker: CostTracker | None = None,
     async_runner: str = "asyncio",
+    project_root: Path | None = None,
+    builtin_skill_names: Sequence[str] = (),
+    skills_digest: str = "",
     initial_error_context_by_module: dict[str, list[str]] | None = None,
 ) -> TestGenerationReport:
     jobs = max(1, int(jobs))
@@ -813,6 +818,9 @@ async def run_test_generation(
             module_contract_block=module_contract.prompt_block,
             module_context_digest=module_context_digest,
             async_runner=async_runner,
+            project_root=project_root,
+            builtin_skill_names=tuple(builtin_skill_names),
+            skills_digest=skills_digest,
         )
 
         def _validate_candidate(source: str) -> list[str]:
@@ -1042,6 +1050,9 @@ async def run_tests(
     response_cache: ResponseCache | None = None,
     cost_tracker: CostTracker | None = None,
     async_runner: str = "asyncio",
+    project_root: Path | None = None,
+    builtin_skill_names: Sequence[str] = (),
+    skills_digest: str = "",
     repair_build_context: RepairBuildContext | None = None,
 ) -> PytestResult:
     generated_files: list[Path] = []
@@ -1081,6 +1092,9 @@ async def run_tests(
             response_cache=response_cache,
             cost_tracker=cost_tracker,
             async_runner=async_runner,
+            project_root=project_root,
+            builtin_skill_names=builtin_skill_names,
+            skills_digest=skills_digest,
         )
         generated_files = report.generated_files
         generated = report.generated
@@ -1170,6 +1184,9 @@ async def run_tests(
                 response_cache=None,
                 cost_tracker=cost_tracker,
                 async_runner=repair_build_context.async_runner,
+                project_root=repair_build_context.project_root,
+                builtin_skill_names=repair_build_context.builtin_skill_names,
+                skills_digest=repair_build_context.skills_digest,
                 build_instructions=repair_build_context.build_instructions,
                 initial_error_context_by_module={
                     module_name: repair_lines for module_name in implicated_build_modules
@@ -1205,6 +1222,9 @@ async def run_tests(
                 response_cache=None,
                 cost_tracker=cost_tracker,
                 async_runner=async_runner,
+                project_root=project_root,
+                builtin_skill_names=builtin_skill_names,
+                skills_digest=skills_digest,
                 initial_error_context_by_module={
                     module_name: repair_lines for module_name in failed_test_modules
                 },
