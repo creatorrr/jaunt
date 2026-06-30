@@ -70,19 +70,20 @@ def test_cache_hit_skips_model(tmp_path: Path) -> None:
     """Two calls with the same digest must produce exactly one model call."""
     state_dir = tmp_path / ".jaunt_state"
     backend = _FakeBackend("My project overview text.")
-
     prompts = _stub_prompts()
-    kwargs = dict(
-        repo_map_block="module-a\nmodule-b\n",
-        project_docs="# README\nA sample project.",
-        digest="abc123",
-        state_dir=state_dir,
-        enabled=True,
-        prompts=prompts,
-    )
 
     # First call — model is invoked.
-    result1 = asyncio.run(load_or_build_overview(backend, **kwargs))
+    result1 = asyncio.run(
+        load_or_build_overview(
+            backend,
+            repo_map_block="module-a\nmodule-b\n",
+            project_docs="# README\nA sample project.",
+            digest="abc123",
+            state_dir=state_dir,
+            enabled=True,
+            prompts=prompts,
+        )
+    )
     assert result1 == "My project overview text."
     assert backend.calls == 1
 
@@ -92,7 +93,17 @@ def test_cache_hit_skips_model(tmp_path: Path) -> None:
     assert overview_file.read_text(encoding="utf-8") == "My project overview text."
 
     # Second call with same digest — cache hit, no second model call.
-    result2 = asyncio.run(load_or_build_overview(backend, **kwargs))
+    result2 = asyncio.run(
+        load_or_build_overview(
+            backend,
+            repo_map_block="module-a\nmodule-b\n",
+            project_docs="# README\nA sample project.",
+            digest="abc123",
+            state_dir=state_dir,
+            enabled=True,
+            prompts=prompts,
+        )
+    )
     assert result2 == "My project overview text."
     assert backend.calls == 1, f"expected 1 model call total, got {backend.calls}"
 
@@ -120,20 +131,33 @@ def test_stale_digest_triggers_new_model_call(tmp_path: Path) -> None:
     """A changed digest must bypass the cache and call the model again."""
     state_dir = tmp_path / ".jaunt_state"
     backend = _FakeBackend("New overview.")
+    prompts = _stub_prompts()
 
-    common = dict(
-        repo_map_block="map",
-        project_docs="docs",
-        state_dir=state_dir,
-        enabled=True,
-        prompts=_stub_prompts(),
+    asyncio.run(
+        load_or_build_overview(
+            backend,
+            repo_map_block="map",
+            project_docs="docs",
+            digest="digest-v1",
+            state_dir=state_dir,
+            enabled=True,
+            prompts=prompts,
+        )
     )
-
-    asyncio.run(load_or_build_overview(backend, digest="digest-v1", **common))
     assert backend.calls == 1
 
     # Different digest → model is called again.
-    asyncio.run(load_or_build_overview(backend, digest="digest-v2", **common))
+    asyncio.run(
+        load_or_build_overview(
+            backend,
+            repo_map_block="map",
+            project_docs="docs",
+            digest="digest-v2",
+            state_dir=state_dir,
+            enabled=True,
+            prompts=prompts,
+        )
+    )
     assert backend.calls == 2
 
 
