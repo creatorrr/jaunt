@@ -225,6 +225,7 @@ jaunt build --no-semantic-gate  # Skip the Layer B gate; rebuild on any real cha
 jaunt test                    # Generate tests and run pytest
 jaunt test --no-build         # Skip build step
 jaunt test --no-run           # Generate tests without running pytest
+jaunt test --no-redact-derived  # Debug: expose full failure detail (defeats the held-out implementer/tester barrier)
 
 jaunt init                    # Scaffold jaunt.toml + src/ + tests/
 jaunt init --force            # Overwrite existing jaunt.toml

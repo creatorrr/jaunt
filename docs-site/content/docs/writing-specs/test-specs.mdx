@@ -39,6 +39,19 @@ def test_normalize_email__lowercases_and_strips() -> None:
 - **Name edge cases**: empty strings, invalid formats, boundary values.
 - **Import the thing you’re testing** inside the docstring or stub body if needed. The generator tends to do better when it sees the intended import path.
 
+## Test Tiers & Held-Out Feedback
+
+Generated tests are automatically tagged with a tier marker — you don’t write it yourself:
+
+- `@pytest.mark.jaunt_tier("example")` — a case anchored to a **canonical example** in the docstring (shared / public).
+- `@pytest.mark.jaunt_tier("derived")` — a case the generator **derived itself** (adversarial / edge cases). Held out.
+
+This implements **implementer/tester independence**. When a generated test fails and Jaunt regenerates the implementation, the implementation generator only sees *derived* failures as an opaque id + exception class — never the expected value — so it can’t be written to the held-out answer key (an oracle the implementer can see is one it games). *Example* failures keep full detail, since they’re part of the shared contract.
+
+Practical implication for your specs: put your **canonical, behavior-defining assertions in the docstring as examples** (they ground both the implementation and the tests), and trust the generator to derive the adversarial cases. Derived cases are given **opaque names** (`test_derived_01`) on purpose — even a descriptive name like `test_empty_list_returns_zero` leaks intent.
+
+`jaunt test --no-redact-derived` disables the redaction (full detail for all tiers) — a **debugging escape hatch only**; it defeats the barrier and logs a warning.
+
 ## Async Test Specs
 
 `@jaunt.test()` also accepts `async def` stubs.

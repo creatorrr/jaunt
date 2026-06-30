@@ -46,8 +46,18 @@ uv run jaunt test
 uv run jaunt test --no-build
 uv run jaunt test --no-run
 uv run jaunt test --pytest-args=-k --pytest-args email
+uv run jaunt test --no-redact-derived   # debug only — see below
 uv run jaunt test --json
 ```
+
+Generated tests are split into a **held-out set**: cases anchored to the docstring's
+canonical examples are tagged `@pytest.mark.jaunt_tier("example")`, everything the test
+generator derives itself is tagged `@pytest.mark.jaunt_tier("derived")`. When a test
+fails and Jaunt regenerates the implementation, *derived* failures are redacted to an
+opaque id + exception class (the implementation generator never sees the expected value
+it would otherwise game), while *example* failures keep full detail. `--no-redact-derived`
+disables this and feeds full failure detail back for all tiers — a **debugging escape
+hatch only**; it defeats the implementer/tester barrier and logs a warning.
 
 ## Eval
 
