@@ -70,6 +70,33 @@ uv run jaunt status --json
 
 `jaunt status` should reflect the same dependency-driven freshness model as `jaunt build`, including modules invalidated by an upstream dependency API change.
 
+## Instructions
+
+Print a tight, **project-aware** agent primer to load into a coding agent's
+context before it operates Jaunt:
+
+```bash
+uv run jaunt instructions
+uv run jaunt instructions --json
+```
+
+The output is the framework rules (the two authoring modes, the build/test loop,
+how to write a good spec, the command and exit-code reference) followed by a live
+snapshot of the current project: resolved `[paths]`, engine/model, semantic-gate
+and repo-map settings, and which modules are stale. It ships with the package, so
+the briefing always matches the installed version.
+
+Run outside an initialized project, it still succeeds (exit `0`) — it prints the
+framework rules plus a note to run `jaunt init`. `--json` emits
+`{command, ok, text, project}`, where `project` is the structured live snapshot
+(or `null` when there is no `jaunt.toml`).
+
+<Callout>
+  `jaunt instructions` is the single source of truth for the agent workflow. The
+  bundled Claude Code / Codex skills are thin stubs that point here, so they
+  cannot drift from the installed CLI.
+</Callout>
+
 ## Clean
 
 Remove generated directories under configured source/test roots:

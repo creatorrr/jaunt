@@ -78,6 +78,8 @@ def format_header(
     module_context_digest: str = "",
     module_api_digest: str = "",
     spec_refs: list[str],
+    digest_scheme: int = 1,
+    spec_digests: dict[str, dict[str, str]] | None = None,
 ) -> str:
     digest = module_digest if module_digest.startswith("sha256:") else f"sha256:{module_digest}"
     spec_refs_json = json.dumps(spec_refs, ensure_ascii=True)
@@ -89,27 +91,32 @@ def format_header(
         f"# jaunt:module_digest={digest}",
         f"# jaunt:spec_refs={spec_refs_json}",
     ]
+    if spec_digests is not None:
+        spec_digests_json = json.dumps(spec_digests, ensure_ascii=True, sort_keys=True)
+        lines.insert(5, f"# jaunt:spec_digests={spec_digests_json}")
+        lines.insert(5, f"# jaunt:digest_scheme={digest_scheme}")
+    optional_insert_at = 7 if spec_digests is not None else 5
     if module_context_digest:
         context_digest = (
             module_context_digest
             if module_context_digest.startswith("sha256:")
             else f"sha256:{module_context_digest}"
         )
-        lines.insert(5, f"# jaunt:module_context_digest={context_digest}")
+        lines.insert(optional_insert_at, f"# jaunt:module_context_digest={context_digest}")
     if module_api_digest:
         api_digest = (
             module_api_digest
             if module_api_digest.startswith("sha256:")
             else f"sha256:{module_api_digest}"
         )
-        lines.insert(5, f"# jaunt:module_api_digest={api_digest}")
+        lines.insert(optional_insert_at, f"# jaunt:module_api_digest={api_digest}")
     if generation_fingerprint:
         fingerprint = (
             generation_fingerprint
             if generation_fingerprint.startswith("sha256:")
             else f"sha256:{generation_fingerprint}"
         )
-        lines.insert(5, f"# jaunt:generation_fingerprint={fingerprint}")
+        lines.insert(optional_insert_at, f"# jaunt:generation_fingerprint={fingerprint}")
     return "\n".join(lines) + "\n"
 
 
@@ -163,3 +170,32 @@ def extract_module_api_digest(source: str) -> str | None:
     if parsed is None:
         return None
     return parsed.get("module_api_digest")
+
+
+def extract_digest_scheme(source: str) -> int | None:
+    parsed = parse_header(source)
+    if parsed is None:
+        return None
+    raw = parsed.get("digest_scheme")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def extract_spec_digests(source: str) -> dict[str, dict[str, str]] | None:
+    parsed = parse_header(source)
+    if parsed is None:
+        return None
+    raw = parsed.get("spec_digests")
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    return value

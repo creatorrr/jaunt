@@ -97,6 +97,7 @@ def test_cli_test_json_does_not_print_generation_summary(
         "ok": True,
         "exit_code": 0,
         "generation_failed": {},
+        "refrozen": [],
     }
     assert "Generated" not in out
     assert "module(s), skipped" not in out

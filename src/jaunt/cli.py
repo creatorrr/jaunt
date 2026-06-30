@@ -11,7 +11,7 @@ import hashlib
 import json
 import os
 import sys
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -29,6 +29,13 @@ from jaunt.errors import (
     JauntGenerationError,
 )
 from jaunt.progress import ProgressBar
+from jaunt.status_core import (
+    compute_magic_status,
+    deps_closure as _deps_closure,
+    discover_targeted_test_entries as _discover_static_targeted_test_entries,
+    iter_target_modules as _iter_target_modules,
+    prepend_sys_path as _prepend_sys_path,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from jaunt.config import JauntConfig
@@ -133,6 +140,13 @@ def _build_parser() -> argparse.ArgumentParser:
     build_p.add_argument(
         "--no-repo-map", action="store_true", help="Disable repo-map injection for this build."
     )
+    build_p.add_argument(
+        "--no-semantic-gate",
+        action="store_true",
+        dest="no_semantic_gate",
+        help="Force every normalized-digest change to rebuild (skip the Layer B "
+        "semantic gate). Layer A linter-resistance still applies.",
+    )
 
     test_p = subparsers.add_parser("test", help="Generate tests and run pytest.")
     _add_common_flags(test_p)
@@ -144,6 +158,13 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help="Extra args appended to pytest (repeatable).",
+    )
+    test_p.add_argument(
+        "--no-semantic-gate",
+        action="store_true",
+        dest="no_semantic_gate",
+        help="Force every normalized-digest change to rebuild (skip the Layer B "
+        "semantic gate). Layer A linter-resistance still applies.",
     )
 
     init_p = subparsers.add_parser("init", help="Initialize a new jaunt project.")
@@ -188,6 +209,29 @@ def _build_parser() -> argparse.ArgumentParser:
 
     status_p = subparsers.add_parser("status", help="Show project build status.")
     _add_common_flags(status_p)
+
+    instructions_p = subparsers.add_parser(
+        "instructions",
+        help="Print a project-aware agent primer for using Jaunt.",
+    )
+    instructions_p.add_argument(
+        "--root",
+        type=str,
+        default=None,
+        help="Project root (defaults to searching upward for jaunt.toml).",
+    )
+    instructions_p.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to jaunt.toml (defaults to <root>/jaunt.toml).",
+    )
+    instructions_p.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Emit structured JSON output to stdout.",
+    )
 
     tree_p = subparsers.add_parser("tree", help="Maintain treedocs.yaml repo map.")
     _add_common_flags(tree_p)
@@ -392,30 +436,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return _build_parser().parse_args(argv)
 
 
-def _iter_target_modules(targets: Iterable[str]) -> set[str]:
-    out: set[str] = set()
-    for t in targets:
-        mod = (t or "").split(":", 1)[0].strip()
-        if mod:
-            out.add(mod)
-    return out
-
-
-def _deps_closure(modules: set[str], *, module_dag: dict[str, set[str]]) -> set[str]:
-    """Return modules plus all of their dependencies (transitively)."""
-
-    seen = set(modules)
-    stack = list(modules)
-    while stack:
-        m = stack.pop()
-        for dep in module_dag.get(m, set()):
-            if dep in seen:
-                continue
-            seen.add(dep)
-            stack.append(dep)
-    return seen
-
-
 def _resolve_root_and_config(args: argparse.Namespace) -> tuple[Path | None, Path | None]:
     root = Path(args.root).resolve() if args.root else None
     config_path = Path(args.config).resolve() if args.config else None
@@ -447,17 +467,6 @@ def _effective_include_target_tests(cfg: JauntConfig, args: argparse.Namespace) 
     if override is None:
         return bool(cfg.build.include_target_tests)
     return bool(override)
-
-
-def _prepend_sys_path(dirs: Sequence[Path]) -> None:
-    # Ensure discovered modules are importable.
-    seen: set[str] = set(sys.path)
-    for d in reversed([p.resolve() for p in dirs if p.exists()]):
-        s = str(d)
-        if s in seen:
-            continue
-        sys.path.insert(0, s)
-        seen.add(s)
 
 
 def _discover_test_spec_modules(*, root: Path, cfg: JauntConfig) -> tuple[list[Path], list[str]]:
@@ -512,33 +521,6 @@ def _resolve_contract_source_file(*, root: Path, cfg: JauntConfig, module: str) 
         if mod == module:
             return path
     raise JauntDiscoveryError(f"Could not locate source module {module!r} under source_roots.")
-
-
-def _discover_static_targeted_test_entries(*, root: Path, cfg: JauntConfig) -> list[SpecEntry]:
-    from jaunt import discovery
-    from jaunt.module_contract import extract_targeted_test_entries
-
-    test_dirs = [root / tr for tr in cfg.paths.test_roots]
-    entries: list[SpecEntry] = []
-    for tr, test_dir in zip(cfg.paths.test_roots, test_dirs, strict=False):
-        if not test_dir.exists():
-            continue
-        prefix = ".".join(Path(tr).parts)
-        discovered = discovery.discover_module_files(
-            roots=[test_dir],
-            exclude=[],
-            generated_dir=cfg.paths.generated_dir,
-            module_prefix=prefix or None,
-        )
-        for module_name, path in discovered:
-            try:
-                entries.extend(extract_targeted_test_entries(module_name, str(path)))
-            except Exception as exc:
-                raise JauntDiscoveryError(
-                    f"Failed to statically inspect test module '{module_name}': "
-                    f"{type(exc).__name__}: {exc}"
-                ) from exc
-    return entries
 
 
 def _build_backend(cfg: JauntConfig):
@@ -1067,6 +1049,38 @@ def cmd_eject(args: argparse.Namespace) -> int:
         return EXIT_CONFIG_OR_DISCOVERY
 
 
+def cmd_instructions(args: argparse.Namespace) -> int:
+    """Print a project-aware agent primer for operating Jaunt.
+
+    Always exits 0: outside an initialized project it prints the framework rules
+    plus an "init" note instead of the live project section.
+    """
+    from jaunt import instructions
+
+    json_mode = _is_json_mode(args)
+    project: dict | None = None
+    note: str | None = None
+    try:
+        root, cfg = _load_config(args)
+    except JauntConfigError as e:
+        note = instructions.no_project_note(str(e))
+    else:
+        try:
+            project = instructions.project_section(root, cfg)
+        except Exception as e:  # noqa: BLE001 - never let introspection break the primer
+            note = (
+                f"Project detected but could not be inspected "
+                f"({type(e).__name__}); run `jaunt status`."
+            )
+
+    text = instructions.render(project=project, note=note)
+    if json_mode:
+        _emit_json({"command": "instructions", "ok": True, "text": text, "project": project})
+    else:
+        print(text)
+    return EXIT_OK
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     json_mode = _is_json_mode(args)
     try:
@@ -1095,8 +1109,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             except Exception:  # noqa: BLE001
                 tree_drift = None
 
-        from jaunt import discovery, registry
-        from jaunt.deps import build_spec_graph, collapse_to_module_dag
+        from jaunt.deps import build_spec_graph
 
         def _contract_rows(infer_default: bool) -> tuple[list[dict[str, object]], set[str]]:
             from jaunt.contract import runner as contract_runner
@@ -1144,33 +1157,27 @@ def cmd_status(args: argparse.Namespace) -> int:
                 )
             return rows, review
 
-        registry.clear_registries()
-        modules = discovery.discover_modules(
-            roots=[d for d in source_dirs if d.exists()],
-            exclude=[],
-            generated_dir=cfg.paths.generated_dir,
+        infer_default = bool(cfg.build.infer_deps) and (not bool(args.no_infer_deps))
+        mstatus = compute_magic_status(
+            root=root,
+            cfg=cfg,
+            source_dirs=source_dirs,
+            build_instructions=build_instructions,
+            include_target_tests=include_target_tests,
+            infer_deps=infer_default,
+            force=bool(args.force),
+            target=args.target,
         )
-        discovery.evict_modules_for_import(
-            module_names=modules,
-            roots=[d for d in source_dirs if d.exists()],
-        )
-        discovery.import_and_collect(modules, kind="magic")
-        static_targeted_test_entries = (
-            _discover_static_targeted_test_entries(root=root, cfg=cfg)
-            if include_target_tests
-            else []
-        )
+        contract_rows, review_refs = _contract_rows(infer_default)
 
-        specs = dict(registry.get_magic_registry())
-        if not specs:
-            infer_default = bool(cfg.build.infer_deps) and (not bool(args.no_infer_deps))
-            contract_rows, review_refs = _contract_rows(infer_default)
+        if mstatus.total == 0:
             if json_mode:
                 _emit_json(
                     {
                         "command": "status",
                         "ok": True,
                         "stale": [],
+                        "stale_changes": {},
                         "fresh": [],
                         "contracts": contract_rows,
                         "contract_review": sorted(review_refs),
@@ -1189,75 +1196,9 @@ def cmd_status(args: argparse.Namespace) -> int:
                     print(f"tree: {tree_drift} (run jaunt tree)")
             return EXIT_OK
 
-        infer_default = bool(cfg.build.infer_deps) and (not bool(args.no_infer_deps))
-        spec_graph = build_spec_graph(specs, infer_default=infer_default)
-        module_dag = collapse_to_module_dag(spec_graph)
-        module_specs = registry.get_specs_by_module("magic")
-
-        package_dir = next((d for d in source_dirs if d.exists()), None)
-        if package_dir is None:
-            raise JauntConfigError("No existing source_roots to check.")
-
-        from jaunt import builder
-        from jaunt.generation_fingerprint import generation_fingerprint
-        from jaunt.module_api import module_api_digest
-        from jaunt.module_contract import group_test_entries_by_target_module
-
-        build_generation_fingerprint = generation_fingerprint(
-            cfg,
-            kind="build",
-            build_instructions=build_instructions,
-            include_target_tests=include_target_tests,
-        )
-        build_module_context_digests: dict[str, str] = {}
-        build_module_api_digests: dict[str, str] = {}
-        targeted_test_entries = group_test_entries_by_target_module(static_targeted_test_entries)
-        for module_name, entries in module_specs.items():
-            expected, _errs = builder._build_expected_names(entries)
-            build_module_context_digests[module_name] = builder.build_module_context_artifacts(
-                module_name=module_name,
-                entries=entries,
-                expected_names=expected,
-                module_specs=module_specs,
-                module_dag=module_dag,
-                package_dir=package_dir,
-                generated_dir=cfg.paths.generated_dir,
-                build_instructions=build_instructions,
-                targeted_test_entries=targeted_test_entries,
-            ).digest
-            build_module_api_digests[module_name] = module_api_digest(entries)
-        stale = builder.detect_stale_modules(
-            package_dir=package_dir,
-            generated_dir=cfg.paths.generated_dir,
-            module_specs=module_specs,
-            specs=specs,
-            spec_graph=spec_graph,
-            generation_fingerprint=build_generation_fingerprint,
-            module_context_digests=build_module_context_digests,
-            force=bool(args.force),
-        )
-        api_changed = builder.detect_api_changed_modules(
-            package_dir=package_dir,
-            generated_dir=cfg.paths.generated_dir,
-            module_specs=module_specs,
-            module_api_digests=build_module_api_digests,
-        )
-
-        target_mods = _iter_target_modules(args.target)
-        if target_mods:
-            allowed = _deps_closure(target_mods, module_dag=module_dag)
-            all_mods = {m for m in module_specs if m in allowed}
-            api_changed = {m for m in api_changed if m in allowed}
-        else:
-            all_mods = set(module_specs.keys())
-
-        stale = builder.expand_stale_modules(
-            module_dag,
-            stale & all_mods,
-            changed_modules=api_changed,
-        )
-        fresh = all_mods - stale
-        contract_rows, review_refs = _contract_rows(infer_default)
+        stale = mstatus.stale
+        fresh = mstatus.fresh
+        stale_changes = mstatus.stale_changes
 
         if json_mode:
             _emit_json(
@@ -1265,6 +1206,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                     "command": "status",
                     "ok": True,
                     "stale": sorted(stale),
+                    "stale_changes": stale_changes,
                     "fresh": sorted(fresh),
                     "contracts": contract_rows,
                     "contract_review": sorted(review_refs),
@@ -1274,10 +1216,10 @@ def cmd_status(args: argparse.Namespace) -> int:
         else:
             stale_sorted = sorted(stale)
             fresh_sorted = sorted(fresh)
-            print(f"Status: {len(all_mods)} module(s) total")
+            print(f"Status: {mstatus.total} module(s) total")
             print(f"Stale ({len(stale_sorted)}):")
             for mod in stale_sorted:
-                print(f"- {mod}")
+                print(f"- {mod} ({stale_changes.get(mod, 'structural')})")
             print(f"Fresh ({len(fresh_sorted)}):")
             for mod in fresh_sorted:
                 print(f"- {mod}")
@@ -1369,7 +1311,14 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
         if not specs:
             if json_mode:
                 _emit_json(
-                    {"command": "build", "ok": True, "generated": [], "skipped": [], "failed": {}}
+                    {
+                        "command": "build",
+                        "ok": True,
+                        "generated": [],
+                        "skipped": [],
+                        "refrozen": [],
+                        "failed": {},
+                    }
                 )
             return EXIT_OK
 
@@ -1456,6 +1405,53 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             changed_modules=api_changed,
             allowed_modules=allowed_modules,
         )
+        refrozen_modules: set[str] = set()
+        if (not bool(args.force)) and expanded_stale:
+            try:
+                module_digest_fn = builder.module_digest
+            except AttributeError:
+                from jaunt.digest import module_digest as module_digest_fn
+            from jaunt.digest import legacy_module_digest
+
+            header_fields_by_module: dict[str, dict[str, object]] = {}
+            for module_name in expanded_stale:
+                entries = module_specs.get(module_name)
+                if entries is None:
+                    continue
+                header_fields_by_module[module_name] = {
+                    "tool_version": "",
+                    "kind": "build",
+                    "source_module": module_name,
+                    "module_digest": module_digest_fn(module_name, entries, specs, spec_graph),
+                    "legacy_module_digest": legacy_module_digest(
+                        module_name, entries, specs, spec_graph
+                    ),
+                    "generation_fingerprint": build_generation_fingerprint,
+                    "module_context_digest": build_module_context_digests.get(module_name, ""),
+                    "module_api_digest": module_api_digest(entries),
+                    "spec_refs": [str(e.spec_ref) for e in entries],
+                }
+            plan = await builder.plan_refreeze_or_rebuild(
+                package_dir=package_dir,
+                generated_dir=cfg.paths.generated_dir,
+                module_specs=module_specs,
+                specs=specs,
+                spec_graph=spec_graph,
+                module_dag=module_dag,
+                stale_modules=expanded_stale & set(module_specs.keys()),
+                header_fields_by_module=header_fields_by_module,
+                cfg=cfg.semantic_gate,
+                gate_enabled=cfg.semantic_gate.enabled
+                and not bool(getattr(args, "no_semantic_gate", False)),
+            )
+            refrozen_modules = set(plan.refrozen)
+            expanded_stale = set(plan.rebuild)
+            # The planner already rolled MEANINGFUL verdicts up the dependency
+            # graph into `plan.rebuild`. Drop re-frozen modules from the API-changed
+            # set so run_build's own dependent expansion cannot resurrect a module
+            # whose only change was judged EQUIVALENT (semantic caching).
+            api_changed = api_changed - refrozen_modules
+        stale = expanded_stale
         progress = None
         if (
             expanded_stale
@@ -1535,6 +1531,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                     "ok": not report.failed,
                     "generated": sorted(report.generated),
                     "skipped": sorted(report.skipped),
+                    "refrozen": sorted(refrozen_modules),
                     "failed": {k: v for k, v in sorted(report.failed.items())},
                     "cost": cost_tracker.summary_dict(),
                     "cache": {"hits": response_cache.hits, "misses": response_cache.misses},
@@ -1719,7 +1716,7 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
                 specs[entry.spec_ref] = entry
         if not specs:
             if json_mode:
-                _emit_json({"command": "test", "ok": True, "exit_code": 0})
+                _emit_json({"command": "test", "ok": True, "exit_code": 0, "refrozen": []})
             return EXIT_OK
         targeted_test_entries = group_test_entries_by_target_module(list(specs.values()))
         if include_target_tests:
@@ -1782,6 +1779,51 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
         if target_mods:
             allowed = _deps_closure(target_mods, module_dag=module_dag)
             stale = {m for m in stale if m in allowed}
+
+        test_refrozen_modules: set[str] = set()
+        if (not bool(args.force)) and stale:
+            test_header_fields_by_module: dict[str, dict[str, object]] = {}
+            for module_name in stale:
+                entries = module_specs.get(module_name)
+                if entries is None:
+                    continue
+                test_header_fields_by_module[module_name] = {
+                    "tool_version": "",
+                    "kind": "test",
+                    "source_module": module_name,
+                    "module_digest": tester._test_module_digest(
+                        module_name,
+                        entries,
+                        specs,
+                        spec_graph,
+                    ),
+                    "legacy_module_digest": tester._legacy_test_module_digest(
+                        module_name,
+                        entries,
+                        specs,
+                        spec_graph,
+                    ),
+                    "generation_fingerprint": test_generation_fingerprint,
+                    "module_context_digest": test_module_context_digests.get(module_name, ""),
+                    "spec_refs": [str(e.spec_ref) for e in entries],
+                }
+            test_plan = await tester.plan_test_refreeze_or_rebuild(
+                project_dir=root,
+                generated_dir=cfg.paths.generated_dir,
+                module_specs=module_specs,
+                specs=specs,
+                spec_graph=spec_graph,
+                module_dag=module_dag,
+                stale_modules=stale & set(module_specs.keys()),
+                header_fields_by_module=test_header_fields_by_module,
+                cfg=cfg.semantic_gate,
+                tests_package=tests_package,
+                test_roots=existing_test_dirs,
+                gate_enabled=cfg.semantic_gate.enabled
+                and not bool(getattr(args, "no_semantic_gate", False)),
+            )
+            test_refrozen_modules = set(test_plan.refrozen)
+            stale = set(test_plan.rebuild)
 
         progress = None
         total = len(stale & set(module_specs.keys()))
@@ -1883,6 +1925,7 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
                     "command": "test",
                     "ok": exit_code == 0 and not gen_failed,
                     "exit_code": exit_code,
+                    "refrozen": sorted(test_refrozen_modules),
                     "generation_failed": {k: v for k, v in sorted(gen_failed.items())},
                 }
             )
@@ -2475,6 +2518,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_clean(args)
     if args.command == "status":
         return cmd_status(args)
+    if args.command == "instructions":
+        return cmd_instructions(args)
     if args.command == "tree":
         return cmd_tree(args)
     if args.command == "check":

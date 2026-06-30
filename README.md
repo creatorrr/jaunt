@@ -109,6 +109,22 @@ uv run jaunt build --root examples/jwt_auth
 PYTHONPATH=examples/jwt_auth/src uv run jaunt test --root examples/jwt_auth
 ```
 
+## For Coding Agents
+
+Point any coding agent (Claude Code, Codex, Cursor, a bare shell, CI) at Jaunt
+with one command:
+
+```bash
+jaunt instructions          # a tight, project-aware primer to load into context
+jaunt instructions --json   # {command, ok, text, project} for tooling/MCP
+```
+
+It prints the framework rules (the two modes, the build/test loop, how to write a
+good spec, the command + exit-code reference) followed by a live snapshot of the
+current project (resolved paths, engine/model, and which modules are stale). It
+ships with the package, so the briefing always matches the installed version. Run
+it before you start working.
+
 ## Freshness Model
 
 - The full cleaned docstring is part of the spec contract, not just the first summary line.

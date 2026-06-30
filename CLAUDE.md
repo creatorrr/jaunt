@@ -161,6 +161,11 @@ battery_dir = "tests/contract"     # where derived contract batteries are writte
 derive = ["examples", "errors"]    # case kinds derived from docstring prose
 strength = true                    # run mutation-based strength scoring at reconcile
 
+[semantic_gate]
+enabled = true              # gate behaviorally-equivalent edits before a gpt-5.5 rebuild
+model = "gpt-5.4-mini"      # small model that judges contract equivalence (must work via codex exec)
+reasoning_effort = "high"   # low | medium | high
+
 [prompts]
 # Optional file path overrides for LLM prompt templates.
 # Leave empty to use the packaged defaults in src/jaunt/prompts/.
@@ -174,6 +179,18 @@ Skills are no longer injected as prompt text; Codex discovers them natively from
 seeded `.agents/skills/` workspace. `max_chars_per_skill` and `inject_user_skills` are
 retained for back-compat but unused by the Codex builder.
 
+**Change detection (two layers).** Spec freshness is computed from an AST-normalized
+contract digest, so ruff reformatting, comment edits, and whitespace/quote changes no
+longer mark a module stale (Layer A — deterministic, build + test). When a spec's
+docstring genuinely changes but its signature/structure do not, a small
+`[semantic_gate]` model judges whether the change is behaviorally meaningful: if it is
+equivalent, Jaunt **re-freezes** the module (rewrites the header digests over the
+validated, unchanged generated body) instead of paying for a full `gpt-5.5` rebuild
+(Layer B). Structural changes, validation failures, and any gate error fail safe to a
+rebuild. `--json` reports re-frozen modules under `"refrozen"`. The gate model must be
+runnable via `codex exec` (e.g. `gpt-5.4-mini`); `gpt-5.4-nano` is not — `codex exec`
+attaches a `tool_search` tool nano rejects.
+
 ## CLI Commands
 
 ```bash
@@ -181,6 +198,7 @@ jaunt build                   # Generate implementations for @jaunt.magic specs
 jaunt build --force           # Force full regeneration
 jaunt build --target my_app.specs  # Build specific module only
 jaunt build --no-auto-skills  # Disable auto-skill injection into build prompts
+jaunt build --no-semantic-gate  # Skip the Layer B gate; rebuild on any real change (Layer A still applies)
 
 jaunt test                    # Generate tests and run pytest
 jaunt test --no-build         # Skip build step
@@ -194,6 +212,9 @@ jaunt clean --dry-run         # Show what would be removed
 
 jaunt status                  # Show which modules are stale, including upstream API fallout
 jaunt status --json           # Machine-readable status
+
+jaunt instructions            # Print a project-aware agent primer (load into an agent's context)
+jaunt instructions --json     # {command, ok, text, project} for tooling/MCP
 
 jaunt tree                    # Maintain treedocs.yaml (1-line descriptions of dirs + .py files)
 jaunt tree --check            # CI gate: exit 4 if the tree is stale (new/ghost paths or edited files)
