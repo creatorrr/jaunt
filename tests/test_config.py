@@ -489,3 +489,22 @@ def test_prompts_config_project_overview_parsed(tmp_path: Path) -> None:
     cfg = load_config(root=tmp_path)
     assert cfg.prompts.project_overview_system == "custom-sys"
     assert cfg.prompts.project_overview_user == "custom-user"
+
+
+def test_prompts_build_preamble_default_and_override(tmp_path: Path) -> None:
+    """prompts.build_preamble defaults to '' and can be overridden."""
+    from jaunt.config import load_config
+
+    # Default: empty string.
+    (tmp_path / "jaunt.toml").write_text("version = 1\n", encoding="utf-8")
+    cfg = load_config(root=tmp_path)
+    assert cfg.prompts.build_preamble == ""
+
+    # Override: value is read.
+    override_root = tmp_path / "override"
+    override_root.mkdir()
+    (override_root / "jaunt.toml").write_text(
+        'version = 1\n\n[prompts]\nbuild_preamble = "my preamble"\n', encoding="utf-8"
+    )
+    cfg2 = load_config(root=override_root)
+    assert cfg2.prompts.build_preamble == "my preamble"

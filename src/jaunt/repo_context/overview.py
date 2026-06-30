@@ -17,7 +17,7 @@ _DOC_SOURCES = (
 
 
 def _doc_intro(path: Path, max_chars: int) -> str:
-    text = path.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8", errors="replace")
     out_lines: list[str] = []
     for line in text.splitlines():
         if out_lines and line.startswith("## "):
@@ -77,17 +77,20 @@ async def project_overview_block_for_build(
     """
     if not cfg.context.overview:
         return ""
-    digest = project_spec_digest(module_specs, repo_map_block)
-    docs = build_project_docs_block(root, max_chars=cfg.context.max_chars)
-    return await load_or_build_overview(
-        backend,
-        repo_map_block=repo_map_block,
-        project_docs=docs,
-        digest=digest,
-        state_dir=root / ".jaunt",
-        enabled=True,
-        prompts=cfg.prompts,
-    )
+    try:
+        digest = project_spec_digest(module_specs, repo_map_block)
+        docs = build_project_docs_block(root, max_chars=cfg.context.max_chars)
+        return await load_or_build_overview(
+            backend,
+            repo_map_block=repo_map_block,
+            project_docs=docs,
+            digest=digest,
+            state_dir=root / ".jaunt",
+            enabled=True,
+            prompts=cfg.prompts,
+        )
+    except Exception:  # noqa: BLE001 - never block the build on overview generation
+        return ""
 
 
 async def load_or_build_overview(

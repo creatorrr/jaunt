@@ -196,3 +196,52 @@ def test_overview_block_absent_when_disabled(tmp_path: Path, monkeypatch) -> Non
     assert "SHOULD NOT APPEAR" not in captured["prompt"], (
         f"Overview prose leaked into prompt when disabled:\n{captured['prompt'][:500]}"
     )
+
+
+def test_overview_complete_text_failure_does_not_abort_build(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A complete_text failure with context.overview = true must not abort the build.
+
+    The overview is best-effort: if the model call raises (auth, network, timeout, etc.)
+    jaunt build must still succeed (EXIT_OK) and the rendered prompt must contain no
+    overview prose.
+    """
+    project, prefix = _make_cli_build_project_with_overview(tmp_path)
+    before = {
+        prefix: sys.modules.get(prefix),
+        f"{prefix}.specs": sys.modules.get(f"{prefix}.specs"),
+    }
+    orig_sys_path = list(sys.path)
+
+    captured: dict[str, str] = {}
+
+    async def _raising_complete_text(self: CodexBackend, *, system: str, user: str) -> str:
+        raise RuntimeError("simulated auth failure")
+
+    async def _fake_generate_module(
+        self: CodexBackend,
+        ctx: ModuleSpecContext,
+        *,
+        extra_error_context: list[str] | None = None,
+    ) -> tuple[str, None]:
+        captured["prompt"] = self._build_prompt(ctx, Path("x.py"), None)
+        lines = [f"def {name}() -> None:\n    assert True\n" for name in ctx.expected_names]
+        return "\n".join(lines).rstrip() + "\n", None
+
+    monkeypatch.setattr(CodexBackend, "complete_text", _raising_complete_text)
+    monkeypatch.setattr(CodexBackend, "generate_module", _fake_generate_module)
+
+    try:
+        rc = jaunt.cli.main(["build", "--root", str(project)])
+    finally:
+        sys.path[:] = orig_sys_path
+        _restore_modules([prefix], before=before)
+
+    assert rc == jaunt.cli.EXIT_OK, (
+        f"Build should succeed even when overview generation fails; got exit code {rc}"
+    )
+    assert "prompt" in captured, "generate_module was never called — no prompt captured"
+    assert "simulated auth failure" not in captured["prompt"], (
+        "Exception message leaked into the rendered prompt"
+    )
