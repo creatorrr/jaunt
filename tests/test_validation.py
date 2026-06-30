@@ -65,6 +65,29 @@ def test_generated_import_provenance_rejects_undeclared_package(tmp_path: Path) 
     assert any("[project.dependencies]" in err for err in errs)
 
 
+def test_generated_import_provenance_rejects_undeclared_dynamic_imports(
+    tmp_path: Path,
+) -> None:
+    src = (
+        "import importlib\n\n"
+        "def play():\n"
+        "    importlib.import_module('hallucinated_pkg')\n"
+        "    __import__('other_hallucinated_pkg')\n"
+        "    importlib.__import__('third_hallucinated_pkg')\n"
+        "    return 1\n"
+    )
+    errs = validate_generated_import_provenance(
+        src,
+        generated_module="pkg.__generated__.specs",
+        project_dir=tmp_path,
+        first_party_modules={"pkg"},
+    )
+
+    assert any("hallucinated_pkg" in err for err in errs)
+    assert any("other_hallucinated_pkg" in err for err in errs)
+    assert any("third_hallucinated_pkg" in err for err in errs)
+
+
 def test_generated_import_provenance_allows_stdlib(tmp_path: Path) -> None:
     src = "import json\nfrom pathlib import Path\n\ndef play():\n    return Path('x')\n"
 
@@ -73,6 +96,45 @@ def test_generated_import_provenance_allows_stdlib(tmp_path: Path) -> None:
             src,
             generated_module="pkg.__generated__.specs",
             project_dir=tmp_path,
+        )
+        == []
+    )
+
+
+def test_generated_import_provenance_allows_dynamic_imports_with_provenance(
+    tmp_path: Path, monkeypatch
+) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\ndependencies = ['external-lib>=1,<2']\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+
+    import jaunt.validation as validation
+
+    monkeypatch.setattr(
+        validation.metadata,
+        "packages_distributions",
+        lambda: {"external_lib": ["external-lib"]},
+    )
+
+    src = (
+        "import importlib\n\n"
+        "def play():\n"
+        "    importlib.import_module('json')\n"
+        "    __import__('external_lib')\n"
+        "    importlib.__import__('pkg.helpers')\n"
+        "    importlib.import_module('intentional_extra')\n"
+        "    return 1\n"
+    )
+
+    assert (
+        validate_generated_import_provenance(
+            src,
+            generated_module="pkg.__generated__.specs",
+            project_dir=tmp_path,
+            allowlist=["intentional-extra"],
         )
         == []
     )
@@ -106,6 +168,20 @@ def test_generated_import_provenance_allows_declared_dependency(
     )
 
 
+def test_generated_import_provenance_rejects_nonconstant_dynamic_import(
+    tmp_path: Path,
+) -> None:
+    src = "import importlib\n\ndef play(name):\n    return importlib.import_module(name)\n"
+    errs = validate_generated_import_provenance(
+        src,
+        generated_module="pkg.__generated__.specs",
+        project_dir=tmp_path,
+    )
+
+    assert any("non-constant dynamic import" in err for err in errs)
+    assert any("provenance cannot be checked" in err for err in errs)
+
+
 def test_generated_import_provenance_allows_first_party_module(tmp_path: Path) -> None:
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "__init__.py").write_text("", encoding="utf-8")
@@ -122,7 +198,14 @@ def test_generated_import_provenance_allows_first_party_module(tmp_path: Path) -
 
 
 def test_build_validation_can_disable_generated_import_check(tmp_path: Path) -> None:
-    src = "import hallucinated_pkg\n\ndef play():\n    return 1\n"
+    src = (
+        "import hallucinated_pkg\n"
+        "import importlib\n\n"
+        "def play(name):\n"
+        "    importlib.import_module('other_hallucinated_pkg')\n"
+        "    __import__(name)\n"
+        "    return 1\n"
+    )
     errs = validate_build_generated_source(
         src,
         ["play"],
@@ -134,6 +217,35 @@ def test_build_validation_can_disable_generated_import_check(tmp_path: Path) -> 
     )
 
     assert errs == []
+
+
+def test_generated_import_provenance_refreshes_declared_dependencies_after_pyproject_change(
+    tmp_path: Path,
+) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text("[project]\ndependencies = []\n", encoding="utf-8")
+    src = "import newly_declared_pkg\n\ndef play():\n    return 1\n"
+
+    initial_errs = validate_generated_import_provenance(
+        src,
+        generated_module="pkg.__generated__.specs",
+        project_dir=tmp_path,
+    )
+    assert any("newly_declared_pkg" in err for err in initial_errs)
+
+    pyproject.write_text(
+        "[project]\ndependencies = ['newly-declared-pkg']\n",
+        encoding="utf-8",
+    )
+
+    assert (
+        validate_generated_import_provenance(
+            src,
+            generated_module="pkg.__generated__.specs",
+            project_dir=tmp_path,
+        )
+        == []
+    )
 
 
 def test_generated_import_provenance_allows_configured_allowlist(tmp_path: Path) -> None:

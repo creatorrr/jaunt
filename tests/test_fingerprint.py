@@ -12,6 +12,7 @@ from jaunt.config import (
     PathsConfig,
     PromptsConfig,
     TestConfig,
+    load_config,
 )
 from jaunt.generate import fingerprint
 
@@ -93,6 +94,49 @@ def test_codex_fingerprint_respects_prompt_overrides(tmp_path: Path) -> None:
     )
 
     assert first != second
+
+
+def test_codex_fingerprint_uses_project_relative_prompt_overrides(
+    monkeypatch, tmp_path: Path
+) -> None:
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    (project / "src").mkdir(parents=True)
+    (project / "prompts").mkdir()
+    outside.mkdir()
+    (project / "prompts" / "build.md").write_text("project prompt", encoding="utf-8")
+    (project / "jaunt.toml").write_text(
+        "\n".join(
+            [
+                "version = 1",
+                "",
+                "[paths]",
+                'source_roots = ["src"]',
+                "",
+                "[prompts]",
+                'build_module = "prompts/build.md"',
+                "",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(outside)
+
+    cfg = load_config(root=project)
+    first = fingerprint.generation_fingerprint_from_config(
+        cfg,
+        kind="build",
+        codex_version_resolver=lambda: "codex-cli 1.0.0",
+    )
+    second = fingerprint.generation_fingerprint_from_config(
+        cfg,
+        kind="build",
+        codex_version_resolver=lambda: "codex-cli 1.0.0",
+    )
+
+    assert cfg.prompts.build_module == str((project / "prompts" / "build.md").resolve())
+    assert first == second
 
 
 def test_codex_fingerprint_includes_cli_version() -> None:

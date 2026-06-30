@@ -1028,6 +1028,7 @@ async def run_build(
     search_enabled: bool = False,
     search_max_hits: int = 8,
     project_root: Path | None = None,
+    source_roots: Sequence[Path] | None = None,
     builtin_skill_names: Sequence[str] = (),
     skills_digest: str = "",
     jobs: int = 4,
@@ -1055,14 +1056,53 @@ async def run_build(
     stale = expanded & set(module_specs.keys())
     skipped = set(module_specs.keys()) - stale
 
-    if not stale:
-        return BuildReport(generated=set(), skipped=skipped, failed={})
-
     first_party_modules = {
         generated_dir,
         *(module_name.split(".", 1)[0] for module_name in module_specs),
     }
     generated_import_allowlist = tuple(generated_import_allowlist or ())
+    validation_source_roots = tuple(
+        (root if root.is_absolute() else package_dir / root).resolve()
+        for root in (source_roots or (package_dir,))
+    )
+
+    def _validate_skipped_generated_modules(modules: set[str]) -> dict[str, list[str]]:
+        if not check_generated_imports:
+            return {}
+        failures: dict[str, list[str]] = {}
+        for module_name in sorted(modules):
+            relpath = _generated_relpath(module_name, generated_dir=generated_dir)
+            gen_path = package_dir / relpath
+            try:
+                source = gen_path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                failures[module_name] = [f"Failed reading generated module: {exc}"]
+                continue
+            errs = validate_build_generated_source(
+                source,
+                [],
+                spec_module=module_name,
+                handwritten_names=(),
+                generated_module=paths.spec_module_to_generated_module(
+                    module_name, generated_dir=generated_dir
+                ),
+                project_dir=package_dir,
+                source_roots=validation_source_roots,
+                first_party_modules=first_party_modules,
+                check_imports=True,
+                import_allowlist=generated_import_allowlist,
+            )
+            if errs:
+                failures[module_name] = errs
+        return failures
+
+    skipped_failures = _validate_skipped_generated_modules(skipped)
+    skipped -= set(skipped_failures)
+
+    if not stale:
+        return BuildReport(generated=set(), skipped=skipped, failed=skipped_failures)
 
     # Induce a subgraph over stale modules.
     deps_in_stale: dict[str, set[str]] = {}
@@ -1088,7 +1128,7 @@ async def run_build(
     generated: set[str] = set()
     # Track generated source for dependency context injection.
     generated_sources: dict[str, str] = {}
-    failed: dict[str, list[str]] = {}
+    failed: dict[str, list[str]] = dict(skipped_failures)
     completed: set[str] = set()
     ty_cmd = _resolve_ty_cmd() if ty_attempts is not None else None
     llm_slots = asyncio.Semaphore(jobs)
@@ -1364,7 +1404,7 @@ async def run_build(
                     handwritten_names=(),
                     generated_module=generated_module,
                     project_dir=package_dir,
-                    source_roots=(package_dir,),
+                    source_roots=validation_source_roots,
                     first_party_modules=first_party_modules,
                     check_imports=True,
                     import_allowlist=generated_import_allowlist,
@@ -1378,7 +1418,7 @@ async def run_build(
                     handwritten_names=handwritten_names,
                     generated_module=generated_module,
                     project_dir=package_dir,
-                    source_roots=(package_dir,),
+                    source_roots=validation_source_roots,
                     first_party_modules=first_party_modules,
                     check_imports=check_generated_imports,
                     import_allowlist=generated_import_allowlist,
@@ -1444,7 +1484,7 @@ async def run_build(
                     module_name, generated_dir=generated_dir
                 ),
                 project_dir=package_dir,
-                source_roots=(package_dir,),
+                source_roots=validation_source_roots,
                 first_party_modules=first_party_modules,
                 check_imports=check_generated_imports,
                 import_allowlist=generated_import_allowlist,

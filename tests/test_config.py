@@ -121,10 +121,10 @@ def test_load_config_overrides_work(tmp_path: Path) -> None:
     assert cfg.test.infer_deps is False
     assert cfg.test.pytest_args == ["-q", "-x"]
 
-    assert cfg.prompts.build_system == "bs"
-    assert cfg.prompts.build_module == "bm"
-    assert cfg.prompts.test_system == "ts"
-    assert cfg.prompts.test_module == "tm"
+    assert cfg.prompts.build_system == str((tmp_path / "bs").resolve())
+    assert cfg.prompts.build_module == str((tmp_path / "bm").resolve())
+    assert cfg.prompts.test_system == str((tmp_path / "ts").resolve())
+    assert cfg.prompts.test_module == str((tmp_path / "tm").resolve())
     assert cfg.agent.engine == "codex"
     assert cfg.codex.model == "gpt-5.2-codex"
     assert cfg.codex.reasoning_effort == "medium"

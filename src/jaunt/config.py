@@ -198,6 +198,15 @@ def _as_float(value: Any, *, name: str) -> float:
     return float(value)
 
 
+def _resolve_prompt_override(value: str, *, root: Path) -> str:
+    if not value:
+        return ""
+    path = Path(value)
+    if path.is_absolute():
+        return str(path)
+    return str((root / path).resolve())
+
+
 def load_config(*, root: Path | None = None, config_path: Path | None = None) -> JauntConfig:
     """Load and validate `jaunt.toml`.
 
@@ -214,6 +223,8 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             root = config_path.parent
 
     assert root is not None
+    root = root.resolve()
+    config_path = config_path.resolve()
 
     try:
         raw = config_path.read_bytes()
@@ -375,22 +386,34 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
         auto_class_tests = False
 
     if "build_system" in prompts_tbl:
-        build_system = _as_str(prompts_tbl["build_system"], name="prompts.build_system")
+        build_system = _resolve_prompt_override(
+            _as_str(prompts_tbl["build_system"], name="prompts.build_system"),
+            root=root,
+        )
     else:
         build_system = ""
 
     if "build_module" in prompts_tbl:
-        build_module = _as_str(prompts_tbl["build_module"], name="prompts.build_module")
+        build_module = _resolve_prompt_override(
+            _as_str(prompts_tbl["build_module"], name="prompts.build_module"),
+            root=root,
+        )
     else:
         build_module = ""
 
     if "test_system" in prompts_tbl:
-        test_system = _as_str(prompts_tbl["test_system"], name="prompts.test_system")
+        test_system = _resolve_prompt_override(
+            _as_str(prompts_tbl["test_system"], name="prompts.test_system"),
+            root=root,
+        )
     else:
         test_system = ""
 
     if "test_module" in prompts_tbl:
-        test_module = _as_str(prompts_tbl["test_module"], name="prompts.test_module")
+        test_module = _resolve_prompt_override(
+            _as_str(prompts_tbl["test_module"], name="prompts.test_module"),
+            root=root,
+        )
     else:
         test_module = ""
 

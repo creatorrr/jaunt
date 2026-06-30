@@ -7,7 +7,6 @@ has the right shape.
 from __future__ import annotations
 
 import ast
-import functools
 import sys
 import tomllib
 from collections.abc import Iterable, Sequence
@@ -214,6 +213,8 @@ def _validate_generated_import_provenance(
     declared_dists = _declared_project_dependencies(_find_pyproject(project_dir))
 
     errors: list[str] = []
+    errors.extend(_nonconstant_dynamic_import_errors(mod, generated_module=generated_module))
+
     for imported in sorted(_top_level_imports(mod)):
         top = imported.split(".", 1)[0]
         if not top:
@@ -247,7 +248,60 @@ def _top_level_imports(mod: ast.Module) -> set[str]:
                 continue
             if node.module:
                 imports.add(node.module.split(".", 1)[0])
+        elif isinstance(node, ast.Call):
+            dynamic_import = _constant_dynamic_import_target(node)
+            if dynamic_import:
+                imports.add(dynamic_import.split(".", 1)[0])
     return imports
+
+
+def _constant_dynamic_import_target(call: ast.Call) -> str | None:
+    if _dynamic_import_call_name(call) is None:
+        return None
+    if not call.args:
+        return None
+    target = call.args[0]
+    if isinstance(target, ast.Constant) and isinstance(target.value, str):
+        return target.value
+    return None
+
+
+def _nonconstant_dynamic_import_errors(
+    mod: ast.Module,
+    *,
+    generated_module: str,
+) -> list[str]:
+    errors: list[str] = []
+    for node in ast.walk(mod):
+        if not isinstance(node, ast.Call):
+            continue
+        call_name = _dynamic_import_call_name(node)
+        if call_name is None:
+            continue
+        if (
+            node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            continue
+        lineno = getattr(node, "lineno", None)
+        loc = f" on line {lineno}" if lineno is not None else ""
+        errors.append(
+            f"Generated module {generated_module!r} uses non-constant dynamic import via "
+            f"{call_name}{loc}. Non-constant dynamic imports are not allowed in generated "
+            "code because their provenance cannot be checked."
+        )
+    return errors
+
+
+def _dynamic_import_call_name(call: ast.Call) -> str | None:
+    func = call.func
+    if isinstance(func, ast.Name) and func.id == "__import__":
+        return "__import__"
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+        if func.value.id == "importlib" and func.attr in {"import_module", "__import__"}:
+            return f"importlib.{func.attr}"
+    return None
 
 
 def _first_party_top_levels(
@@ -305,7 +359,6 @@ def _find_pyproject(start: Path) -> Path | None:
         cur = cur.parent
 
 
-@functools.lru_cache(maxsize=128)
 def _declared_project_dependencies(pyproject_path: Path | None) -> frozenset[str]:
     if pyproject_path is None:
         return frozenset()
