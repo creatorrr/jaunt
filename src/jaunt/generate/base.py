@@ -31,6 +31,8 @@ class ModuleSpecContext:
     build_instructions_block: str = ""
     attached_test_specs_block: str = ""
     package_context_block: str = ""
+    repo_map_block: str = ""
+    relevant_context_block: str = ""
     module_context_digest: str = ""
     async_runner: str = "asyncio"
     seed_target_content: str = ""

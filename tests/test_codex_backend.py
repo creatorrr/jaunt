@@ -561,3 +561,11 @@ def test_cached_input_tokens_parsed_into_usage(monkeypatch) -> None:
         )
 
     asyncio.run(run())
+
+
+def test_build_prompt_includes_repo_map_block() -> None:
+    backend = _backend()
+    ctx = _ctx(repo_map_block="## Repository map\nsrc/a.py — does a")
+    prompt = backend._build_prompt(ctx, Path("pkg/__generated__/m.py"), None)
+    assert "## Repository map" in prompt
+    assert prompt.index("## Repository map") > prompt.index("Write a complete Python module")

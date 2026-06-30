@@ -391,12 +391,16 @@ class CodexBackend(GeneratorBackend):
             getattr(ctx, "module_contract_block", "") or "",
             getattr(ctx, "base_contract_block", "") or "",
             getattr(ctx, "package_context_block", "") or "",
+            getattr(ctx, "repo_map_block", "") or "",
             getattr(ctx, "skills_block", "") or "",
         ]
         blocks.append(
             "Edit ONLY the target file. Do not create other files, run tests, or modify "
             "anything else. Output the full module - no placeholders."
         )
+        relevant = getattr(ctx, "relevant_context_block", "") or ""
+        if relevant.strip():
+            blocks.append(relevant)
         if extra_error_context:
             blocks.append("Previous attempt problems:\n" + "\n".join(extra_error_context))
         return "\n\n".join(b for b in blocks if b)
