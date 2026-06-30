@@ -64,6 +64,13 @@ src/jaunt/          # Library source
   generate/
     base.py              # Abstract GeneratorBackend interface
     codex_backend.py    # Codex engine (drives `codex exec`)
+  repo_context/     # Maintained treedocs.yaml repo map + colgrep retrieval
+    tree.py              # TreeDoc model, incremental sync, atomic write, drift
+    describe.py          # AST baseline (+ optional LLM enrichment) descriptions
+    digests.py           # Source-content digests + .jaunt/tree-cache.json sidecar
+    block.py             # Render repo-map prompt block + annotate package tree
+    search.py            # colgrep wrapper (detect/index/query, graceful fallback)
+    api.py               # High-level sync_tree / repo_map_block_for_build / check_drift
   prompts/          # LLM prompt templates (Jinja-like {{var}})
 tests/              # pytest test suite (~41 files)
 examples/           # Runnable example projects
@@ -135,6 +142,17 @@ auto = true                 # auto-generate PyPI helper skills into build prompt
 max_chars_per_skill = 8000  # cap injected skill text to keep prompts lean
 inject_user_skills = []     # user-skill names to always inject (default: none)
 
+[context]
+repo_map = true             # maintain treedocs.yaml + inject a repo map into build prompts
+repo_map_file = "treedocs.yaml"
+enrich = false              # opt-in: LLM-enrich descriptions (else AST-only, offline)
+max_chars = 6000            # cap the injected repo-map block
+
+[context.search]            # colgrep (LightOn next-plaid) semantic retrieval
+enabled = false             # opt-in; requires the `colgrep` binary on PATH
+internal_retrieval = true   # Jaunt queries `colgrep --json` and seeds _context/relevant_*.py
+max_hits = 8
+
 [contract]
 battery_dir = "tests/contract"     # where derived contract batteries are written
 derive = ["examples", "errors"]    # case kinds derived from docstring prose
@@ -169,6 +187,11 @@ jaunt clean --dry-run         # Show what would be removed
 
 jaunt status                  # Show which modules are stale, including upstream API fallout
 jaunt status --json           # Machine-readable status
+
+jaunt tree                    # Maintain treedocs.yaml (1-line descriptions of dirs + .py files)
+jaunt tree --check            # CI gate: exit 4 if the tree is stale (new/ghost paths or edited files)
+jaunt tree --enrich           # Force LLM enrichment of descriptions this run
+jaunt build --no-repo-map     # Disable repo-map injection for one build
 
 jaunt adopt <module:func>     # Add @jaunt.contract to existing code and derive its battery
 jaunt reconcile               # Derive/refresh committed contract batteries (calls the model)
