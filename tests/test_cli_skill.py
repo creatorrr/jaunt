@@ -3,12 +3,60 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import jaunt.builder
+import jaunt.tester
 from jaunt.cli import main, parse_args
+from jaunt.skills_builtin import DEFAULT_BUILTIN_SKILLS
 
 
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def _write_tiny_project(root: Path) -> None:
+    _write(
+        root / "jaunt.toml",
+        """
+version = 1
+
+[paths]
+source_roots = ["src"]
+test_roots = ["tests"]
+generated_dir = "__generated__"
+
+[skills]
+auto = false
+""".lstrip(),
+    )
+    _write(
+        root / "src/app.py",
+        '''
+import jaunt
+
+
+@jaunt.magic()
+def greet(name: str) -> str:
+    """Return a friendly greeting for name."""
+    raise RuntimeError("spec stub")
+'''.lstrip(),
+    )
+
+
+def _write_tiny_test_project(root: Path) -> None:
+    _write_tiny_project(root)
+    _write(
+        root / "tests/test_app.py",
+        '''
+import jaunt
+
+
+@jaunt.test()
+def test_greet() -> None:
+    """Assert greet("Ada") returns a friendly greeting containing Ada."""
+    raise AssertionError("test stub")
+'''.lstrip(),
+    )
 
 
 # --- Parse tests ---
@@ -90,6 +138,95 @@ def test_parse_skill_build() -> None:
     args = parse_args(["skill", "build", "my-tool"])
     assert args.skill_command == "build"
     assert args.name == "my-tool"
+
+
+def test_cmd_build_threads_default_builtin_skills(tmp_path: Path, capsys, monkeypatch) -> None:
+    project = tmp_path / "project"
+    _write_tiny_project(project)
+    captured: dict[str, object] = {}
+
+    async def fake_run_build(**kwargs):
+        captured.update(kwargs)
+        return jaunt.builder.BuildReport(generated={"app"}, skipped=set(), failed={})
+
+    monkeypatch.setattr(jaunt.builder, "run_build", fake_run_build)
+
+    rc = main(["build", "--root", str(project), "--json"])
+
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+    assert captured["project_root"] == project
+    assert captured["builtin_skill_names"] == DEFAULT_BUILTIN_SKILLS
+    assert isinstance(captured["skills_digest"], str)
+    assert captured["skills_digest"]
+
+
+def test_cmd_build_threads_empty_builtin_skills_with_flag(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    project = tmp_path / "project"
+    _write_tiny_project(project)
+    captured: dict[str, object] = {}
+
+    async def fake_run_build(**kwargs):
+        captured.update(kwargs)
+        return jaunt.builder.BuildReport(generated={"app"}, skipped=set(), failed={})
+
+    monkeypatch.setattr(jaunt.builder, "run_build", fake_run_build)
+
+    rc = main(["build", "--root", str(project), "--json", "--no-builtin-skills"])
+
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+    assert captured["project_root"] == project
+    assert captured["builtin_skill_names"] == ()
+    assert isinstance(captured["skills_digest"], str)
+    assert captured["skills_digest"]
+
+
+def test_cmd_test_threads_empty_builtin_skills_with_flag(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    project = tmp_path / "project"
+    _write_tiny_test_project(project)
+    captured: dict[str, object] = {}
+
+    def fake_run_tests(**kwargs):
+        captured.update(kwargs)
+        return jaunt.tester.PytestResult(
+            exit_code=0,
+            passed=True,
+            failed=False,
+            failures=[],
+            generated={"tests.test_app"},
+            skipped=set(),
+        )
+
+    monkeypatch.setattr(jaunt.tester, "run_tests", fake_run_tests)
+
+    rc = main(
+        [
+            "test",
+            "--root",
+            str(project),
+            "--no-build",
+            "--no-run",
+            "--json",
+            "--no-builtin-skills",
+        ]
+    )
+
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+    assert captured["project_root"] == project
+    assert captured["builtin_skill_names"] == ()
+    assert isinstance(captured["skills_digest"], str)
+    assert captured["skills_digest"]
+    repair_context = captured["repair_build_context"]
+    assert isinstance(repair_context, jaunt.tester.RepairBuildContext)
+    assert repair_context.project_root == project
+    assert repair_context.builtin_skill_names == ()
+    assert repair_context.skills_digest == captured["skills_digest"]
 
 
 # --- cmd_skill dispatch tests ---

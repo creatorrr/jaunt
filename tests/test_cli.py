@@ -15,6 +15,7 @@ def test_parse_build_defaults() -> None:
     assert ns.no_progress is False
     assert ns.instructions == []
     assert ns.include_target_tests is None
+    assert ns.no_builtin_skills is False
 
 
 def test_parse_build_flags() -> None:
@@ -37,6 +38,7 @@ def test_parse_build_flags() -> None:
             "--instruction",
             "Prefer helpers.",
             "--include-target-tests",
+            "--no-builtin-skills",
         ]
     )
     assert ns.command == "build"
@@ -49,6 +51,7 @@ def test_parse_build_flags() -> None:
     assert ns.no_progress is True
     assert ns.instructions == ["Prefer helpers."]
     assert ns.include_target_tests is True
+    assert ns.no_builtin_skills is True
 
 
 def test_parse_test_defaults() -> None:
@@ -60,6 +63,7 @@ def test_parse_test_defaults() -> None:
     assert ns.no_progress is False
     assert ns.instructions == []
     assert ns.include_target_tests is None
+    assert ns.no_builtin_skills is False
 
 
 def test_parse_test_flags() -> None:
@@ -72,6 +76,7 @@ def test_parse_test_flags() -> None:
             "--instruction",
             "Stay close to the spec.",
             "--no-include-target-tests",
+            "--no-builtin-skills",
             "--pytest-args=-k",
             "--pytest-args",
             "foo",
@@ -84,6 +89,7 @@ def test_parse_test_flags() -> None:
     assert ns.no_progress is True
     assert ns.instructions == ["Stay close to the spec."]
     assert ns.include_target_tests is False
+    assert ns.no_builtin_skills is True
 
 
 def test_parse_eval_defaults() -> None:

@@ -113,6 +113,12 @@ def _add_build_generation_flags(p: argparse.ArgumentParser) -> None:
         dest="no_auto_skills",
         help="Disable auto-generated PyPI skill injection for this run.",
     )
+    p.add_argument(
+        "--no-builtin-skills",
+        action="store_true",
+        dest="no_builtin_skills",
+        help="Do not seed Jaunt's bundled builtin skills into the Codex workspace.",
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -1296,6 +1302,10 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
 
         source_dirs = [root / sr for sr in cfg.paths.source_roots]
 
+        builtin_on = bool(cfg.skills.builtin) and not bool(
+            getattr(args, "no_builtin_skills", False)
+        )
+        builtin_skill_names = tuple(cfg.skills.builtin_skills) if builtin_on else ()
         auto_skills_on = bool(cfg.skills.auto) and not bool(getattr(args, "no_auto_skills", False))
         if auto_skills_on:
             try:
@@ -1320,6 +1330,12 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             from jaunt.repo_context import api as rc_api
 
             repo_map_block = rc_api.repo_map_block_for_build(root=root, cfg=cfg, today=_today())
+
+        from jaunt.skill_seed import skills_fingerprint
+
+        build_skills_digest = skills_fingerprint(
+            project_root=root, builtin_names=builtin_skill_names
+        )
 
         _prepend_sys_path([*source_dirs, root])
 
@@ -1486,6 +1502,9 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             async_runner=cfg.build.async_runner,
             build_instructions=build_instructions,
             targeted_test_entries=targeted_test_entries,
+            project_root=root,
+            builtin_skill_names=builtin_skill_names,
+            skills_digest=build_skills_digest,
         )
 
         if report.failed and not json_mode:
@@ -1775,6 +1794,15 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             build_instructions=build_instructions,
             include_target_tests=include_target_tests,
         )
+        builtin_on = bool(cfg.skills.builtin) and not bool(
+            getattr(args, "no_builtin_skills", False)
+        )
+        builtin_skill_names = tuple(cfg.skills.builtin_skills) if builtin_on else ()
+        from jaunt.skill_seed import skills_fingerprint
+
+        test_skills_digest = skills_fingerprint(
+            project_root=root, builtin_names=builtin_skill_names
+        )
         repair_build_context = tester.RepairBuildContext(
             package_dir=package_dir,
             generated_dir=cfg.paths.generated_dir,
@@ -1786,8 +1814,8 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             generation_fingerprint=build_generation_fingerprint,
             targeted_test_entries=build_targeted_test_entries,
             project_root=root,
-            builtin_skill_names=(),
-            skills_digest="",
+            builtin_skill_names=builtin_skill_names,
+            skills_digest=test_skills_digest,
             jobs=int(cfg.build.jobs),
             async_runner=cfg.build.async_runner,
             build_instructions=build_instructions,
@@ -1818,6 +1846,9 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             cost_tracker=cost_tracker,
             async_runner=cfg.build.async_runner,
             repair_build_context=repair_build_context,
+            project_root=root,
+            builtin_skill_names=builtin_skill_names,
+            skills_digest=test_skills_digest,
         )
 
         if asyncio.iscoroutine(result):
