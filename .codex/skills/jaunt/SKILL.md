@@ -294,6 +294,14 @@ jobs = 4
 infer_deps = true
 pytest_args = ["-q"]             # Extra pytest arguments
 
+[skills]
+auto = true                 # auto-generate PyPI helper skills for imported libs
+builtin = true              # seed Jaunt's bundled builtin skills into the Codex workspace
+builtin_skills = [          # the default set (override to trim/extend)
+  "asyncpg", "dbos", "descope", "fastmcp", "openai", "pydantic", "pydantic-ai",
+  "pytest", "ruff", "spacy", "starlette", "ty", "uv",
+]
+
 [prompts]
 # Override default prompt templates (file paths relative to project root)
 build_system = ""
@@ -301,6 +309,12 @@ build_module = ""
 test_system = ""
 test_module = ""
 ```
+
+Skills are no longer injected as prompt text; Codex discovers them natively from a
+seeded `.agents/skills/` workspace (builtins are seeded from the package, and a
+project's own `.agents/skills/<name>/` overrides a builtin of the same name).
+`max_chars_per_skill` and `inject_user_skills` are retained for back-compat but are
+unused by the Codex builder.
 
 ## CLI Commands
 
