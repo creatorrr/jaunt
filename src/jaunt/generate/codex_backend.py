@@ -436,6 +436,12 @@ class CodexBackend(GeneratorBackend):
         return "\n\n".join(b for b in blocks if b)
 
     async def complete_text(self, *, system: str, user: str) -> str:
+        text, _usage = await self.complete_text_with_usage(system=system, user=user)
+        return text
+
+    async def complete_text_with_usage(
+        self, *, system: str, user: str
+    ) -> tuple[str, TokenUsage | None]:
         with tempfile.TemporaryDirectory() as tmp:
             prompt = "\n\n".join(
                 [
@@ -451,7 +457,7 @@ class CodexBackend(GeneratorBackend):
                 model=self._model,
                 reasoning_effort=self._codex.reasoning_effort,
             )
-            return result.final_message
+            return result.final_message, self._usage_from(result)
 
     def _usage_from(self, result: CodexExecResult | None) -> TokenUsage | None:
         if result is None:

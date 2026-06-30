@@ -477,7 +477,7 @@ def test_prompts_config_project_overview_defaults(tmp_path: Path) -> None:
 
 
 def test_prompts_config_project_overview_parsed(tmp_path: Path) -> None:
-    """prompts.project_overview_system and _user are read from [prompts]."""
+    """prompts.project_overview_system and _user are read and resolved from project root."""
     (tmp_path / "jaunt.toml").write_text(
         "version = 1\n\n[prompts]\n"
         'project_overview_system = "custom-sys"\n'
@@ -487,12 +487,12 @@ def test_prompts_config_project_overview_parsed(tmp_path: Path) -> None:
     from jaunt.config import load_config
 
     cfg = load_config(root=tmp_path)
-    assert cfg.prompts.project_overview_system == "custom-sys"
-    assert cfg.prompts.project_overview_user == "custom-user"
+    assert cfg.prompts.project_overview_system == str((tmp_path / "custom-sys").resolve())
+    assert cfg.prompts.project_overview_user == str((tmp_path / "custom-user").resolve())
 
 
 def test_prompts_build_preamble_default_and_override(tmp_path: Path) -> None:
-    """prompts.build_preamble defaults to '' and can be overridden."""
+    """prompts.build_preamble defaults to '' and an override is resolved from project root."""
     from jaunt.config import load_config
 
     # Default: empty string.
@@ -500,11 +500,11 @@ def test_prompts_build_preamble_default_and_override(tmp_path: Path) -> None:
     cfg = load_config(root=tmp_path)
     assert cfg.prompts.build_preamble == ""
 
-    # Override: value is read.
+    # Override: a relative path is resolved against the project root.
     override_root = tmp_path / "override"
     override_root.mkdir()
     (override_root / "jaunt.toml").write_text(
-        'version = 1\n\n[prompts]\nbuild_preamble = "my preamble"\n', encoding="utf-8"
+        'version = 1\n\n[prompts]\nbuild_preamble = "my_preamble.md"\n', encoding="utf-8"
     )
     cfg2 = load_config(root=override_root)
-    assert cfg2.prompts.build_preamble == "my preamble"
+    assert cfg2.prompts.build_preamble == str((override_root / "my_preamble.md").resolve())

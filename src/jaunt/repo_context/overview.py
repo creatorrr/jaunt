@@ -69,11 +69,14 @@ async def project_overview_block_for_build(
     module_specs,
     repo_map_block: str,
     backend,
+    cost_tracker=None,
 ) -> str:
     """Return the project overview prose block for injection into build prompts.
 
     Returns '' immediately if cfg.context.overview is False.
-    Delegates to load_or_build_overview for caching and model calls.
+    Delegates to load_or_build_overview for caching and model calls. When a
+    cost_tracker is supplied, a fresh (non-cached) overview model call is charged
+    against it so the build budget and cost summary account for it.
     """
     if not cfg.context.overview:
         return ""
@@ -88,6 +91,7 @@ async def project_overview_block_for_build(
             state_dir=root / ".jaunt",
             enabled=True,
             prompts=cfg.prompts,
+            cost_tracker=cost_tracker,
         )
     except Exception:  # noqa: BLE001 - never block the build on overview generation
         return ""
@@ -102,23 +106,20 @@ async def load_or_build_overview(
     state_dir: Path,
     enabled: bool,
     prompts,
+    cost_tracker=None,
 ) -> str:
     """Return cached or freshly-generated project overview prose.
 
     Returns '' immediately when enabled is False.
     Uses state_dir/PROJECT_OVERVIEW.md as cache; invalidates when
-    state_dir/project_overview.digest does not match digest.
+    state_dir/project_overview.digest does not match digest. When a fresh overview
+    is generated and cost_tracker is supplied, the model call's token usage is
+    recorded against it.
     """
     if not enabled:
         return ""
     overview_path = state_dir / "PROJECT_OVERVIEW.md"
     digest_path = state_dir / "project_overview.digest"
-    if (
-        digest_path.is_file()
-        and digest_path.read_text(encoding="utf-8").strip() == digest
-        and overview_path.is_file()
-    ):
-        return overview_path.read_text(encoding="utf-8")
 
     system = load_prompt(
         "project_overview_system.md",
@@ -129,9 +130,30 @@ async def load_or_build_overview(
         getattr(prompts, "project_overview_user", None) or None,
     )
     user = render_template(user_tmpl, {"project_docs": project_docs, "repo_map": repo_map_block})
-    prose = (await backend.complete_text(system=system, user=user)).strip()
+
+    # The cache key covers the exact model inputs (system + rendered user, which embeds
+    # project_docs and the repo map) plus the incoming spec/repo digest. Editing README/AGENTS,
+    # the repo map, the spec sources, or the overview prompt templates all invalidate the cache.
+    cache_digest = hashlib.sha256(
+        b"\x00".join((digest.encode(), system.encode(), user.encode()))
+    ).hexdigest()
+    if (
+        digest_path.is_file()
+        and digest_path.read_text(encoding="utf-8").strip() == cache_digest
+        and overview_path.is_file()
+    ):
+        return overview_path.read_text(encoding="utf-8")
+
+    complete_with_usage = getattr(backend, "complete_text_with_usage", None)
+    if complete_with_usage is not None:
+        raw, usage = await complete_with_usage(system=system, user=user)
+    else:
+        raw, usage = await backend.complete_text(system=system, user=user), None
+    prose = raw.strip()
+    if cost_tracker is not None and usage is not None:
+        cost_tracker.record("__project_overview__", usage)
 
     state_dir.mkdir(parents=True, exist_ok=True)
     overview_path.write_text(prose, encoding="utf-8")
-    digest_path.write_text(digest, encoding="utf-8")
+    digest_path.write_text(cache_digest, encoding="utf-8")
     return prose

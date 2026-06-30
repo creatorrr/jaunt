@@ -61,6 +61,19 @@ class _ErrorBackend:
         raise AssertionError("complete_text must not be called when enabled=False")
 
 
+class _UsageBackend:
+    """Reports token usage so the cost-tracking path can be exercised."""
+
+    def __init__(self, usage: object, response: str = "Overview prose.") -> None:
+        self._usage = usage
+        self._response = response
+        self.calls: int = 0
+
+    async def complete_text_with_usage(self, *, system: str, user: str) -> tuple[str, object]:
+        self.calls += 1
+        return self._response, self._usage
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -212,3 +225,108 @@ def test_project_spec_digest_is_stable(tmp_path: Path) -> None:
 
     assert d1 == d2, "digest must be deterministic"
     assert d1 != d3, "different repo_map_block must produce different digest"
+
+
+def test_cache_invalidates_when_project_docs_change(tmp_path: Path) -> None:
+    """Editing README/AGENTS (project_docs) must invalidate the overview cache."""
+    state_dir = tmp_path / ".jaunt_state"
+    backend = _FakeBackend("overview")
+    prompts = _stub_prompts()
+
+    asyncio.run(
+        load_or_build_overview(
+            backend,
+            repo_map_block="map",
+            project_docs="docs-v1",
+            digest="same-spec-digest",
+            state_dir=state_dir,
+            enabled=True,
+            prompts=prompts,
+        )
+    )
+    assert backend.calls == 1
+
+    # Same spec/repo digest but different docs → the model must be called again.
+    asyncio.run(
+        load_or_build_overview(
+            backend,
+            repo_map_block="map",
+            project_docs="docs-v2",
+            digest="same-spec-digest",
+            state_dir=state_dir,
+            enabled=True,
+            prompts=prompts,
+        )
+    )
+    assert backend.calls == 2, "changed project_docs must bust the overview cache"
+
+
+def test_cache_invalidates_when_prompt_template_changes(tmp_path: Path) -> None:
+    """Editing the overview prompt template must invalidate the cache."""
+    state_dir = tmp_path / ".jaunt_state"
+    backend = _FakeBackend("overview")
+
+    tmpl1 = tmp_path / "ov_system_v1.md"
+    tmpl1.write_text("System prompt v1", encoding="utf-8")
+    prompts1 = SimpleNamespace(project_overview_system=str(tmpl1), project_overview_user="")
+    asyncio.run(
+        load_or_build_overview(
+            backend,
+            repo_map_block="map",
+            project_docs="docs",
+            digest="same",
+            state_dir=state_dir,
+            enabled=True,
+            prompts=prompts1,
+        )
+    )
+    assert backend.calls == 1
+
+    tmpl2 = tmp_path / "ov_system_v2.md"
+    tmpl2.write_text("System prompt v2 — materially different", encoding="utf-8")
+    prompts2 = SimpleNamespace(project_overview_system=str(tmpl2), project_overview_user="")
+    asyncio.run(
+        load_or_build_overview(
+            backend,
+            repo_map_block="map",
+            project_docs="docs",
+            digest="same",
+            state_dir=state_dir,
+            enabled=True,
+            prompts=prompts2,
+        )
+    )
+    assert backend.calls == 2, "changed prompt template must bust the overview cache"
+
+
+def test_overview_records_usage_against_cost_tracker(tmp_path: Path) -> None:
+    """A fresh overview model call charges its token usage to the cost tracker."""
+    from jaunt.cost import CostTracker
+    from jaunt.generate.base import TokenUsage
+
+    usage = TokenUsage(
+        prompt_tokens=100,
+        completion_tokens=20,
+        model="gpt-5.5",
+        provider="codex",
+        cached_prompt_tokens=0,
+    )
+    backend = _UsageBackend(usage)
+    tracker = CostTracker(max_cost=None)
+
+    asyncio.run(
+        load_or_build_overview(
+            backend,
+            repo_map_block="map",
+            project_docs="docs",
+            digest="d",
+            state_dir=tmp_path / ".jaunt_state",
+            enabled=True,
+            prompts=_stub_prompts(),
+            cost_tracker=tracker,
+        )
+    )
+    assert backend.calls == 1
+    assert tracker.api_calls == 1
+    assert tracker.total_prompt_tokens == 100
+    assert tracker.total_completion_tokens == 20

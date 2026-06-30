@@ -96,6 +96,60 @@ def test_codex_fingerprint_respects_prompt_overrides(tmp_path: Path) -> None:
     assert first != second
 
 
+def test_codex_fingerprint_respects_build_preamble_override(tmp_path: Path) -> None:
+    """Editing the Jaunt preamble (build_preamble) must invalidate already-built modules."""
+    preamble = tmp_path / "codex_preamble.md"
+    preamble.write_text("preamble one", encoding="utf-8")
+    cfg = _config(engine="codex")
+    cfg = replace(cfg, prompts=replace(cfg.prompts, build_preamble=str(preamble)))
+
+    first = fingerprint.generation_fingerprint_from_config(
+        cfg,
+        kind="build",
+        codex_version_resolver=lambda: "codex-cli 1.0.0",
+    )
+    preamble.write_text("preamble two — materially different", encoding="utf-8")
+    second = fingerprint.generation_fingerprint_from_config(
+        cfg,
+        kind="build",
+        codex_version_resolver=lambda: "codex-cli 1.0.0",
+    )
+
+    assert first != second
+
+
+def test_codex_fingerprint_changes_when_overview_enabled() -> None:
+    """Enabling context.overview must change the build fingerprint (feature takes effect)."""
+    cfg_off = _config(engine="codex")
+    cfg_on = replace(cfg_off, context=replace(cfg_off.context, overview=True))
+
+    off = fingerprint.generation_fingerprint_from_config(
+        cfg_off,
+        kind="build",
+        codex_version_resolver=lambda: "codex-cli 1.0.0",
+    )
+    on = fingerprint.generation_fingerprint_from_config(
+        cfg_on,
+        kind="build",
+        codex_version_resolver=lambda: "codex-cli 1.0.0",
+    )
+    assert off != on, "enabling the project overview must invalidate already-built modules"
+
+    # The overview is build-only orientation: the test-kind fingerprint must be unaffected
+    # so `jaunt build` and `jaunt test` agree on freshness.
+    off_test = fingerprint.generation_fingerprint_from_config(
+        cfg_off,
+        kind="test",
+        codex_version_resolver=lambda: "codex-cli 1.0.0",
+    )
+    on_test = fingerprint.generation_fingerprint_from_config(
+        cfg_on,
+        kind="test",
+        codex_version_resolver=lambda: "codex-cli 1.0.0",
+    )
+    assert off_test == on_test, "overview flag must not affect the test fingerprint"
+
+
 def test_codex_fingerprint_uses_project_relative_prompt_overrides(
     monkeypatch, tmp_path: Path
 ) -> None:

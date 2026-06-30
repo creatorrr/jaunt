@@ -152,11 +152,15 @@ enrich = false              # opt-in: LLM-enrich descriptions (else AST-only, of
 max_chars = 6000            # cap the injected repo-map block
 overview = false            # opt-in: model-written architecture overview injected into build
                             #   prompts, digest-cached to .jaunt/PROJECT_OVERVIEW.md. Jaunt
-                            #   calls the model once (via CodexBackend.complete_text) when the
-                            #   spec sources or repo map change; subsequent builds reuse the
-                            #   cached prose. Off by default — enable when you want the LLM to
-                            #   receive a prose summary of the whole codebase alongside the
-                            #   per-spec context.
+                            #   calls the model once when the spec sources, repo map, injected
+                            #   project docs (README/AGENTS/CLAUDE), or overview prompt templates
+                            #   change; subsequent builds reuse the cached prose. The overview
+                            #   model call is charged against [llm] max_cost_per_build and shown
+                            #   in the cost summary. Toggling this flag participates in build
+                            #   freshness, so enabling it triggers a one-time rebuild of already-
+                            #   built modules (it does not affect the test-kind fingerprint).
+                            #   Off by default — enable when you want the LLM to receive a prose
+                            #   summary of the whole codebase alongside the per-spec context.
 
 [context.search]            # colgrep (LightOn next-plaid) semantic retrieval
 enabled = false             # opt-in; requires the `colgrep` binary on PATH
@@ -186,9 +190,12 @@ project_overview_user = ""    # override for the overview user prompt ({{project
 ```
 
 Every build prompt opens with a static **Jaunt preamble** (`src/jaunt/prompts/codex_preamble.md`)
-that frames what Jaunt is and states the signature/docstring contract. It is always-on,
-costs nothing extra (no model call, no cache churn), and can be replaced project-wide via
-`[prompts] build_preamble = "path/to/my_preamble.md"`.
+that frames what Jaunt is and states the signature/docstring contract. It is always-on and
+adds no model call. Its content is part of the build freshness fingerprint (like
+`build_system`/`build_module`), so editing the preamble — or pointing at a different one —
+regenerates already-built modules. Replace it project-wide via
+`[prompts] build_preamble = "path/to/my_preamble.md"` (a relative path resolves against the
+project root).
 
 Skills are no longer injected as prompt text; Codex discovers them natively from a
 seeded `.agents/skills/` workspace. `max_chars_per_skill` and `inject_user_skills` are

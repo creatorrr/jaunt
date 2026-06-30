@@ -408,7 +408,10 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
         build_system = ""
 
     if "build_preamble" in prompts_tbl:
-        build_preamble = _as_str(prompts_tbl["build_preamble"], name="prompts.build_preamble")
+        build_preamble = _resolve_prompt_override(
+            _as_str(prompts_tbl["build_preamble"], name="prompts.build_preamble"),
+            root=root,
+        )
     else:
         build_preamble = ""
 
@@ -437,15 +440,17 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
         test_module = ""
 
     if "project_overview_system" in prompts_tbl:
-        project_overview_system = _as_str(
-            prompts_tbl["project_overview_system"], name="prompts.project_overview_system"
+        project_overview_system = _resolve_prompt_override(
+            _as_str(prompts_tbl["project_overview_system"], name="prompts.project_overview_system"),
+            root=root,
         )
     else:
         project_overview_system = ""
 
     if "project_overview_user" in prompts_tbl:
-        project_overview_user = _as_str(
-            prompts_tbl["project_overview_user"], name="prompts.project_overview_user"
+        project_overview_user = _resolve_prompt_override(
+            _as_str(prompts_tbl["project_overview_user"], name="prompts.project_overview_user"),
+            root=root,
         )
     else:
         project_overview_user = ""

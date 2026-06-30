@@ -77,8 +77,8 @@ def test_overview_block_appears_in_rendered_prompt(tmp_path: Path, monkeypatch) 
     """When context.overview = true, 'OVERVIEW PROSE' appears in the rendered _build_prompt.
 
     Uses the real CodexBackend so that _build_prompt assembles the prompt exactly as
-    production does. Only complete_text (returns the overview prose) and generate_module
-    (captures the rendered prompt, returns valid stubs) are monkeypatched.
+    production does. Only complete_text_with_usage (returns the overview prose) and
+    generate_module (captures the rendered prompt, returns valid stubs) are monkeypatched.
     """
     project, prefix = _make_cli_build_project_with_overview(tmp_path)
     before = {
@@ -89,8 +89,10 @@ def test_overview_block_appears_in_rendered_prompt(tmp_path: Path, monkeypatch) 
 
     captured: dict[str, str] = {}
 
-    async def _fake_complete_text(self: CodexBackend, *, system: str, user: str) -> str:
-        return "OVERVIEW PROSE"
+    async def _fake_complete_text_with_usage(
+        self: CodexBackend, *, system: str, user: str
+    ) -> tuple[str, None]:
+        return "OVERVIEW PROSE", None
 
     async def _fake_generate_module(
         self: CodexBackend,
@@ -103,7 +105,7 @@ def test_overview_block_appears_in_rendered_prompt(tmp_path: Path, monkeypatch) 
         lines = [f"def {name}() -> None:\n    assert True\n" for name in ctx.expected_names]
         return "\n".join(lines).rstrip() + "\n", None
 
-    monkeypatch.setattr(CodexBackend, "complete_text", _fake_complete_text)
+    monkeypatch.setattr(CodexBackend, "complete_text_with_usage", _fake_complete_text_with_usage)
     monkeypatch.setattr(CodexBackend, "generate_module", _fake_generate_module)
 
     try:
@@ -120,7 +122,7 @@ def test_overview_block_appears_in_rendered_prompt(tmp_path: Path, monkeypatch) 
 
 
 def test_overview_block_absent_when_disabled(tmp_path: Path, monkeypatch) -> None:
-    """When context.overview = false (default), complete_text is never called."""
+    """When context.overview = false (default), the overview model call never happens."""
     project = tmp_path / "proj2"
     project.mkdir(parents=True, exist_ok=True)
     _write(
@@ -165,9 +167,11 @@ def test_overview_block_absent_when_disabled(tmp_path: Path, monkeypatch) -> Non
     complete_text_called = {"count": 0}
     captured: dict[str, str] = {}
 
-    async def _fake_complete_text(self: CodexBackend, *, system: str, user: str) -> str:
+    async def _fake_complete_text_with_usage(
+        self: CodexBackend, *, system: str, user: str
+    ) -> tuple[str, None]:
         complete_text_called["count"] += 1
-        return "SHOULD NOT APPEAR"
+        return "SHOULD NOT APPEAR", None
 
     async def _fake_generate_module(
         self: CodexBackend,
@@ -179,7 +183,7 @@ def test_overview_block_absent_when_disabled(tmp_path: Path, monkeypatch) -> Non
         lines = [f"def {name}() -> None:\n    assert True\n" for name in ctx.expected_names]
         return "\n".join(lines).rstrip() + "\n", None
 
-    monkeypatch.setattr(CodexBackend, "complete_text", _fake_complete_text)
+    monkeypatch.setattr(CodexBackend, "complete_text_with_usage", _fake_complete_text_with_usage)
     monkeypatch.setattr(CodexBackend, "generate_module", _fake_generate_module)
 
     try:
@@ -191,7 +195,7 @@ def test_overview_block_absent_when_disabled(tmp_path: Path, monkeypatch) -> Non
     assert rc == jaunt.cli.EXIT_OK
     assert "prompt" in captured, "generate_module was never called — no prompt captured"
     assert complete_text_called["count"] == 0, (
-        "complete_text should NOT be called when overview is disabled"
+        "the overview model call should NOT happen when overview is disabled"
     )
     assert "SHOULD NOT APPEAR" not in captured["prompt"], (
         f"Overview prose leaked into prompt when disabled:\n{captured['prompt'][:500]}"
@@ -199,7 +203,7 @@ def test_overview_block_absent_when_disabled(tmp_path: Path, monkeypatch) -> Non
 
 
 def test_overview_complete_text_failure_does_not_abort_build(tmp_path: Path, monkeypatch) -> None:
-    """A complete_text failure with context.overview = true must not abort the build.
+    """An overview model-call failure with context.overview = true must not abort the build.
 
     The overview is best-effort: if the model call raises (auth, network, timeout, etc.)
     jaunt build must still succeed (EXIT_OK) and the rendered prompt must contain no
@@ -214,7 +218,9 @@ def test_overview_complete_text_failure_does_not_abort_build(tmp_path: Path, mon
 
     captured: dict[str, str] = {}
 
-    async def _raising_complete_text(self: CodexBackend, *, system: str, user: str) -> str:
+    async def _raising_complete_text_with_usage(
+        self: CodexBackend, *, system: str, user: str
+    ) -> tuple[str, None]:
         raise RuntimeError("simulated auth failure")
 
     async def _fake_generate_module(
@@ -227,7 +233,7 @@ def test_overview_complete_text_failure_does_not_abort_build(tmp_path: Path, mon
         lines = [f"def {name}() -> None:\n    assert True\n" for name in ctx.expected_names]
         return "\n".join(lines).rstrip() + "\n", None
 
-    monkeypatch.setattr(CodexBackend, "complete_text", _raising_complete_text)
+    monkeypatch.setattr(CodexBackend, "complete_text_with_usage", _raising_complete_text_with_usage)
     monkeypatch.setattr(CodexBackend, "generate_module", _fake_generate_module)
 
     try:

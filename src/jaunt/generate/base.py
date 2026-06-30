@@ -103,6 +103,17 @@ class GeneratorBackend(ABC):
         """
         raise NotImplementedError("Contract derivation via model is not supported on this backend.")
 
+    async def complete_text_with_usage(
+        self, *, system: str, user: str
+    ) -> tuple[str, TokenUsage | None]:
+        """Like `complete_text`, but also surfaces token usage when available.
+
+        Default: delegate to `complete_text` and report no usage. Backends that can
+        report token counts (e.g. Codex) override this so callers can charge the call
+        against a cost budget.
+        """
+        return await self.complete_text(system=system, user=user), None
+
     async def generate_with_retry(
         self,
         ctx: ModuleSpecContext,
