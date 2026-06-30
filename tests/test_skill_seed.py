@@ -37,6 +37,18 @@ def test_unknown_builtin_is_skipped(tmp_path):
     assert warnings == []  # unknown builtin names are silently skipped (registry-resolved)
 
 
+def test_unsafe_builtin_name_does_not_escape(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    warnings = seed_skills_into_workspace(
+        ws, project_root=None, builtin_names=["../evil", "/abs", "ruff"]
+    )
+    # Only the safe builtin is seeded; nothing is written outside the workspace.
+    assert (ws / ".agents" / "skills" / "ruff" / "SKILL.md").is_file()
+    assert not (tmp_path / "evil").exists()
+    assert warnings == []
+
+
 def test_fingerprint_changes_with_set(tmp_path):
     a = skills_fingerprint(project_root=None, builtin_names=["ruff"])
     b = skills_fingerprint(project_root=None, builtin_names=["ruff", "pytest"])

@@ -29,8 +29,25 @@ def builtin_skills_dir() -> Path:
 
 
 def resolve_builtin_skill(name: str) -> Path | None:
-    """Return the SKILL.md path for *name*, or None if it is not bundled."""
-    candidate = builtin_skills_dir() / name / "SKILL.md"
+    """Return the SKILL.md path for *name*, or None if it is not bundled.
+
+    *name* must be a single safe path component. Values containing path
+    separators, ``..``, or absolute paths are rejected so a hostile or
+    mistyped ``[skills] builtin_skills`` entry cannot escape the bundled
+    directory when the resolved path is later joined into a workspace.
+    """
+    from jaunt.skill_manager import validate_skill_name
+
+    try:
+        name = validate_skill_name(name)
+    except ValueError:
+        return None
+
+    base = builtin_skills_dir()
+    candidate = (base / name / "SKILL.md").resolve()
+    # Defense in depth: never escape the bundled skills directory.
+    if base not in candidate.parents:
+        return None
     return candidate if candidate.is_file() else None
 
 

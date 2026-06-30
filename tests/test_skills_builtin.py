@@ -42,6 +42,18 @@ def test_iter_enabled_skips_unknown() -> None:
     assert names == ["ruff"]
 
 
+def test_resolve_rejects_unsafe_names() -> None:
+    # Path traversal / absolute / multi-component names must never resolve,
+    # so a hostile or mistyped builtin_skills entry cannot escape the dir.
+    for bad in ("../evil", "a/b", "/abs", "..", "x/../y", ""):
+        assert resolve_builtin_skill(bad) is None, bad
+
+
+def test_iter_enabled_skips_unsafe_names() -> None:
+    pairs = iter_enabled_builtin_skill_dirs(["ruff", "../evil", "/abs"])
+    assert [n for n, _ in pairs] == ["ruff"]
+
+
 def test_all_default_skills_bundled_and_valid() -> None:
     for name in DEFAULT_BUILTIN_SKILLS:
         path = resolve_builtin_skill(name)
