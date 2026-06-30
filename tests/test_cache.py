@@ -28,6 +28,8 @@ def _make_ctx(**overrides: object) -> ModuleSpecContext:
         seed_target_content=overrides.get("seed_target_content", ""),  # type: ignore[arg-type]
         whole_class_contract_block=overrides.get("whole_class_contract_block", ""),  # type: ignore[arg-type]
         whole_class=overrides.get("whole_class", False),  # type: ignore[arg-type]
+        repo_map_block=overrides.get("repo_map_block", ""),  # type: ignore[arg-type]
+        relevant_context_block=overrides.get("relevant_context_block", ""),  # type: ignore[arg-type]
     )
 
 
@@ -222,3 +224,25 @@ def test_cache_key_changes_with_whole_class_flag_and_contract() -> None:
         _make_ctx(whole_class_contract_block="fill push"), model="m", provider="p"
     )
     assert len({base, flagged, contracted}) == 3
+
+
+def test_repo_map_block_changes_cache_key() -> None:
+    from jaunt.cache import cache_key_from_context
+
+    base = _make_ctx()
+    with_map = _make_ctx(repo_map_block="## Repository map\nsrc/a.py — does a")
+    k1 = cache_key_from_context(base, model="m", provider="p")
+    k2 = cache_key_from_context(with_map, model="m", provider="p")
+    assert k1 != k2
+
+
+def test_relevant_block_changes_cache_key() -> None:
+    from jaunt.cache import cache_key_from_context
+
+    k1 = cache_key_from_context(_make_ctx(), model="m", provider="p")
+    k2 = cache_key_from_context(
+        _make_ctx(relevant_context_block="see _context/relevant_0.py"),
+        model="m",
+        provider="p",
+    )
+    assert k1 != k2

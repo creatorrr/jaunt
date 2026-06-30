@@ -133,6 +133,7 @@ def build_cycle_runner(
         no_infer_deps=bool(getattr(args, "no_infer_deps", False)),
         no_progress=bool(getattr(args, "no_progress", False)),
         no_cache=bool(getattr(args, "no_cache", False)),
+        no_repo_map=bool(getattr(args, "no_repo_map", False)),
         json_output=False,
     )
 

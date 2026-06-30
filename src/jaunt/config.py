@@ -89,6 +89,22 @@ class SkillsConfig:
 
 
 @dataclass(frozen=True)
+class ContextSearchConfig:
+    enabled: bool = False
+    internal_retrieval: bool = True
+    max_hits: int = 8
+
+
+@dataclass(frozen=True)
+class ContextConfig:
+    repo_map: bool = True
+    repo_map_file: str = "treedocs.yaml"
+    enrich: bool = False
+    max_chars: int = 6000
+    search: ContextSearchConfig = field(default_factory=ContextSearchConfig)
+
+
+@dataclass(frozen=True)
 class ContractConfig:
     battery_dir: str = "tests/contract"
     derive: list[str] = field(default_factory=lambda: ["examples", "errors"])
@@ -107,6 +123,7 @@ class JauntConfig:
     codex: CodexConfig = field(default_factory=CodexConfig)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     contract: ContractConfig = field(default_factory=ContractConfig)
+    context: ContextConfig = field(default_factory=ContextConfig)
 
 
 def find_project_root(start: Path) -> Path:
@@ -422,6 +439,40 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     else:
         contract_strength = True
 
+    context_tbl = _as_table(data.get("context", {}), name="context")
+    if "repo_map" in context_tbl:
+        context_repo_map = _as_bool(context_tbl["repo_map"], name="context.repo_map")
+    else:
+        context_repo_map = True
+    if "repo_map_file" in context_tbl:
+        context_repo_map_file = _as_str(context_tbl["repo_map_file"], name="context.repo_map_file")
+    else:
+        context_repo_map_file = "treedocs.yaml"
+    if "enrich" in context_tbl:
+        context_enrich = _as_bool(context_tbl["enrich"], name="context.enrich")
+    else:
+        context_enrich = False
+    if "max_chars" in context_tbl:
+        context_max_chars = _as_int(context_tbl["max_chars"], name="context.max_chars")
+    else:
+        context_max_chars = 6000
+
+    search_tbl = _as_table(context_tbl.get("search", {}), name="context.search")
+    if "enabled" in search_tbl:
+        search_enabled = _as_bool(search_tbl["enabled"], name="context.search.enabled")
+    else:
+        search_enabled = False
+    if "internal_retrieval" in search_tbl:
+        search_internal = _as_bool(
+            search_tbl["internal_retrieval"], name="context.search.internal_retrieval"
+        )
+    else:
+        search_internal = True
+    if "max_hits" in search_tbl:
+        search_max_hits = _as_int(search_tbl["max_hits"], name="context.search.max_hits")
+    else:
+        search_max_hits = 8
+
     # Validation
     if not any((root / sr).exists() for sr in source_roots):
         raise JauntConfigError(
@@ -508,5 +559,16 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             battery_dir=contract_battery_dir,
             derive=contract_derive,
             strength=contract_strength,
+        ),
+        context=ContextConfig(
+            repo_map=context_repo_map,
+            repo_map_file=context_repo_map_file,
+            enrich=context_enrich,
+            max_chars=context_max_chars,
+            search=ContextSearchConfig(
+                enabled=search_enabled,
+                internal_retrieval=search_internal,
+                max_hits=search_max_hits,
+            ),
         ),
     )

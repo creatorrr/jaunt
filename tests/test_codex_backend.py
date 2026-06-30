@@ -561,3 +561,38 @@ def test_cached_input_tokens_parsed_into_usage(monkeypatch) -> None:
         )
 
     asyncio.run(run())
+
+
+def test_build_prompt_includes_repo_map_block() -> None:
+    backend = _backend()
+    ctx = _ctx(repo_map_block="## Repository map\nsrc/a.py — does a")
+    prompt = backend._build_prompt(ctx, Path("pkg/__generated__/m.py"), None)
+    assert "## Repository map" in prompt
+    assert prompt.index("## Repository map") > prompt.index("Write a complete Python module")
+
+
+def test_generate_writes_relevant_context_files(monkeypatch) -> None:
+    # Capture the _context dir contents by stubbing run_codex_exec.
+    import jaunt.generate.codex_backend as cb
+
+    written: dict[str, str] = {}
+
+    async def _fake_run(*, prompt, cwd, **kw):
+        ctx_dir = Path(cwd) / "_context"
+        for p in ctx_dir.glob("relevant_*.py"):
+            written[p.name] = p.read_text(encoding="utf-8")
+        # Write the target so generate_module can read it back (the single
+        # .py outside _context).
+        for p in Path(cwd).rglob("*.py"):
+            if "_context" not in p.parts:
+                p.write_text("x = 1\n", encoding="utf-8")
+        return None
+
+    monkeypatch.setattr(cb, "run_codex_exec", _fake_run)
+    backend = _backend()
+    ctx = _ctx(
+        relevant_context_block="Read `_context/relevant_*.py` ...",
+        relevant_context_files=(("relevant_0.py", "# src/a.py\ndef f(): ...\n"),),
+    )
+    asyncio.run(backend.generate_module(ctx))
+    assert "relevant_0.py" in written and "def f()" in written["relevant_0.py"]

@@ -124,6 +124,9 @@ def _build_parser() -> argparse.ArgumentParser:
     build_p = subparsers.add_parser("build", help="Generate code for magic specs.")
     _add_common_flags(build_p)
     _add_build_generation_flags(build_p)
+    build_p.add_argument(
+        "--no-repo-map", action="store_true", help="Disable repo-map injection for this build."
+    )
 
     test_p = subparsers.add_parser("test", help="Generate tests and run pytest.")
     _add_common_flags(test_p)
@@ -179,6 +182,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     status_p = subparsers.add_parser("status", help="Show project build status.")
     _add_common_flags(status_p)
+
+    tree_p = subparsers.add_parser("tree", help="Maintain treedocs.yaml repo map.")
+    _add_common_flags(tree_p)
+    tree_p.add_argument("--check", action="store_true", help="Fail (exit 4) if the tree is stale.")
+    tree_p.add_argument("--enrich", action="store_true", help="Force LLM enrichment this run.")
+    tree_p.add_argument("--no-enrich", action="store_true", help="Force AST-only this run.")
 
     check_p = subparsers.add_parser(
         "check", help="Verify committed contract batteries (deterministic, no model)."
@@ -678,6 +687,68 @@ def _find_generated_dirs(roots: Sequence[Path], generated_dir: str) -> list[Path
     return sorted(found)
 
 
+def _today() -> str:
+    from datetime import date
+
+    return date.today().isoformat()
+
+
+def cmd_tree(args: argparse.Namespace) -> int:
+    json_mode = _is_json_mode(args)
+    try:
+        root, cfg = _load_config(args)
+        from jaunt.repo_context import api as rc_api
+
+        if getattr(args, "check", False):
+            drift = rc_api.check_drift(root=root, cfg=cfg)
+            if json_mode:
+                _emit_json(
+                    {
+                        "command": "tree",
+                        "ok": drift is None,
+                        "drift": None
+                        if drift is None
+                        else {
+                            "added": drift.added,
+                            "removed": drift.removed,
+                            "restaled": drift.restaled,
+                        },
+                    }
+                )
+            elif drift is None:
+                print("treedocs.yaml is up to date.")
+            else:
+                _eprint(
+                    f"drift: +{len(drift.added)} new, -{len(drift.removed)} removed, "
+                    f"~{len(drift.restaled)} stale description(s). Run `jaunt tree`."
+                )
+            return EXIT_OK if drift is None else 4
+
+        doc, result = rc_api.sync_tree(root=root, cfg=cfg, today=_today())
+        if json_mode:
+            _emit_json(
+                {
+                    "command": "tree",
+                    "ok": True,
+                    "added": result.added,
+                    "removed": result.removed,
+                    "restaled": result.restaled,
+                }
+            )
+        else:
+            print(
+                f"Synced {cfg.context.repo_map_file}: "
+                f"+{len(result.added)} new, -{len(result.removed)} removed, "
+                f"~{len(result.restaled)} updated."
+            )
+        return EXIT_OK
+    except (JauntConfigError, JauntDiscoveryError) as e:
+        _print_error(e)
+        if json_mode:
+            _emit_json({"command": "tree", "ok": False, "error": str(e)})
+        return EXIT_CONFIG_OR_DISCOVERY
+
+
 def cmd_clean(args: argparse.Namespace) -> int:
     import shutil
 
@@ -994,6 +1065,24 @@ def cmd_status(args: argparse.Namespace) -> int:
         source_dirs = [root / sr for sr in cfg.paths.source_roots]
         _prepend_sys_path([*source_dirs, root])
 
+        tree_drift = None
+        if cfg.context.repo_map:
+            from jaunt.repo_context import api as rc_api
+
+            try:
+                d = rc_api.check_drift(root=root, cfg=cfg)
+                tree_drift = (
+                    None
+                    if d is None
+                    else {
+                        "added": len(d.added),
+                        "removed": len(d.removed),
+                        "restaled": len(d.restaled),
+                    }
+                )
+            except Exception:  # noqa: BLE001
+                tree_drift = None
+
         from jaunt import discovery, registry
         from jaunt.deps import build_spec_graph, collapse_to_module_dag
 
@@ -1073,6 +1162,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                         "fresh": [],
                         "contracts": contract_rows,
                         "contract_review": sorted(review_refs),
+                        "tree": tree_drift,
                     }
                 )
             else:
@@ -1083,6 +1173,8 @@ def cmd_status(args: argparse.Namespace) -> int:
                     for row in contract_rows:
                         flag = " [review]" if row["review"] else ""
                         print(f"- {row['ref']}: {row['state']} (strength {row['strength']})" + flag)
+                if tree_drift is not None:
+                    print(f"tree: {tree_drift} (run jaunt tree)")
             return EXIT_OK
 
         infer_default = bool(cfg.build.infer_deps) and (not bool(args.no_infer_deps))
@@ -1164,6 +1256,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                     "fresh": sorted(fresh),
                     "contracts": contract_rows,
                     "contract_review": sorted(review_refs),
+                    "tree": tree_drift,
                 }
             )
         else:
@@ -1181,6 +1274,8 @@ def cmd_status(args: argparse.Namespace) -> int:
                 for row in contract_rows:
                     flag = " [review]" if row["review"] else ""
                     print(f"- {row['ref']}: {row['state']} (strength {row['strength']})" + flag)
+            if tree_drift is not None:
+                print(f"tree: {tree_drift} (run jaunt tree)")
 
         return EXIT_OK
     except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError, KeyError) as e:
@@ -1221,6 +1316,12 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                 skills_block = skills_res.skills_block
             except Exception as e:  # noqa: BLE001 - best-effort; never block build
                 _eprint(f"warn: failed ensuring external library skills: {type(e).__name__}: {e}")
+
+        repo_map_block = ""
+        if cfg.context.repo_map and not bool(getattr(args, "no_repo_map", False)):
+            from jaunt.repo_context import api as rc_api
+
+            repo_map_block = rc_api.repo_map_block_for_build(root=root, cfg=cfg, today=_today())
 
         _prepend_sys_path([*source_dirs, root])
 
@@ -1357,6 +1458,12 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
         response_cache = ResponseCache(cache_dir, enabled=not no_cache)
         cost_tracker = CostTracker(max_cost=cfg.llm.max_cost_per_build)
 
+        search_enabled = cfg.context.search.enabled and cfg.context.search.internal_retrieval
+        if cfg.context.search.enabled:
+            from jaunt.repo_context import search as rc_search
+
+            rc_search.ensure_index(package_dir)
+
         jobs = int(args.jobs) if args.jobs is not None else int(cfg.build.jobs)
         report = await builder.run_build(
             package_dir=package_dir,
@@ -1371,6 +1478,9 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             backend=_build_backend(cfg),
             generation_fingerprint=build_generation_fingerprint,
             skills_block=skills_block,
+            repo_map_block=repo_map_block,
+            search_enabled=search_enabled,
+            search_max_hits=cfg.context.search.max_hits,
             jobs=jobs,
             progress=progress,
             response_cache=response_cache,
@@ -2336,6 +2446,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_clean(args)
     if args.command == "status":
         return cmd_status(args)
+    if args.command == "tree":
+        return cmd_tree(args)
     if args.command == "check":
         return cmd_check(args)
     if args.command == "reconcile":

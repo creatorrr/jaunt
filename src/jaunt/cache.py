@@ -103,6 +103,10 @@ def cache_key_from_context(
     h.update(b"\x00")
     h.update((ctx.module_context_digest or "").encode())
     h.update(b"\x00")
+    h.update((ctx.repo_map_block or "").encode())
+    h.update(b"\x00")
+    h.update((ctx.relevant_context_block or "").encode())
+    h.update(b"\x00")
     h.update(generation_fingerprint.encode())
     return h.hexdigest()
 
