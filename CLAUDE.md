@@ -150,6 +150,13 @@ repo_map = true             # maintain treedocs.yaml + inject a repo map into bu
 repo_map_file = "treedocs.yaml"
 enrich = false              # opt-in: LLM-enrich descriptions (else AST-only, offline)
 max_chars = 6000            # cap the injected repo-map block
+overview = false            # opt-in: model-written architecture overview injected into build
+                            #   prompts, digest-cached to .jaunt/PROJECT_OVERVIEW.md. Jaunt
+                            #   calls the model once (via CodexBackend.complete_text) when the
+                            #   spec sources or repo map change; subsequent builds reuse the
+                            #   cached prose. Off by default — enable when you want the LLM to
+                            #   receive a prose summary of the whole codebase alongside the
+                            #   per-spec context.
 
 [context.search]            # colgrep (LightOn next-plaid) semantic retrieval
 enabled = false             # opt-in; requires the `colgrep` binary on PATH
@@ -169,11 +176,19 @@ reasoning_effort = "high"   # low | medium | high
 [prompts]
 # Optional file path overrides for LLM prompt templates.
 # Leave empty to use the packaged defaults in src/jaunt/prompts/.
+build_preamble = ""         # override for the Jaunt preamble (codex_preamble.md)
 build_system = ""
 build_module = ""
 test_system = ""
 test_module = ""
+project_overview_system = ""  # override for the overview system prompt
+project_overview_user = ""    # override for the overview user prompt ({{project_docs}}, {{repo_map}})
 ```
+
+Every build prompt opens with a static **Jaunt preamble** (`src/jaunt/prompts/codex_preamble.md`)
+that frames what Jaunt is and states the signature/docstring contract. It is always-on,
+costs nothing extra (no model call, no cache churn), and can be replaced project-wide via
+`[prompts] build_preamble = "path/to/my_preamble.md"`.
 
 Skills are no longer injected as prompt text; Codex discovers them natively from a
 seeded `.agents/skills/` workspace. `max_chars_per_skill` and `inject_user_skills` are
