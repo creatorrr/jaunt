@@ -40,3 +40,25 @@ def test_iter_enabled_skips_unknown() -> None:
     pairs = iter_enabled_builtin_skill_dirs(["ruff", "does-not-exist"])
     names = [n for n, _ in pairs]
     assert names == ["ruff"]
+
+
+def test_all_default_skills_bundled_and_valid() -> None:
+    for name in DEFAULT_BUILTIN_SKILLS:
+        path = resolve_builtin_skill(name)
+        assert path is not None, f"missing builtin skill: {name}"
+        text = path.read_text(encoding="utf-8")
+        m = _FRONTMATTER_RE.match(text)
+        assert m, f"{name} missing frontmatter"
+        fm = m.group("fm")
+        assert re.search(rf"^name:\s*\"?{re.escape(name)}\"?\s*$", fm, re.MULTILINE), name
+        assert re.search(r"^description:\s*\S", fm, re.MULTILINE), name
+        body = text[m.end() :]
+        for heading in (
+            "## What it is",
+            "## Core concepts",
+            "## Common patterns",
+            "## Gotchas",
+            "## Testing notes",
+        ):
+            assert heading in body, f"{name} missing {heading}"
+        assert len(text) <= 12_000, f"{name} too long ({len(text)} chars)"
