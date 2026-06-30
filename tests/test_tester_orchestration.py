@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import fields
 from pathlib import Path
 
 from jaunt.deps import build_spec_graph
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
 from jaunt.registry import SpecEntry
 from jaunt.spec_ref import normalize_spec_ref
-from jaunt.tester import run_pytest, run_test_generation, run_tests
+from jaunt.tester import RepairBuildContext, run_pytest, run_test_generation, run_tests
 
 
 def _write(path: Path, text: str) -> None:
@@ -36,6 +37,84 @@ class FakeBackend(GeneratorBackend):
         for name in ctx.expected_names:
             lines.append(f"def {name}():\n    assert True\n")
         return "\n".join(lines).rstrip() + "\n", None
+
+
+def test_repair_build_context_defaults_and_run_tests_threads_skills(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "proj"
+    (project / "src").mkdir(parents=True, exist_ok=True)
+    (project / "tests").mkdir(parents=True, exist_ok=True)
+
+    spec_path = project / "tests" / "specs_mod.py"
+    _write(
+        spec_path,
+        """
+def test_generated():
+    raise AssertionError("should not run")
+""".lstrip(),
+    )
+
+    e = _entry(module="tests.specs_mod", qualname="test_generated", source_file=str(spec_path))
+    specs = {e.spec_ref: e}
+    spec_graph = build_spec_graph(specs, infer_default=False)
+    module_specs = {"tests.specs_mod": [e]}
+    module_dag = {"tests.specs_mod": set()}
+
+    repair_ctx = RepairBuildContext(
+        package_dir=project / "src",
+        generated_dir="__generated__",
+        module_specs={},
+        specs={},
+        spec_graph={},
+        module_dag={},
+        backend=FakeBackend(),
+        generation_fingerprint="build-fingerprint",
+    )
+    field_names = {field.name for field in fields(RepairBuildContext)}
+
+    assert repair_ctx.project_root is None
+    assert repair_ctx.builtin_skill_names == ()
+    assert repair_ctx.skills_digest == ""
+    assert "skills_block" not in field_names
+    assert not hasattr(repair_ctx, "skills_block")
+
+    class CapturingBackend(GeneratorBackend):
+        def __init__(self) -> None:
+            self.contexts: list[ModuleSpecContext] = []
+
+        async def generate_module(
+            self, ctx: ModuleSpecContext, *, extra_error_context: list[str] | None = None
+        ) -> tuple[str, None]:
+            self.contexts.append(ctx)
+            return "def test_generated():\n    assert True\n", None
+
+    backend = CapturingBackend()
+    result = asyncio.run(
+        run_tests(
+            project_dir=project,
+            tests_package="tests",
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"tests.specs_mod"},
+            backend=backend,
+            jobs=1,
+            no_run=True,
+            project_root=project,
+            builtin_skill_names=("ruff", "pytest"),
+            skills_digest="skills-digest",
+        )
+    )
+
+    assert result.exit_code == 0
+    assert len(backend.contexts) == 1
+    generated_ctx = backend.contexts[0]
+    assert generated_ctx.project_root == project
+    assert generated_ctx.builtin_skill_names == ("ruff", "pytest")
+    assert generated_ctx.skills_digest == "skills-digest"
 
 
 def test_tester_generates_into_tests_tree_and_runs_pytest(tmp_path: Path) -> None:

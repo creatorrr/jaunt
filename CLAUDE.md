@@ -138,9 +138,12 @@ infer_deps = true
 pytest_args = ["-q"]
 
 [skills]
-auto = true                 # auto-generate PyPI helper skills into build prompts
-max_chars_per_skill = 8000  # cap injected skill text to keep prompts lean
-inject_user_skills = []     # user-skill names to always inject (default: none)
+auto = true                 # auto-generate PyPI helper skills for imported libs
+builtin = true              # seed Jaunt's bundled builtin skills into the Codex workspace
+builtin_skills = [          # the default set (override to trim/extend)
+  "asyncpg", "dbos", "descope", "fastmcp", "openai", "pydantic", "pydantic-ai",
+  "pytest", "ruff", "spacy", "starlette", "ty", "uv",
+]
 
 [context]
 repo_map = true             # maintain treedocs.yaml + inject a repo map into build prompts
@@ -166,6 +169,10 @@ build_module = ""
 test_system = ""
 test_module = ""
 ```
+
+Skills are no longer injected as prompt text; Codex discovers them natively from a
+seeded `.agents/skills/` workspace. `max_chars_per_skill` and `inject_user_skills` are
+retained for back-compat but unused by the Codex builder.
 
 ## CLI Commands
 

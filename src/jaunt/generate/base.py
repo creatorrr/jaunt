@@ -7,6 +7,7 @@ import json
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 
 from jaunt.spec_ref import SpecRef
@@ -24,7 +25,9 @@ class ModuleSpecContext:
     dependency_apis: dict[SpecRef, str]
     dependency_generated_modules: dict[str, str]
     decorator_apis: dict[SpecRef, str] = field(default_factory=dict)
-    skills_block: str = ""
+    project_root: Path | None = None
+    builtin_skill_names: tuple[str, ...] = ()
+    skills_digest: str = ""
     module_contract_block: str = ""
     base_contract_block: str = ""
     blueprint_source: str = ""

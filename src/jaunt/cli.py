@@ -113,6 +113,12 @@ def _add_build_generation_flags(p: argparse.ArgumentParser) -> None:
         dest="no_auto_skills",
         help="Disable auto-generated PyPI skill injection for this run.",
     )
+    p.add_argument(
+        "--no-builtin-skills",
+        action="store_true",
+        dest="no_builtin_skills",
+        help="Do not seed Jaunt's bundled builtin skills into the Codex workspace.",
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -1296,13 +1302,16 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
 
         source_dirs = [root / sr for sr in cfg.paths.source_roots]
 
-        skills_block = ""
+        builtin_on = bool(cfg.skills.builtin) and not bool(
+            getattr(args, "no_builtin_skills", False)
+        )
+        builtin_skill_names = tuple(cfg.skills.builtin_skills) if builtin_on else ()
         auto_skills_on = bool(cfg.skills.auto) and not bool(getattr(args, "no_auto_skills", False))
         if auto_skills_on:
             try:
                 from jaunt import skills_auto
 
-                skills_res = await skills_auto.ensure_pypi_skills_and_block(
+                skills_res = await skills_auto.ensure_pypi_skills(
                     project_root=root,
                     source_roots=[d for d in source_dirs if d.exists()],
                     generated_dir=cfg.paths.generated_dir,
@@ -1313,7 +1322,6 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                 )
                 for w in skills_res.warnings:
                     _eprint(f"warn: {w}")
-                skills_block = skills_res.skills_block
             except Exception as e:  # noqa: BLE001 - best-effort; never block build
                 _eprint(f"warn: failed ensuring external library skills: {type(e).__name__}: {e}")
 
@@ -1322,6 +1330,12 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             from jaunt.repo_context import api as rc_api
 
             repo_map_block = rc_api.repo_map_block_for_build(root=root, cfg=cfg, today=_today())
+
+        from jaunt.skill_seed import skills_fingerprint
+
+        build_skills_digest = skills_fingerprint(
+            project_root=root, builtin_names=builtin_skill_names
+        )
 
         _prepend_sys_path([*source_dirs, root])
 
@@ -1477,7 +1491,6 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             allowed_modules=allowed_modules,
             backend=_build_backend(cfg),
             generation_fingerprint=build_generation_fingerprint,
-            skills_block=skills_block,
             repo_map_block=repo_map_block,
             search_enabled=search_enabled,
             search_max_hits=cfg.context.search.max_hits,
@@ -1489,6 +1502,9 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             async_runner=cfg.build.async_runner,
             build_instructions=build_instructions,
             targeted_test_entries=targeted_test_entries,
+            project_root=root,
+            builtin_skill_names=builtin_skill_names,
+            skills_digest=build_skills_digest,
         )
 
         if report.failed and not json_mode:
@@ -1771,25 +1787,21 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
         response_cache = ResponseCache(cache_dir, enabled=not no_cache)
         cost_tracker = CostTracker(max_cost=cfg.llm.max_cost_per_build)
         backend = _build_backend(cfg)
-        build_skills_block = ""
-        auto_skills_on = bool(cfg.skills.auto) and not bool(getattr(args, "no_auto_skills", False))
-        if auto_skills_on:
-            try:
-                from jaunt.skill_manager import build_skills_block as _build_skills_block
-
-                build_skills_block = _build_skills_block(
-                    root,
-                    inject_user_skills=set(cfg.skills.inject_user_skills),
-                    max_chars_per_skill=cfg.skills.max_chars_per_skill,
-                )
-            except Exception:
-                build_skills_block = ""
 
         build_generation_fingerprint = generation_fingerprint(
             cfg,
             kind="build",
             build_instructions=build_instructions,
             include_target_tests=include_target_tests,
+        )
+        builtin_on = bool(cfg.skills.builtin) and not bool(
+            getattr(args, "no_builtin_skills", False)
+        )
+        builtin_skill_names = tuple(cfg.skills.builtin_skills) if builtin_on else ()
+        from jaunt.skill_seed import skills_fingerprint
+
+        test_skills_digest = skills_fingerprint(
+            project_root=root, builtin_names=builtin_skill_names
         )
         repair_build_context = tester.RepairBuildContext(
             package_dir=package_dir,
@@ -1801,7 +1813,9 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             backend=backend,
             generation_fingerprint=build_generation_fingerprint,
             targeted_test_entries=build_targeted_test_entries,
-            skills_block=build_skills_block,
+            project_root=root,
+            builtin_skill_names=builtin_skill_names,
+            skills_digest=test_skills_digest,
             jobs=int(cfg.build.jobs),
             async_runner=cfg.build.async_runner,
             build_instructions=build_instructions,
@@ -1832,6 +1846,9 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             cost_tracker=cost_tracker,
             async_runner=cfg.build.async_runner,
             repair_build_context=repair_build_context,
+            project_root=root,
+            builtin_skill_names=builtin_skill_names,
+            skills_digest=test_skills_digest,
         )
 
         if asyncio.iscoroutine(result):
@@ -2168,7 +2185,7 @@ def cmd_skill(args: argparse.Namespace) -> int:
             from jaunt import skills_auto
 
             res = asyncio.run(
-                skills_auto.ensure_pypi_skills_and_block(
+                skills_auto.ensure_pypi_skills(
                     project_root=root,
                     source_roots=[d for d in source_dirs if d.exists()],
                     generated_dir=cfg.paths.generated_dir,

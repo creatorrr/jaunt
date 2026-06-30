@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from jaunt.cache import CacheEntry, ResponseCache, cache_key_from_context
 from jaunt.generate.base import ModuleSpecContext
@@ -162,6 +163,27 @@ def test_cache_key_differs_by_module_context_digest() -> None:
     ctx2 = _make_ctx(module_context_digest="def")
     k1 = cache_key_from_context(ctx1, model="m", provider="p")
     k2 = cache_key_from_context(ctx2, model="m", provider="p")
+    assert k1 != k2
+
+
+def test_cache_key_changes_with_skills_digest() -> None:
+    from jaunt.cache import cache_key_from_context
+    from jaunt.generate.base import ModuleSpecContext
+
+    base: dict[str, Any] = dict(
+        kind="build",
+        spec_module="pkg.specs",
+        generated_module="pkg.__generated__.specs",
+        expected_names=["a"],
+        spec_sources={},
+        decorator_prompts={},
+        dependency_apis={},
+        dependency_generated_modules={},
+    )
+    c1 = ModuleSpecContext(**base, skills_digest="aaa")
+    c2 = ModuleSpecContext(**base, skills_digest="bbb")
+    k1 = cache_key_from_context(c1, model="m", provider="codex", generation_fingerprint="fp")
+    k2 = cache_key_from_context(c2, model="m", provider="codex", generation_fingerprint="fp")
     assert k1 != k2
 
 

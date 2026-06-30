@@ -8,7 +8,6 @@ import pytest
 from jaunt.skill_manager import (
     SkillMeta,
     add_skill,
-    build_skills_block,
     discover_all_skills,
     import_skills,
     read_skill_meta,
@@ -18,6 +17,7 @@ from jaunt.skill_manager import (
     validate_skill_name,
     write_skill_meta,
 )
+from jaunt.skills_auto import _format_generated_skill_file
 
 
 def _write(path: Path, text: str) -> None:
@@ -25,8 +25,8 @@ def _write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def _auto_header(dist: str, version: str) -> str:
-    return f"<!-- jaunt:skill=pypi dist={dist} version={version} -->"
+def _header(dist: str, version: str) -> str:
+    return _format_generated_skill_file(dist=dist, version=version, body_md="")
 
 
 # --- discover_all_skills ---
@@ -35,7 +35,7 @@ def _auto_header(dist: str, version: str) -> str:
 def test_discover_all_skills_finds_auto_and_user(tmp_path: Path) -> None:
     _write(
         tmp_path / ".agents/skills/requests/SKILL.md",
-        f"{_auto_header('requests', '2.31.0')}\nRequests body\n",
+        _header("requests", "2.31.0") + "Requests body\n",
     )
     _write(
         tmp_path / ".agents/skills/my-tool/SKILL.md",
@@ -67,80 +67,6 @@ def test_discover_all_skills_sorted(tmp_path: Path) -> None:
     skills = discover_all_skills(tmp_path)
     names = [s.name for s in skills]
     assert names == ["alpha", "Beta", "Zebra"]
-
-
-# --- build_skills_block ---
-
-
-def test_build_skills_block_includes_all(tmp_path: Path) -> None:
-    _write(
-        tmp_path / ".agents/skills/requests/SKILL.md",
-        f"{_auto_header('requests', '2.31.0')}\nRequests body\n",
-    )
-    _write(
-        tmp_path / ".agents/skills/my-tool/SKILL.md",
-        "# my-tool\nUser content\n",
-    )
-
-    block = build_skills_block(tmp_path)
-    assert "Requests body" in block
-    assert "User content" in block
-
-
-def test_build_skills_block_strips_header(tmp_path: Path) -> None:
-    _write(
-        tmp_path / ".agents/skills/lib/SKILL.md",
-        f"{_auto_header('lib', '1.0')}\nBody\n",
-    )
-
-    block = build_skills_block(tmp_path)
-    assert "jaunt:skill=pypi" not in block
-    assert "Body" in block
-
-
-def test_build_skills_block_deterministic_order(tmp_path: Path) -> None:
-    _write(tmp_path / ".agents/skills/zzz/SKILL.md", "# zzz\nZ content\n")
-    _write(tmp_path / ".agents/skills/aaa/SKILL.md", "# aaa\nA content\n")
-    _write(tmp_path / ".agents/skills/mmm/SKILL.md", "# mmm\nM content\n")
-
-    block1 = build_skills_block(tmp_path)
-    block2 = build_skills_block(tmp_path)
-    assert block1 == block2
-    # Verify ordering: aaa before mmm before zzz
-    assert block1.index("A content") < block1.index("M content") < block1.index("Z content")
-
-
-def test_build_skills_block_caps_per_skill_text(tmp_path: Path) -> None:
-    long_body = "\n".join(
-        [
-            "# long-skill",
-            "Intro text.",
-            "```python",
-            "print('example')\n" * 350,
-            "```",
-            "Tail details.\n" * 350,
-        ]
-    )
-    _write(tmp_path / ".agents/skills/long-skill/SKILL.md", long_body)
-
-    block = build_skills_block(tmp_path, max_chars_per_skill=500)
-
-    assert "## long-skill" in block
-    assert len(block) < len(long_body)
-    assert "# ... (example elided to slim prompt)" in block or "[TRUNCATED]" in block
-
-
-def test_build_skills_block_only_injects_opted_in_user_skills(tmp_path: Path) -> None:
-    _write(tmp_path / ".agents/skills/keep/SKILL.md", "# keep\nKeep content\n")
-    _write(tmp_path / ".agents/skills/drop/SKILL.md", "# drop\nDrop content\n")
-
-    filtered = build_skills_block(tmp_path, inject_user_skills={"keep"})
-    assert "Keep content" in filtered
-    assert "Drop content" not in filtered
-
-    default = build_skills_block(tmp_path)
-    assert "Keep content" in default
-    assert "Drop content" in default
 
 
 # --- add_skill ---
@@ -209,7 +135,7 @@ def test_validate_skill_name_accepts_valid(good_name: str) -> None:
 def test_remove_auto_skills_only_removes_auto(tmp_path: Path) -> None:
     _write(
         tmp_path / ".agents/skills/auto-lib/SKILL.md",
-        f"{_auto_header('auto-lib', '1.0')}\nauto body\n",
+        _header("auto-lib", "1.0") + "auto body\n",
     )
     _write(
         tmp_path / ".agents/skills/user-tool/SKILL.md",
@@ -336,44 +262,6 @@ def test_import_copies_sibling_files(tmp_path: Path) -> None:
     assert (project / ".agents/skills/my-tool/SKILL.md").exists()
     assert (project / ".agents/skills/my-tool/references/api.md").exists()
     assert (project / ".agents/skills/my-tool/assets/example.py").exists()
-
-
-def test_build_skills_block_filters_stale_auto_skills(tmp_path: Path) -> None:
-    """Auto skills for no-longer-imported dists should be excluded when pypi_dists is given."""
-    # "requests" is stale (not in pypi_dists), "httpx" is active
-    _write(
-        tmp_path / ".agents/skills/requests/SKILL.md",
-        f"{_auto_header('requests', '2.31.0')}\nRequests body\n",
-    )
-    _write(
-        tmp_path / ".agents/skills/httpx/SKILL.md",
-        f"{_auto_header('httpx', '0.25.0')}\nHTTPX body\n",
-    )
-    _write(
-        tmp_path / ".agents/skills/my-tool/SKILL.md",
-        "# my-tool\nUser content\n",
-    )
-
-    block = build_skills_block(tmp_path, pypi_dists={"httpx": "0.25.0"})
-    assert "HTTPX body" in block
-    assert "User content" in block
-    assert "Requests body" not in block
-
-
-def test_build_skills_block_no_filter_without_pypi_dists(tmp_path: Path) -> None:
-    """Without pypi_dists, all skills (auto + user) should be included."""
-    _write(
-        tmp_path / ".agents/skills/requests/SKILL.md",
-        f"{_auto_header('requests', '2.31.0')}\nRequests body\n",
-    )
-    _write(
-        tmp_path / ".agents/skills/my-tool/SKILL.md",
-        "# my-tool\nUser content\n",
-    )
-
-    block = build_skills_block(tmp_path)
-    assert "Requests body" in block
-    assert "User content" in block
 
 
 # --- add_skill with description ---
