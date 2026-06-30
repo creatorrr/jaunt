@@ -140,6 +140,81 @@ def test_generated_import_provenance_allows_dynamic_imports_with_provenance(
     )
 
 
+def test_generated_import_provenance_rejects_aliased_dynamic_imports(
+    tmp_path: Path,
+) -> None:
+    src = (
+        "from importlib import import_module\n"
+        "from importlib import import_module as im\n"
+        "import importlib as il\n\n"
+        "def play():\n"
+        "    import_module('aliased_a')\n"
+        "    im('aliased_b')\n"
+        "    il.import_module('aliased_c')\n"
+        "    il.__import__('aliased_d')\n"
+        "    return 1\n"
+    )
+    errs = validate_generated_import_provenance(
+        src,
+        generated_module="pkg.__generated__.specs",
+        project_dir=tmp_path,
+        first_party_modules={"pkg"},
+    )
+    for name in ("aliased_a", "aliased_b", "aliased_c", "aliased_d"):
+        assert any(name in err for err in errs), name
+
+
+def test_generated_import_provenance_rejects_nonconstant_aliased_dynamic_import(
+    tmp_path: Path,
+) -> None:
+    src = "from importlib import import_module as im\n\ndef play(name):\n    return im(name)\n"
+    errs = validate_generated_import_provenance(
+        src,
+        generated_module="pkg.__generated__.specs",
+        project_dir=tmp_path,
+        first_party_modules={"pkg"},
+    )
+    assert any("non-constant dynamic import" in err for err in errs)
+
+
+def test_generated_import_provenance_allows_aliased_dynamic_imports_with_provenance(
+    tmp_path: Path, monkeypatch
+) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\ndependencies = ['external-lib>=1,<2']\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+
+    import jaunt.validation as validation
+
+    monkeypatch.setattr(
+        validation.metadata,
+        "packages_distributions",
+        lambda: {"external_lib": ["external-lib"]},
+    )
+
+    src = (
+        "from importlib import import_module as im\n"
+        "import importlib as il\n\n"
+        "def play():\n"
+        "    im('json')\n"
+        "    il.import_module('external_lib')\n"
+        "    im('pkg')\n"
+        "    return 1\n"
+    )
+
+    assert (
+        validate_generated_import_provenance(
+            src,
+            generated_module="pkg.__generated__.specs",
+            project_dir=tmp_path,
+        )
+        == []
+    )
+
+
 def test_generated_import_provenance_allows_declared_dependency(
     tmp_path: Path, monkeypatch
 ) -> None:

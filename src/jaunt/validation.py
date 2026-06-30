@@ -212,10 +212,25 @@ def _validate_generated_import_provenance(
     allowlist_norm = {pep503_normalize(name) for name in allowlist if name.strip()}
     declared_dists = _declared_project_dependencies(_find_pyproject(project_dir))
 
-    errors: list[str] = []
-    errors.extend(_nonconstant_dynamic_import_errors(mod, generated_module=generated_module))
+    importlib_aliases, direct_dynamic_names = _importlib_dynamic_bindings(mod)
 
-    for imported in sorted(_top_level_imports(mod)):
+    errors: list[str] = []
+    errors.extend(
+        _nonconstant_dynamic_import_errors(
+            mod,
+            generated_module=generated_module,
+            importlib_aliases=importlib_aliases,
+            direct_dynamic_names=direct_dynamic_names,
+        )
+    )
+
+    for imported in sorted(
+        _top_level_imports(
+            mod,
+            importlib_aliases=importlib_aliases,
+            direct_dynamic_names=direct_dynamic_names,
+        )
+    ):
         top = imported.split(".", 1)[0]
         if not top:
             continue
@@ -236,7 +251,40 @@ def _validate_generated_import_provenance(
     return errors
 
 
-def _top_level_imports(mod: ast.Module) -> set[str]:
+def _importlib_dynamic_bindings(mod: ast.Module) -> tuple[set[str], set[str]]:
+    """Resolve the names in this module that can perform a dynamic import.
+
+    Returns ``(importlib_aliases, direct_dynamic_names)``:
+    - ``importlib_aliases``: names bound to the ``importlib`` module, used for
+      attribute calls like ``X.import_module(...)`` / ``X.__import__(...)`` —
+      seeded with ``"importlib"`` and extended by ``import importlib as X``.
+    - ``direct_dynamic_names``: names that are themselves dynamic-import
+      callables, used for ``X(...)`` — seeded with the always-available builtin
+      ``__import__`` and extended by ``from importlib import import_module as X``.
+    """
+    importlib_aliases: set[str] = {"importlib"}
+    direct_dynamic_names: set[str] = {"__import__"}
+    for node in ast.walk(mod):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "importlib":
+                    importlib_aliases.add(alias.asname or "importlib")
+        elif isinstance(node, ast.ImportFrom):
+            if int(getattr(node, "level", 0) or 0) > 0:
+                continue
+            if node.module == "importlib":
+                for alias in node.names:
+                    if alias.name in {"import_module", "__import__"}:
+                        direct_dynamic_names.add(alias.asname or alias.name)
+    return importlib_aliases, direct_dynamic_names
+
+
+def _top_level_imports(
+    mod: ast.Module,
+    *,
+    importlib_aliases: set[str],
+    direct_dynamic_names: set[str],
+) -> set[str]:
     imports: set[str] = set()
     for node in ast.walk(mod):
         if isinstance(node, ast.Import):
@@ -249,14 +297,30 @@ def _top_level_imports(mod: ast.Module) -> set[str]:
             if node.module:
                 imports.add(node.module.split(".", 1)[0])
         elif isinstance(node, ast.Call):
-            dynamic_import = _constant_dynamic_import_target(node)
+            dynamic_import = _constant_dynamic_import_target(
+                node,
+                importlib_aliases=importlib_aliases,
+                direct_dynamic_names=direct_dynamic_names,
+            )
             if dynamic_import:
                 imports.add(dynamic_import.split(".", 1)[0])
     return imports
 
 
-def _constant_dynamic_import_target(call: ast.Call) -> str | None:
-    if _dynamic_import_call_name(call) is None:
+def _constant_dynamic_import_target(
+    call: ast.Call,
+    *,
+    importlib_aliases: set[str],
+    direct_dynamic_names: set[str],
+) -> str | None:
+    if (
+        _dynamic_import_call_name(
+            call,
+            importlib_aliases=importlib_aliases,
+            direct_dynamic_names=direct_dynamic_names,
+        )
+        is None
+    ):
         return None
     if not call.args:
         return None
@@ -270,12 +334,18 @@ def _nonconstant_dynamic_import_errors(
     mod: ast.Module,
     *,
     generated_module: str,
+    importlib_aliases: set[str],
+    direct_dynamic_names: set[str],
 ) -> list[str]:
     errors: list[str] = []
     for node in ast.walk(mod):
         if not isinstance(node, ast.Call):
             continue
-        call_name = _dynamic_import_call_name(node)
+        call_name = _dynamic_import_call_name(
+            node,
+            importlib_aliases=importlib_aliases,
+            direct_dynamic_names=direct_dynamic_names,
+        )
         if call_name is None:
             continue
         if (
@@ -294,12 +364,17 @@ def _nonconstant_dynamic_import_errors(
     return errors
 
 
-def _dynamic_import_call_name(call: ast.Call) -> str | None:
+def _dynamic_import_call_name(
+    call: ast.Call,
+    *,
+    importlib_aliases: set[str],
+    direct_dynamic_names: set[str],
+) -> str | None:
     func = call.func
-    if isinstance(func, ast.Name) and func.id == "__import__":
-        return "__import__"
+    if isinstance(func, ast.Name) and func.id in direct_dynamic_names:
+        return func.id
     if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-        if func.value.id == "importlib" and func.attr in {"import_module", "__import__"}:
+        if func.value.id in importlib_aliases and func.attr in {"import_module", "__import__"}:
             return f"importlib.{func.attr}"
     return None
 

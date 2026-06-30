@@ -1098,7 +1098,12 @@ async def run_build(
                 failures[module_name] = errs
         return failures
 
-    skipped_failures = _validate_skipped_generated_modules(skipped)
+    # For a targeted build (`allowed_modules` set, e.g. `jaunt build --target`),
+    # `skipped` spans the whole project; only validate skipped modules within the
+    # requested closure so an unrelated, out-of-target module never fails a
+    # targeted build. A full build (`allowed_modules is None`) validates all skipped.
+    skipped_to_validate = skipped if allowed_modules is None else skipped & set(allowed_modules)
+    skipped_failures = _validate_skipped_generated_modules(skipped_to_validate)
     skipped -= set(skipped_failures)
 
     if not stale:
