@@ -19,6 +19,7 @@ from typing import cast
 from jaunt.config import CodexConfig, LLMConfig, PromptsConfig
 from jaunt.errors import JauntGenerationError
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext, TokenUsage
+from jaunt.generate.shared import load_prompt
 from jaunt.skill_seed import seed_skills_into_workspace
 
 
@@ -394,7 +395,12 @@ class CodexBackend(GeneratorBackend):
         target_rel: Path,
         extra_error_context: list[str] | None,
     ) -> str:
-        blocks = [
+        preamble = load_prompt(
+            "codex_preamble.md",
+            self._prompts.build_preamble if self._prompts is not None else None,
+        )
+        blocks = [preamble.strip()]
+        blocks += [
             f"Write a complete Python module to `{target_rel}` that exports: "
             f"{', '.join(ctx.expected_names)}.",
             "The spec stubs and their docstrings in `_context/spec_*.py` are the "
@@ -407,6 +413,7 @@ class CodexBackend(GeneratorBackend):
                 "the public API the docstring implies."
             )
         blocks += [
+            getattr(ctx, "project_overview_block", "") or "",
             getattr(ctx, "build_instructions_block", "") or "",
             getattr(ctx, "module_contract_block", "") or "",
             getattr(ctx, "base_contract_block", "") or "",
@@ -429,6 +436,12 @@ class CodexBackend(GeneratorBackend):
         return "\n\n".join(b for b in blocks if b)
 
     async def complete_text(self, *, system: str, user: str) -> str:
+        text, _usage = await self.complete_text_with_usage(system=system, user=user)
+        return text
+
+    async def complete_text_with_usage(
+        self, *, system: str, user: str
+    ) -> tuple[str, TokenUsage | None]:
         with tempfile.TemporaryDirectory() as tmp:
             prompt = "\n\n".join(
                 [
@@ -444,7 +457,7 @@ class CodexBackend(GeneratorBackend):
                 model=self._model,
                 reasoning_effort=self._codex.reasoning_effort,
             )
-            return result.final_message
+            return result.final_message, self._usage_from(result)
 
     def _usage_from(self, result: CodexExecResult | None) -> TokenUsage | None:
         if result is None:

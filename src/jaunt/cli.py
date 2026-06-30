@@ -1341,6 +1341,27 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
 
         module_specs = registry.get_specs_by_module("magic")
 
+        from jaunt.cost import CostTracker
+
+        # Created up front so a (best-effort) project-overview model call is charged
+        # against the same budget/summary as the per-module build calls below.
+        cost_tracker = CostTracker(max_cost=cfg.llm.max_cost_per_build)
+
+        overview_block = ""
+        if cfg.context.overview:
+            from jaunt.repo_context import overview as rc_overview
+
+            overview_block = await rc_overview.project_overview_block_for_build(
+                root=root,
+                cfg=cfg,
+                module_specs=module_specs,
+                repo_map_block=repo_map_block,
+                backend=_build_backend(cfg),
+                cost_tracker=cost_tracker,
+            )
+            # Abort early if generating the overview already blew the budget.
+            cost_tracker.check_budget()
+
         package_dir = next((d for d in source_dirs if d.exists()), None)
         if package_dir is None:
             raise JauntConfigError("No existing source_roots to build into.")
@@ -1467,12 +1488,12 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             )
 
         from jaunt.cache import ResponseCache
-        from jaunt.cost import CostTracker
 
         cache_dir = root / ".jaunt" / "cache"
         no_cache = bool(getattr(args, "no_cache", False))
         response_cache = ResponseCache(cache_dir, enabled=not no_cache)
-        cost_tracker = CostTracker(max_cost=cfg.llm.max_cost_per_build)
+        # cost_tracker was created up front (above) so the project-overview model call
+        # is charged against the same budget and cost summary as the build calls.
 
         search_enabled = cfg.context.search.enabled and cfg.context.search.internal_retrieval
         if cfg.context.search.enabled:
@@ -1494,6 +1515,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             backend=_build_backend(cfg),
             generation_fingerprint=build_generation_fingerprint,
             repo_map_block=repo_map_block,
+            project_overview_block=overview_block,
             search_enabled=search_enabled,
             search_max_hits=cfg.context.search.max_hits,
             source_roots=[d for d in source_dirs if d.exists()],

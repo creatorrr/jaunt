@@ -66,18 +66,21 @@ def _prompt_digest_part(name: str, content: str) -> str:
     return f"{name}:sha256:{digest}"
 
 
-def _effective_prompt_parts(cfg: JauntConfig, *, kind: Literal["build", "test"]) -> list[str]:
+def _prompt_specs(
+    cfg: JauntConfig, *, kind: Literal["build", "test"]
+) -> list[tuple[str, str | None]]:
     if kind == "build":
-        prompts = [
+        # The Jaunt preamble (codex_preamble.md) opens every build prompt, so a change to
+        # it must invalidate already-built modules just like build_system/build_module.
+        return [
+            ("codex_preamble.md", cfg.prompts.build_preamble or None),
             ("build_system.md", cfg.prompts.build_system or None),
             ("build_module.md", cfg.prompts.build_module or None),
         ]
-    else:
-        prompts = [
-            ("test_system.md", cfg.prompts.test_system or None),
-            ("test_module.md", cfg.prompts.test_module or None),
-        ]
-    return [load_prompt(default_name, override_path) for default_name, override_path in prompts]
+    return [
+        ("test_system.md", cfg.prompts.test_system or None),
+        ("test_module.md", cfg.prompts.test_module or None),
+    ]
 
 
 def generation_fingerprint_from_config(
@@ -88,17 +91,13 @@ def generation_fingerprint_from_config(
     include_target_tests: bool | None = None,
     codex_version_resolver: Callable[[], str] | None = None,
 ) -> str:
-    prompt_parts = _effective_prompt_parts(cfg, kind=kind)
+    specs = _prompt_specs(cfg, kind=kind)
+    prompt_parts = [load_prompt(name, override) for name, override in specs]
     mode = ""
     if cfg.agent.engine == "codex":
-        names = (
-            ("build_system.md", "build_module.md")
-            if kind == "build"
-            else ("test_system.md", "test_module.md")
-        )
         prompt_parts = [
             _prompt_digest_part(name, content)
-            for name, content in zip(names, prompt_parts, strict=True)
+            for (name, _override), content in zip(specs, prompt_parts, strict=True)
         ]
     editor_model = ""
     reasoning_effort = cfg.codex.reasoning_effort if cfg.agent.engine == "codex" else ""
@@ -128,6 +127,14 @@ def generation_fingerprint_from_config(
                 "build_instructions=" + json.dumps(effective_instructions, ensure_ascii=True),
             ]
         )
+        # Enabling the model-written project overview changes what every build prompt
+        # contains, so flipping it on (or off) must invalidate already-built modules.
+        # Keyed on the config flag rather than the generated prose so that (a) `jaunt
+        # build` and `jaunt test` compute identical fingerprints and (b) editing docs
+        # alone does not force a whole-project rebuild. Only contributes when enabled,
+        # so projects that never use the overview are unaffected.
+        if cfg.context.overview:
+            build_runtime_parts.append("project_overview_enabled=True")
 
     return build_generation_fingerprint(
         engine=cfg.agent.engine,
