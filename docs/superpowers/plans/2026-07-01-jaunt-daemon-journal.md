@@ -4,7 +4,7 @@
 
 **Goal:** Ship `jaunt daemon` (commit-triggered, worktree-isolated background codegen jobs that auto-commit on green), a committed `JAUNT_LOG` change journal, and the `jaunt guard` warn-on-access hook.
 
-**Architecture:** The daemon is a thin orchestrator over jaunt's existing CLI JSON contracts: it polls HEAD, probes staleness via `jaunt status --json` in a detached probe worktree, runs `jaunt build --target <mod> --json` in per-job worktrees, and lands green diffs onto the developer's branch as pathspec-limited provenance commits. All model-facing work stays inside the existing build pipeline (gates included); the daemon adds isolation, scheduling, landing, and journaling. Landing is serialized in the main loop; job execution parallelizes via a thread pool (subprocess-bound).
+**Architecture:** The daemon is a thin orchestrator over jaunt's existing CLI JSON contracts: it polls HEAD, probes staleness via `jaunt status --json` in a detached probe worktree, runs `jaunt build --target <mod> --json` plus a deterministic, model-free gate (`jaunt check` and committed batteries) in per-job worktrees, and lands green diffs onto the developer's branch as pathspec-limited provenance commits — revalidating HEAD immediately before every commit. All model-facing work stays inside the existing build pipeline (gates included); the daemon adds isolation, scheduling, landing, and journaling. Landing is serialized in the main loop; job execution parallelizes via a thread pool (subprocess-bound).
 
 **Tech Stack:** Python 3.12+, argparse CLI (existing pattern), `subprocess` git plumbing, `concurrent.futures.ThreadPoolExecutor`, pytest with fake runners (no API keys, no network).
 
@@ -16,7 +16,9 @@
 
 - Python 3.12+; ruff (E/F/I/UP/B, line-length 100); `uv run ruff check .` and `uv run ty check` must pass.
 - Full suite green: `uv run pytest`. New tests must not require API keys or network; daemon/build interactions go through injectable runner callables.
-- Exit codes follow existing conventions: 0 OK, 2 config/usage error (`EXIT_CONFIG`), 3 generation error, 4 test failure.
+- Exit codes follow existing conventions: 0 OK, 2 config/discovery error (`EXIT_CONFIG_OR_DISCOVERY` — that is the real constant name in cli.py, there is no `EXIT_CONFIG`), 3 generation error, 4 test failure.
+- New CLI commands dispatch via explicit `if args.command == "...":` branches in `main()` — the repo does NOT use `set_defaults(func=...)`; parser defaults are ignored by the dispatcher.
+- `load_config` is keyword-only: call it as `load_config(root=root)`, never positionally.
 - The daemon writes only: `__generated__/**` (i.e. `cfg.paths.generated_dir` trees), `*.contract.json` sidecars inside those trees, `JAUNT_LOG`, and its own `.jaunt/` state. It only appends commits — never rebase, never force-push, never reset outside daemon-owned worktrees.
 - Journal lines are single-line and pre-redacted: derived-battery detail is never more than opaque id + exception class (mirrors `heldout.py` redaction).
 - Timestamps in journal lines are UTC, format `YYYY-MM-DD HH:MMZ`.
@@ -263,11 +265,15 @@ log_p.add_argument("-n", "--lines", type=int, default=20, help="Number of lines 
 log_p.add_argument("--module", default=None, help="Filter by module name.")
 log_p.add_argument("--root", default=".", help="Project root.")
 log_p.add_argument("--json", action="store_true", dest="json_mode")
-log_p.set_defaults(func=cmd_log)
 ```
 
-(Match the existing pattern for how commands are dispatched — grep `set_defaults|args.command` in
-cli.py and follow whichever dispatch mechanism the file already uses.)
+Then add the dispatch branch in `main()` alongside the existing `args.command` branches
+(the repo dispatches explicitly; `set_defaults(func=...)` is ignored):
+
+```python
+if args.command == "log":
+    return cmd_log(args)
+```
 
 ```python
 def cmd_log(args: argparse.Namespace) -> int:
@@ -461,6 +467,7 @@ class JobRecord:
     landed_commit: str = ""
     error: str = ""
     detail_log: str = ""
+    patch_paths: str = ""  # JSON-encoded list; set when a job parks so retry can re-land
 
     @classmethod
     def new(cls, *, module: str, spec_digest: str, base_commit: str, branch: str) -> JobRecord:
@@ -551,7 +558,7 @@ git commit -m "feat(daemon): persisted job records in .jaunt/jobs"
 
 **Interfaces:**
 - Consumes: nothing from other new modules; shells out to `git`.
-- Produces: `LandingError`; `git_out(repo: Path, *args: str) -> str` (raises `LandingError` on nonzero exit); `extract_patch(worktree: Path, base_commit: str, allowed_prefixes: Sequence[str]) -> str` (empty string when no changes).
+- Produces: `LandingError`; `git_out(repo: Path, *args: str) -> str` (raises `LandingError` on nonzero exit); `changed_paths(worktree: Path, base_commit: str) -> list[str]`; `extract_patch(worktree: Path, base_commit: str, is_allowed: Callable[[str], bool]) -> str` (empty string when no changes; raises `LandingError` when any changed path fails the predicate — the predicate form exists precisely so the daemon can allow *nested* generated dirs like `src/pkg/__generated__/mod.py` without allowlisting whole source roots).
 
 - [ ] **Step 1: Write the failing tests (real git in tmp repos)**
 
@@ -585,12 +592,16 @@ def repo(tmp_path: Path) -> Path:
     return r
 
 
-def test_extract_patch_scoped_to_allowlist(repo: Path):
+def _machine_owned(path: str) -> bool:
+    return "/__generated__/" in f"/{path}" or path == "JAUNT_LOG"
+
+
+def test_extract_patch_scoped_by_predicate(repo: Path):
     base = _git(repo, "rev-parse", "HEAD")
     gen = repo / "src" / "__generated__"
     gen.mkdir()
     (gen / "app.py").write_text("y = 2\n", encoding="utf-8")
-    patch = landing.extract_patch(repo, base, allowed_prefixes=["src/__generated__/", "JAUNT_LOG"])
+    patch = landing.extract_patch(repo, base, is_allowed=_machine_owned)
     assert "src/__generated__/app.py" in patch
 
 
@@ -598,12 +609,12 @@ def test_extract_patch_rejects_out_of_scope_paths(repo: Path):
     base = _git(repo, "rev-parse", "HEAD")
     (repo / "src" / "app.py").write_text("x = 999\n", encoding="utf-8")
     with pytest.raises(landing.LandingError, match="src/app.py"):
-        landing.extract_patch(repo, base, allowed_prefixes=["src/__generated__/"])
+        landing.extract_patch(repo, base, is_allowed=_machine_owned)
 
 
 def test_extract_patch_empty_when_no_changes(repo: Path):
     base = _git(repo, "rev-parse", "HEAD")
-    assert landing.extract_patch(repo, base, allowed_prefixes=["src/__generated__/"]) == ""
+    assert landing.extract_patch(repo, base, is_allowed=_machine_owned) == ""
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -619,7 +630,7 @@ Expected: FAIL (no module `jaunt.landing`).
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Callable
 from pathlib import Path
 
 
@@ -636,25 +647,28 @@ def git_out(repo: Path, *args: str) -> str:
     return proc.stdout
 
 
-def _changed_paths(worktree: Path, base_commit: str) -> list[str]:
-    out = git_out(worktree, "add", "-A") and ""  # stage untracked so diff sees new files
+def changed_paths(worktree: Path, base_commit: str) -> list[str]:
+    git_out(worktree, "add", "-A")  # stage untracked so diff sees new files
     out = git_out(worktree, "diff", "--cached", "--name-only", base_commit)
     return [p for p in out.splitlines() if p.strip()]
 
 
-def extract_patch(worktree: Path, base_commit: str, allowed_prefixes: Sequence[str]) -> str:
-    paths = _changed_paths(worktree, base_commit)
+def extract_patch(
+    worktree: Path, base_commit: str, is_allowed: Callable[[str], bool]
+) -> str:
+    paths = changed_paths(worktree, base_commit)
     if not paths:
         return ""
-    violations = [p for p in paths if not any(p.startswith(pre) for pre in allowed_prefixes)]
+    violations = [p for p in paths if not is_allowed(p)]
     if violations:
         raise LandingError(f"job touched paths outside allowlist: {', '.join(sorted(violations))}")
     return git_out(worktree, "diff", "--cached", "--binary", base_commit, "--", *paths)
 ```
 
-Note: the `and ""` idiom is noise — write it as two statements (`git_out(worktree, "add", "-A")`
-then the diff). The staging happens in the *job worktree*, which is daemon-owned; the
-developer's tree is never staged.
+Notes: staging happens in the *job worktree*, which is daemon-owned — the developer's tree
+is never staged. `git add -A` does not stage ignored files, so `.jaunt/cache` writes inside
+the worktree stay invisible provided `.jaunt/` is gitignored (the daemon refuses to start
+otherwise — Task 6).
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -679,7 +693,7 @@ git commit -m "feat(daemon): patch extraction with hard path allowlist"
 
 **Interfaces:**
 - Consumes: `JobRecord` (Task 3) for message construction only (pass fields, not the object).
-- Produces: `build_commit_message(module: str, cause: str, job_id: str, spec_digest: str) -> str`; `land(repo: Path, patch: str, *, patch_paths: Sequence[str], message: str, expected_branch: str) -> str | None` — returns commit SHA on success, `None` when parking is required (branch mismatch, dirty machine-owned paths, or 3-way conflict). Never raises for park conditions; raises `LandingError` only for unexpected git failures.
+- Produces: `build_commit_message(module: str, cause: str, job_id: str, spec_digest: str) -> str`; `HEAD_MOVED = "HEAD_MOVED"` (sentinel; a real SHA can never equal it); `land(repo: Path, patch: str, *, patch_paths: Sequence[str], message: str, expected_branch: str, expected_head: str) -> str | None` — returns the commit SHA on success, `HEAD_MOVED` when the repo's HEAD no longer equals `expected_head` (caller defers to the next daemon iteration, which re-probes and may supersede — this closes the stale-landing race where a user commits a newer spec while a job runs), and `None` when parking is required (branch mismatch, dirty machine-owned paths, or 3-way conflict). Never raises for park conditions; raises `LandingError` only for unexpected git failures.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -701,11 +715,18 @@ def _patch_for(repo: Path, relpath: str, content: str) -> tuple[str, str, list[s
     return patch, base, [relpath]
 
 
+def _land(repo: Path, patch: str, paths: list[str], msg: str = "m", branch: str = "main"):
+    head = _git(repo, "rev-parse", "HEAD")
+    return landing.land(
+        repo, patch, patch_paths=paths, message=msg, expected_branch=branch, expected_head=head
+    )
+
+
 def test_land_commits_with_trailers(repo: Path):
     patch, _, paths = _patch_for(repo, "src/__generated__/app.py", "y = 2\n")
     msg = landing.build_commit_message("app", "prose change", "a1b2c3d4", "abcd1234")
-    sha = landing.land(repo, patch, patch_paths=paths, message=msg, expected_branch="main")
-    assert sha
+    sha = _land(repo, patch, paths, msg=msg)
+    assert sha and sha != landing.HEAD_MOVED
     body = _git(repo, "log", "-1", "--format=%B")
     assert "Jaunt-Job: a1b2c3d4" in body and "Jaunt-Spec: abcd1234" in body
     assert (repo / "src/__generated__/app.py").read_text(encoding="utf-8") == "y = 2\n"
@@ -714,24 +735,37 @@ def test_land_commits_with_trailers(repo: Path):
 def test_land_is_pathspec_limited(repo: Path):
     (repo / "notes.txt").write_text("dev work in progress\n", encoding="utf-8")
     patch, _, paths = _patch_for(repo, "src/__generated__/app.py", "y = 3\n")
-    sha = landing.land(repo, patch, patch_paths=paths, message="regen(app): x", expected_branch="main")
-    assert sha
+    sha = _land(repo, patch, paths, msg="regen(app): x")
+    assert sha and sha != landing.HEAD_MOVED
     committed = _git(repo, "show", "--name-only", "--format=", "HEAD").splitlines()
     assert committed == ["src/__generated__/app.py"]
     assert (repo / "notes.txt").exists()  # untouched, uncommitted
 
 
+def test_land_defers_when_head_moved(repo: Path):
+    stale_head = _git(repo, "rev-parse", "HEAD")
+    patch, _, paths = _patch_for(repo, "src/__generated__/app.py", "y = 9\n")
+    (repo / "other.txt").write_text("x\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "user commit moves HEAD")
+    result = landing.land(
+        repo, patch, patch_paths=paths, message="m", expected_branch="main", expected_head=stale_head
+    )
+    assert result == landing.HEAD_MOVED
+    assert _git(repo, "status", "--porcelain") == ""  # nothing applied
+
+
 def test_land_parks_on_wrong_branch(repo: Path):
     patch, _, paths = _patch_for(repo, "src/__generated__/app.py", "y = 4\n")
     _git(repo, "checkout", "-b", "other")
-    assert landing.land(repo, patch, patch_paths=paths, message="m", expected_branch="main") is None
+    assert _land(repo, patch, paths) is None
 
 
 def test_land_parks_on_locally_modified_generated_path(repo: Path):
     patch, _, paths = _patch_for(repo, "src/__generated__/app.py", "y = 5\n")
     (repo / "src/__generated__").mkdir(exist_ok=True)
     (repo / "src/__generated__/app.py").write_text("hand edit\n", encoding="utf-8")
-    assert landing.land(repo, patch, patch_paths=paths, message="m", expected_branch="main") is None
+    assert _land(repo, patch, paths) is None
 
 
 def test_land_parks_on_conflict(repo: Path):
@@ -741,7 +775,7 @@ def test_land_parks_on_conflict(repo: Path):
     (repo / "src/__generated__/app.py").write_text("conflicting committed content\n", encoding="utf-8")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-m", "conflicting")
-    result = landing.land(repo, patch, patch_paths=paths, message="m", expected_branch="main")
+    result = _land(repo, patch, paths)
     assert result is None
     status = _git(repo, "status", "--porcelain")
     assert status == ""  # no half-applied state left behind
@@ -758,6 +792,9 @@ Append to `src/jaunt/landing.py`:
 
 ```python
 import tempfile
+from collections.abc import Sequence
+
+HEAD_MOVED = "HEAD_MOVED"  # sentinel: caller defers landing to the next daemon iteration
 
 
 def build_commit_message(module: str, cause: str, job_id: str, spec_digest: str) -> str:
@@ -777,11 +814,17 @@ def land(
     patch_paths: Sequence[str],
     message: str,
     expected_branch: str,
+    expected_head: str,
 ) -> str | None:
     if not patch:
         return None
     if _current_branch(repo) != expected_branch:
         return None
+    if git_out(repo, "rev-parse", "HEAD").strip() != expected_head:
+        # A commit landed after the daemon probed this HEAD (possibly a newer spec for
+        # this very module). Never land against an unprobed HEAD — defer; the next
+        # iteration re-probes and either supersedes the job or lands it cleanly.
+        return HEAD_MOVED
     dirty = git_out(repo, "status", "--porcelain", "--", *patch_paths).strip()
     if dirty:
         return None
@@ -917,12 +960,21 @@ def lock_pid(root: Path) -> int | None:
 
 
 def acquire_lock(root: Path) -> bool:
-    if lock_pid(root) is not None:
-        return False
+    """Atomic acquire via O_CREAT|O_EXCL — check-then-write would let two daemons race."""
     path = _lock_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"{os.getpid()}\n", encoding="utf-8")
-    return True
+    for _ in range(2):  # one retry after clearing a stale pidfile
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            if lock_pid(root) is not None:
+                return False  # a live daemon holds the lock
+            path.unlink(missing_ok=True)  # stale: owning pid is dead
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(f"{os.getpid()}\n")
+        return True
+    return False
 
 
 def release_lock(root: Path) -> None:
@@ -986,10 +1038,25 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     # start
     if os.environ.get(daemon_mod.DISABLE_ENV):
         print(f"{daemon_mod.DISABLE_ENV} is set; refusing to start.", file=sys.stderr)
-        return EXIT_CONFIG
+        return EXIT_CONFIG_OR_DISCOVERY
+    ignored = (
+        subprocess.run(
+            ["git", "-C", str(root), "check-ignore", "-q", ".jaunt"],
+            capture_output=True, check=False,
+        ).returncode
+        == 0
+    )
+    if not ignored:
+        print(
+            "error: .jaunt/ must be gitignored before running the daemon "
+            "(its cache and job state would otherwise trip the landing allowlist). "
+            "Add '.jaunt/' to .gitignore.",
+            file=sys.stderr,
+        )
+        return EXIT_CONFIG_OR_DISCOVERY
     if not daemon_mod.acquire_lock(root):
         print("Daemon already running.", file=sys.stderr)
-        return EXIT_CONFIG
+        return EXIT_CONFIG_OR_DISCOVERY
     try:
         daemon_mod.run_daemon(root)  # Task 7
         return EXIT_OK
@@ -997,8 +1064,10 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         daemon_mod.release_lock(root)
 ```
 
-(Use the module's existing `EXIT_OK`/`EXIT_CONFIG` constants and `_emit_json` helper; `sys`
-and `os` are already imported in cli.py.)
+(Use the module's existing `EXIT_OK`/`EXIT_CONFIG_OR_DISCOVERY` constants and `_emit_json`
+helper — there is no `EXIT_CONFIG` in cli.py; `sys`, `os`, and `subprocess` are already
+imported there. Dispatch: add `if args.command == "daemon": return cmd_daemon(args)` to
+`main()`'s explicit branch chain.)
 
 - [ ] **Step 5: Run tests, lint, commit**
 
@@ -1017,17 +1086,52 @@ git commit -m "feat(daemon): config section, pidfile lock, daemon start/stop/sta
 
 **Files:**
 - Modify: `src/jaunt/daemon.py`
-- Test: `tests/test_daemon.py` (extend)
+- Modify: `src/jaunt/status_core.py`, `src/jaunt/cli.py` (Step 0 prerequisite: digests + `--magic-only`)
+- Test: `tests/test_daemon.py` (extend), `tests/test_cli_status.py` (extend)
 
 **Interfaces:**
-- Consumes: `jobs.*` (Task 3), `landing.*` (Tasks 4–5), `journal.append_events` (Task 1).
+- Consumes: `jobs.*` (Task 3, incl. `patch_paths` field), `landing.*` (Tasks 4–5, incl. `HEAD_MOVED` and `changed_paths`), `journal.append_events` (Task 1).
 - Produces:
-  - `Runner` protocol: `probe_stale(worktree: Path) -> dict[str, str]` (module → change kind, from `jaunt status --json`'s `stale`/`stale_changes`); `build(worktree: Path, module: str) -> BuildOutcome`.
-  - `BuildOutcome(ok: bool, refrozen: bool, error: str = "", battery: str = "")`.
+  - `MagicStatus.digests: dict[str, str]` (Step 0 — module → `module_digest`, the same digest build freshness uses; NOT the contract digest) exposed in the `jaunt status --json` payload as `"digests"`, plus a `--magic-only` status flag that skips contract-row evaluation and tree drift (contract rows can run batteries — far too heavy and env-dependent for a probe).
+  - `Runner` protocol: `probe(worktree: Path) -> tuple[dict[str, str], dict[str, str]]` (stale module → change kind, module → digest); `build(worktree: Path, module: str) -> BuildOutcome`; `gate(worktree: Path, module: str) -> GateOutcome`.
+  - `BuildOutcome(ok: bool, refrozen: bool, error: str = "")`.
+  - `GateOutcome(ok: bool, battery: str = "-", detail: str = "")` — detail is pre-redacted, single line.
+  - `JobResult(job_id, build, gate, patch, patch_paths)`.
   - `CliRunner` default impl shelling `[sys.executable, "-m", "jaunt", ...]`.
-  - `DaemonState` (last seen HEAD, in-flight futures).
-  - `run_once(root: Path, cfg: JauntConfig, state: DaemonState, runner: Runner, pool: Executor) -> None` — single testable iteration.
+  - `DaemonState` (last probed HEAD, in-flight futures, pending-landing results).
+  - `run_once(root: Path, cfg: JauntConfig, state: DaemonState, runner: Runner, pool: Executor) -> None` — single testable iteration, ordered probe → collect → land → spawn.
   - `run_daemon(root: Path, *, runner: Runner | None = None, iterations: int | None = None, sleep=time.sleep) -> None`.
+
+- [ ] **Step 0 (prerequisite): expose module digests + `--magic-only` in `jaunt status`**
+
+The daemon's supersede logic keys on the real per-module digest, and its probe must be
+cheap and pure. Neither holds today: `MagicStatus` carries only `stale/fresh/stale_changes`,
+and `cmd_status` evaluates contract rows (which can run batteries) and tree drift.
+
+Failing test first — extend `tests/test_cli_status.py` following its existing fixture
+pattern:
+
+```python
+def test_status_json_exposes_module_digests_and_magic_only(scaffolded_magic_project, capsys, monkeypatch):
+    monkeypatch.chdir(scaffolded_magic_project)
+    rc = main(["status", "--json", "--magic-only"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["stale"]  # the scaffolded spec module is unbuilt, hence stale
+    for module in payload["stale"]:
+        assert payload["digests"][module]  # non-empty digest per discovered module
+    assert "contracts" not in payload  # --magic-only skips contract evaluation entirely
+```
+
+Run: `uv run pytest tests/test_cli_status.py -v -k digests` — expect FAIL.
+
+Implementation: add `digests: dict[str, str]` to `MagicStatus` (`status_core.py:92`),
+populated where per-module staleness is computed — use the same `module_digest` value the
+freshness comparison already computes (grep `module_digest` in `status_core.py` /
+`digest.py`; do NOT recompute differently). In `cmd_status`, add the `--magic-only` flag:
+when set, skip `_contract_rows` and tree-drift entirely and omit those keys from the JSON
+payload; always include `"digests": mstatus.digests`. Run the test, then commit:
+`git commit -m "feat(status): expose per-module digests + --magic-only probe flag"`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1040,31 +1144,43 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
 from jaunt import daemon, jobs, journal
-from jaunt.config import load_config  # match the actual loader name used in tests/test_config.py
 
 
 class FakeRunner:
-    """Stale once, then builds by writing a generated file in the worktree."""
+    """Stale until built; probe returns a controllable digest so tests can supersede."""
 
     def __init__(self, module="app", change="prose"):
         self.module, self.change = module, change
+        self.digest = "digest-v1"
         self.built: list[str] = []
 
-    def probe_stale(self, worktree):
-        return {} if self.built else {self.module: self.change}
+    def probe(self, worktree):
+        if self.built:
+            return {}, {}
+        return {self.module: self.change}, {self.module: self.digest}
 
     def build(self, worktree, module):
         gen = worktree / "src" / "__generated__"
         gen.mkdir(parents=True, exist_ok=True)
         (gen / f"{module}.py").write_text("generated = True\n", encoding="utf-8")
         self.built.append(module)
-        return daemon.BuildOutcome(ok=True, refrozen=False, battery="3/3")
+        return daemon.BuildOutcome(ok=True, refrozen=False)
+
+    def gate(self, worktree, module):
+        return daemon.GateOutcome(ok=True, battery="3/3")
 
 
-def _spec_commit(repo):
-    (repo / "src" / "app.py").write_text('"""spec v2"""\n', encoding="utf-8")
+def _spec_commit(repo, body='"""spec v2"""\n'):
+    (repo / "src" / "app.py").write_text(body, encoding="utf-8")
     _git(repo, "add", "-A")
-    _git(repo, "commit", "-m", "spec: app v2")
+    _git(repo, "commit", "-m", "spec commit")
+
+
+def _cycle(repo, cfg, state, runner, pool, n=3):
+    """Drive run_once to quiescence: probe/spawn, drain, collect/land."""
+    for _ in range(n):
+        daemon.run_once(repo, cfg, state, runner, pool)
+        daemon.drain(state)
 
 
 def test_run_once_full_cycle_lands_and_journals(repo, jaunt_cfg):
@@ -1073,13 +1189,12 @@ def test_run_once_full_cycle_lands_and_journals(repo, jaunt_cfg):
     state = daemon.DaemonState()
     with ThreadPoolExecutor(max_workers=2) as pool:
         _spec_commit(repo)
-        daemon.run_once(repo, jaunt_cfg, state, runner, pool)   # detect + enqueue + spawn
-        daemon.drain(state)                                      # wait for job futures (test helper)
-        daemon.run_once(repo, jaunt_cfg, state, runner, pool)   # collect + land
+        _cycle(repo, jaunt_cfg, state, runner, pool)
     landed = jobs.list_jobs(repo, states={jobs.LANDED})
     assert len(landed) == 1 and landed[0].module == "app"
+    assert landed[0].spec_digest == "digest-v1"
     assert "regen(app)" in _git(repo, "log", "-1", "--format=%s")
-    assert any("build" in ln and "app" in ln for ln in journal.read_lines(repo))
+    assert any("build" in ln and "app" in ln and "3/3" in ln for ln in journal.read_lines(repo))
     assert (repo / "src" / "__generated__" / "app.py").exists()
 
 
@@ -1088,17 +1203,14 @@ def test_supersede_on_newer_spec_commit(repo, jaunt_cfg):
     state = daemon.DaemonState()
     with ThreadPoolExecutor(max_workers=1) as pool:
         _spec_commit(repo)
-        daemon.run_once(repo, jaunt_cfg, state, runner, pool)
+        daemon.run_once(repo, jaunt_cfg, state, runner, pool)  # enqueue against digest-v1
         first = jobs.list_jobs(repo)[0]
-        (repo / "src" / "app.py").write_text('"""spec v3"""\n', encoding="utf-8")
-        _git(repo, "add", "-A")
-        _git(repo, "commit", "-m", "spec: app v3")
-        daemon.run_once(repo, jaunt_cfg, state, runner, pool)
-        daemon.drain(state)
-        daemon.run_once(repo, jaunt_cfg, state, runner, pool)
-    assert jobs.load_job(repo, first.id).state in {jobs.SUPERSEDED, jobs.LANDED}
-    states = {j.state for j in jobs.list_jobs(repo)}
-    assert jobs.LANDED in states
+        runner.digest = "digest-v2"                            # spec genuinely changed
+        _spec_commit(repo, body='"""spec v3"""\n')
+        _cycle(repo, jaunt_cfg, state, runner, pool)
+    assert jobs.load_job(repo, first.id).state == jobs.SUPERSEDED
+    landed = jobs.list_jobs(repo, states={jobs.LANDED})
+    assert landed and landed[0].spec_digest == "digest-v2"
 
 
 def test_failed_build_journals_and_marks_failed(repo, jaunt_cfg):
@@ -1106,23 +1218,39 @@ def test_failed_build_journals_and_marks_failed(repo, jaunt_cfg):
 
     class FailingRunner(FakeRunner):
         def build(self, worktree, module):
+            self.built.append(module)
             return daemon.BuildOutcome(ok=False, refrozen=False, error="codex exited 3")
 
+    runner = FailingRunner()
     state = daemon.DaemonState()
     with ThreadPoolExecutor(max_workers=1) as pool:
         _spec_commit(repo)
-        daemon.run_once(repo, jaunt_cfg, FailingRunner(), state_or := state, pool)
-        daemon.drain(state)
-        daemon.run_once(repo, jaunt_cfg, FailingRunner(), state, pool)
+        _cycle(repo, jaunt_cfg, state, runner, pool)
     failed = jobs.list_jobs(repo, states={jobs.FAILED})
     assert failed and "codex exited 3" in failed[0].error
-    assert any(ln.startswith !=("") or "job-fail" in ln for ln in journal.read_lines(repo))
+    assert any("job-fail" in ln for ln in journal.read_lines(repo))
+
+
+def test_failed_gate_blocks_landing(repo, jaunt_cfg):
+    class GateFailRunner(FakeRunner):
+        def gate(self, worktree, module):
+            return daemon.GateOutcome(ok=False, detail="jaunt check failed")
+
+    runner = GateFailRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        _spec_commit(repo)
+        _cycle(repo, jaunt_cfg, state, runner, pool)
+    assert not jobs.list_jobs(repo, states={jobs.LANDED})
+    failed = jobs.list_jobs(repo, states={jobs.FAILED})
+    assert failed and "check failed" in failed[0].error
+    assert not (repo / "src" / "__generated__" / "app.py").exists()  # nothing landed
 ```
 
-(The last assertion contains an obvious typo to fix when writing: it should be
-`assert any("job-fail" in ln for ln in journal.read_lines(repo))`. The `jaunt_cfg` fixture
-loads a minimal scaffolded `jaunt.toml` in the repo via the same helper `tests/test_config.py`
-uses; source root `src`, generated dir `__generated__`.)
+(The `jaunt_cfg` fixture loads a minimal scaffolded `jaunt.toml` in the repo via the same
+helper `tests/test_config.py` uses; source root `src`, generated dir `__generated__`.
+Reuse the `repo`/`_git` fixture shape from `tests/test_landing.py`, extracted into this
+file.)
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -1134,10 +1262,10 @@ Expected: new tests FAIL (`DaemonState`/`run_once` missing).
 Append to `src/jaunt/daemon.py`:
 
 ```python
+import json as _json
 import subprocess
 import sys
 import time
-from collections.abc import Callable
 from concurrent.futures import Executor, Future
 from dataclasses import dataclass, field
 
@@ -1152,13 +1280,20 @@ class BuildOutcome:
     ok: bool
     refrozen: bool
     error: str = ""
-    battery: str = ""
+
+
+@dataclass(frozen=True)
+class GateOutcome:
+    ok: bool
+    battery: str = "-"  # "47/47" when a deterministic battery ran; "-" when none exists
+    detail: str = ""    # pre-redacted, single line
 
 
 @dataclass
 class JobResult:
     job_id: str
-    outcome: BuildOutcome
+    build: BuildOutcome
+    gate: GateOutcome | None = None
     patch: str = ""
     patch_paths: tuple[str, ...] = ()
 
@@ -1167,6 +1302,7 @@ class JobResult:
 class DaemonState:
     last_head: str = ""
     futures: dict[str, Future] = field(default_factory=dict)
+    pending: dict[str, JobResult] = field(default_factory=dict)
 
 
 def drain(state: DaemonState) -> None:
@@ -1178,10 +1314,8 @@ class CliRunner:
     """Default runner: drives jaunt's own CLI JSON contracts in a worktree."""
 
     def _run(self, worktree, *argv) -> dict:
-        import json as _json
-
         proc = subprocess.run(
-            [sys.executable, "-m", "jaunt", *argv, "--json"],
+            [sys.executable, "-m", "jaunt", *argv],
             cwd=worktree, capture_output=True, text=True, check=False,
         )
         try:
@@ -1189,20 +1323,39 @@ class CliRunner:
         except _json.JSONDecodeError:
             return {"ok": False, "error": (proc.stderr or proc.stdout)[-500:]}
 
-    def probe_stale(self, worktree) -> dict[str, str]:
-        payload = self._run(worktree, "status")
+    def probe(self, worktree):
+        payload = self._run(worktree, "status", "--json", "--magic-only")
         stale = payload.get("stale", [])
         changes = payload.get("stale_changes", {})
-        return {m: changes.get(m, "structural") for m in stale}
+        digests = payload.get("digests", {})
+        return {m: changes.get(m, "structural") for m in stale}, digests
 
     def build(self, worktree, module) -> BuildOutcome:
-        payload = self._run(worktree, "build", "--target", module)
+        # --no-repo-map / --no-auto-skills keep the build from writing treedocs.yaml
+        # and skill files in the worktree — tracked side effects that would trip the
+        # landing allowlist. Cache writes land in .jaunt/ (gitignored, invisible).
+        payload = self._run(
+            worktree, "build", "--target", module, "--json",
+            "--no-repo-map", "--no-auto-skills",
+        )
         if module in payload.get("refrozen", []):
             return BuildOutcome(ok=True, refrozen=True)
         if module in payload.get("generated", []):
             return BuildOutcome(ok=True, refrozen=False)
         error = str(payload.get("failed", {}).get(module, payload.get("error", "build failed")))
         return BuildOutcome(ok=False, refrozen=False, error=error.splitlines()[0][:200])
+
+    def gate(self, worktree, module) -> GateOutcome:
+        # Deterministic, model-free gate: `jaunt check` re-runs committed contract
+        # batteries and drift checks with no API key (build-internal validation — AST,
+        # import provenance, ty — already ran inside `build`). Repos with no contracts
+        # pass trivially and the journal shows battery "-".
+        payload = self._run(worktree, "check", "--json")
+        if payload.get("ok", False):
+            battery = str(payload.get("battery") or "-")
+            return GateOutcome(ok=True, battery=battery)
+        detail = str(payload.get("error", "jaunt check failed")).splitlines()[0][:200]
+        return GateOutcome(ok=False, detail=detail)
 
 
 def _head(repo) -> str:
@@ -1217,102 +1370,116 @@ def _worktrees_dir(root):
     return root / ".jaunt" / "worktrees"
 
 
-def _allowed_prefixes(cfg: JauntConfig) -> list[str]:
-    gen = cfg.paths.generated_dir
-    return [f"{gen}/", journal_mod.JOURNAL_FILE] + [f"{r}/" for r in cfg.paths.source_roots]
-    # NOTE: source roots are included ONLY so `<src>/<pkg>/__generated__/...` paths pass;
-    # tighten to paths *containing* f"/{gen}/" — see _path_allowed below. Implement
-    # _path_allowed and use it instead of raw prefixes.
+def _remove_worktree(root, path) -> None:
+    subprocess.run(
+        ["git", "-C", str(root), "worktree", "remove", "--force", str(path)],
+        capture_output=True, text=True, check=False,
+    )
 
 
 def _execute_job(root, cfg, job: jobs_mod.JobRecord, runner) -> JobResult:
     wt = _worktrees_dir(root) / job.id
     landing.git_out(root, "worktree", "add", "--detach", str(wt), job.base_commit)
     try:
-        outcome = runner.build(wt, job.module)
-        if not outcome.ok:
-            return JobResult(job_id=job.id, outcome=outcome)
+        build = runner.build(wt, job.module)
+        if not build.ok:
+            return JobResult(job_id=job.id, build=build)
+        gate = runner.gate(wt, job.module)
+        if not gate.ok:
+            return JobResult(job_id=job.id, build=build, gate=gate)
         gen = cfg.paths.generated_dir
-        paths = [
-            p for p in landing.git_out(wt, "status", "--porcelain").splitlines() if p.strip()
-        ]
-        patch_paths = tuple(
-            p.split(maxsplit=1)[1] for p in paths
-            if f"{gen}/" in p.split(maxsplit=1)[1] or p.endswith(journal_mod.JOURNAL_FILE)
-        )
-        patch = landing.extract_patch(wt, job.base_commit, allowed_prefixes=None or patch_paths or ("<none>",))
-        return JobResult(job_id=job.id, outcome=outcome, patch=patch, patch_paths=patch_paths)
+
+        def _machine_owned(path: str) -> bool:
+            # Nested generated dirs (src/pkg/__generated__/mod.py) and their
+            # .contract.json sidecars pass; whole source roots do NOT.
+            return f"/{gen}/" in f"/{path}" or path == journal_mod.JOURNAL_FILE
+
+        patch = landing.extract_patch(wt, job.base_commit, is_allowed=_machine_owned)
+        paths = tuple(landing.changed_paths(wt, job.base_commit))
+        return JobResult(job_id=job.id, build=build, gate=gate, patch=patch, patch_paths=paths)
     finally:
-        subprocess.run(
-            ["git", "-C", str(root), "worktree", "remove", "--force", str(wt)],
-            capture_output=True, text=True, check=False,
-        )
+        _remove_worktree(root, wt)
 
 
 def run_once(root, cfg: JauntConfig, state: DaemonState, runner, pool: Executor) -> None:
-    # 1) Collect finished futures -> land / fail / journal.
-    for job_id, fut in list(state.futures.items()):
-        if not fut.done():
-            continue
-        del state.futures[job_id]
-        job = jobs_mod.load_job(root, job_id)
-        if job is None or job.state != jobs_mod.RUNNING:
-            continue  # superseded while running
-        result: JobResult = fut.result()
-        if not result.outcome.ok:
-            jobs_mod.mark(root, job, jobs_mod.FAILED, error=result.outcome.error)
-            journal_mod.append_events(
-                root,
-                [journal_mod.JournalEvent("job-fail", job.module, result.outcome.error, job.id)],
-            )
-            continue
-        cause = "cosmetic (gate: EQUIVALENT)" if result.outcome.refrozen else "spec change"
-        message = landing.build_commit_message(job.module, cause, job.id, job.spec_digest)
-        sha = landing.land(
-            root, result.patch, patch_paths=list(result.patch_paths),
-            message=message, expected_branch=job.branch,
-        )
-        if sha is None:
-            patch_file = jobs_mod.jobs_dir(root) / f"{job.id}.patch"
-            patch_file.write_text(result.patch, encoding="utf-8")
-            jobs_mod.mark(root, job, jobs_mod.PARKED)
-            journal_mod.append_events(
-                root, [journal_mod.JournalEvent("job-park", job.module, "landing conflict", job.id)]
-            )
-        else:
-            action = "refreeze" if result.outcome.refrozen else "build"
-            detail = cause + (f"; battery {result.outcome.battery}" if result.outcome.battery else "")
-            jobs_mod.mark(root, job, jobs_mod.LANDED, landed_commit=sha)
-            journal_mod.append_events(
-                root, [journal_mod.JournalEvent(action, job.module, detail, job.id)]
-            )
-
-    # 2) Detect HEAD movement -> probe staleness in a detached probe worktree.
+    # 1) Probe on HEAD movement FIRST, so supersede always runs before any landing.
     head = _head(root)
     if head != state.last_head:
         state.last_head = head
         probe = _worktrees_dir(root) / "probe"
-        if probe.exists():
-            landing.git_out(root, "worktree", "remove", "--force", str(probe))
+        _remove_worktree(root, probe)
         landing.git_out(root, "worktree", "add", "--detach", str(probe), head)
         try:
-            stale = runner.probe_stale(probe)
+            stale, digests = runner.probe(probe)
         finally:
-            landing.git_out(root, "worktree", "remove", "--force", str(probe))
+            _remove_worktree(root, probe)
         branch = _branch(root)
-        for module, change in sorted(stale.items()):
+        for module, _change in sorted(stale.items()):
+            digest = digests.get(module, "")
             existing = jobs_mod.active_for_module(root, module)
             if existing is not None:
-                if existing.base_commit == head:
-                    continue
+                if existing.spec_digest == digest:
+                    continue  # same contract — in-flight job still valid
                 jobs_mod.mark(root, existing, jobs_mod.SUPERSEDED)
                 state.futures.pop(existing.id, None)
+                state.pending.pop(existing.id, None)
             job = jobs_mod.JobRecord.new(
-                module=module, spec_digest=change, base_commit=head, branch=branch
+                module=module, spec_digest=digest, base_commit=head, branch=branch
             )
             jobs_mod.save_job(root, job)
 
-    # 3) Spawn queued jobs up to the concurrency cap.
+    # 2) Move finished futures into the pending-landing set.
+    for job_id, fut in list(state.futures.items()):
+        if fut.done():
+            del state.futures[job_id]
+            state.pending[job_id] = fut.result()
+
+    # 3) Land pending results — only for jobs still RUNNING, only onto the probed HEAD.
+    for job_id, result in list(state.pending.items()):
+        job = jobs_mod.load_job(root, job_id)
+        if job is None or job.state != jobs_mod.RUNNING:
+            del state.pending[job_id]  # superseded while running
+            continue
+        if not result.build.ok or (result.gate is not None and not result.gate.ok):
+            detail = result.build.error or (result.gate.detail if result.gate else "gate failed")
+            jobs_mod.mark(root, job, jobs_mod.FAILED, error=detail)
+            journal_mod.append_events(
+                root, [journal_mod.JournalEvent("job-fail", job.module, detail, job.id)]
+            )
+            del state.pending[job_id]
+            continue
+        cause = "cosmetic (gate: EQUIVALENT)" if result.build.refrozen else "spec change"
+        message = landing.build_commit_message(job.module, cause, job.id, job.spec_digest)
+        sha = landing.land(
+            root, result.patch, patch_paths=list(result.patch_paths),
+            message=message, expected_branch=job.branch, expected_head=state.last_head,
+        )
+        if sha == landing.HEAD_MOVED:
+            continue  # keep pending; next iteration re-probes and supersedes or lands
+        del state.pending[job_id]
+        if sha is None:
+            (jobs_mod.jobs_dir(root) / f"{job.id}.patch").write_text(result.patch, encoding="utf-8")
+            jobs_mod.mark(
+                root, job, jobs_mod.PARKED,
+                patch_paths=_json.dumps(list(result.patch_paths)),
+            )
+            journal_mod.append_events(
+                root, [journal_mod.JournalEvent("job-park", job.module, "landing conflict", job.id)]
+            )
+        else:
+            # Our own landing commit moved HEAD; adopt it so the next pending result
+            # can land this iteration. Safe: regen commits touch only machine-owned
+            # paths and can never change a spec digest.
+            state.last_head = sha
+            action = "refreeze" if result.build.refrozen else "build"
+            battery = result.gate.battery if result.gate else "-"
+            jobs_mod.mark(root, job, jobs_mod.LANDED, landed_commit=sha)
+            journal_mod.append_events(
+                root,
+                [journal_mod.JournalEvent(action, job.module, f"{cause}; battery {battery}", job.id)],
+            )
+
+    # 4) Spawn queued jobs up to the concurrency cap.
     max_jobs = cfg.daemon.max_jobs or cfg.build.jobs
     for job in jobs_mod.list_jobs(root, states={jobs_mod.QUEUED}):
         if len(state.futures) >= max_jobs:
@@ -1326,9 +1493,10 @@ def run_daemon(root, *, runner=None, iterations: int | None = None, sleep=time.s
 
     from jaunt.config import load_config
 
-    cfg = load_config(root)  # match the actual loader name/signature in config.py
+    cfg = load_config(root=root)  # keyword-only in config.py
     runner = runner or CliRunner()
     state = DaemonState()
+    # recover(root) is added by Task 8 and called here, before the loop.
     max_jobs = cfg.daemon.max_jobs or cfg.build.jobs
     count = 0
     with ThreadPoolExecutor(max_workers=max_jobs) as pool:
@@ -1342,21 +1510,17 @@ def run_daemon(root, *, runner=None, iterations: int | None = None, sleep=time.s
         run_once(root, cfg, state, runner, pool)  # final collection pass
 ```
 
-Implementation notes the executor MUST resolve (they are marked in the code above):
-- Replace the `_allowed_prefixes` sketch with a `_path_allowed(path: str, gen: str) -> bool`
-  helper: a path is allowed iff `f"/{gen}/" in f"/{path}"` (covers nested generated dirs and
-  their `.contract.json` sidecars) or `path == journal_mod.JOURNAL_FILE`. Pass a
-  prefix-list shim into `landing.extract_patch` or refactor `extract_patch` to accept a
-  `Callable[[str], bool]` predicate — predicate form is cleaner; update Task 4's tests
-  accordingly (same behavior, predicate instead of prefixes).
-- `spec_digest=change` stores the change *kind* in the digest field as a stopgap. Instead,
-  store the real per-module digest: `jaunt status --json` doesn't expose it, so extend the
-  status JSON payload with `"digests": {module: contract_digest}` (one-line addition where
-  `stale_changes` is emitted in `cmd_status`) and use it. The job id must change when the
-  spec changes — that is what supersede keys on.
-- `--json` placement in `CliRunner._run` must match jaunt's CLI (global vs per-subcommand
-  flag) — check `jaunt status --json` manually once and mirror it.
-- The `state_or :=` typo in the test sketch is a typo; write clean tests.
+Implementation notes:
+- The `expected_head` discipline means landings serialize against probes: nothing lands
+  onto a HEAD the daemon hasn't probed. A user commit between probe and land defers the
+  landing by one iteration (correctness over latency). The daemon's own landing commits
+  update `state.last_head` in place, which is safe because they can never alter spec
+  digests.
+- `jaunt check --json`: verify what count fields its payload actually exposes and surface
+  them as the `battery` string; if it exposes none, keep `"-"`. Do not invent keys.
+- If `jaunt build` grows new tracked side effects later, they surface as loud
+  `LandingError: job touched paths outside allowlist` failures — by design. Extend the
+  build flags, never the predicate.
 
 - [ ] **Step 4: Run tests, lint, commit**
 
@@ -1511,12 +1675,12 @@ jobs_retry_p.add_argument("--root", default=".")
   `{"command": "jobs", "ok": true, "jobs": [...], "would_rebuild": {...}}`.
 - `show`: load record, print all fields; `--full` also prints the `detail_log` file contents
   when the path is non-empty and exists.
-- `retry`: require state PARKED; read `.jaunt/jobs/<id>.patch`; recompute `patch_paths` from
-  the patch (`git apply --numstat`-style parse or store `patch_paths` on the JobRecord at
-  park time — store on the record, it is simpler: add `patch_paths: str = ""`
-  (JSON-encoded list) to `JobRecord` in Task 3 if not already present); call `landing.land`;
-  on success `mark(..., LANDED, landed_commit=sha)` and exit 0; else print park reason and
-  exit 4.
+- `retry`: require state PARKED; read `.jaunt/jobs/<id>.patch` and the record's
+  `patch_paths` (JSON-encoded list stored at park time — Task 3 field); call `landing.land`
+  with `expected_branch=job.branch` and `expected_head` = current `git rev-parse HEAD`
+  (retry explicitly accepts the current HEAD as the landing base — the human invoking it
+  is the revalidation); on success `mark(..., LANDED, landed_commit=sha)` and exit 0; else
+  print the park reason and exit 4.
 
 - [ ] **Step 4: Run tests, lint, commit**
 
@@ -1803,21 +1967,34 @@ git commit -m "feat(daemon): notify_command on landed/parked/failed transitions"
 
 ---
 
-## Self-review notes (already applied)
+## Review status
+
+**Codex review (2026-07-01, session 019f1f9d):** 11 P1 findings, all applied to this
+plan — real `args.command` dispatch, `EXIT_CONFIG_OR_DISCOVERY`, keyword-only
+`load_config(root=root)`, a deterministic gate step (`Runner.gate` running `jaunt check`)
+between build and landing, `expected_head` revalidation with the `HEAD_MOVED` defer
+sentinel (closes the stale-landing race), per-module digests + `--magic-only` exposed by
+`jaunt status` as an explicit prerequisite (Task 7 Step 0), side-effect-quiet builds
+(`--no-repo-map --no-auto-skills` + gitignored `.jaunt/` enforced at daemon start), a
+predicate allowlist that never admits whole source roots, atomic `O_CREAT|O_EXCL`
+pidfile locking, and `patch_paths` persisted on `JobRecord` at park time so retry works.
+
+**Deferred (P2, from the same review — fix during implementation, do not drop):**
+1. Match the repo's `dest="json_output"` / `_is_json_mode()` convention for the new
+   commands' `--json` flags instead of the plan's `json_mode`.
+2. `merge=union` does not guarantee newest-last ordering across branch merges — make
+   `jaunt log` sort by the leading timestamp on read; file order is best-effort.
+3. `GREEN` state is defined but no code path currently sets it — either mark jobs GREEN
+   when their future completes (before landing) or drop GREEN from `recover()`.
+4. `jaunt guard` should best-effort load `jaunt.toml` for the real `generated_dir` and
+   filter on `tool_name` (file tools only), per its own interface description.
 
 - **Spec coverage:** journal (Tasks 1–2), job records + daemon + supersede + recovery
-  (Tasks 3, 6–8, 12), landing with hard path allowlist + trailers + park (Tasks 4–5, 9),
+  (Tasks 3, 6–8, 12), landing with hard predicate allowlist + trailers + park + HEAD
+  revalidation (Tasks 4–5, 9), status digests + `--magic-only` (Task 7 Step 0),
   `jaunt jobs`/`log` CLI (Tasks 2, 9), guard hook (Task 10), init/docs (Task 11).
-  Journal rotation is deferred (file stays small at pilot scale; `jaunt log` reads fine) —
-  noted as a follow-up, not silently dropped. Battery-in-job execution is carried via
-  `BuildOutcome.battery` but wiring a per-module contract-battery pytest run into
-  `CliRunner.build` is deferred to the adoption-parity plan, where batteries for the
-  pilot modules actually exist.
-- **Known impedance points for the executor** (flagged inline in tasks): CLI dispatch
-  mechanism (`set_defaults` vs `args.command` matching), the exact config-loader name
-  (`load_config`), `--json` flag placement, `cmd_build` local variable names at the journal
-  wiring point, and the `extract_patch` predicate refactor in Task 7. Each is a
-  read-the-neighboring-code adaptation, not a design decision.
+  Journal rotation is deferred (file stays small at pilot scale) — a follow-up, not
+  silently dropped. Per-module pytest batteries beyond `jaunt check` are deferred to the
+  adoption-parity plan, where batteries for the pilot modules actually exist.
 - **Type consistency:** `JobRecord` fields referenced by Tasks 7/9 (`gate`, `battery`,
-  `detail_log`, `landed_commit`, `error`) are all defined in Task 3; `patch_paths` storage
-  is added in Task 9 with instructions to fold back into Task 3's dataclass.
+  `detail_log`, `landed_commit`, `error`, `patch_paths`) are all defined in Task 3.
