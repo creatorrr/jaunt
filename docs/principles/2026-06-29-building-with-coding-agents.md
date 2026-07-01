@@ -2,6 +2,8 @@
 
 **Date:** 2026-06-29
 **Status:** Living reference. Doubles as a roadmap compass for jaunt.
+**Last synced with `src/jaunt/`:** 2026-07-01 — the shipped/designed markers in Part 2
+were re-verified against the code on this date.
 **Shape:** Hybrid — three altitudes (developer · tool · factory) over one set of
 cross-cutting laws, with the unresolved tensions kept honest rather than flattened.
 
@@ -190,33 +192,33 @@ not any single study's number.
 Give each unit one job and a small, named interface, so an agent can change it without
 loading its neighbors. The deeper rule underneath is **minimize behavior-at-a-distance:**
 an agent, like a reviewer, predicts what code does by reading it, so anything that smears
-behavior across files it never opened is where confident mistakes are born. This is also
-the honest frame for the inheritance-vs-composition question. Progressive disclosure —
+behavior across files it never opened is where confident mistakes are born. The variable
+that actually matters is **static discoverability and bounded dispatch** — "how many
+files must I open before I can predict what this change does?"
+
+That variable, not ideology, settles the inheritance-vs-composition question — and it
+indicts both sides. A deep mixin/MRO tower scatters a leaf's behavior up an ancestor
+chain the agent must load in full, and editing a base silently breaks subclasses it never
+saw; but service locators, dynamic DI containers, plugin registries, and runtime
+monkeypatching hide behavior somewhere else just as thoroughly. Progressive disclosure —
 read a high abstraction, descend only when needed — genuinely suits an agent, and a
-*shallow, honest "is-a"* hierarchy delivers it better than a sprawling dependency-injection
-graph. But that benefit comes from locality and progressive disclosure, not from
-inheritance as a mechanism: a deep mixin/MRO tower is the worst case, because a leaf's
-behavior is scattered up an ancestor chain the agent must load in full, and editing a base
-silently breaks subclasses it never saw. Composition's win is explicit wiring; its loss is
-deep, runtime-resolved indirection the agent can't statically trace. The variable that
-actually matters is **static discoverability and bounded dispatch** — "how many files
-must I open before I can predict what this change does?" — and it indicts both sides
-equally: deep inheritance, mixins, MRO tricks, service locators, dynamic DI containers,
-plugin registries, and runtime monkeypatching all hide behavior somewhere else. So the
-default is composition with explicit constructor wiring and protocol/interface seams;
-allow *shallow* inheritance only for stable framework contracts or genuine taxonomies.
-The "shallow honest is-a beats sprawling DI" caveat is real — but it doesn't rehabilitate
-inheritance broadly. The single sharpest offender is **closure-captured local state and
-implicit dependencies**: variables a function closes over, mutable state captured in a
-callback, an implicit dependency resolved at runtime. It is invisible at the call site,
-usually unannotated, and worse than either inheritance or explicit composition because
-there is no declared seam to read at all. Annotate it, or avoid it. And this is a place to
-spend tooling: prioritize tools that **surface, locate, and bound** what a unit depends on
-and captures — names, line ranges, the closure's free variables — so a hidden dependency
-becomes a visible, navigable fact instead of something the agent must simulate execution to
-discover.
+*shallow, honest "is-a"* hierarchy can deliver it better than a sprawling
+dependency-injection graph; but that benefit comes from locality, not from inheritance as
+a mechanism, so it does not rehabilitate inheritance broadly. The default: composition
+with explicit constructor wiring and protocol/interface seams; allow *shallow*
+inheritance for stable framework contracts or genuine taxonomies.
+
+The single sharpest offender is **closure-captured local state and implicit
+dependencies**: variables a function closes over, mutable state captured in a callback, a
+dependency resolved at runtime. It is worse than either deep inheritance or explicit
+composition because there is no declared seam to read at all — invisible at the call
+site, usually unannotated. Annotate it, or avoid it. And this is a place to spend
+tooling: prioritize tools that **surface, locate, and bound** what a unit depends on and
+captures — names, line ranges, a closure's free variables — so a hidden dependency
+becomes a visible, navigable fact instead of something the agent must simulate execution
+to discover.
 **Tension:** the categorical claim "inheritance beats composition for agents" is half-right
-and worth the argument — see the coda.
+and worth the argument — see live tension 7 (§4).
 
 ### 1.12 The dependency calculus inverted. (L12)
 Agents collapse the cost of writing small utilities to near zero, while every dependency
@@ -293,7 +295,7 @@ splitting them is busywork. The rule is "reviewably small," not "small."
 ### 1.17 Shrink the review surface; raise the altitude of review. (L7, L8)
 Review is the bottleneck (1.9, Part 3), and the durable fix is not "review faster" — it is
 to **reduce what a human must look at.** Push low-level abstractions *below the line* of
-human attention, into the purview of deterministic checks and good-enough (often local)
+human attention, into the purview of deterministic checks and good-enough small
 models, so the human reviews intent and contracts while the generated implementation is
 reviewed *by its tests*, not by eye. This is the strategic answer to L7 and a core premise
 of spec-driven tools: the unit of human review becomes the spec diff, not the code diff.
@@ -306,21 +308,19 @@ spec is wrong or the tests are weak, you have removed the one human who might ha
 by reading the code. The altitude you review at can only be as high as your verification is
 trustworthy.
 
-### 1.18 Push determinism down: deterministic preprocessing, then local inference. (L3, L9)
+### 1.18 Push determinism down: deterministic preprocessing, then the smallest model that works. (L3, L9)
 Spend the model on the smallest, cleanest residue. First normalize deterministically —
 tree-sitter / AST canonicalization strips formatting, comments, and cosmetic noise before
 anything model-shaped runs (jaunt's Layer A is exactly this). Then, where a model judgment
-*is* needed, prefer a **deterministic local model** (e.g. steadytext: fixed seed, greedy
-decoding, on-device, "same input → same output") over a network API. That choice does
-double duty: it is cheap and private enough to run *everywhere* (which is how you afford to
-verify at all, point from L7), and it makes the model step *reproducible* — converting a
-non-deterministic network dependency into something closer to a pure function, which is
-what L9 actually wants. The bet: on-device models are nearly good enough for these narrow,
-well-scoped judgments and keep improving.
-**Tension:** determinism is not correctness — a deterministic local model is reproducibly
-wrong when it is wrong, so it still needs the L4 backstop. And local models lag frontier
-models in capability; the narrower and more preprocessed the question, the safer the
-substitution, which is why the preprocessing comes first.
+*is* needed, hand the narrowed residue to the smallest, cheapest model that is reliable on
+it (jaunt's Layer B gate runs a small model, never the build model), and key the judgment
+by its inputs — model id, effort, prompt digest — so it re-runs only when something real
+changes (L9). That is what makes verification affordable enough to run *everywhere* (L7):
+the narrower and more preprocessed the question, the smaller the model you can spend on it.
+**Tension:** cheap is not correct — a small model is confidently wrong within budget, so it
+still needs the L4 backstop (fail-safe to rebuild; a deterministic check holds the
+verdict). And keying inputs is not pinning outputs: the sampler below the API line stays
+non-deterministic, which is why the deterministic layers, not the model, must dispose.
 
 ### 1.19 Treat tests as a held-out set; keep the implementer and tester blind to each other. (L14, L4)
 The check in 1.1 is only honest if the code's author did not write it to pass: a
@@ -398,29 +398,31 @@ code; lots of things do. It is *how it decides when not to, and who has final sa
 Read through 1.17, jaunt's premise is to **raise the altitude of review**: the human
 reviews the docstring contract and the battery; the generated implementation lives below
 the line, owned by its tests. And read through 1.18, its layered design — deterministic
-AST-normalized digest first, a cheap model only on the residue — is the
-"push determinism down" principle made concrete (a deterministic *local* gate per
-steadytext would be the natural completion).
+AST-normalized digest first (Layer A), a small-model gate only on the residue (Layer B) —
+is the "push determinism down" principle made concrete, and shipped.
 
-### 2.1 Where jaunt embodies the laws — and where it's still design
+### 2.1 Where jaunt embodies the laws — and what's still open
 
-> **Honesty marker.** Magic mode, Contract mode (`contract/` — derive, battery, drift,
-> strength, runner), input-keyed digests, `generation_fingerprint`, the model-free
-> `jaunt check`, and the dependency graph are **shipped**. Smart change detection
-> (AST-normalized digest + cheap-model semantic gate + re-freeze) is **designed and
-> Codex-reviewed but not yet in `src/jaunt/`** — it is the headline roadmap item (§2.3).
-> Below, designed-not-shipped items are marked *(designed)*.
+> **Honesty marker** *(re-verified against `src/jaunt/` on 2026-07-01)*. Magic mode,
+> Contract mode (`contract/` — derive, battery, drift, strength, runner), input-keyed
+> digests, `generation_fingerprint` (now covering prompt templates and the Codex CLI
+> version), the model-free `jaunt check`, the dependency graph, **smart change detection**
+> (Layer A AST-normalized digests + Layer B semantic gate + re-freeze,
+> `change_detection.py`), generated-import provenance screening (`validation.py`), and
+> the held-out implementer barrier (`heldout.py`) are all **shipped**. What remains open
+> lives in the roadmap (§2.3): gate audit logging, property derivation, deeper Layer A
+> normalization, the spec-authoring paved road, and round-trip ambiguity detection.
 
 - **L2 — spec is the durable artifact.** *(shipped)* The docstring *is* the contract, in
   both modes. Magic mode makes English canonical and the generated code a disposable
   build artifact. Contract mode inverts it: committed code is canonical, the docstring is
   the contract, and jaunt derives a committed pytest battery instead of an implementation.
-- **L3 — push work into deterministic layers.** Freshness today is input-keyed but hashes
-  *raw* source, so a ruff reformat or comment edit still flips the digest and forces a
-  full rebuild. The fix — *smart change detection*: an AST-normalized contract digest
-  (Layer A, deterministic, ignores cosmetic noise) with a cheap-model semantic gate
-  (Layer B) only on a genuine prose change — is *(designed)*, not yet code. The
-  *instinct* is in the codebase; this specific mechanism is still on paper.
+- **L3 — push work into deterministic layers.** *(shipped)* Freshness is computed from an
+  AST-normalized contract digest (Layer A — deterministic, so a ruff reformat, comment
+  edit, or quote-style change triggers no work), and a genuine prose-only change goes to
+  a small-model semantic gate (Layer B): judged equivalent, the module is **re-frozen** —
+  header digests rewritten over the validated, unchanged body — instead of rebuilt.
+  `--json` reports these under `"refrozen"`.
 - **L4 — the model proposes, deterministic checks dispose.** Jaunt's spine and sharpest
   instinct. *Shipped:*
   - `jaunt check` and `jaunt status` are deterministic, offline, and need no API key.
@@ -432,10 +434,11 @@ steadytext would be the natural completion).
     prose-as-contract: a docstring that reads like a spec but pins nothing. Mutate the
     body, re-run the battery; a contract that survives a broken body is decoration.
 
-  *Designed (part of smart change detection):* **fail-safe to REBUILD** on any ambiguity
-  (a wrong gate verdict costs a rebuild, never silent drift) and **validate-before-
-  re-freeze** (a re-freeze must never certify code a fresh build's gates would reject).
-  The right properties — not yet shipped.
+  *Shipped with smart change detection:* **fail-safe to REBUILD** on any ambiguity —
+  structural changes, missing snapshots, validation failures, and any gate error all
+  resolve to a rebuild, so a wrong gate verdict costs money, never silent drift — and
+  **validate-before-re-freeze** (a re-freeze never certifies code a fresh build's gates
+  would reject).
 - **L9 — pin the artifact, not the sampler.** Freshness is an input-keyed SHA-256
   digest over spec source + decorator kwargs + transitive dependency digests;
   regenerate only when inputs change. The generated tree is machine-owned (`DO NOT
@@ -457,24 +460,25 @@ steadytext would be the natural completion).
   must *earn* the right to rewrite, a jaunt module rewrites by default and proves itself
   against its committed tests — jaunt is what L11 looks like when it is the default path,
   not the exception.
-- **L12 — the sandbox is a real lever, with one open surface.** Codex runs under a
-  configurable `sandbox` (`workspace-write`, etc.), so generation has bounded blast radius
-  by design. The surface jaunt uniquely opens: generated code can embed a hallucinated or
-  injection-suggested import, which no general-purpose guard catches (see roadmap item 8).
-- **L14 — keep the checker independent of the author.** *(half shipped)* Jaunt already
-  enforces the **tester-side** held-out discipline, at two layers: the test generator's
-  context never includes generated implementation source (`dependency_generated_modules` is
-  empty for tests — it gets only public dependency signatures and the contract), and
-  `public_api_only` (on by default) rejects tests that import the generated module, touch
-  `__globals__`/private attributes, or monkeypatch the target — with a deliberate
-  `@jaunt.test(public_api_only=False)` white-box opt-out. The **implementer-side** barrier,
-  by contrast, holds only *incidentally*: `jaunt test` builds before it generates tests, so
-  the concrete assertions don't exist when the implementation is written — but nothing
-  *enforces* it, and the implementer does see attached test *stubs* (intent, which is
-  fairly part of the shared spec). The moment a test-driven *repair* loop is added (rebuild
-  to make failing tests pass), L14 demands the tiered, query-bounded feedback of 1.19 —
-  pass/fail, never the assertion diff — or the held-out oracle leaks straight back in
-  (roadmap item 9).
+- **L12 — the sandbox is a real lever, and the codegen-specific surface is closed.**
+  *(shipped)* Codex runs under a configurable `sandbox` (`workspace-write`, etc.), so
+  generation has bounded blast radius by design. And the surface a codegen tool uniquely
+  opens — generated code embedding a hallucinated or injection-suggested import — is now
+  guarded deterministically: validation fails the build if `__generated__/` imports a
+  package absent from the project's declared dependencies (roadmap item 8, done).
+- **L14 — keep the checker independent of the author.** *(shipped, both sides)* The
+  **tester-side** barrier holds at two layers: the test generator's context never includes
+  generated implementation source (`dependency_generated_modules` is empty for tests — it
+  gets only public dependency signatures and the contract), and `public_api_only` (on by
+  default) rejects tests that import the generated module, touch `__globals__`/private
+  attributes, or monkeypatch the target — with a deliberate
+  `@jaunt.test(public_api_only=False)` white-box opt-out. The **implementer-side** barrier
+  is now explicit rather than incidental (`heldout.py`, roadmap item 9): repair feedback
+  is tiered exactly as 1.19 prescribes. Example-tier cases — canonical examples, fairly
+  part of the shared spec — surface full failure detail; derived battery cases are
+  redacted to an opaque id plus exception class (`derived#3: AssertionError`), with a
+  leak-assertion guard on the redacted output and `--no-redact-derived` as the deliberate
+  debug escape hatch. A repair loop can no longer binary-search the committed battery.
 
 ### 2.2 Positioning against the field
 
@@ -487,12 +491,12 @@ with Magic mode — strategically strong, currently narrow.)
 
 More importantly, Böckeler's survey names a gap that *none* of Kiro, Spec Kit, or
 Tessl close: **ongoing spec↔code drift**, plus the absence of incremental,
-input-keyed change detection. Jaunt ships exactly the two things that attack that gap —
-an input-keyed incremental digest and a model-free deterministic CI gate
-(`jaunt check`) — and its *designed* smart change detection is a textbook instance of
-the Meta-ACH two-tier pattern: a cheap deterministic filter, the model only on genuine
-ambiguity, and a deterministic backstop confirming the verdict. Shipping that gate is
-what would turn the competitive claim from "betting on" to "demonstrating."
+input-keyed change detection. Jaunt ships exactly the three things that attack that gap —
+an input-keyed incremental digest, a model-free deterministic CI gate (`jaunt check`),
+and smart change detection: a textbook instance of the Meta-ACH two-tier pattern — a
+cheap deterministic filter, the model only on genuine ambiguity, fail-safe to a rebuild.
+With the gate shipped, the competitive claim has moved from "betting on" to
+"demonstrating."
 
 That is the honest competitive claim: jaunt is not "another SDD tool," it is the one
 betting that **determinism and incrementality are the unsolved part**, and building
@@ -500,71 +504,65 @@ there.
 
 ### 2.3 Roadmap compass (concrete do-next, each tied to a law)
 
-**Priority order (correctness/security before efficiency):** do **1** (fingerprint
-completeness) and **8** (generated-import provenance) first — they close *correctness and
-security* holes. Then ship smart change detection itself (the umbrella for items **4–5**,
-which presuppose the gate exists). The efficiency items earn their place only once the
-correctness ones are closed. Numbering below is by topic, not priority.
+**Status (2026-07-01):** the first wave is done. Items **1, 2, 8, 9** — fingerprint
+completeness, generated-code gitattributes, import provenance, and the implementer-side
+held-out barrier — are shipped, as is smart change detection itself (the umbrella items
+4–5 presupposed). What remains is ordered correctness-before-efficiency: **4** (gate
+auditability) first, then **3, 5, 6, 7**. Numbering below is by topic, not priority;
+shipped items are kept for the record, marked ✅.
 
-1. **Close the residual gaps in the causal-input key. (L9)** Good news first: jaunt
-   already does the Bazel-style thing for most of the causal set. `generation_fingerprint`
-   folds in engine, `codex_model`, `reasoning_effort`, sandbox, and build instructions,
-   and that fingerprint **gates staleness** (`builder.py:176-178`) — so a model or effort
-   change already busts the cache. Two residual gaps remain, and both let an upgrade
-   silently serve stale code: (a) under the Codex engine, jaunt's own **prompt templates**
-   are not in the fingerprint — `prompt_parts` is populated only for non-codex engines
-   (`generate/fingerprint.py`), so editing `prompts/*.md` or a `[prompts]` override won't
-   invalidate anything; (b) `engine` is the string `"codex"`, a **name, not a version** —
-   a Codex CLI or underlying model-snapshot upgrade that changes behavior won't bust the
-   key. Fold the effective prompt-template digest (Codex path too) and a Codex
-   engine/binary version into the fingerprint. *Smallest, highest-correctness-leverage
-   item here.*
-2. **Mark committed generated code second-class. (L2 / commit-vs-regenerate)** Add
-   `__generated__/** linguist-generated=true -diff` to `.gitattributes`. This resolves
-   the commit-vs-regenerate debate without choosing a side: reproducible self-contained
-   checkouts and a model-free CI gate, without polluting PR diffs. Caveat (Codex): this is
-   only safe if the *review target* shifts to the spec diff + battery diff + provenance —
-   otherwise you are hiding behavior, not just noise.
+1. ✅ **Close the residual gaps in the causal-input key. (L9)** *Shipped.* The
+   `generation_fingerprint` already folded in engine, `codex_model`, `reasoning_effort`,
+   sandbox, and build instructions, and gates staleness; it now also folds in the
+   effective **prompt-template digests** on the Codex path — the always-on preamble
+   (`codex_preamble.md`) included, so editing a template or a `[prompts]` override
+   regenerates what it should — and the **Codex CLI version** (`codex --version`, via
+   `[codex] fingerprint_cli_version`, default on), so an engine upgrade busts the cache
+   instead of silently serving stale code.
+2. ✅ **Mark committed generated code second-class. (L2 / commit-vs-regenerate)**
+   *Shipped:* `.gitattributes` carries `__generated__/** linguist-generated=true -diff` —
+   reproducible self-contained checkouts and a model-free CI gate, without polluting PR
+   diffs. The caveat stands: this is only safe because the *review target* shifts to the
+   spec diff + battery diff + provenance — otherwise you are hiding behavior, not noise.
 3. **Properties over examples for the contract core. (L5)** Contract mode today derives
    examples + errors and defers properties. Property derivation (Hypothesis-backed) is a
    stronger contract and closes the "tests pass but behavior is wrong" gap — but only with
    *real invariants/oracles*; properties generated from vague prose are decorative
    randomness, not a stronger spec. Keep a few canonical examples for grounding the model
    and the human reader.
-4. **Make the nano gate auditable and cheaply backstopped. (L4, L7)** Log every
-   `EQUIVALENT` verdict with its old/new prose, and consider a sampled deterministic
-   re-derivation (or battery run) to catch field false-KEEPs. Meta-ACH's lesson:
-   equivalence is undecidable, so they *always* confirm a positive verdict with a
+4. **Make the semantic gate auditable and cheaply backstopped. (L4, L7)** The gate ships
+   and `--json` reports re-frozen modules, but there is no per-verdict audit trail yet:
+   log every `EQUIVALENT` verdict with its old/new prose, and consider a sampled
+   deterministic re-derivation (or battery run) to catch field false-KEEPs. Meta-ACH's
+   lesson: equivalence is undecidable, so they *always* confirm a positive verdict with a
    generated killing test. Jaunt's fail-safe bias is right; add observability so a rare
-   wrong KEEP is detectable after the fact.
+   wrong KEEP is detectable after the fact. *Now the top open item.*
 5. **Add a semantic-equivalence normalization rung to Layer A. (L4)** Beyond AST-token
    normalization, fold literal-equivalence (`1337` == `0x539`), redundant parens, and
    safe reorders to cut over-rebuilds further — but keep the recall-safe bias: err
    toward rebuild, because a false *negative* (silent drift) is the worst outcome, far
    worse than an unnecessary rebuild. (SemanticDiff / GumTree lineage.)
-6. **Treat spec-authoring as the paved road. (L1, L10)** The Claude Code plugin/skills
-   work (plan.md) is the factory primitive hiding in plain sight: the golden path for
-   *writing a good spec* is the highest-leverage standardization jaunt can ship. The
-   strength score is the floor-enforcement that keeps that road honest.
+6. **Treat spec-authoring as the paved road. (L1, L10)** *Partly shipped:* `jaunt
+   instructions` emits a project-aware agent primer, and builtin/auto skills seed the
+   Codex workspace. The remaining leverage is the golden path for *writing a good spec* —
+   the highest-leverage standardization jaunt can ship. The strength score is the
+   floor-enforcement that keeps that road honest.
 7. **Round-trip ambiguity detection. (L8)** A flagged non-goal worth promoting:
    re-derive prose from an unchanged input and compare. Low agreement surfaces an
    *ambiguous spec* to the human director before it causes drift downstream — verifying
    the spec, not just the code.
-8. **Screen generated imports against a provenance allowlist. (L12)** Generated code can
-   import a package the model hallucinated (slopsquatting) or one an injected docstring
-   asked for. Add a deterministic post-generation check that every import in
-   `__generated__/` resolves to a declared, pinned dependency — fail the build otherwise.
-   It is a model-free gate (fits L4) and it closes the one supply-chain hole a codegen tool
-   uniquely opens. This is arguably more urgent than items 5–7, because it is a
-   *correctness/security* gap, not an efficiency one.
-9. **Make the implementer-side held-out barrier explicit, not incidental. (L14, L4)** The
-   tester-side is enforced (§2.1); the implementer-side holds only because build precedes
-   test generation. *Before* adding any test-driven repair loop, tier the feedback the
-   implementer receives — full diffs from a public/dev suite it owns, only a contract-area
-   label from the committed battery, and a final suite-level pass/fail — so a repair loop
-   cannot binary-search the committed tests (Dwork's adaptive-holdout failure). Cheap,
-   model-free, and a prerequisite for *safe* auto-repair rather than a way to teach the
-   implementer the answer key.
+8. ✅ **Screen generated imports against a provenance allowlist. (L12)** *Shipped:*
+   validation now fails the build when code in `__generated__/` imports a package that
+   doesn't resolve to a declared dependency — a deterministic, model-free gate (fits L4)
+   that closes the one supply-chain hole a codegen tool uniquely opens, whether the
+   import was hallucinated (slopsquatting) or suggested by an injected docstring.
+9. ✅ **Make the implementer-side held-out barrier explicit, not incidental. (L14, L4)**
+   *Shipped* (`heldout.py`): repair feedback is tiered — full detail from example-tier
+   cases (the shared spec), an opaque id plus exception class from derived battery cases,
+   a leak-assertion guard on the redacted output, and `--no-redact-derived` as the
+   explicit debug escape hatch — so a repair loop cannot binary-search the committed
+   tests (Dwork's adaptive-holdout failure). The prerequisite for *safe* auto-repair is
+   in place.
 
 ---
 
@@ -711,9 +709,8 @@ tension is propaganda — so each is stated honestly, followed by **our current 
    biased by task/developer opt-out and may now *understate* speedup, so the headline is
    an early-2025 mature-OSS finding, not a standing verdict. Greenfield and junior gains
    look real; the mature-codebase case is genuinely contested.
-   **Stance:** stop arguing the average; instrument it continuously and cheaply — small,
-   fast, local models can measure this on-device, and that capability is nearly good enough
-   now and improving. Track the task *mix*, not just speed on a fixed task.
+   **Stance:** stop arguing the average; instrument your own pipeline continuously and
+   cheaply. Track the task *mix*, not just speed on a fixed task.
 2. **How far toward spec-as-source dare you go?** Determinism is bounded — regenerating
    from the *same* spec yields different code (Böckeler). A spec is a reliable "source"
    only if generation is deterministic enough, which pushes specs toward code-level
@@ -731,15 +728,15 @@ tension is propaganda — so each is stated honestly, followed by **our current 
    just add another sensor a human must adjudicate, lengthening the queue.
    **Stance:** this is *the* bottleneck now, so spend here first. It nets out only if you
    (a) shrink the review surface and raise its altitude (1.17), (b) push judgment onto
-   cheap local models with deterministic backstops (1.18), and (c) ruthlessly minimize
+   cheap small models with deterministic backstops (1.18), and (c) ruthlessly minimize
    false-positive reviews — every false alarm spends the scarcest resource.
 5. **How much determinism is enough?** You can pin the artifact but never the sampler
    (batch-variance nondeterminism is below the API line).
    **Stance:** more is reachable than "you can't pin the sampler" implies. Deterministic
-   preprocessing (tree-sitter / AST canonicalization) plus deterministic *local* inference
-   (steadytext: fixed seed, greedy, on-device) move most of the residue into reproducible
-   territory; the irreducible remainder stays behind a deterministic, model-free check
-   (1.18, L9).
+   preprocessing (tree-sitter / AST canonicalization) shrinks the residue, and input-keyed
+   pinning (model id, effort, prompt digests) makes the remaining model step re-run only
+   on real change; the irreducible remainder stays behind a deterministic, model-free
+   check (1.18, L9).
 6. **Contract precision: over-spec vs under-spec.** Pin behavior tightly enough to test
    and you risk encoding the implementation (every refactor becomes a contract edit);
    leave it loose and wrong-but-passing code slips through. Meyer's pre/post/invariant
@@ -826,9 +823,6 @@ tension is propaganda — so each is stated honestly, followed by **our current 
   https://www.youtube.com/watch?v=8rABwKRsec4
 - Thinking Machines Lab, *Defeating Nondeterminism in LLM Inference* — why you cannot
   pin the sampler. https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/
-- SteadyText — deterministic on-device generation/embeddings (fixed seed, greedy, llama.cpp);
-  "same input → same output," a reproducible local model step (L9, 1.18).
-  https://pypi.org/project/steadytext/
 - tree-sitter — incremental parser / concrete syntax trees; the deterministic preprocessing
   layer that strips cosmetic noise before any model runs (1.18, jaunt Layer A).
   https://tree-sitter.github.io/tree-sitter/
