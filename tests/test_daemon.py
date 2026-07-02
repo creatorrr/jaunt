@@ -98,6 +98,12 @@ def _spec_commit(repo: Path, body: str = '"""spec v2"""\n') -> None:
     _git(repo, "commit", "-m", "spec commit")
 
 
+def _opt_into_journal(repo: Path) -> None:
+    (repo / journal.JOURNAL_FILE).touch()
+    _git(repo, "add", "--", journal.JOURNAL_FILE)
+    _git(repo, "commit", "-m", "opt into journal")
+
+
 def _proc_start_time(pid: int) -> str:
     stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     _, fields = stat.rsplit(")", 1)
@@ -344,7 +350,7 @@ def test_daemon_status_json_when_stopped(tmp_path: Path, capsys) -> None:
 
 
 def test_run_once_full_cycle_lands_and_journals(repo: Path, jaunt_cfg: JauntConfig) -> None:
-    (repo / journal.JOURNAL_FILE).touch()
+    _opt_into_journal(repo)
     runner = FakeRunner()
     state = daemon.DaemonState()
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -362,7 +368,7 @@ def test_run_once_full_cycle_lands_and_journals(repo: Path, jaunt_cfg: JauntConf
 
 
 def test_landed_regen_commit_includes_jaunt_log(repo: Path, jaunt_cfg: JauntConfig) -> None:
-    (repo / journal.JOURNAL_FILE).touch()
+    _opt_into_journal(repo)
     runner = FakeRunner()
     state = daemon.DaemonState()
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -380,9 +386,7 @@ def test_landed_regen_commit_includes_jaunt_log(repo: Path, jaunt_cfg: JauntConf
 def test_worker_journal_change_is_ignored_and_job_lands(
     repo: Path, jaunt_cfg: JauntConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    (repo / journal.JOURNAL_FILE).touch()
-    _git(repo, "add", "--", journal.JOURNAL_FILE)
-    _git(repo, "commit", "-m", "opt into journal")
+    _opt_into_journal(repo)
 
     class WorkerJournalRunner(FakeRunner):
         def build(self, worktree: Path, module: str) -> daemon.BuildOutcome:
@@ -423,8 +427,94 @@ def test_worker_journal_change_is_ignored_and_job_lands(
     assert "worker-build" not in blob
 
 
+def test_dirty_jaunt_log_defers_landing_without_appending(
+    repo: Path, jaunt_cfg: JauntConfig
+) -> None:
+    _opt_into_journal(repo)
+    runner = FakeRunner()
+    state = daemon.DaemonState()
+    user_line = "manual user journal line\n"
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        _spec_commit(repo)
+        head_before = _git(repo, "rev-parse", "HEAD")
+        log_count_before = _git(repo, "rev-list", "--count", "HEAD")
+        with open(repo / journal.JOURNAL_FILE, "a", encoding="utf-8") as f:
+            f.write(user_line)
+
+        _cycle(repo, jaunt_cfg, state, runner, pool)
+
+    assert _git(repo, "rev-parse", "HEAD") == head_before
+    assert _git(repo, "rev-list", "--count", "HEAD") == log_count_before
+    assert (repo / journal.JOURNAL_FILE).read_text(encoding="utf-8") == user_line
+    assert not jobs.list_jobs(repo, states={jobs.LANDED, jobs.PARKED, jobs.FAILED})
+    active = jobs.list_jobs(repo, states={jobs.RUNNING, jobs.GREEN})
+    assert len(active) == 1 and active[0].module == "app"
+    assert set(state.pending) == {active[0].id}
+
+
+def test_landing_retries_after_user_commits_dirty_jaunt_log(
+    repo: Path, jaunt_cfg: JauntConfig
+) -> None:
+    class StillStaleRunner(FakeRunner):
+        def probe(self, worktree: Path) -> tuple[dict[str, str], dict[str, str]]:
+            return {self.module: self.change}, {self.module: self.digest}
+
+    _opt_into_journal(repo)
+    runner = StillStaleRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        _spec_commit(repo)
+        with open(repo / journal.JOURNAL_FILE, "a", encoding="utf-8") as f:
+            f.write("manual user journal line\n")
+        _cycle(repo, jaunt_cfg, state, runner, pool)
+
+        _git(repo, "add", "--", journal.JOURNAL_FILE)
+        _git(repo, "commit", "-m", "user journal note")
+        previous_lines = _git(repo, "show", f"HEAD:{journal.JOURNAL_FILE}").splitlines()
+
+        daemon.run_once(repo, jaunt_cfg, state, runner, pool)
+
+    landed = jobs.list_jobs(repo, states={jobs.LANDED})
+    assert len(landed) == 1 and landed[0].module == "app"
+    current_lines = _git(repo, "show", f"HEAD:{journal.JOURNAL_FILE}").splitlines()
+    appended = current_lines[len(previous_lines) :]
+    assert len(appended) == 1
+    assert "build" in appended[0] and "app" in appended[0] and "3/3" in appended[0]
+    assert "manual user journal line" in _git(repo, "show", f"HEAD~1:{journal.JOURNAL_FILE}")
+
+
+def test_dirty_jaunt_log_deferred_notify_is_rate_limited(
+    repo: Path, jaunt_cfg_with_notify: JauntConfig, tmp_path: Path
+) -> None:
+    notify_path = tmp_path / "notify.txt"
+    _opt_into_journal(repo)
+    runner = FakeRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        _spec_commit(repo)
+        with open(repo / journal.JOURNAL_FILE, "a", encoding="utf-8") as f:
+            f.write("first manual line\n")
+        _cycle(repo, jaunt_cfg_with_notify, state, runner, pool, n=5)
+
+        lines = notify_path.read_text(encoding="utf-8").splitlines()
+        assert lines.count("app:deferred") == 1
+
+        _git(repo, "checkout", "--", journal.JOURNAL_FILE)
+        daemon.run_once(repo, jaunt_cfg_with_notify, state, runner, pool)
+
+        runner.digest = "digest-v2"
+        runner.built = []
+        _spec_commit(repo, body='"""spec v3"""\n')
+        with open(repo / journal.JOURNAL_FILE, "a", encoding="utf-8") as f:
+            f.write("second manual line\n")
+        _cycle(repo, jaunt_cfg_with_notify, state, runner, pool, n=5)
+
+    lines = notify_path.read_text(encoding="utf-8").splitlines()
+    assert lines.count("app:deferred") == 2
+
+
 def test_commit_failure_parks_without_killing_daemon(repo: Path, jaunt_cfg: JauntConfig) -> None:
-    (repo / journal.JOURNAL_FILE).touch()
+    _opt_into_journal(repo)
     runner = FakeRunner()
     state = daemon.DaemonState()
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -473,7 +563,7 @@ def test_restart_preserves_parked_job(repo: Path, jaunt_cfg: JauntConfig) -> Non
 def test_restart_supersedes_stale_parked_job_and_enqueues_fresh(
     repo: Path, jaunt_cfg: JauntConfig
 ) -> None:
-    (repo / journal.JOURNAL_FILE).touch()
+    _opt_into_journal(repo)
     runner = FakeRunner()
     state = daemon.DaemonState()
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -501,7 +591,7 @@ def test_restart_supersedes_stale_parked_job_and_enqueues_fresh(
 
 
 def test_park_truncates_preappended_success_line(repo: Path, jaunt_cfg: JauntConfig) -> None:
-    (repo / journal.JOURNAL_FILE).touch()
+    _opt_into_journal(repo)
     runner = FakeRunner()
     state = daemon.DaemonState()
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -567,7 +657,7 @@ def test_supersede_on_newer_spec_commit(repo: Path, jaunt_cfg: JauntConfig) -> N
 
 
 def test_probe_failure_is_loud_and_non_destructive(repo: Path, jaunt_cfg: JauntConfig) -> None:
-    (repo / journal.JOURNAL_FILE).touch()
+    _opt_into_journal(repo)
     release = threading.Event()
     started = threading.Event()
 
@@ -650,7 +740,7 @@ def test_cli_runner_probe_raises_on_failed_status(monkeypatch: pytest.MonkeyPatc
 
 
 def test_failed_build_journals_and_marks_failed(repo: Path, jaunt_cfg: JauntConfig) -> None:
-    (repo / journal.JOURNAL_FILE).touch()
+    _opt_into_journal(repo)
 
     class FailingRunner(FakeRunner):
         def build(self, worktree: Path, module: str) -> daemon.BuildOutcome:
@@ -669,7 +759,7 @@ def test_failed_build_journals_and_marks_failed(repo: Path, jaunt_cfg: JauntConf
 
 
 def test_worker_exception_marks_failed_and_survives(repo: Path, jaunt_cfg: JauntConfig) -> None:
-    (repo / journal.JOURNAL_FILE).touch()
+    _opt_into_journal(repo)
 
     class ExplodingRunner(FakeRunner):
         def build(self, worktree: Path, module: str) -> daemon.BuildOutcome:

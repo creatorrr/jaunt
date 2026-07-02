@@ -75,6 +75,7 @@ class Runner(Protocol):
 class DaemonState:
     last_head: str = ""
     last_probe_error: str = ""
+    journal_dirty_notified: bool = False
     futures: dict[str, Future[JobResult]] = field(default_factory=dict)
     pending: dict[str, JobResult] = field(default_factory=dict)
 
@@ -388,14 +389,16 @@ def _collect_finished(state: DaemonState, root: Path, cfg: JauntConfig) -> None:
         state.pending[job_id] = result
 
 
-def _notify(cfg: JauntConfig, job: jobs_mod.JobRecord) -> None:
+def _notify(
+    cfg: JauntConfig, job: jobs_mod.JobRecord, *, state_override: str | None = None
+) -> None:
     if not cfg.daemon.notify_command:
         return
     env = dict(
         os.environ,
         JAUNT_JOB_ID=job.id,
         JAUNT_JOB_MODULE=job.module,
-        JAUNT_JOB_STATE=job.state,
+        JAUNT_JOB_STATE=state_override or job.state,
     )
     try:
         subprocess.run(
@@ -412,6 +415,50 @@ def _notify(cfg: JauntConfig, job: jobs_mod.JobRecord) -> None:
 def _truncate_journal(path: Path, size: int) -> None:
     with open(path, "r+", encoding="utf-8") as f:
         f.truncate(size)
+
+
+def _is_daemon_journal_addition(line: str) -> bool:
+    if line.startswith("+++"):
+        return False
+    if not line.startswith("+"):
+        return False
+    parts = line[1:].split(maxsplit=3)
+    if len(parts) < 4:
+        return False
+    date, timestamp, action, _rest = parts
+    if len(date) != 10 or date[4] != "-" or date[7] != "-":
+        return False
+    if len(timestamp) != 6 or timestamp[2] != ":" or timestamp[-1] != "Z":
+        return False
+    return action in {
+        "build",
+        "refreeze",
+        "job-fail",
+        "job-park",
+        "job-supersede",
+        "probe-fail",
+    }
+
+
+def _journal_user_dirty(root: Path) -> bool:
+    status = landing.git_out(root, "status", "--porcelain", "--", journal_mod.JOURNAL_FILE).strip()
+    if not status:
+        return False
+    if status.startswith("??"):
+        return True
+
+    has_daemon_addition = False
+    for args in (("diff", "--unified=0"), ("diff", "--cached", "--unified=0")):
+        diff = landing.git_out(root, *args, "--", journal_mod.JOURNAL_FILE)
+        for line in diff.splitlines():
+            if line.startswith(("diff --git", "index ", "@@ ", "--- ", "+++ ")):
+                continue
+            if _is_daemon_journal_addition(line):
+                has_daemon_addition = True
+                continue
+            if line.startswith(("+", "-")):
+                return True
+    return not has_daemon_addition
 
 
 def _land_pending(root: Path, cfg: JauntConfig, state: DaemonState) -> None:
@@ -439,6 +486,12 @@ def _land_pending(root: Path, cfg: JauntConfig, state: DaemonState) -> None:
         snapshot_len = 0
         extra_paths: tuple[str, ...] = ()
         if journal_opted_in:
+            if _journal_user_dirty(root):
+                if not state.journal_dirty_notified:
+                    _notify(cfg, job, state_override="deferred")
+                    state.journal_dirty_notified = True
+                continue
+            state.journal_dirty_notified = False
             snapshot_len = journal_path.stat().st_size
             journal_mod.append_events(
                 root,
