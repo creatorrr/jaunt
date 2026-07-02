@@ -258,11 +258,21 @@ def _execute_job(
             return JobResult(job_id=job.id, build=build, gate=gate)
         gen = cfg.paths.generated_dir
 
-        def _machine_owned(path: str) -> bool:
-            return f"/{gen}/" in f"/{path}" or path == journal_mod.JOURNAL_FILE
+        def _worker_ignored(path: str) -> bool:
+            return path == journal_mod.JOURNAL_FILE
 
-        patch = landing.extract_patch(wt, job.base_commit, is_allowed=_machine_owned)
-        paths = tuple(landing.changed_paths(wt, job.base_commit))
+        def _machine_owned(path: str) -> bool:
+            return f"/{gen}/" in f"/{path}"
+
+        patch = landing.extract_patch(
+            wt,
+            job.base_commit,
+            is_allowed=_machine_owned,
+            is_ignored=_worker_ignored,
+        )
+        paths = tuple(
+            path for path in landing.changed_paths(wt, job.base_commit) if not _worker_ignored(path)
+        )
         return JobResult(job_id=job.id, build=build, gate=gate, patch=patch, patch_paths=paths)
     finally:
         _remove_worktree(root, wt)

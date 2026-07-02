@@ -29,8 +29,16 @@ def changed_paths(worktree: Path, base_commit: str) -> list[str]:
     return [path for path in out.splitlines() if path.strip()]
 
 
-def extract_patch(worktree: Path, base_commit: str, is_allowed: Callable[[str], bool]) -> str:
+def extract_patch(
+    worktree: Path,
+    base_commit: str,
+    is_allowed: Callable[[str], bool],
+    *,
+    is_ignored: Callable[[str], bool] | None = None,
+) -> str:
     paths = changed_paths(worktree, base_commit)
+    if is_ignored is not None:
+        paths = [path for path in paths if not is_ignored(path)]
     if not paths:
         return ""
     violations = [path for path in paths if not is_allowed(path)]

@@ -48,6 +48,52 @@ def test_extract_patch_rejects_out_of_scope_paths(repo: Path) -> None:
         landing.extract_patch(repo, base, is_allowed=_machine_owned)
 
 
+def test_extract_patch_drops_ignored_paths_before_allowlist(repo: Path) -> None:
+    base = _git(repo, "rev-parse", "HEAD")
+    gen = repo / "src" / "__generated__"
+    gen.mkdir()
+    (gen / "app.py").write_text("y = 2\n", encoding="utf-8")
+    (repo / "JAUNT_LOG").write_text("worker journal line\n", encoding="utf-8")
+
+    patch = landing.extract_patch(
+        repo,
+        base,
+        is_allowed=lambda path: "/__generated__/" in f"/{path}",
+        is_ignored=lambda path: path == "JAUNT_LOG",
+    )
+
+    assert "src/__generated__/app.py" in patch
+    assert "JAUNT_LOG" not in patch
+
+
+def test_extract_patch_ignored_only_change_is_empty(repo: Path) -> None:
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / "JAUNT_LOG").write_text("worker journal line\n", encoding="utf-8")
+
+    patch = landing.extract_patch(
+        repo,
+        base,
+        is_allowed=lambda path: False,
+        is_ignored=lambda path: path == "JAUNT_LOG",
+    )
+
+    assert patch == ""
+
+
+def test_extract_patch_still_rejects_nonignored_disallowed_path(repo: Path) -> None:
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / "JAUNT_LOG").write_text("worker journal line\n", encoding="utf-8")
+    (repo / "src" / "app.py").write_text("x = 999\n", encoding="utf-8")
+
+    with pytest.raises(landing.LandingError, match="src/app.py"):
+        landing.extract_patch(
+            repo,
+            base,
+            is_allowed=lambda path: False,
+            is_ignored=lambda path: path == "JAUNT_LOG",
+        )
+
+
 def test_extract_patch_empty_when_no_changes(repo: Path) -> None:
     base = _git(repo, "rev-parse", "HEAD")
     assert landing.extract_patch(repo, base, is_allowed=_machine_owned) == ""

@@ -7,6 +7,7 @@ import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -223,6 +224,52 @@ def test_landed_regen_commit_includes_jaunt_log(repo: Path, jaunt_cfg: JauntConf
     blob = _git(repo, "show", f"HEAD:{journal.JOURNAL_FILE}")
     assert "build" in blob and "app" in blob
     assert _git(repo, "status", "--porcelain") == ""
+
+
+def test_worker_journal_change_is_ignored_and_job_lands(
+    repo: Path, jaunt_cfg: JauntConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (repo / journal.JOURNAL_FILE).touch()
+    _git(repo, "add", "--", journal.JOURNAL_FILE)
+    _git(repo, "commit", "-m", "opt into journal")
+
+    class WorkerJournalRunner(FakeRunner):
+        def build(self, worktree: Path, module: str) -> daemon.BuildOutcome:
+            outcome = super().build(worktree, module)
+            with open(worktree / journal.JOURNAL_FILE, "a", encoding="utf-8") as f:
+                f.write("worker-build journal line\n")
+            return outcome
+
+    captured_patch_paths: list[list[str]] = []
+    original_land = daemon.landing.land
+
+    def land_spy(*args: Any, **kwargs: Any) -> str | None:
+        captured_patch_paths.append(list(kwargs["patch_paths"]))
+        return original_land(*args, **kwargs)
+
+    monkeypatch.setattr(daemon.landing, "land", land_spy)
+
+    runner = WorkerJournalRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        _spec_commit(repo)
+        _cycle(repo, jaunt_cfg, state, runner, pool)
+
+    assert captured_patch_paths
+    assert journal.JOURNAL_FILE not in captured_patch_paths[0]
+    assert not jobs.list_jobs(repo, states={jobs.PARKED})
+    landed = jobs.list_jobs(repo, states={jobs.LANDED})
+    assert len(landed) == 1 and landed[0].module == "app"
+
+    committed = set(_git(repo, "show", "--name-only", "--format=", "HEAD").splitlines())
+    assert "src/__generated__/app.py" in committed
+    assert journal.JOURNAL_FILE in committed
+
+    blob = _git(repo, "show", f"HEAD:{journal.JOURNAL_FILE}")
+    lines = blob.splitlines()
+    assert len(lines) == 1
+    assert "build" in lines[0] and "app" in lines[0] and "3/3" in lines[0]
+    assert "worker-build" not in blob
 
 
 def test_commit_failure_parks_without_killing_daemon(repo: Path, jaunt_cfg: JauntConfig) -> None:
