@@ -930,6 +930,8 @@ def test_slugify() -> str:
 
 
 def cmd_init(args: argparse.Namespace) -> int:
+    from jaunt import journal as _journal
+
     json_mode = _is_json_mode(args)
     root = Path(args.root).resolve() if args.root else Path.cwd().resolve()
     toml_path = root / "jaunt.toml"
@@ -951,6 +953,14 @@ def cmd_init(args: argparse.Namespace) -> int:
     if not spec_path.exists():
         spec_path.write_text(_INIT_SPEC_TEMPLATE, encoding="utf-8")
         spec_created = True
+
+    (root / _journal.JOURNAL_FILE).touch(exist_ok=True)
+    _journal.ensure_union_merge_attribute(root)
+    gitignore = root / ".gitignore"
+    existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+    if ".jaunt/" not in existing.splitlines():
+        joiner = "" if (not existing or existing.endswith("\n")) else "\n"
+        gitignore.write_text(existing + joiner + ".jaunt/\n", encoding="utf-8")
 
     if json_mode:
         payload = {"command": "init", "ok": True, "path": str(toml_path)}
