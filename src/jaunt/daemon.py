@@ -542,6 +542,8 @@ def run_once(
     state: DaemonState,
     runner: Runner,
     pool: Executor,
+    *,
+    spawn: bool = True,
 ) -> None:
     head = _head(root)
     if head != state.last_head:
@@ -620,6 +622,8 @@ def run_once(
 
     _collect_finished(state, root, cfg)
     _land_pending(root, cfg, state)
+    if not spawn:
+        return
 
     max_jobs = cfg.daemon.max_jobs or cfg.build.jobs
     for job in jobs_mod.list_jobs(root, states={jobs_mod.QUEUED}):
@@ -654,4 +658,4 @@ def run_daemon(
             count += 1
             sleep(cfg.daemon.poll_interval)
         drain(state)
-        run_once(root, cfg, state, daemon_runner, pool)
+        run_once(root, cfg, state, daemon_runner, pool, spawn=False)

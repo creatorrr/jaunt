@@ -321,6 +321,57 @@ def test_run_once_full_cycle_lands_and_journals(repo: Path, jaunt_cfg: JauntConf
     assert (repo / "src" / "__generated__" / "app.py").exists()
 
 
+def test_run_once_spawn_false_leaves_queued_job_unsubmitted(
+    repo: Path, jaunt_cfg: JauntConfig
+) -> None:
+    job = jobs.JobRecord.new(
+        module="app",
+        spec_digest="digest-v1",
+        base_commit=_git(repo, "rev-parse", "HEAD"),
+        branch="main",
+    )
+    jobs.save_job(repo, job)
+    state = daemon.DaemonState()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        daemon.run_once(repo, jaunt_cfg, state, FakeRunner(), pool, spawn=False)
+
+    loaded = jobs.load_job(repo, job.id)
+    assert loaded is not None
+    assert loaded.state == jobs.QUEUED
+    assert state.futures == {}
+
+
+def test_run_once_default_spawn_starts_queued_job(repo: Path, jaunt_cfg: JauntConfig) -> None:
+    job = jobs.JobRecord.new(
+        module="app",
+        spec_digest="digest-v1",
+        base_commit=_git(repo, "rev-parse", "HEAD"),
+        branch="main",
+    )
+    jobs.save_job(repo, job)
+    state = daemon.DaemonState()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        daemon.run_once(repo, jaunt_cfg, state, FakeRunner(), pool)
+
+    loaded = jobs.load_job(repo, job.id)
+    assert loaded is not None
+    assert loaded.state == jobs.RUNNING
+    assert set(state.futures) == {job.id}
+
+
+def test_run_daemon_shutdown_collects_and_lands_spawned_job(repo: Path) -> None:
+    _spec_commit(repo)
+
+    daemon.run_daemon(repo, runner=FakeRunner(), iterations=1, sleep=lambda _: None)
+
+    landed = jobs.list_jobs(repo, states={jobs.LANDED})
+    assert len(landed) == 1 and landed[0].module == "app"
+    assert not jobs.list_jobs(repo, states={jobs.RUNNING})
+    assert (repo / "src" / "__generated__" / "app.py").exists()
+
+
 def test_landed_regen_commit_includes_jaunt_log(repo: Path, jaunt_cfg: JauntConfig) -> None:
     _opt_into_journal(repo)
     runner = FakeRunner()
