@@ -244,6 +244,18 @@ def _build_parser() -> argparse.ArgumentParser:
     daemon_status_p.add_argument("--root", default=".")
     daemon_status_p.add_argument("--json", action="store_true", dest="json_output")
 
+    jobs_p = subparsers.add_parser("jobs", help="Show daemon job records and pending staleness.")
+    jobs_p.add_argument("--root", default=".")
+    jobs_p.add_argument("--json", action="store_true", dest="json_output")
+    jobs_sub = jobs_p.add_subparsers(dest="jobs_command")
+    jobs_show_p = jobs_sub.add_parser("show", help="Show one job record.")
+    jobs_show_p.add_argument("job_id")
+    jobs_show_p.add_argument("--full", action="store_true", help="Include full local detail log.")
+    jobs_show_p.add_argument("--root", default=".")
+    jobs_retry_p = jobs_sub.add_parser("retry", help="Retry landing a parked job.")
+    jobs_retry_p.add_argument("job_id")
+    jobs_retry_p.add_argument("--root", default=".")
+
     instructions_p = subparsers.add_parser(
         "instructions",
         help="Print a project-aware agent primer for using Jaunt.",
@@ -664,6 +676,157 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         return EXIT_OK
     finally:
         daemon_mod.release_lock(root)
+
+
+def _jobs_would_rebuild(root: Path, args: argparse.Namespace) -> dict[str, str]:
+    from jaunt.config import load_config
+
+    cfg = load_config(root=root)
+    include_target_tests = _effective_include_target_tests(cfg, args)
+    build_instructions = _effective_build_instructions(cfg, args)
+    source_dirs = [root / sr for sr in cfg.paths.source_roots]
+    _prepend_sys_path([*source_dirs, root])
+    infer_default = bool(cfg.build.infer_deps)
+    mstatus = compute_magic_status(
+        root=root,
+        cfg=cfg,
+        source_dirs=source_dirs,
+        build_instructions=build_instructions,
+        include_target_tests=include_target_tests,
+        infer_deps=infer_default,
+        force=False,
+        target=(),
+    )
+    return {mod: mstatus.stale_changes.get(mod, "structural") for mod in sorted(mstatus.stale)}
+
+
+def _cmd_jobs_list(args: argparse.Namespace) -> int:
+    from dataclasses import asdict
+
+    from jaunt import jobs as jobs_mod
+
+    json_mode = _is_json_mode(args)
+    root = Path(args.root).resolve()
+    try:
+        records = jobs_mod.list_jobs(root)
+        would_rebuild = _jobs_would_rebuild(root, args)
+    except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError, KeyError) as e:
+        _print_error(e)
+        if json_mode:
+            _emit_json({"command": "jobs", "ok": False, "error": str(e)})
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    if json_mode:
+        _emit_json(
+            {
+                "command": "jobs",
+                "ok": True,
+                "jobs": [asdict(job) for job in records],
+                "would_rebuild": would_rebuild,
+            }
+        )
+        return EXIT_OK
+
+    if not records:
+        print("No job records.")
+    for job in records:
+        print(f"- {job.id} {job.module}: {job.state}")
+        if job.battery:
+            print(f"  battery {job.battery}")
+        if job.error:
+            print(f"  {job.error.splitlines()[0]}")
+    for module, change in would_rebuild.items():
+        print(f"would rebuild: {module} ({change})")
+    return EXIT_OK
+
+
+def _cmd_jobs_show(args: argparse.Namespace) -> int:
+    from dataclasses import asdict
+
+    from jaunt import jobs as jobs_mod
+
+    root = Path(args.root).resolve()
+    job = jobs_mod.load_job(root, args.job_id)
+    if job is None:
+        _eprint(f"error: job not found: {args.job_id}")
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    for key, value in asdict(job).items():
+        print(f"{key}: {value}")
+    if args.full and job.detail_log:
+        detail = Path(job.detail_log)
+        if detail.exists():
+            print(detail.read_text(encoding="utf-8"), end="")
+    return EXIT_OK
+
+
+def _cmd_jobs_retry(args: argparse.Namespace) -> int:
+    from jaunt import jobs as jobs_mod
+    from jaunt import landing
+
+    root = Path(args.root).resolve()
+    job = jobs_mod.load_job(root, args.job_id)
+    if job is None:
+        _eprint(f"error: job not found: {args.job_id}")
+        return EXIT_CONFIG_OR_DISCOVERY
+    if job.state != jobs_mod.PARKED:
+        _eprint(f"error: job {job.id} is {job.state}; only parked jobs can be retried")
+        return EXIT_CONFIG_OR_DISCOVERY
+    if not job.patch_paths:
+        _eprint(f"error: parked job {job.id} has no patch paths")
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    try:
+        patch_paths_raw = json.loads(job.patch_paths)
+    except json.JSONDecodeError:
+        _eprint(f"error: parked job {job.id} has invalid patch paths")
+        return EXIT_CONFIG_OR_DISCOVERY
+    if not isinstance(patch_paths_raw, list) or not all(
+        isinstance(path, str) for path in patch_paths_raw
+    ):
+        _eprint(f"error: parked job {job.id} has invalid patch paths")
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    patch_file = jobs_mod.jobs_dir(root) / f"{job.id}.patch"
+    if not patch_file.exists():
+        _eprint(f"error: parked job {job.id} is missing patch file")
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    patch = patch_file.read_text(encoding="utf-8")
+    try:
+        expected_head = landing.git_out(root, "rev-parse", "HEAD").strip()
+        sha = landing.land(
+            root,
+            patch,
+            patch_paths=patch_paths_raw,
+            message=landing.build_commit_message(
+                job.module,
+                "retry landing",
+                job.id,
+                job.spec_digest,
+            ),
+            expected_branch=job.branch,
+            expected_head=expected_head,
+        )
+    except landing.LandingError as e:
+        _eprint(str(e))
+        return EXIT_PYTEST_FAILURE
+
+    if not sha or sha == landing.HEAD_MOVED:
+        _eprint(f"parked: retry could not land job {job.id}")
+        return EXIT_PYTEST_FAILURE
+
+    jobs_mod.mark(root, job, jobs_mod.LANDED, landed_commit=sha)
+    print(sha)
+    return EXIT_OK
+
+
+def cmd_jobs(args: argparse.Namespace) -> int:
+    if args.jobs_command == "show":
+        return _cmd_jobs_show(args)
+    if args.jobs_command == "retry":
+        return _cmd_jobs_retry(args)
+    return _cmd_jobs_list(args)
 
 
 def _sync_generated_dir_env(cfg: JauntConfig) -> None:
@@ -2715,6 +2878,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_log(args)
     if args.command == "daemon":
         return cmd_daemon(args)
+    if args.command == "jobs":
+        return cmd_jobs(args)
     if args.command == "instructions":
         return cmd_instructions(args)
     if args.command == "tree":
