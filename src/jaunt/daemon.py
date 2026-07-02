@@ -10,6 +10,7 @@ import sys
 import time
 from concurrent.futures import Executor, Future
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
@@ -19,6 +20,13 @@ from jaunt import landing
 from jaunt.config import JauntConfig
 
 DISABLE_ENV = "JAUNT_DAEMON_DISABLE"
+_PROC_STARTTIME_INDEX = 19
+
+
+class LockVerdict(Enum):
+    OURS = "ours"
+    STALE = "stale"
+    UNVERIFIABLE = "unverifiable"
 
 
 @dataclass(frozen=True)
@@ -139,25 +147,62 @@ def _lock_path(root: Path) -> Path:
     return root / ".jaunt" / "daemon.pid"
 
 
-def _pid_is_jaunt(pid: int) -> bool:
+def _process_start_token(pid: int) -> str | None:
     try:
-        return b"jaunt" in Path(f"/proc/{pid}/cmdline").read_bytes()
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     except (FileNotFoundError, PermissionError, OSError):
-        return True
+        return None
+    try:
+        _, fields = stat.rsplit(")", 1)
+    except ValueError:
+        return None
+    parts = fields.strip().split()
+    if len(parts) <= _PROC_STARTTIME_INDEX:
+        return None
+    return parts[_PROC_STARTTIME_INDEX]
+
+
+def _lock_contents(path: Path) -> tuple[int | None, str | None, bool]:
+    try:
+        parts = path.read_text(encoding="utf-8").strip().split()
+    except (FileNotFoundError, PermissionError, OSError):
+        return None, None, False
+    if not parts:
+        return None, None, False
+    try:
+        pid = int(parts[0])
+    except ValueError:
+        return None, None, False
+    if pid <= 0:
+        return None, None, False
+    has_token = len(parts) > 1
+    return pid, parts[1] if has_token else None, has_token
+
+
+def lock_verdict(root: Path) -> tuple[LockVerdict, int | None]:
+    path = _lock_path(root)
+    pid, stored_token, has_token = _lock_contents(path)
+    if pid is None:
+        return LockVerdict.STALE, None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return LockVerdict.STALE, pid
+    except (PermissionError, OSError):
+        return LockVerdict.UNVERIFIABLE, pid
+    if not has_token:
+        return LockVerdict.UNVERIFIABLE, pid
+    current_token = _process_start_token(pid)
+    if current_token is None or stored_token is None:
+        return LockVerdict.UNVERIFIABLE, pid
+    if current_token != stored_token:
+        return LockVerdict.STALE, pid
+    return LockVerdict.OURS, pid
 
 
 def lock_pid(root: Path) -> int | None:
-    path = _lock_path(root)
-    if not path.exists():
-        return None
-    try:
-        pid = int(path.read_text(encoding="utf-8").strip())
-        os.kill(pid, 0)
-    except (ValueError, ProcessLookupError, PermissionError):
-        return None
-    if not _pid_is_jaunt(pid):
-        return None
-    return pid
+    verdict, pid = lock_verdict(root)
+    return pid if verdict is LockVerdict.OURS else None
 
 
 def acquire_lock(root: Path) -> bool:
@@ -168,12 +213,15 @@ def acquire_lock(root: Path) -> bool:
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
         except FileExistsError:
-            if lock_pid(root) is not None:
+            verdict, _ = lock_verdict(root)
+            if verdict is not LockVerdict.STALE:
                 return False
             path.unlink(missing_ok=True)
             continue
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(f"{os.getpid()}\n")
+            pid = os.getpid()
+            token = _process_start_token(pid)
+            f.write(f"{pid} {token}\n" if token is not None else f"{pid}\n")
         return True
     return False
 

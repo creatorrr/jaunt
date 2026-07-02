@@ -630,9 +630,12 @@ def cmd_daemon(args: argparse.Namespace) -> int:
 
     root = Path(args.root).resolve()
     if args.daemon_command == "stop":
-        pid = daemon_mod.lock_pid(root)
-        if pid is None:
+        verdict, pid = daemon_mod.lock_verdict(root)
+        if verdict is daemon_mod.LockVerdict.STALE or pid is None:
             print("Daemon not running.")
+            return EXIT_OK
+        if verdict is daemon_mod.LockVerdict.UNVERIFIABLE:
+            print(f"Daemon lockfile cannot be verified (pid {pid} alive); refusing to signal.")
             return EXIT_OK
         os.kill(pid, signal.SIGTERM)
         print(f"Sent SIGTERM to daemon (pid {pid}).")

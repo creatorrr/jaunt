@@ -98,6 +98,15 @@ def _spec_commit(repo: Path, body: str = '"""spec v2"""\n') -> None:
     _git(repo, "commit", "-m", "spec commit")
 
 
+def _proc_start_time(pid: int) -> str:
+    stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    _, fields = stat.rsplit(")", 1)
+    parts = fields.strip().split()
+    if len(parts) <= 19:
+        pytest.skip(f"/proc/{pid}/stat does not expose a start time")
+    return parts[19]
+
+
 def _install_failing_pre_commit(repo: Path) -> None:
     hook = repo / ".git" / "hooks" / "pre-commit"
     hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
@@ -126,6 +135,43 @@ def test_lock_acquire_release(tmp_path: Path) -> None:
     assert daemon.lock_pid(tmp_path) is None
 
 
+def test_lock_verdict_missing_lockfile_is_stale(tmp_path: Path) -> None:
+    assert daemon.lock_verdict(tmp_path) == (daemon.LockVerdict.STALE, None)
+
+
+def test_lock_verdict_dead_pid_with_start_token_is_stale(tmp_path: Path) -> None:
+    lock = tmp_path / ".jaunt" / "daemon.pid"
+    lock.parent.mkdir(parents=True)
+    lock.write_text("999999999 12345\n", encoding="utf-8")
+
+    assert daemon.lock_verdict(tmp_path) == (daemon.LockVerdict.STALE, 999999999)
+
+
+def test_lock_verdict_acquired_current_process_lock_is_ours(tmp_path: Path) -> None:
+    _proc_start_time(os.getpid())
+    assert daemon.acquire_lock(tmp_path) is True
+    try:
+        assert daemon.lock_verdict(tmp_path) == (daemon.LockVerdict.OURS, os.getpid())
+    finally:
+        daemon.release_lock(tmp_path)
+
+
+def test_lock_verdict_old_format_live_pid_is_unverifiable(tmp_path: Path) -> None:
+    lock = tmp_path / ".jaunt" / "daemon.pid"
+    lock.parent.mkdir(parents=True)
+    lock.write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+    assert daemon.lock_verdict(tmp_path) == (daemon.LockVerdict.UNVERIFIABLE, os.getpid())
+
+
+def test_lock_verdict_garbage_contents_are_stale(tmp_path: Path) -> None:
+    lock = tmp_path / ".jaunt" / "daemon.pid"
+    lock.parent.mkdir(parents=True)
+    lock.write_text("not-a-pid\n", encoding="utf-8")
+
+    assert daemon.lock_verdict(tmp_path) == (daemon.LockVerdict.STALE, None)
+
+
 def test_stale_lock_is_reclaimed(tmp_path: Path) -> None:
     lock = tmp_path / ".jaunt" / "daemon.pid"
     lock.parent.mkdir(parents=True)
@@ -136,30 +182,49 @@ def test_stale_lock_is_reclaimed(tmp_path: Path) -> None:
     daemon.release_lock(tmp_path)
 
 
-def test_lock_pid_ignores_live_non_jaunt_pid(tmp_path: Path, monkeypatch) -> None:
+def test_lock_with_mismatched_start_time_is_stale(tmp_path: Path, capsys, monkeypatch) -> None:
     lock = tmp_path / ".jaunt" / "daemon.pid"
     lock.parent.mkdir(parents=True)
-    lock.write_text(f"{os.getpid()}\n", encoding="utf-8")
-    monkeypatch.setattr(daemon, "_pid_is_jaunt", lambda pid: False)
+    lock.write_text(f"{os.getpid()} 0\n", encoding="utf-8")
+    real_kill = os.kill
+    killed: list[tuple[int, int]] = []
 
     assert daemon.lock_pid(tmp_path) is None
+    assert daemon.acquire_lock(tmp_path) is True
+    daemon.release_lock(tmp_path)
+
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text(f"{os.getpid()} 0\n", encoding="utf-8")
+
+    def kill_spy(pid: int, sig: int) -> None:
+        if sig == 0:
+            real_kill(pid, sig)
+            return
+        killed.append((pid, sig))
+        pytest.fail(f"attempted to signal stale pid {pid}")
+
+    monkeypatch.setattr(os, "kill", kill_spy)
+
+    rc = cli.main(["daemon", "stop", "--root", str(tmp_path)])
+
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "Daemon not running."
+    assert killed == []
 
 
-def test_lock_pid_accepts_live_jaunt_pid(tmp_path: Path, monkeypatch) -> None:
+def test_lock_pid_accepts_matching_start_time(tmp_path: Path) -> None:
     lock = tmp_path / ".jaunt" / "daemon.pid"
     lock.parent.mkdir(parents=True)
-    lock.write_text(f"{os.getpid()}\n", encoding="utf-8")
-    monkeypatch.setattr(daemon, "_pid_is_jaunt", lambda pid: True)
+    lock.write_text(f"{os.getpid()} {_proc_start_time(os.getpid())}\n", encoding="utf-8")
 
     assert daemon.lock_pid(tmp_path) == os.getpid()
 
 
-def test_daemon_stop_does_not_kill_live_non_jaunt_pid(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_old_format_live_pid_is_unverifiable(tmp_path: Path, capsys, monkeypatch) -> None:
     lock = tmp_path / ".jaunt" / "daemon.pid"
     lock.parent.mkdir(parents=True)
     foreign_pid = os.getpid()
     lock.write_text(f"{foreign_pid}\n", encoding="utf-8")
-    monkeypatch.setattr(daemon, "_pid_is_jaunt", lambda pid: False)
     real_kill = os.kill
     killed: list[tuple[int, int]] = []
 
@@ -175,8 +240,11 @@ def test_daemon_stop_does_not_kill_live_non_jaunt_pid(tmp_path: Path, capsys, mo
     rc = cli.main(["daemon", "stop", "--root", str(tmp_path)])
 
     assert rc == 0
-    assert capsys.readouterr().out.strip() == "Daemon not running."
+    assert capsys.readouterr().out.strip() == (
+        f"Daemon lockfile cannot be verified (pid {foreign_pid} alive); refusing to signal."
+    )
     assert killed == []
+    assert daemon.acquire_lock(tmp_path) is False
 
 
 def test_daemon_status_json_when_stopped(tmp_path: Path, capsys) -> None:
