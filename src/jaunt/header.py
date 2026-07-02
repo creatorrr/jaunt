@@ -21,6 +21,7 @@ def format_contract_battery_header(
     body_digest: str,
     strength: str,
     tool_version: str,
+    strength_excluded: str = "0",
 ) -> str:
     """Format the header for a committed contract test battery.
 
@@ -37,8 +38,10 @@ def format_contract_battery_header(
         f"# jaunt:signature={signature}",
         f"# jaunt:body-digest={body}",
         f"# jaunt:strength={strength}",
-        f"# jaunt:tool-version={tool_version}",
     ]
+    if strength_excluded != "0":
+        lines.append(f"# jaunt:strength-excluded={strength_excluded}")
+    lines.append(f"# jaunt:tool-version={tool_version}")
     return "\n".join(lines) + "\n"
 
 

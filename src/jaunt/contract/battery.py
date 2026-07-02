@@ -41,6 +41,7 @@ def _header_text(header_fields: dict[str, str]) -> str:
         body_digest=header_fields["body_digest"],
         strength=header_fields["strength"],
         tool_version=header_fields["tool_version"],
+        strength_excluded=header_fields.get("strength_excluded", "0"),
     )
 
 

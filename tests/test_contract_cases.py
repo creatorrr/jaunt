@@ -220,3 +220,87 @@ class TestBatteryExtraImports:
             extra_imports=(),
         )
         assert without == with_empty
+
+
+class TestEvaluateCases:
+    def test_pure_example_pass_and_fail(self) -> None:
+        from jaunt.contract.derive import evaluate_cases
+
+        blocks = _parse("Examples:\n    - f(1, 2) == 3\n    - f(1, 2) == 4\n")
+        failures = evaluate_cases(blocks, namespace={"f": lambda a, b: a + b})
+        assert len(failures) == 1
+        assert "expected 4" in failures[0]
+
+    def test_async_case_run_via_asyncio(self) -> None:
+        from jaunt.contract.derive import evaluate_cases
+
+        async def f(x):
+            return x + 1
+
+        blocks = _parse("Examples:\n    - f(1) == 2\n", async_map={"f": True})
+        assert evaluate_cases(blocks, namespace={"f": f}) == []
+
+    def test_fixture_cases_are_skipped(self) -> None:
+        from jaunt.contract.derive import evaluate_cases
+
+        doc = "Examples:\n    - f(db) == 1\n\nFixtures: db\n"
+        assert evaluate_cases(_parse(doc), namespace={"f": lambda db: 1}) == []
+
+    def test_raises_case(self) -> None:
+        from jaunt.contract.derive import evaluate_cases
+
+        def f(x):
+            if x == "":
+                raise ValueError("empty")
+            return x
+
+        blocks = _parse("Raises:\n    - f('') raises ValueError\n")
+        assert evaluate_cases(blocks, namespace={"f": f}) == []
+
+    def test_class_constructor_case(self) -> None:
+        from jaunt.contract.derive import evaluate_cases
+
+        class Counter:
+            def __init__(self, start=0):
+                self.n = start
+
+            def increment(self, by):
+                self.n += by
+                return self.n
+
+        blocks = _parse(
+            "Examples:\n    - Counter(start=10).increment(5) == 15\n",
+            target="Counter",
+            async_map={"Counter.increment": False},
+        )
+        assert evaluate_cases(blocks, namespace={"Counter": Counter}) == []
+
+
+class TestCaseStrength:
+    def test_strength_counts_and_exclusions(self) -> None:
+        from jaunt.contract.strength import compute_case_strength
+
+        src = "def f(a, b):\n    return a + b\n"
+        doc = "Examples:\n    - f(1, 2) == 3\n    - f(db, 1) == 2\n\nFixtures: db\n"
+        blocks = _parse(doc)
+        killed, applicable, excluded = compute_case_strength(src, "f", blocks, {})
+        assert excluded == 1
+        assert applicable > 0
+        assert killed > 0
+
+
+class TestHeaderStrengthExcluded:
+    def test_field_omitted_when_zero(self) -> None:
+        from jaunt.header import format_contract_battery_header
+
+        base = dict(
+            derived_from="m:f",
+            prose_digest="0" * 64,
+            signature="sha256:" + "0" * 64,
+            body_digest="0" * 64,
+            strength="1/2",
+            tool_version="t",
+        )
+        assert "strength-excluded" not in format_contract_battery_header(**base)
+        out = format_contract_battery_header(**base, strength_excluded="2")
+        assert "# jaunt:strength-excluded=2" in out

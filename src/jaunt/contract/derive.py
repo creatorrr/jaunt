@@ -321,3 +321,44 @@ def derive_case_regions(
             )
         )
     return regions
+
+
+def evaluate_cases(blocks: CaseBlocks, *, namespace: dict[str, object]) -> list[str]:
+    """Run pure derived cases in-process. Fixture cases are skipped (validated
+    by the battery pytest run at reconcile time). Async calls are driven with
+    asyncio.run."""
+
+    import asyncio
+    import inspect
+
+    def _run(expr: str) -> object:
+        got = eval(expr, dict(namespace))  # noqa: S307 - exprs come from the contract docstring
+        if inspect.iscoroutine(got):
+            got = asyncio.run(got)
+        return got
+
+    failures: list[str] = []
+    for case in blocks.examples:
+        if case.fixtures:
+            continue
+        try:
+            got = _run(case.call_expr)
+            want = eval(case.expected_expr or "None", dict(namespace))  # noqa: S307
+            if got != want:
+                failures.append(f"example {case.source_line} -> {got!r}, expected {want!r}")
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"example {case.source_line} raised {type(exc).__name__}: {exc}")
+    for case in blocks.raises:
+        if case.fixtures:
+            continue
+        exc_type = _resolve_exc(case.exc_name or "Exception", namespace)
+        try:
+            _run(case.call_expr)
+            failures.append(f"raises {case.source_line}: expected {case.exc_name}, none raised")
+        except exc_type:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            failures.append(
+                f"raises {case.source_line}: expected {case.exc_name}, got {type(exc).__name__}"
+            )
+    return failures
