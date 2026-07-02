@@ -570,6 +570,17 @@ def run_once(
                     if existing.spec_digest == digest:
                         continue
                     jobs_mod.mark(root, existing, jobs_mod.SUPERSEDED)
+                    journal_mod.append_events(
+                        root,
+                        [
+                            journal_mod.JournalEvent(
+                                "job-supersede",
+                                existing.module,
+                                "active job stale; spec changed",
+                                existing.id,
+                            )
+                        ],
+                    )
                     state.futures.pop(existing.id, None)
                     state.pending.pop(existing.id, None)
                 parked = jobs_mod.parked_for_module(root, module)
@@ -598,6 +609,17 @@ def run_once(
             for job in jobs_mod.list_jobs(root, states=jobs_mod.ACTIVE_STATES):
                 if job.module not in stale:
                     jobs_mod.mark(root, job, jobs_mod.SUPERSEDED)
+                    journal_mod.append_events(
+                        root,
+                        [
+                            journal_mod.JournalEvent(
+                                "job-supersede",
+                                job.module,
+                                "module no longer stale; spec removed",
+                                job.id,
+                            )
+                        ],
+                    )
                     state.futures.pop(job.id, None)
                     state.pending.pop(job.id, None)
 

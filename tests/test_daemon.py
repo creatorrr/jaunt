@@ -654,6 +654,37 @@ def test_supersede_on_newer_spec_commit(repo: Path, jaunt_cfg: JauntConfig) -> N
     assert loaded.state == jobs.SUPERSEDED
     landed = jobs.list_jobs(repo, states={jobs.LANDED})
     assert landed and landed[0].spec_digest == "digest-v2"
+    assert not (repo / journal.JOURNAL_FILE).exists()
+
+
+def test_active_supersede_on_newer_spec_commit_journals(repo: Path, jaunt_cfg: JauntConfig) -> None:
+    _opt_into_journal(repo)
+    event = threading.Event()
+
+    class BlockingRunner(FakeRunner):
+        def build(self, worktree: Path, module: str) -> daemon.BuildOutcome:
+            event.wait(timeout=10)
+            return super().build(worktree, module)
+
+    runner = BlockingRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        _spec_commit(repo)
+        daemon.run_once(repo, jaunt_cfg, state, runner, pool)
+        first = jobs.list_jobs(repo, states={jobs.RUNNING})[0]
+
+        runner.digest = "digest-v2"
+        _spec_commit(repo, '"""spec v3"""\n')
+        daemon.run_once(repo, jaunt_cfg, state, runner, pool)
+        event.set()
+        _cycle(repo, jaunt_cfg, state, runner, pool)
+
+    supersede_lines = [
+        line for line in journal.read_lines(repo, limit=0) if "job-supersede" in line
+    ]
+    assert len(supersede_lines) == 1
+    assert "app" in supersede_lines[0]
+    assert first.id in supersede_lines[0]
 
 
 def test_probe_failure_is_loud_and_non_destructive(repo: Path, jaunt_cfg: JauntConfig) -> None:
@@ -850,7 +881,41 @@ def test_supersede_when_module_vanishes_from_probe(repo: Path, jaunt_cfg: JauntC
     assert superseded and superseded[0].module == "app"
     assert not jobs.list_jobs(repo, states={jobs.LANDED})
     assert not (repo / "src" / "__generated__" / "app.py").exists()
+    assert not (repo / journal.JOURNAL_FILE).exists()
     assert "regen" not in _git(repo, "log", "-1", "--format=%s")
+
+
+def test_vanished_module_supersede_journals(repo: Path, jaunt_cfg: JauntConfig) -> None:
+    _opt_into_journal(repo)
+
+    class VanishingRunner(FakeRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.vanished = False
+
+        def probe(self, worktree: Path) -> tuple[dict[str, str], dict[str, str]]:
+            if self.vanished:
+                return {}, {}
+            return super().probe(worktree)
+
+    runner = VanishingRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        _spec_commit(repo)
+        daemon.run_once(repo, jaunt_cfg, state, runner, pool)
+        daemon.drain(state)
+        first = jobs.list_jobs(repo, states={jobs.RUNNING})[0]
+        runner.vanished = True
+        _spec_commit(repo, body="# spec deleted\n")
+        daemon.run_once(repo, jaunt_cfg, state, runner, pool)
+        daemon.run_once(repo, jaunt_cfg, state, runner, pool)
+
+    supersede_lines = [
+        line for line in journal.read_lines(repo, limit=0) if "job-supersede" in line
+    ]
+    assert len(supersede_lines) == 1
+    assert "app" in supersede_lines[0]
+    assert first.id in supersede_lines[0]
 
 
 def test_jaunt_dir_ignored_creates_missing_dir(repo: Path) -> None:
