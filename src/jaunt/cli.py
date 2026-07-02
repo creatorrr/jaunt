@@ -972,8 +972,17 @@ def _cmd_jobs_wait(
 ) -> int:
     from jaunt import jobs as jobs_mod
 
+    from jaunt.config import find_project_root
+
     json_mode = _is_json_mode(args)
-    root = Path(args.root).resolve()
+    raw_root = getattr(args, "root", None)
+    # The jobs parser defaults --root to "."; discover the enclosing project
+    # like build/test do so `jobs wait` works from a subdirectory (and reads
+    # the right [daemon] poll_interval for the settle default).
+    if raw_root in (None, "."):
+        root = find_project_root(Path.cwd())
+    else:
+        root = Path(raw_root).resolve()
     target_id = getattr(args, "job_id", None)
     printer = _WaitPrinter(_resolve_progress_mode(args, json_mode=json_mode))
     watched: dict[str, JobRecord] = {}
@@ -1066,11 +1075,11 @@ def _cmd_jobs_wait(
             records = jobs_mod.list_jobs(root)
             records_by_id = {job.id: job for job in records}
             active = [job for job in records if job.state in jobs_mod.ACTIVE_STATES]
-            recent = [
-                job
-                for job in records
-                if job.created >= wait_started_at or job.updated >= wait_started_at
-            ]
+            # Look back one settle window: a job the daemon finished in the
+            # instant before wait started (fast failure right after a commit)
+            # still belongs to this wait.
+            cutoff = wait_started_at - settle
+            recent = [job for job in records if job.created >= cutoff or job.updated >= cutoff]
             for job in active:
                 remember(job)
             for job in recent:

@@ -911,10 +911,25 @@ def test_job_heartbeat_throttles_and_last_line_wins(
     heartbeat("last")
     heartbeat.flush()
 
-    assert saves == [(1.0, "third"), (2.0, "last")]
+    assert saves == [(0.0, "first"), (1.0, "third"), (2.0, "last")]
     loaded = jobs.load_job(tmp_path, job.id)
     assert loaded is not None
     assert loaded.phase == "last"
+
+
+def test_job_heartbeat_first_line_persists_immediately(tmp_path: Path) -> None:
+    # The opening "generating" line may be the only stderr output for the
+    # entire model call; it must not sit buffered until flush.
+    job = jobs.JobRecord.new(module="app", spec_digest="d", base_commit="c", branch="main")
+    jobs.save_job(tmp_path, job)
+    running = jobs.mark(tmp_path, job, jobs.RUNNING)
+
+    heartbeat = daemon._JobHeartbeat(tmp_path, running, clock=lambda: 0.0, sleep=lambda _s: None)
+    heartbeat("[build] app: generating")
+
+    loaded = jobs.load_job(tmp_path, job.id)
+    assert loaded is not None
+    assert loaded.phase == "[build] app: generating"
 
 
 def test_job_heartbeat_save_failure_is_best_effort(

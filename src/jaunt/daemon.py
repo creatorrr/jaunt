@@ -206,7 +206,9 @@ class _JobHeartbeat:
         self.interval = interval
         self._clock = clock
         self._sleep = sleep
-        self._next_save = clock() + interval
+        # First line persists immediately: the opening "generating" heartbeat
+        # may be the only stderr output for the entire model call.
+        self._next_save = clock()
         self._has_pending = False
         self._pending = ""
         self._has_saved = False

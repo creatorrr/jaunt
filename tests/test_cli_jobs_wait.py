@@ -362,3 +362,45 @@ def test_jobs_wait_streams_plain_lines_on_state_and_phase_change(
     assert f"[wait] {job.id} app: queued" in err
     assert f"[wait] {job.id} app: running — generating" in err
     assert f"[wait] {job.id} app: landed" in err
+
+
+def test_jobs_wait_includes_terminal_job_within_settle_lookback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A job the daemon failed in the instant before `wait` started (fast
+    # failure right after a commit) must still count against this wait.
+    _write_config(tmp_path, poll_interval=1.0)  # settle default = 2.0s
+    _daemon_running(monkeypatch, True)
+    job = _new_job(tmp_path)
+    jobs.mark(tmp_path, job, jobs.FAILED, error="boom")  # updated ~now, before wait starts
+
+    rc = _run_wait(tmp_path, "--json", "--progress", "none")
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == jaunt.cli.EXIT_PYTEST_FAILURE
+    assert payload["ok"] is False
+    assert payload["jobs"][0]["state"] == jobs.FAILED
+    assert payload["jobs"][0]["error"] == "boom"
+
+
+def test_jobs_wait_discovers_project_root_from_subdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Without --root, wait must find the enclosing jaunt.toml like build/test
+    # do, not poll <subdir>/.jaunt/jobs.
+    _write_config(tmp_path)
+    _daemon_running(monkeypatch, False)
+    _new_job(tmp_path)  # active record at the project root
+    subdir = tmp_path / "src" / "pkg"
+    subdir.mkdir(parents=True)
+    monkeypatch.chdir(subdir)
+
+    args = jaunt.cli.parse_args(["jobs", "wait", "--json"])
+    fake = FakeClock()
+    rc = jaunt.cli._cmd_jobs_wait(args, clock=fake, sleep=fake.sleep)
+
+    captured = capsys.readouterr()
+    # Dead daemon + the root's active record -> "died mid-job" (exit 2); a
+    # wait that resolved the subdir instead would see no jobs and exit 0.
+    assert rc == jaunt.cli.EXIT_CONFIG_OR_DISCOVERY
+    assert "daemon died mid-job" in captured.err
