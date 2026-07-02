@@ -164,12 +164,95 @@ def test_lock_verdict_old_format_live_pid_is_unverifiable(tmp_path: Path) -> Non
     assert daemon.lock_verdict(tmp_path) == (daemon.LockVerdict.UNVERIFIABLE, os.getpid())
 
 
-def test_lock_verdict_garbage_contents_are_stale(tmp_path: Path) -> None:
+def test_lock_verdict_garbage_contents_are_unverifiable(tmp_path: Path) -> None:
     lock = tmp_path / ".jaunt" / "daemon.pid"
     lock.parent.mkdir(parents=True)
     lock.write_text("not-a-pid\n", encoding="utf-8")
 
-    assert daemon.lock_verdict(tmp_path) == (daemon.LockVerdict.STALE, None)
+    assert daemon.lock_verdict(tmp_path) == (daemon.LockVerdict.UNVERIFIABLE, None)
+    assert daemon.acquire_lock(tmp_path) is False
+
+
+def test_acquire_lock_does_not_reclaim_empty_lockfile(tmp_path: Path) -> None:
+    lock = tmp_path / ".jaunt" / "daemon.pid"
+    lock.parent.mkdir(parents=True)
+    lock.write_text("", encoding="utf-8")
+
+    assert daemon.acquire_lock(tmp_path) is False
+    assert lock.exists()
+    assert lock.read_text(encoding="utf-8") == ""
+
+
+def test_lock_verdict_empty_lockfile_is_unverifiable(tmp_path: Path) -> None:
+    lock = tmp_path / ".jaunt" / "daemon.pid"
+    lock.parent.mkdir(parents=True)
+    lock.write_text("", encoding="utf-8")
+
+    assert daemon.lock_verdict(tmp_path) == (daemon.LockVerdict.UNVERIFIABLE, None)
+
+
+def test_acquire_lock_writes_complete_parseable_lockfile(tmp_path: Path) -> None:
+    assert daemon.acquire_lock(tmp_path) is True
+    try:
+        contents = (tmp_path / ".jaunt" / "daemon.pid").read_text(encoding="utf-8")
+        parts = contents.strip().split()
+        assert contents
+        assert parts[0] == str(os.getpid())
+        if Path(f"/proc/{os.getpid()}/stat").exists():
+            assert len(parts) > 1
+    finally:
+        daemon.release_lock(tmp_path)
+
+
+def test_acquire_lock_reclaims_genuinely_stale_lockfile(tmp_path: Path) -> None:
+    lock = tmp_path / ".jaunt" / "daemon.pid"
+    lock.parent.mkdir(parents=True)
+    lock.write_text("999999999 12345\n", encoding="utf-8")
+
+    assert daemon.acquire_lock(tmp_path) is True
+    try:
+        assert daemon.lock_pid(tmp_path) == os.getpid()
+    finally:
+        daemon.release_lock(tmp_path)
+
+
+def test_acquire_lock_leaves_no_temp_files(tmp_path: Path) -> None:
+    jaunt_dir = tmp_path / ".jaunt"
+    jaunt_dir.mkdir(parents=True)
+
+    assert daemon.acquire_lock(tmp_path) is True
+    assert sorted(path.name for path in jaunt_dir.iterdir()) == ["daemon.pid"]
+    assert daemon.acquire_lock(tmp_path) is False
+    assert sorted(path.name for path in jaunt_dir.iterdir()) == ["daemon.pid"]
+    daemon.release_lock(tmp_path)
+
+    jaunt_dir.mkdir(parents=True, exist_ok=True)
+    lock = jaunt_dir / "daemon.pid"
+    lock.write_text("", encoding="utf-8")
+    before = sorted(path.name for path in jaunt_dir.iterdir())
+    assert daemon.acquire_lock(tmp_path) is False
+    assert sorted(path.name for path in jaunt_dir.iterdir()) == before
+
+
+def test_daemon_stop_empty_lockfile_refuses_to_signal(tmp_path: Path, capsys, monkeypatch) -> None:
+    lock = tmp_path / ".jaunt" / "daemon.pid"
+    lock.parent.mkdir(parents=True)
+    lock.write_text("", encoding="utf-8")
+    killed: list[tuple[int, int]] = []
+
+    def kill_spy(pid: int, sig: int) -> None:
+        killed.append((pid, sig))
+        pytest.fail(f"attempted to signal pid {pid}")
+
+    monkeypatch.setattr(os, "kill", kill_spy)
+
+    rc = cli.main(["daemon", "stop", "--root", str(tmp_path)])
+
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == (
+        "Daemon lockfile cannot be verified; refusing to signal."
+    )
+    assert killed == []
 
 
 def test_stale_lock_is_reclaimed(tmp_path: Path) -> None:
