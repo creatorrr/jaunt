@@ -25,12 +25,12 @@ friction of expressing it) and warned there is no silver bullet for the former.
 Coding agents are the largest accidental-complexity reducer we have ever shipped:
 they make the *typing* nearly free. What they cannot do is make the *deciding* free.
 
-So the bill moves — and the 2025–26 data is *consistent with* that shift, not proof
+So the bill moves, and the 2025–26 data is *consistent with* that shift, not proof
 of it. Faros telemetry reports teams adopting agents merge far more changes (~98% more
-PRs) while review time rises ~91% — but the same report finds org-level outcomes flat,
+PRs) while review time rises ~91%, but the same report finds org-level outcomes flat,
 and the 2025 DORA report frames AI as an *amplifier*: throughput and product
 performance up, delivery stability down. A controlled trial (METR) found experienced
-OSS developers ~19% *slower* with AI while *feeling* ~20% faster — though METR's own
+OSS developers ~19% *slower* with AI while *feeling* ~20% faster, though METR's own
 Feb-2026 update warns that result is biased by task/developer opt-out and may now
 *understate* speedup, so treat it as an early-2025 mature-codebase finding, not a
 standing verdict. Read together, the honest claim is narrow: generation got cheap,
@@ -64,9 +64,9 @@ independence — is now the second condition of L4.)
 | # | Law | One line | Small example |
 |---|---|---|---|
 | **L1** | Value migrates to spec + verification | The two things worth scarce attention when typing is free. | A failing test handed to the agent does more than a paragraph describing the bug. |
-| **L4** | The model proposes; a verdict counts only if it is deterministic *and* independent of what it judges | A wrong model verdict should cost money, never correctness — and an oracle the implementer can see is one it games. | `jaunt check` reruns committed tests with no API key; the implementer gets pass/fail, never `expected 42, got 41`. |
+| **L4** | The model proposes; a verdict counts only if it is deterministic *and* independent of what it judges | A wrong model verdict should cost money, never correctness, and an oracle the implementer can see is one it games. | `jaunt check` reruns committed tests with no API key; the implementer gets pass/fail, never `expected 42, got 41`. |
 | **L6** | Architecture is an amplifier | Bounded units multiply quality; tangle multiplies *confident* mistakes. | Ten focused files let the agent read only what it edits; one 2k-line module forces guessing. |
-| **L8** | The human is the terminal oracle | Verification chains end in a person: the spec itself has no external check, so the human directs intent, owns the merge, and is accountable for what ships — and taste is produced by practice, so maintain it like the asset it is. | You approve the contract and the diff's intent; you don't hand-type the body. |
+| **L8** | The human is the terminal oracle | Verification chains end in a person: the spec itself has no external check, so the human directs intent, owns the merge, and is accountable for what ships. Taste is produced by practice, so maintain it like the asset it is. | You approve the contract and the diff's intent; you don't hand-type the body. |
 | **L12** | Treat everything the model reads and pulls as untrusted | Prompt injection and slopsquatting are input, not edge cases. | The build fails if generated code imports a package absent from your declared deps. |
 | **L13** | Make engineering compound | Each task should leave the system better at the next one. | Every fixed bug becomes a battery case, so it can't silently regress. |
 
@@ -108,33 +108,33 @@ signal it can run itself: a test, a build, a type-check, a screenshot diff. Once
 a signal exists, the agent iterates to green without you in the loop for every step.
 Everything else in agentic coding is in service of making that loop tight and
 trustworthy.
-**Tension:** a check the agent can run is also a check the agent can *game* —
+**Tension:** a check the agent can run is also a check the agent can *game*:
 retrofitted tests just bless whatever the agent already did. The signal is only as
 honest as it was before the agent saw the code.
 
 ### 1.2 Tests are the spec; "first run the tests." (L1, L4)
 Simon Willison's four-word prompt does three things at once: forces the agent to
 discover the project, signals its shape, and puts it in a verification mindset. When
-writing code is cheap, the test suite is where trust is actually stored — it is the
+writing code is cheap, the test suite is where trust is actually stored: it is the
 executable part of the specification.
 **Tension:** example-based tests under-constrain (many wrong programs pass);
 property-based tests constrain far more but cover narrower surface and cost more to
 write. Most teams sit in the gap and call it covered.
 
 ### 1.3 Treat context as a curated budget; load it just-in-time. (L6-adjacent)
-Model performance degrades as the window fills — every token competes for attention.
+Model performance degrades as the window fills; every token competes for attention.
 Anthropic's guidance is to find "the smallest set of high-signal tokens," hand the
 agent lightweight identifiers (paths, queries) and let it pull detail at runtime
 rather than pre-loading everything. Keep the always-on instruction file (CLAUDE.md /
 AGENTS.md) small and near-universal; bloat there is paid every turn.
-**Tension:** too little context is the *other* failure mode — at mabl, context drift
+**Tension:** too little context is the *other* failure mode: at mabl, context drift
 caused ~40% of task failures until per-repository context docs dropped it below 5%.
 The skill is curation, not minimization.
 
 ### 1.4 Prefer deterministic enforcement over advisory prose. (L4)
 A `PostToolUse` hook that runs the tests after every edit *guarantees* the action; a
 sentence in CLAUDE.md only *suggests* it. Encode invariants where they fire
-mechanically — hooks, the build graph, linters, type checks — not in prose the model
+mechanically (hooks, the build graph, linters, type checks), not in prose the model
 may or may not honor under context pressure.
 **Tension:** mechanical enforcement is rigid by construction; over-constrain and you
 spend your day fighting guardrails on the legitimate exceptions they cannot see.
@@ -143,33 +143,33 @@ spend your day fighting guardrails on the legitimate exceptions they cannot see.
 Version-controlling the code while discarding the spec that produced it is backwards:
 the spec carries the *why* that raw code throws away, and that "why" is what rots into
 tech debt. Keep a maintained specification (with canonical examples that become
-tests). Böckeler/Fowler's taxonomy names the levels — **spec-first** (spec kicks off,
+tests). Böckeler/Fowler's taxonomy names the levels: **spec-first** (spec kicks off,
 then discarded), **spec-anchored** (spec maintained beside editable code),
 **spec-as-source** (code is regenerated, `DO NOT EDIT`). A spec is also its **negative
 space**: the non-goals, forbidden dependencies, performance bounds, and the things the
 agent must *ask about* rather than infer. Agents confidently fill silence (Part 3);
 the unsaid is where they go wrong.
 **Tension:** the staleness fork is real and unsolved. Spec-first lets the spec rot
-into stale docs — the exact problem SDD claims to fix. Spec-as-source forbids
+into stale docs, the exact problem SDD claims to fix. Spec-as-source forbids
 hand-editing code, which many teams reject outright. And L2's "code is a projection" is
-literally true only in spec-as-source systems — in normal software, production code,
+literally true only in spec-as-source systems; in normal software, production code,
 schema migrations, data, telemetry, and incident history are each canonical in their
 own right. The durable rule is to keep intent maintained *alongside* code, not to
 demote code everywhere.
 
 ### 1.6 Force intent explicit before code: Spec → Plan → Tasks → Implement. (L1)
 The structured progression (GitHub Spec Kit; Kiro's requirements/design/tasks) exists
-to catch ambiguity when it is cheap — on the page, before it is multiplied across an
+to catch ambiguity when it is cheap, on the page, before it is multiplied across an
 implementation. Phase gates are where a human's judgment is highest-leverage.
 **Tension:** push specificity far enough and the spec approaches the complexity of the
-code it replaces — "the return of waterfall." A spec precise enough to regenerate from
+code it replaces: "the return of waterfall." A spec precise enough to regenerate from
 reliably may cost as much as just writing it.
 
 ### 1.7 Architect for AI-readability: small, cohesive, vertical slices. (L6)
 Bounded modules with clear interfaces let an agent reason depth-first without loading
 the whole repo, and they let concurrent agents work with fewer merge conflicts. The
 same property that makes code testable makes it agent-legible. When a file grows large,
-that is the signal it is doing too much — for the agent *and* for you.
+that is the signal it is doing too much, for the agent *and* for you.
 **Tension:** micro-modularity has its own navigation cost; fragment too far and the
 agent burns its context budget just stitching the pieces back together.
 
@@ -184,13 +184,13 @@ and emergent-failure complexity. A longer loop can just lengthen the review queu
 ### 1.9 The human is the terminal oracle; cultivate taste, own the merge. (L8)
 The agent writes; the human decides what to trust and owns the integration. The deeper
 reason this is a *law* and not an efficiency preference: every verification chain ends
-in a person. L4 demands each verdict have an oracle independent of its author — the spec
-for code, the battery for behavior — but the spec *itself* has no external check. The
+in a person. L4 demands each verdict have an oracle independent of its author (the spec
+for code, the battery for behavior), but the spec *itself* has no external check. The
 chain has to terminate somewhere, and it terminates in human intent; the human gate is
 the one verifier that is neither deterministic nor independent, and it is the carve-out
 where L4's conditions cannot be met. That is also why accountability stays human even
 where AI review is strong: someone must be answerable for what ships. The scarce skill
-shifts from authoring to judgment — architectural consistency, knowing which
+shifts from authoring to judgment: architectural consistency, knowing which
 plausible-looking diff is actually right. "The loop automates the typing, not the
 judgment." And judgment has a supply chain: taste is produced by practice, so a workflow
 that removes all authorship must find another way to grow its reviewers.
@@ -203,10 +203,10 @@ METR's 2025 RCT is the cautionary datum: experienced developers felt 20% faster 
 were 19% slower. The perception gap means vibes are not evidence. Measure cycle time,
 defect rates, and trust-per-change, not tokens emitted or lines produced. Note too that
 *which work you attempt* shifts: METR reported 30–50% of developers withheld tasks they
-didn't want randomized away from AI — so adoption changes the task mix, not just the
+didn't want randomized away from AI, so adoption changes the task mix, not just the
 speed on a fixed task.
-**Tension:** the gains are real somewhere — greenfield work and less-experienced
-developers show clear lift; the mature-codebase case is the contested one — and the
+**Tension:** the gains are real somewhere: greenfield work and less-experienced
+developers show clear lift; the mature-codebase case is the contested one, and the
 headline number is fragile. METR's own Feb-2026 update says its measurement is biased
 by opt-out and may now *understate* speedup. Believe the trend in your own instrument,
 not any single study's number.
@@ -216,15 +216,15 @@ Give each unit one job and a small, named interface, so an agent can change it w
 loading its neighbors. The deeper rule underneath is **minimize behavior-at-a-distance:**
 an agent, like a reviewer, predicts what code does by reading it, so anything that smears
 behavior across files it never opened is where confident mistakes are born. The variable
-that actually matters is **static discoverability and bounded dispatch** — "how many
+that actually matters is **static discoverability and bounded dispatch**: "how many
 files must I open before I can predict what this change does?"
 
-That variable, not ideology, settles the inheritance-vs-composition question — and it
+That variable, not ideology, settles the inheritance-vs-composition question, and it
 indicts both sides. A deep mixin/MRO tower scatters a leaf's behavior up an ancestor
 chain the agent must load in full, and editing a base silently breaks subclasses it never
 saw; but service locators, dynamic DI containers, plugin registries, and runtime
-monkeypatching hide behavior somewhere else just as thoroughly. Progressive disclosure —
-read a high abstraction, descend only when needed — genuinely suits an agent, and a
+monkeypatching hide behavior somewhere else just as thoroughly. Progressive disclosure
+(read a high abstraction, descend only when needed) genuinely suits an agent, and a
 *shallow, honest "is-a"* hierarchy can deliver it better than a sprawling
 dependency-injection graph; but that benefit comes from locality, not from inheritance as
 a mechanism, so it does not rehabilitate inheritance broadly. The default: composition
@@ -234,10 +234,10 @@ inheritance for stable framework contracts or genuine taxonomies.
 The single sharpest offender is **closure-captured local state and implicit
 dependencies**: variables a function closes over, mutable state captured in a callback, a
 dependency resolved at runtime. It is worse than either deep inheritance or explicit
-composition because there is no declared seam to read at all — invisible at the call
+composition because there is no declared seam to read at all: invisible at the call
 site, usually unannotated. Annotate it, or avoid it. And this is a place to spend
 tooling: prioritize tools that **surface, locate, and bound** what a unit depends on and
-captures — names, line ranges, a closure's free variables — so a hidden dependency
+captures (names, line ranges, a closure's free variables), so a hidden dependency
 becomes a visible, navigable fact instead of something the agent must simulate execution
 to discover.
 **Tension:** the categorical claim "inheritance beats composition for agents" is half-right
@@ -250,27 +250,27 @@ you don't control. So the bar to take a dependency rose. Write small things your
 a dependency only when it is substantial enough that you couldn't cheaply regenerate it
 *and* it is both well-maintained (patch latency) *and* popular (many eyes ≈ security). A
 small dependency is now usually worse than the code you would write in its place.
-**Tension:** "cheaply regenerate" tempts you to reinvent crypto, parsers, and date math —
+**Tension:** "cheaply regenerate" tempts you to reinvent crypto, parsers, and date math,
 exactly the domains where a popular, audited dependency is non-negotiable. The calculus is
 a heuristic, not a license to reinvent everything.
 
 ### 1.13 Treat everything the model reads and pulls as untrusted. (L12)
 Two distinct new attack surfaces, both serious. **Prompt injection:** any content the
-agent ingests — an issue, a web page, a tool result, a dependency's README — can carry
+agent ingests (an issue, a web page, a tool result, a dependency's README) can carry
 instructions, and the model cannot reliably separate data from command. Establish trust
 boundaries, give tools least privilege, and require human approval for outward or
 destructive actions (Willison's "lethal trifecta": private data + untrusted content + a way
 to exfiltrate is the danger condition). **Slopsquatting:** the agent itself becomes the
-vector — models confidently hallucinate package names that attackers pre-register. The
+vector: models confidently hallucinate package names that attackers pre-register. The
 USENIX 2025 study measured ~5.2% hallucination for commercial models and ~21.7% for open
 ones; a 2026 replication puts frontier models nearer 5–6%. The rate is falling, but the
-*exploitable* property is its predictability — a large share of hallucinated names recur
-across re-runs — not the rate. Screen and pin dependencies, verify provenance, and never
+*exploitable* property is its predictability, a large share of hallucinated names recur
+across re-runs, not the rate. Screen and pin dependencies, verify provenance, and never
 let an agent install what it merely named. Prompt injection and slopsquatting are two
 entries in a wider class: OWASP's 2026 *Top 10 for Agentic Applications* adds goal hijack,
 tool misuse, excessive agency, identity abuse, memory poisoning, and cascading
 multi-agent failure. The governing principle is **grant least _agency_, not just least
-privilege** — constrain what the agent is allowed to *decide and do*, not only what it can
+privilege**: constrain what the agent is allowed to *decide and do*, not only what it can
 read.
 **Tension:** the strongest mitigations (no untrusted content, no exfiltration path,
 human-in-loop on every action) directly throttle the autonomy that makes agents useful.
@@ -279,8 +279,8 @@ Security and capability trade against each other here.
 ### 1.14 Rewrite from the spec, not the code. (L11)
 Classic wisdom (Spolsky, "Things You Should Never Do") was: never rewrite, because code
 embodies years of accumulated bug-fixes and edge-case knowledge a rewrite discards. Two
-things changed. The cost of the rewrite collapsed — the model writes it — and, crucially,
-*if* the hard-won knowledge is captured as spec + tests, the rewrite no longer discards it.
+things changed. The cost of the rewrite collapsed (the model writes it), and *if* the
+hard-won knowledge is captured as spec + tests, the rewrite no longer discards it.
 So the calculus inverts **exactly to the degree your contract preserves the edge cases.** A
 clean reimplementation against a strong battery, with a better model and no legacy debt, is
 now often cheaper *and* better than patching.
@@ -293,8 +293,8 @@ policy. The cheapness is real; the *safety* is a function of contract coverage a
 radius — which is why this principle is downstream of L2.
 
 ### 1.15 Make engineering compound. (L13)
-Each task should leave the system better at the next one. Capture learnings — what broke,
-the non-obvious constraint, the pattern that worked — as durable, maintained context the
+Each task should leave the system better at the next one. Capture learnings (what broke,
+the non-obvious constraint, the pattern that worked) as durable, maintained context the
 next iteration consults. Every Inc's "compound engineering" automates exactly this: Plan →
 Work → Review → **Compound**, where an agent distills each task's learnings into a
 structured wiki and the compound↔plan loop becomes the flywheel. The per-repo "operating
@@ -306,25 +306,25 @@ gets absorbed into the base tools soon, so invest in the *practice*, not a parti
 plugin.
 
 ### 1.16 Keep changes reviewably small. (L7, L8)
-Agents make it trivial to produce a huge, coherent-looking diff — which is exactly the
+Agents make it trivial to produce a huge, coherent-looking diff, which is exactly the
 wrong thing when review is the bottleneck (L7) and the human owns the merge (L8). Faros
 telemetry found AI adoption came with ~154% larger PRs and ~9% more bugs per developer:
 batch size is its own lever. Cap the unit of change to what a human can actually hold in
 their head, and make the agent split work rather than land it in one pass.
 **Tension:** small PRs add coordination and sequencing overhead, and some changes (a
-rename, a codegen refresh, a mechanical migration) are *genuinely* large and atomic —
+rename, a codegen refresh, a mechanical migration) are *genuinely* large and atomic;
 splitting them is busywork. The rule is "reviewably small," not "small."
 
 ### 1.17 Shrink the review surface; raise the altitude of review. (L7, L8)
-Review is the bottleneck (1.9, Part 3), and the durable fix is not "review faster" — it is
+Review is the bottleneck (1.9, Part 3), and the durable fix is not "review faster"; it is
 to **reduce what a human must look at.** Push low-level abstractions *below the line* of
 human attention, into the purview of deterministic checks and good-enough small
 models, so the human reviews intent and contracts while the generated implementation is
 reviewed *by its tests*, not by eye. This is the strategic answer to L7 and a core premise
 of spec-driven tools: the unit of human review becomes the spec diff, not the code diff.
-Two corollaries: (a) optimize review *precision* — every false-positive review spends the
+Two corollaries: (a) optimize review *precision*, every false-positive review spends the
 scarcest resource and trains reviewers to rubber-stamp; (b) "below the line" is only safe
-to the degree the lower layer is genuinely verified — shrink an *unverified* surface and
+to the degree the lower layer is genuinely verified: shrink an *unverified* surface and
 you have hidden a bug, not removed a chore (L4).
 **Tension:** raising the altitude concentrates risk in the contract and the checks. If the
 spec is wrong or the tests are weak, you have removed the one human who might have caught it
@@ -332,12 +332,12 @@ by reading the code. The altitude you review at can only be as high as your veri
 trustworthy.
 
 ### 1.18 Push determinism down: deterministic preprocessing, then the smallest model that works. (L3, L9)
-Spend the model on the smallest, cleanest residue. First normalize deterministically —
+Spend the model on the smallest, cleanest residue. First normalize deterministically:
 tree-sitter / AST canonicalization strips formatting, comments, and cosmetic noise before
 anything model-shaped runs (jaunt's Layer A is exactly this). Then, where a model judgment
 *is* needed, hand the narrowed residue to the smallest, cheapest model that is reliable on
 it (jaunt's Layer B gate runs a small model, never the build model), and key the judgment
-by its inputs — model id, effort, prompt digest — so it re-runs only when something real
+by its inputs (model id, effort, prompt digest) so it re-runs only when something real
 changes (L9). That is what makes verification affordable enough to run *everywhere* (L7):
 the narrower and more preprocessed the question, the smaller the model you can spend on it.
 **Tension:** cheap is not correct — a small model is confidently wrong within budget, so it
@@ -368,7 +368,7 @@ and editing test files when the environment makes it easy.
 The barrier is **asymmetric**, and that is the subtle part. Source-blindness is symmetric;
 *output*-blindness is not, because **a test's output can contain the answer key and an
 implementation's output cannot.** The Tester may freely run the Implementation as a black
-box — observing that it returns `41` leaks nothing, because the Tester derived the expected
+box: observing that it returns `41` leaks nothing, because the Tester derived the expected
 `42` from the spec independently. The Tester's hazard runs the other way: if it derives its
 expectations *from* observed behavior, the tests collapse into characterization snapshots
 that bless bugs as correct — the classic **test-oracle problem**, where the verdict of
@@ -377,19 +377,19 @@ from the system under test. The Implementer is held stricter: a failing assertio
 (`expected 42, got 41`) literally hands over the held-out target, so it must receive a
 **bounded, redacted** signal, not the raw failure.
 
-And "coarse pass/fail" is not enough on its own — Dwork et al.'s reusable-holdout result is
+And "coarse pass/fail" is not enough on its own; Dwork et al.'s reusable-holdout result is
 blunt: query a held-out set enough times and you overfit it even at one bit of feedback per
 round, because many rounds turn the gate into a search oracle. So the real shape is
 **tiered**: a generous *public* suite the Implementer owns and sees in full (diffs, traces —
 game it freely, it is not the gate); a *private* validation tier that returns only a
 contract-area label, no inputs or expected values; and a *final* held-out tier that returns
-one suite-level pass/fail at low attempt count. Even test *names* leak —
-`test_empty_list_returns_zero` is already an answer — so the private tiers use opaque ids or
+one suite-level pass/fail at low attempt count. Even test *names* leak:
+`test_empty_list_returns_zero` is already an answer, so the private tiers use opaque ids or
 broad contract-clause names. This also dissolves the obvious objection ("redact the feedback
 and the agent can't debug"): the public tier is exactly where it debugs; only the gate is
 held out.
 
-Finally — the move that makes this work with agents specifically — **state the discipline
+Finally, the move that makes this work with agents specifically: **state the discipline
 *and its rationale* to both agents, as policy and not just setup.** Told it will never see
 the tests and gets only a verdict, the Implementer cannot specialize to specific cases and
 instead invests in covering the whole contract; told the Implementer is blind, the Tester
@@ -397,9 +397,9 @@ treats its suite as the real gate and writes adversarial coverage rather than a 
 it explicit: instruct the Implementer not to probe, infer, or specialize to the hidden tests,
 and instruct the Tester to commit its oracle logic *before* observing behavior (or to mark
 any behavior-driven finding as non-oracular until re-derived from the spec). The analogy is a
-closed-book exam graded by an independent examiner — announcing it in advance changes how you
+closed-book exam graded by an independent examiner: announcing it in advance changes how you
 study.
-**Tension:** independence assumes a spec good enough to *be* the shared oracle (1.6, 3.2) —
+**Tension:** independence assumes a spec good enough to *be* the shared oracle (1.6, 3.2):
 with a thin contract, the held-out tests silently *become* the requirements, and a wall built
 too high just starves the Implementer of the context it needs to resolve genuine ambiguity.
 And the independence can be illusory: two agents on the same base model with the same prompt
@@ -414,20 +414,20 @@ diversified — a different model, a different framing, or an adversarial tester
 it looks like to bake Part 1's practices into a tool instead of a habit.*
 
 Jaunt is a direct bet on the throughline. You write intent as decorator-marked Python
-stubs — `@jaunt.magic` for implementations, `@jaunt.test` for tests — with the cleaned
+stubs (`@jaunt.magic` for implementations, `@jaunt.test` for tests) with the cleaned
 docstring as the behavioral contract, and jaunt generates real modules into
 `__generated__/` via the Codex CLI. The interesting thing is not that it generates
 code; lots of things do. It is *how it decides when not to, and who has final say.*
 Read through 1.17, jaunt's premise is to **raise the altitude of review**: the human
 reviews the docstring contract and the battery; the generated implementation lives below
-the line, owned by its tests. And read through 1.18, its layered design — deterministic
-AST-normalized digest first (Layer A), a small-model gate only on the residue (Layer B) —
+the line, owned by its tests. And read through 1.18, its layered design (deterministic
+AST-normalized digest first in Layer A, a small-model gate only on the residue in Layer B)
 is the "push determinism down" principle made concrete, and shipped.
 
 ### 2.1 Where jaunt embodies the laws — and what's still open
 
 > **Honesty marker** *(re-verified against `src/jaunt/` on 2026-07-01)*. Magic mode,
-> Contract mode (`contract/` — derive, battery, drift, strength, runner), input-keyed
+> Contract mode (`contract/`: derive, battery, drift, strength, runner), input-keyed
 > digests, `generation_fingerprint` (now covering prompt templates and the Codex CLI
 > version), the model-free `jaunt check`, the dependency graph, **smart change detection**
 > (Layer A AST-normalized digests + Layer B semantic gate + re-freeze,
@@ -443,8 +443,8 @@ is the "push determinism down" principle made concrete, and shipped.
 - **L3 — push work into deterministic layers.** *(shipped)* Freshness is computed from an
   AST-normalized contract digest (Layer A — deterministic, so a ruff reformat, comment
   edit, or quote-style change triggers no work), and a genuine prose-only change goes to
-  a small-model semantic gate (Layer B): judged equivalent, the module is **re-frozen** —
-  header digests rewritten over the validated, unchanged body — instead of rebuilt.
+  a small-model semantic gate (Layer B): judged equivalent, the module is **re-frozen**
+  (header digests rewritten over the validated, unchanged body) instead of rebuilt.
   `--json` reports these under `"refrozen"`.
 - **L4 — the model proposes, deterministic checks dispose.** Jaunt's spine and sharpest
   instinct. *Shipped:*
@@ -457,9 +457,9 @@ is the "push determinism down" principle made concrete, and shipped.
     prose-as-contract: a docstring that reads like a spec but pins nothing. Mutate the
     body, re-run the battery; a contract that survives a broken body is decoration.
 
-  *Shipped with smart change detection:* **fail-safe to REBUILD** on any ambiguity —
+  *Shipped with smart change detection:* **fail-safe to REBUILD** on any ambiguity:
   structural changes, missing snapshots, validation failures, and any gate error all
-  resolve to a rebuild, so a wrong gate verdict costs money, never silent drift — and
+  resolve to a rebuild, so a wrong gate verdict costs money, never silent drift, and
   **validate-before-re-freeze** (a re-freeze never certifies code a fresh build's gates
   would reject).
 - **L9 — pin the artifact, not the sampler.** Freshness is an input-keyed SHA-256
@@ -486,7 +486,7 @@ is the "push determinism down" principle made concrete, and shipped.
 - **L12 — the sandbox is a real lever, and the codegen-specific surface is closed.**
   *(shipped)* Codex runs under a configurable `sandbox` (`workspace-write`, etc.), so
   generation has bounded blast radius by design. And the surface a codegen tool uniquely
-  opens — generated code embedding a hallucinated or injection-suggested import — is now
+  opens (generated code embedding a hallucinated or injection-suggested import) is now
   guarded deterministically: validation fails the build if `__generated__/` imports a
   package absent from the project's declared dependencies (roadmap item 8, done).
 - **L4 (independence condition) — keep the checker independent of the author.** *(shipped, both sides)* The
@@ -497,8 +497,8 @@ is the "push determinism down" principle made concrete, and shipped.
   attributes, or monkeypatch the target — with a deliberate
   `@jaunt.test(public_api_only=False)` white-box opt-out. The **implementer-side** barrier
   is now explicit rather than incidental (`heldout.py`, roadmap item 9): repair feedback
-  is tiered exactly as 1.19 prescribes. Example-tier cases — canonical examples, fairly
-  part of the shared spec — surface full failure detail; derived battery cases are
+  is tiered exactly as 1.19 prescribes. Example-tier cases (canonical examples, fairly
+  part of the shared spec) surface full failure detail; derived battery cases are
   redacted to an opaque id plus exception class (`derived#3: AssertionError`), with a
   leak-assertion guard on the redacted output and `--no-redact-derived` as the deliberate
   debug escape hatch. A repair loop can no longer binary-search the committed battery.
@@ -510,14 +510,14 @@ In the spec-first → spec-anchored → spec-as-source taxonomy, jaunt is unusua
 spec-as-source (Tessl's end); Contract mode is spec-anchored. Kiro and Spec Kit are
 spec-first and commit hand-edited code; Tessl regenerates and forbids hand-edits.
 (Honest scope: Contract mode today covers **top-level sync functions**, not full parity
-with Magic mode — strategically strong, currently narrow.)
+with Magic mode: strategically strong, currently narrow.)
 
 More importantly, Böckeler's survey names a gap that *none* of Kiro, Spec Kit, or
 Tessl close: **ongoing spec↔code drift**, plus the absence of incremental,
-input-keyed change detection. Jaunt ships exactly the three things that attack that gap —
+input-keyed change detection. Jaunt ships exactly the three things that attack that gap:
 an input-keyed incremental digest, a model-free deterministic CI gate (`jaunt check`),
-and smart change detection: a textbook instance of the Meta-ACH two-tier pattern — a
-cheap deterministic filter, the model only on genuine ambiguity, fail-safe to a rebuild.
+and smart change detection, a textbook instance of the Meta-ACH two-tier pattern (a
+cheap deterministic filter, the model only on genuine ambiguity, fail-safe to a rebuild).
 With the gate shipped, the competitive claim has moved from "betting on" to
 "demonstrating."
 
@@ -527,9 +527,9 @@ there.
 
 ### 2.3 Roadmap compass (concrete do-next, each tied to a law)
 
-**Status (2026-07-01):** the first wave is done. Items **1, 2, 8, 9** — fingerprint
+**Status (2026-07-01):** the first wave is done. Items **1, 2, 8, 9** (fingerprint
 completeness, generated-code gitattributes, import provenance, and the implementer-side
-held-out barrier — are shipped, as is smart change detection itself (the umbrella items
+held-out barrier) are shipped, as is smart change detection itself (the umbrella items
 4–5 presupposed). What remains is ordered correctness-before-efficiency: **4** (gate
 auditability) first, then **3, 5, 6, 7**. Numbering below is by topic, not priority;
 shipped items are kept for the record, marked ✅.
@@ -537,19 +537,19 @@ shipped items are kept for the record, marked ✅.
 1. ✅ **Close the residual gaps in the causal-input key. (L9)** *Shipped.* The
    `generation_fingerprint` already folded in engine, `codex_model`, `reasoning_effort`,
    sandbox, and build instructions, and gates staleness; it now also folds in the
-   effective **prompt-template digests** on the Codex path — the always-on preamble
+   effective **prompt-template digests** on the Codex path, the always-on preamble
    (`codex_preamble.md`) included, so editing a template or a `[prompts]` override
-   regenerates what it should — and the **Codex CLI version** (`codex --version`, via
+   regenerates what it should, and the **Codex CLI version** (`codex --version`, via
    `[codex] fingerprint_cli_version`, default on), so an engine upgrade busts the cache
    instead of silently serving stale code.
 2. ✅ **Mark committed generated code second-class. (L2 / commit-vs-regenerate)**
-   *Shipped:* `.gitattributes` carries `__generated__/** linguist-generated=true -diff` —
+   *Shipped:* `.gitattributes` carries `__generated__/** linguist-generated=true -diff`:
    reproducible self-contained checkouts and a model-free CI gate, without polluting PR
    diffs. The caveat stands: this is only safe because the *review target* shifts to the
-   spec diff + battery diff + provenance — otherwise you are hiding behavior, not noise.
+   spec diff + battery diff + provenance; otherwise you are hiding behavior, not noise.
 3. **Properties over examples for the contract core. (L5)** Contract mode today derives
    examples + errors and defers properties. Property derivation (Hypothesis-backed) is a
-   stronger contract and closes the "tests pass but behavior is wrong" gap — but only with
+   stronger contract and closes the "tests pass but behavior is wrong" gap, but only with
    *real invariants/oracles*; properties generated from vague prose are decorative
    randomness, not a stronger spec. Keep a few canonical examples for grounding the model
    and the human reader.
@@ -562,28 +562,28 @@ shipped items are kept for the record, marked ✅.
    wrong KEEP is detectable after the fact. *Now the top open item.*
 5. **Add a semantic-equivalence normalization rung to Layer A. (L4)** Beyond AST-token
    normalization, fold literal-equivalence (`1337` == `0x539`), redundant parens, and
-   safe reorders to cut over-rebuilds further — but keep the recall-safe bias: err
+   safe reorders to cut over-rebuilds further, but keep the recall-safe bias: err
    toward rebuild, because a false *negative* (silent drift) is the worst outcome, far
    worse than an unnecessary rebuild. (SemanticDiff / GumTree lineage.)
 6. **Treat spec-authoring as the paved road. (L1, L10)** *Partly shipped:* `jaunt
    instructions` emits a project-aware agent primer, and builtin/auto skills seed the
-   Codex workspace. The remaining leverage is the golden path for *writing a good spec* —
+   Codex workspace. The remaining leverage is the golden path for *writing a good spec*:
    the highest-leverage standardization jaunt can ship. The strength score is the
    floor-enforcement that keeps that road honest.
 7. **Round-trip ambiguity detection. (L8)** A flagged non-goal worth promoting:
    re-derive prose from an unchanged input and compare. Low agreement surfaces an
-   *ambiguous spec* to the human director before it causes drift downstream — verifying
+   *ambiguous spec* to the human director before it causes drift downstream, verifying
    the spec, not just the code.
 8. ✅ **Screen generated imports against a provenance allowlist. (L12)** *Shipped:*
    validation now fails the build when code in `__generated__/` imports a package that
-   doesn't resolve to a declared dependency — a deterministic, model-free gate (fits L4)
+   doesn't resolve to a declared dependency, a deterministic, model-free gate (fits L4)
    that closes the one supply-chain hole a codegen tool uniquely opens, whether the
    import was hallucinated (slopsquatting) or suggested by an injected docstring.
 9. ✅ **Make the implementer-side held-out barrier explicit, not incidental. (L4)**
-   *Shipped* (`heldout.py`): repair feedback is tiered — full detail from example-tier
+   *Shipped* (`heldout.py`): repair feedback is tiered: full detail from example-tier
    cases (the shared spec), an opaque id plus exception class from derived battery cases,
    a leak-assertion guard on the redacted output, and `--no-redact-derived` as the
-   explicit debug escape hatch — so a repair loop cannot binary-search the committed
+   explicit debug escape hatch, so a repair loop cannot binary-search the committed
    tests (Dwork's adaptive-holdout failure). The prerequisite for *safe* auto-repair is
    in place.
 
@@ -592,12 +592,12 @@ shipped items are kept for the record, marked ✅.
 ## 3. Building software factories (organization altitude)
 
 *Dominant laws at this altitude: **L1, L4, L12, L13** (with corollaries L7, L10). The unit is a pipeline that
-turns specifications into verified, integrated changes — at the scale of many agents and
+turns specifications into verified, integrated changes, at the scale of many agents and
 many repositories.*
 
 ### 3.1 The factory is the artifact, not the code. (L1)
 You are no longer writing software; you are building and tuning the system that builds
-software. The leverage is in the pipeline — specs, evals, gates, rollout controls —
+software. The leverage is in the pipeline (specs, evals, gates, rollout controls),
 because generation, and increasingly *re*generation of whole subsystems as better models
 arrive (L11), is commoditized.
 **Tension:** is "factory" even the right metaphor? Manufacturing has cheap design and
@@ -615,22 +615,22 @@ absorbed.
 ### 3.3 Fund verification like you fund production. (L7)
 Tests, evals, policies, audit logs, and rollout controls deserve the same investment as
 the feature work. The 2025–26 data is blunt: generation volume up, review time up
-proportionally — the constraint moved downstream and most orgs haven't funded it there.
+proportionally; the constraint moved downstream and most orgs haven't funded it there.
 **Tension:** throughput without trust is negative work; AI-authored changes carry more
 issues per change, so unscaled verification turns extra output into extra liability.
 
 ### 3.4 Apply Theory of Constraints continuously. (L7)
 Find today's bottleneck along spec → generation → review → integration, exploit it,
-then re-find it — because it moves. Adopting agents *fastest* is not the win; relieving
+then re-find it, because it moves. Adopting agents *fastest* is not the win; relieving
 the *current* constraint is.
 **Tension:** the bottleneck migrates silently. Solve generation and it becomes review;
 solve review and it becomes integration or spec quality. The org that measures wins;
 the one that assumes loses.
 
 ### 3.5 Parallelize independent work; serialize shared state. (L6)
-Fleets shine on independent, repetitive work — migrations, test backfills, lint sweeps
-across many repos (Devin-style fleets, Nubank-style refactors). Orchestration —
-deciding what can run concurrently — becomes a first-class engineering skill.
+Fleets shine on independent, repetitive work: migrations, test backfills, lint sweeps
+across many repos (Devin-style fleets, Nubank-style refactors). Orchestration — deciding
+what can run concurrently — becomes a first-class engineering skill.
 **Tension:** naive fan-out causes redundant or conflicting work; the coordination cost
 can eat the parallelism gain.
 
@@ -638,7 +638,7 @@ can eat the parallelism gain.
 A centralized supervisor is a structural failure mode: if it dies, the swarm collapses,
 and as you scale it becomes the constraint. Design coordination to degrade gracefully.
 **Tension:** decentralized coordination is harder to reason about and audit than a
-single conductor — you trade a throughput ceiling for debuggability.
+single conductor; you trade a throughput ceiling for debuggability.
 
 ### 3.7 Make the build/feedback loop fast and deterministic. (L4, L7)
 Reproducible environments, fast CI, reliable regression detection. A flaky pipeline
@@ -647,7 +647,7 @@ slowest *reliable* check, not its fastest optimistic one.
 
 ### 3.8 Capture institutional knowledge as reusable assets. (L1)
 Encode patterns, skills, and domain languages so the factory accelerates over time.
-This is the original Software Factories "product line" insight — vindicated — but done
+This is the original Software Factories "product line" insight, vindicated, but done
 with natural-language specs + tests + skills as the flexible domain language, not the
 rigid DSLs that sank the 2004 version.
 **Tension:** standardized assets can ossify; novel problems still need bespoke design
@@ -655,7 +655,7 @@ that the paved road actively discourages.
 
 ### 3.9 Standardize the path, not the thought. (L10)
 Golden paths and paved roads let agents and humans default to the validated, secure
-workflow — the platform-engineering primitive with measured DORA lift. Standardize the
+workflow, the platform-engineering primitive with measured DORA lift. Standardize the
 *defaults*, not the destination.
 **Tension:** the same paved road that raises the floor can cap the ceiling if it becomes
 the only road.
@@ -668,9 +668,9 @@ motion, not progress.
 A factory that does not learn re-pays every lesson on every run. Make the "compound" step
 institutional: agents capture per-task learnings into shared, maintained context that
 future runs consult, turning one-off fixes into permanent capability. This is the modern,
-honest form of the Software Factories "product line" thesis — reusable assets, but as living
+honest form of the Software Factories "product line" thesis: reusable assets, but as living
 specs, tests, and learnings rather than rigid DSLs.
-**Tension:** shared learnings are shared blast radius — a wrong "learning" propagates to
+**Tension:** shared learnings are shared blast radius; a wrong "learning" propagates to
 every agent at once, so the compounding mechanism needs the same verification gate as code.
 
 ### 3.12 Defend the supply chain and the trust boundary at fleet scale. (L12)
@@ -683,37 +683,37 @@ controls fight throughput at exactly the scale where throughput is the whole poi
 
 ### 3.13 Build many thin sub-factories, not one monolith. (L7, L10; resolves 3.1/3.6)
 The honest form of "the factory" is not one giant pipeline but **many thin vertical
-sub-factories** — each owning a narrow slice end to end and wired to a real **user-feedback
+sub-factories**, each owning a narrow slice end to end and wired to a real **user-feedback
 signal** (bug reports *and* improvement signals) wherever one legitimately exists. This
 resolves two tensions at once: it dodges the single-orchestrator failure (3.6) by keeping
 units independent, and it answers the metaphor objection (3.1) because each slice exposes
 and relieves *its own* constraint (Theory of Constraints, locally). The feedback signal is
 load-bearing: a sub-factory with no signal is a code cannon, not a factory.
-**Tension:** vertical slices still share cross-cutting concerns — auth, data model,
+**Tension:** vertical slices still share cross-cutting concerns: auth, data model,
 security, the design system. Slice too thin and they duplicate or quietly diverge on
 exactly those; the craft is cutting along genuine seams, and some concerns must stay
 horizontal and shared.
 
-### 3.14 Keep generation and verification independent — at the org level too. (L4, L7)
+### 3.14 Keep generation and verification independent, at the org level too. (L4, L7)
 The held-out discipline of 1.19 is also an *organizational* control. At fleet scale, the
 agents (or teams) that author implementations and the ones that author the acceptance oracle
-should be independent — the way safety-critical shops keep **IV&V** organizationally separate
+should be independent, the way safety-critical shops keep **IV&V** organizationally separate
 from development (NASA/IEEE split it into technical, managerial, and financial independence).
 The factory's held-out set becomes an institution: a private acceptance suite, owned by the
 verification side, that no implementer fleet can read or edit, feeding back tiered,
-query-budgeted signals rather than raw diffs. And diversify the two sides — different models
-or framings — because a fleet that implements *and* grades with one model has one set of
+query-budgeted signals rather than raw diffs. And diversify the two sides (different models
+or framings), because a fleet that implements *and* grades with one model has one set of
 blind spots, not two.
 **Tension:** independence is one more coordination cost and one more queue (3.6, 3.12), and a
-verification side too isolated from intent rejects correct work for the wrong reasons — so it
+verification side too isolated from intent rejects correct work for the wrong reasons, so it
 only nets out if the shared oracle is a genuinely good spec, the very thing 3.2 names as
 scarce.
 
-### 3.15 Historical callout — learn from why the first software factories stalled.
+### 3.15 Historical callout: learn from why the first software factories stalled.
 > Microsoft's Software Factories (Greenfield & Short, 2004) got the durable part right:
 > reuse of domain assets, software product lines, raising the abstraction above
 > hand-coding. They got the fatal part wrong: they demanded heavy upfront formalism
-> (DSLs, metamodels, MDA tooling) that was brittle and vendor-locked, and — per Reeves —
+> (DSLs, metamodels, MDA tooling) that was brittle and vendor-locked, and, per Reeves,
 > they automated *production* (compilation, already nearly free) while leaving *design*
 > (specification, the actual cost) untouched. The agent era inherits the asset-reuse
 > thesis and replaces the rigid DSL with natural-language specs + tests + skills. The
