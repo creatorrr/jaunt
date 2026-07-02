@@ -13,7 +13,7 @@ import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from jaunt import __version__
 from jaunt.diagnostics import (
@@ -216,6 +216,59 @@ def _build_parser() -> argparse.ArgumentParser:
 
     status_p = subparsers.add_parser("status", help="Show project build status.")
     _add_common_flags(status_p)
+    status_p.add_argument(
+        "--magic-only",
+        action="store_true",
+        dest="magic_only",
+        help="Probe only @jaunt.magic freshness; skip contract checks and repo-map drift.",
+    )
+
+    log_p = subparsers.add_parser("log", help="Show the JAUNT_LOG change journal.")
+    log_p.add_argument("-n", "--lines", type=int, default=20, help="Number of lines (0 = all).")
+    log_p.add_argument("--module", default=None, help="Filter by module name.")
+    log_p.add_argument("--root", default=".", help="Project root.")
+    log_p.add_argument("--json", action="store_true", dest="json_output")
+
+    daemon_p = subparsers.add_parser("daemon", help="Background codegen daemon.")
+    daemon_sub = daemon_p.add_subparsers(dest="daemon_command", required=True)
+    daemon_start_p = daemon_sub.add_parser(
+        "start",
+        help="Run the daemon (foreground; Ctrl-C to stop).",
+    )
+    daemon_start_p.add_argument("--root", default=".")
+    daemon_start_p.add_argument("--json", action="store_true", dest="json_output")
+    daemon_stop_p = daemon_sub.add_parser("stop", help="Stop a running daemon.")
+    daemon_stop_p.add_argument("--root", default=".")
+    daemon_status_p = daemon_sub.add_parser("status", help="Show daemon and job status.")
+    daemon_status_p.add_argument("--root", default=".")
+    daemon_status_p.add_argument("--json", action="store_true", dest="json_output")
+
+    jobs_p = subparsers.add_parser("jobs", help="Show daemon job records and pending staleness.")
+    jobs_p.add_argument("--root", default=".")
+    jobs_p.add_argument("--json", action="store_true", dest="json_output")
+    jobs_sub = jobs_p.add_subparsers(dest="jobs_command")
+    jobs_show_p = jobs_sub.add_parser("show", help="Show one job record.")
+    jobs_show_p.add_argument("job_id")
+    jobs_show_p.add_argument("--full", action="store_true", help="Include full local detail log.")
+    jobs_show_p.add_argument("--root", default=argparse.SUPPRESS)
+    jobs_retry_p = jobs_sub.add_parser("retry", help="Retry landing a parked job.")
+    jobs_retry_p.add_argument("job_id")
+    jobs_retry_p.add_argument("--root", default=argparse.SUPPRESS)
+    jobs_retry_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Land even if the spec changed since the job parked.",
+    )
+
+    guard_p = subparsers.add_parser(
+        "guard",
+        help="PreToolUse hook: warn when agents touch generated code.",
+    )
+    guard_p.add_argument(
+        "--generated-dir",
+        default=None,
+        help="Generated dir override (defaults to jaunt.toml or __generated__).",
+    )
 
     instructions_p = subparsers.add_parser(
         "instructions",
@@ -553,6 +606,274 @@ def _emit_json(data: dict[str, object]) -> None:
     print(json.dumps(data, indent=2, default=str))
 
 
+def cmd_log(args: argparse.Namespace) -> int:
+    from jaunt import journal
+
+    root = Path(args.root).resolve()
+    lines = journal.read_lines(root, limit=args.lines, module=args.module)
+    if _is_json_mode(args):
+        _emit_json({"command": "log", "ok": True, "lines": lines})
+        return EXIT_OK
+    if not lines:
+        print("No journal entries (no JAUNT_LOG file, or it is empty).")
+        return EXIT_OK
+    for line in lines:
+        print(line)
+    return EXIT_OK
+
+
+def cmd_daemon(args: argparse.Namespace) -> int:
+    import signal
+
+    from jaunt import daemon as daemon_mod
+    from jaunt import jobs as jobs_mod
+
+    root = Path(args.root).resolve()
+    if args.daemon_command == "stop":
+        try:
+            running, pid = daemon_mod.probe_lock(root)
+        except RuntimeError as e:
+            print(str(e), file=sys.stderr)
+            return EXIT_CONFIG_OR_DISCOVERY
+        if not running:
+            print("Daemon not running.")
+            return EXIT_OK
+        if pid is None:
+            print("Daemon lockfile is locked but has no readable pid; refusing to signal.")
+            return EXIT_OK
+        os.kill(pid, signal.SIGTERM)
+        print(f"Sent SIGTERM to daemon (pid {pid}).")
+        return EXIT_OK
+
+    if args.daemon_command == "status":
+        try:
+            running, pid = daemon_mod.probe_lock(root)
+        except RuntimeError as e:
+            print(str(e), file=sys.stderr)
+            return EXIT_CONFIG_OR_DISCOVERY
+        records = jobs_mod.list_jobs(root)
+        if _is_json_mode(args):
+            _emit_json(
+                {
+                    "command": "daemon-status",
+                    "ok": True,
+                    "running": running,
+                    "pid": pid,
+                    "jobs": [
+                        {"id": job.id, "module": job.module, "state": job.state} for job in records
+                    ],
+                }
+            )
+        else:
+            if running and pid is not None:
+                status = f"running (pid {pid})"
+            elif running:
+                status = "running (pid unknown)"
+            else:
+                status = "stopped"
+            print(f"Daemon: {status}")
+            for job in records[-10:]:
+                print(f"- {job.id} {job.module}: {job.state}")
+        return EXIT_OK
+
+    if os.environ.get(daemon_mod.DISABLE_ENV):
+        print(f"{daemon_mod.DISABLE_ENV} is set; refusing to start.", file=sys.stderr)
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    if not daemon_mod.jaunt_dir_ignored(root):
+        print(
+            "error: .jaunt/ must be gitignored before running the daemon "
+            "(its cache and job state would otherwise trip the landing allowlist). "
+            "Add '.jaunt/' to .gitignore.",
+            file=sys.stderr,
+        )
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    try:
+        lock = daemon_mod.acquire_lock(root)
+    except RuntimeError as e:
+        print(str(e), file=sys.stderr)
+        return EXIT_CONFIG_OR_DISCOVERY
+    if lock is None:
+        print("Daemon already running.", file=sys.stderr)
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    try:
+        daemon_mod.run_daemon(root)
+        return EXIT_OK
+    finally:
+        daemon_mod.release_lock(lock)
+
+
+def _jobs_magic_status(root: Path, args: argparse.Namespace, target: tuple[str, ...]):
+    from jaunt.config import load_config
+
+    cfg = load_config(root=root)
+    include_target_tests = _effective_include_target_tests(cfg, args)
+    build_instructions = _effective_build_instructions(cfg, args)
+    source_dirs = [root / sr for sr in cfg.paths.source_roots]
+    _prepend_sys_path([*source_dirs, root])
+    infer_default = bool(cfg.build.infer_deps)
+    return compute_magic_status(
+        root=root,
+        cfg=cfg,
+        source_dirs=source_dirs,
+        build_instructions=build_instructions,
+        include_target_tests=include_target_tests,
+        infer_deps=infer_default,
+        force=False,
+        target=target,
+    )
+
+
+def _module_current_digest(root: Path, args: argparse.Namespace, module: str) -> str | None:
+    mstatus = _jobs_magic_status(root, args, (module,))
+    return mstatus.digests.get(module)
+
+
+def _jobs_would_rebuild(root: Path, args: argparse.Namespace) -> dict[str, str]:
+    mstatus = _jobs_magic_status(root, args, ())
+    return {mod: mstatus.stale_changes.get(mod, "structural") for mod in sorted(mstatus.stale)}
+
+
+def _cmd_jobs_list(args: argparse.Namespace) -> int:
+    from dataclasses import asdict
+
+    from jaunt import jobs as jobs_mod
+
+    json_mode = _is_json_mode(args)
+    root = Path(args.root).resolve()
+    try:
+        records = jobs_mod.list_jobs(root)
+        would_rebuild = _jobs_would_rebuild(root, args)
+    except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError, KeyError) as e:
+        _print_error(e)
+        if json_mode:
+            _emit_json({"command": "jobs", "ok": False, "error": str(e)})
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    if json_mode:
+        _emit_json(
+            {
+                "command": "jobs",
+                "ok": True,
+                "jobs": [asdict(job) for job in records],
+                "would_rebuild": would_rebuild,
+            }
+        )
+        return EXIT_OK
+
+    if not records:
+        print("No job records.")
+    for job in records:
+        print(f"- {job.id} {job.module}: {job.state}")
+        if job.battery:
+            print(f"  battery {job.battery}")
+        if job.error:
+            print(f"  {job.error.splitlines()[0]}")
+    for module, change in would_rebuild.items():
+        print(f"would rebuild: {module} ({change})")
+    return EXIT_OK
+
+
+def _cmd_jobs_show(args: argparse.Namespace) -> int:
+    from dataclasses import asdict
+
+    from jaunt import jobs as jobs_mod
+
+    root = Path(args.root).resolve()
+    job = jobs_mod.load_job(root, args.job_id)
+    if job is None:
+        _eprint(f"error: job not found: {args.job_id}")
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    for key, value in asdict(job).items():
+        print(f"{key}: {value}")
+    if args.full and job.detail_log:
+        detail = Path(job.detail_log)
+        if detail.exists():
+            print(detail.read_text(encoding="utf-8"), end="")
+    return EXIT_OK
+
+
+def _cmd_jobs_retry(args: argparse.Namespace) -> int:
+    from jaunt import jobs as jobs_mod
+    from jaunt import landing
+
+    root = Path(args.root).resolve()
+    job = jobs_mod.load_job(root, args.job_id)
+    if job is None:
+        _eprint(f"error: job not found: {args.job_id}")
+        return EXIT_CONFIG_OR_DISCOVERY
+    if job.state != jobs_mod.PARKED:
+        _eprint(f"error: job {job.id} is {job.state}; only parked jobs can be retried")
+        return EXIT_CONFIG_OR_DISCOVERY
+    if not job.patch_paths:
+        _eprint(f"error: parked job {job.id} has no patch paths")
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    try:
+        patch_paths_raw = json.loads(job.patch_paths)
+    except json.JSONDecodeError:
+        _eprint(f"error: parked job {job.id} has invalid patch paths")
+        return EXIT_CONFIG_OR_DISCOVERY
+    if not isinstance(patch_paths_raw, list) or not all(
+        isinstance(path, str) for path in patch_paths_raw
+    ):
+        _eprint(f"error: parked job {job.id} has invalid patch paths")
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    patch_file = jobs_mod.jobs_dir(root) / f"{job.id}.patch"
+    if not patch_file.exists():
+        _eprint(f"error: parked job {job.id} is missing patch file")
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    patch = patch_file.read_text(encoding="utf-8")
+    if not args.force:
+        current_digest = _module_current_digest(root, args, job.module)
+        if current_digest is None or current_digest != job.spec_digest:
+            _eprint(
+                f"error: {job.module} spec changed since this job parked; "
+                "the daemon will rebuild it -- use --force to land anyway"
+            )
+            return EXIT_PYTEST_FAILURE
+
+    try:
+        expected_head = landing.git_out(root, "rev-parse", "HEAD").strip()
+        sha = landing.land(
+            root,
+            patch,
+            patch_paths=patch_paths_raw,
+            message=landing.build_commit_message(
+                job.module,
+                "retry landing",
+                job.id,
+                job.spec_digest,
+            ),
+            expected_branch=job.branch,
+            expected_head=expected_head,
+        )
+    except landing.LandingError as e:
+        _eprint(str(e))
+        return EXIT_PYTEST_FAILURE
+
+    if not sha or sha == landing.HEAD_MOVED:
+        _eprint(f"parked: retry could not land job {job.id}")
+        return EXIT_PYTEST_FAILURE
+
+    jobs_mod.mark(root, job, jobs_mod.LANDED, landed_commit=sha)
+    print(sha)
+    return EXIT_OK
+
+
+def cmd_jobs(args: argparse.Namespace) -> int:
+    if args.jobs_command == "show":
+        return _cmd_jobs_show(args)
+    if args.jobs_command == "retry":
+        return _cmd_jobs_retry(args)
+    return _cmd_jobs_list(args)
+
+
 def _sync_generated_dir_env(cfg: JauntConfig) -> None:
     """Propagate generated_dir to env so runtime forwarding uses the right path."""
     os.environ["JAUNT_GENERATED_DIR"] = cfg.paths.generated_dir
@@ -644,6 +965,8 @@ def test_slugify() -> str:
 
 
 def cmd_init(args: argparse.Namespace) -> int:
+    from jaunt import journal as _journal
+
     json_mode = _is_json_mode(args)
     root = Path(args.root).resolve() if args.root else Path.cwd().resolve()
     toml_path = root / "jaunt.toml"
@@ -665,6 +988,14 @@ def cmd_init(args: argparse.Namespace) -> int:
     if not spec_path.exists():
         spec_path.write_text(_INIT_SPEC_TEMPLATE, encoding="utf-8")
         spec_created = True
+
+    (root / _journal.JOURNAL_FILE).touch(exist_ok=True)
+    _journal.ensure_union_merge_attribute(root)
+    gitignore = root / ".gitignore"
+    existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+    if ".jaunt/" not in existing.splitlines():
+        joiner = "" if (not existing or existing.endswith("\n")) else "\n"
+        gitignore.write_text(existing + joiner + ".jaunt/\n", encoding="utf-8")
 
     if json_mode:
         payload = {"command": "init", "ok": True, "path": str(toml_path)}
@@ -968,6 +1299,20 @@ def cmd_adopt(args: argparse.Namespace) -> int:
             tool_version=__version__,
         )
 
+        if result.ok:
+            from jaunt import journal as _journal
+
+            _journal.append_events(
+                root,
+                [
+                    _journal.JournalEvent(
+                        action="adopt",
+                        module=result.spec_ref,
+                        detail=f"battery derived (strength {result.strength})",
+                    )
+                ],
+            )
+
         if json_mode:
             _emit_json(
                 {
@@ -1092,6 +1437,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     json_mode = _is_json_mode(args)
     try:
         root, cfg = _load_config(args)
+        magic_only = bool(getattr(args, "magic_only", False))
         include_target_tests = _effective_include_target_tests(cfg, args)
         build_instructions = _effective_build_instructions(cfg, args)
 
@@ -1099,7 +1445,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         _prepend_sys_path([*source_dirs, root])
 
         tree_drift = None
-        if cfg.context.repo_map:
+        if cfg.context.repo_map and not magic_only:
             from jaunt.repo_context import api as rc_api
 
             try:
@@ -1175,22 +1521,30 @@ def cmd_status(args: argparse.Namespace) -> int:
             force=bool(args.force),
             target=args.target,
         )
-        contract_rows, review_refs = _contract_rows(infer_default)
+        contract_rows: list[dict[str, object]] = []
+        review_refs: set[str] = set()
+        if not magic_only:
+            contract_rows, review_refs = _contract_rows(infer_default)
 
         if mstatus.total == 0:
             if json_mode:
-                _emit_json(
-                    {
-                        "command": "status",
-                        "ok": True,
-                        "stale": [],
-                        "stale_changes": {},
-                        "fresh": [],
-                        "contracts": contract_rows,
-                        "contract_review": sorted(review_refs),
-                        "tree": tree_drift,
-                    }
-                )
+                payload: dict[str, object] = {
+                    "command": "status",
+                    "ok": True,
+                    "stale": [],
+                    "stale_changes": {},
+                    "fresh": [],
+                    "digests": mstatus.digests,
+                }
+                if not magic_only:
+                    payload.update(
+                        {
+                            "contracts": contract_rows,
+                            "contract_review": sorted(review_refs),
+                            "tree": tree_drift,
+                        }
+                    )
+                _emit_json(payload)
             else:
                 print("Status: 0 module(s) total")
                 print("No magic specs discovered.")
@@ -1208,18 +1562,23 @@ def cmd_status(args: argparse.Namespace) -> int:
         stale_changes = mstatus.stale_changes
 
         if json_mode:
-            _emit_json(
-                {
-                    "command": "status",
-                    "ok": True,
-                    "stale": sorted(stale),
-                    "stale_changes": stale_changes,
-                    "fresh": sorted(fresh),
-                    "contracts": contract_rows,
-                    "contract_review": sorted(review_refs),
-                    "tree": tree_drift,
-                }
-            )
+            payload = {
+                "command": "status",
+                "ok": True,
+                "stale": sorted(stale),
+                "stale_changes": stale_changes,
+                "fresh": sorted(fresh),
+                "digests": mstatus.digests,
+            }
+            if not magic_only:
+                payload.update(
+                    {
+                        "contracts": contract_rows,
+                        "contract_review": sorted(review_refs),
+                        "tree": tree_drift,
+                    }
+                )
+            _emit_json(payload)
         else:
             stale_sorted = sorted(stale)
             fresh_sorted = sorted(fresh)
@@ -1543,6 +1902,22 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
 
         if report.failed and not json_mode:
             _eprint(format_build_failures(report.failed))
+
+        from jaunt import journal as _journal
+
+        events = []
+        for mod in sorted(report.generated):
+            events.append(_journal.JournalEvent(action="build", module=mod, detail="rebuilt"))
+        for mod in sorted(refrozen_modules):
+            events.append(
+                _journal.JournalEvent(
+                    action="refreeze", module=mod, detail="cosmetic (gate: EQUIVALENT)"
+                )
+            )
+        for mod, err in sorted(report.failed.items()):
+            first = str(err).splitlines()[0][:120] if str(err) else "generation failed"
+            events.append(_journal.JournalEvent(action="build-fail", module=mod, detail=first))
+        _journal.append_events(root, events)
 
         if not json_mode and (cost_tracker.api_calls > 0 or cost_tracker.cache_hits > 0):
             _eprint(cost_tracker.format_summary())
@@ -2536,6 +2911,35 @@ def cmd_mcp(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _guard_generated_dir(args: argparse.Namespace, payload: dict[str, object]) -> str:
+    if args.generated_dir:
+        return str(args.generated_dir)
+    try:
+        from jaunt.config import find_project_root, load_config
+
+        cwd = payload.get("cwd")
+        start = Path(str(cwd)) if cwd else Path.cwd()
+        root = find_project_root(start)
+        cfg = load_config(root=root)
+        return cfg.paths.generated_dir
+    except Exception:  # noqa: BLE001 - hooks must never break the harness
+        return "__generated__"
+
+
+def cmd_guard(args: argparse.Namespace) -> int:
+    from jaunt import guard as guard_mod
+
+    try:
+        payload_obj = json.load(sys.stdin)
+    except Exception:  # noqa: BLE001 - hooks must never break the harness
+        return EXIT_OK
+    payload = cast("dict[str, object]", payload_obj) if isinstance(payload_obj, dict) else {}
+    out = guard_mod.evaluate(payload, generated_dir=_guard_generated_dir(args, payload))
+    if out is not None:
+        print(json.dumps(out))
+    return EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_args(list(sys.argv[1:] if argv is None else argv))
@@ -2554,6 +2958,14 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_clean(args)
     if args.command == "status":
         return cmd_status(args)
+    if args.command == "log":
+        return cmd_log(args)
+    if args.command == "daemon":
+        return cmd_daemon(args)
+    if args.command == "jobs":
+        return cmd_jobs(args)
+    if args.command == "guard":
+        return cmd_guard(args)
     if args.command == "instructions":
         return cmd_instructions(args)
     if args.command == "tree":

@@ -25,6 +25,9 @@ COMMANDS: list[tuple[str, str]] = [
     ("build", "Generate implementations for `@jaunt.magic` specs."),
     ("test", "Generate tests for `@jaunt.test` specs and run pytest."),
     ("status", "Show which modules are stale vs fresh (and why)."),
+    ("log", "Show the `JAUNT_LOG` change journal (recent builds/adopts)."),
+    ("daemon", "Run, stop, or inspect the background codegen daemon."),
+    ("jobs", "List daemon jobs, inspect parked failures, or retry landing."),
     ("watch", "Rebuild (and optionally test) on file changes."),
     ("init", "Scaffold `jaunt.toml` + source/test directories."),
     ("clean", "Remove `__generated__/` directories."),
@@ -33,6 +36,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("reconcile", "Derive/refresh committed contract batteries (calls the model)."),
     ("check", "Verify committed contract batteries deterministically (CI gate)."),
     ("eject", "Remove contract tracking; leave plain Python + pytest."),
+    ("guard", "Warn-on-access PreToolUse hook for `__generated__/` (see docs/hooks.md)."),
 ]
 
 # Real subcommands intentionally NOT surfaced in the primer (advanced / rare).
