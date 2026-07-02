@@ -43,6 +43,28 @@ def jaunt_cfg(repo: Path) -> JauntConfig:
     return load_config(root=repo)
 
 
+@pytest.fixture()
+def jaunt_cfg_with_notify(repo: Path, tmp_path: Path) -> JauntConfig:
+    notify_path = tmp_path / "notify.txt"
+    notify_command = f"echo $JAUNT_JOB_MODULE:$JAUNT_JOB_STATE >> {notify_path.as_posix()}"
+    (repo / "jaunt.toml").write_text(
+        "\n".join(
+            [
+                "version = 1",
+                "",
+                "[paths]",
+                'source_roots = ["src"]',
+                "",
+                "[daemon]",
+                f"notify_command = '{notify_command}'",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return load_config(root=repo)
+
+
 class FakeRunner:
     """Stale until built; probe returns a controllable digest so tests can supersede."""
 
@@ -135,6 +157,21 @@ def test_run_once_full_cycle_lands_and_journals(repo: Path, jaunt_cfg: JauntConf
         "build" in line and "app" in line and "3/3" in line for line in journal.read_lines(repo)
     )
     assert (repo / "src" / "__generated__" / "app.py").exists()
+
+
+def test_notify_command_fires_with_env(
+    repo: Path, jaunt_cfg_with_notify: JauntConfig, tmp_path: Path
+) -> None:
+    runner = FakeRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        _spec_commit(repo)
+        daemon.run_once(repo, jaunt_cfg_with_notify, state, runner, pool)
+        daemon.drain(state)
+        daemon.run_once(repo, jaunt_cfg_with_notify, state, runner, pool)
+
+    text = (tmp_path / "notify.txt").read_text(encoding="utf-8")
+    assert "app:landed" in text
 
 
 def test_supersede_on_newer_spec_commit(repo: Path, jaunt_cfg: JauntConfig) -> None:
