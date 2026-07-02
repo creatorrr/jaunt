@@ -14,7 +14,7 @@ import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from jaunt import __version__
 from jaunt.diagnostics import (
@@ -255,6 +255,16 @@ def _build_parser() -> argparse.ArgumentParser:
     jobs_retry_p = jobs_sub.add_parser("retry", help="Retry landing a parked job.")
     jobs_retry_p.add_argument("job_id")
     jobs_retry_p.add_argument("--root", default=".")
+
+    guard_p = subparsers.add_parser(
+        "guard",
+        help="PreToolUse hook: warn when agents touch generated code.",
+    )
+    guard_p.add_argument(
+        "--generated-dir",
+        default=None,
+        help="Generated dir override (defaults to jaunt.toml or __generated__).",
+    )
 
     instructions_p = subparsers.add_parser(
         "instructions",
@@ -2856,6 +2866,35 @@ def cmd_mcp(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _guard_generated_dir(args: argparse.Namespace, payload: dict[str, object]) -> str:
+    if args.generated_dir:
+        return str(args.generated_dir)
+    try:
+        from jaunt.config import find_project_root, load_config
+
+        cwd = payload.get("cwd")
+        start = Path(str(cwd)) if cwd else Path.cwd()
+        root = find_project_root(start)
+        cfg = load_config(root=root)
+        return cfg.paths.generated_dir
+    except Exception:  # noqa: BLE001 - hooks must never break the harness
+        return "__generated__"
+
+
+def cmd_guard(args: argparse.Namespace) -> int:
+    from jaunt import guard as guard_mod
+
+    try:
+        payload_obj = json.load(sys.stdin)
+    except Exception:  # noqa: BLE001 - hooks must never break the harness
+        return EXIT_OK
+    payload = cast("dict[str, object]", payload_obj) if isinstance(payload_obj, dict) else {}
+    out = guard_mod.evaluate(payload, generated_dir=_guard_generated_dir(args, payload))
+    if out is not None:
+        print(json.dumps(out))
+    return EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_args(list(sys.argv[1:] if argv is None else argv))
@@ -2880,6 +2919,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_daemon(args)
     if args.command == "jobs":
         return cmd_jobs(args)
+    if args.command == "guard":
+        return cmd_guard(args)
     if args.command == "instructions":
         return cmd_instructions(args)
     if args.command == "tree":
