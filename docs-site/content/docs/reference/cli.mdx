@@ -129,6 +129,36 @@ uv run jaunt watch --json
 
 When `--json` is enabled, watch emits one JSON object per rebuild cycle (the watch envelope), not nested build/test JSON documents.
 
+## Daemon Jobs
+
+Run background codegen jobs from committed spec changes:
+
+```bash
+uv run jaunt daemon start
+uv run jaunt daemon status
+uv run jaunt daemon stop
+
+uv run jaunt jobs
+uv run jaunt jobs show <id> --full
+uv run jaunt jobs retry <id>
+uv run jaunt jobs wait --timeout 1800
+uv run jaunt jobs wait <id> --timeout 1800 --json --progress plain
+```
+
+`jaunt jobs` shows job records, pending rebuilds, and the latest heartbeat phase for
+running jobs. `jaunt jobs wait` blocks until a target job finishes, or without an id
+until the daemon is idle; `--settle N` controls the idle race-guard window and
+`--timeout N` exits with code `5` if time runs out.
+
+<Callout>
+  **Automation**
+
+  | Pattern | Command |
+  |---------|---------|
+  | Blocking agent loop | `git commit … && uv run jaunt jobs wait --timeout 1800` |
+  | Push notification | Set `[daemon] notify_command` to run your hook on landed, parked, or failed jobs. |
+</Callout>
+
 ## MCP
 
 Start the stdio MCP server:
@@ -170,6 +200,7 @@ library metadata, usually from `jaunt skill add <name> --lib <package>`.
 - `--config /path/to/jaunt.toml`: override config path.
 - `--target MODULE[:QUALNAME]`: restrict work to one or more modules (currently module-level; `:QUALNAME` is ignored for filtering).
 - `--no-infer-deps`: disable best-effort dependency inference (explicit `deps=` still applies).
+- `--progress {auto,rich,plain,none}`: progress output mode; `auto` is rich on TTY and plain lines off-TTY. Explicit `--progress plain` works with `--json` (progress on stderr, JSON on stdout).
 - `--json`: emit structured JSON output for agent/CI workflows.
 
 ## Exit Codes
@@ -177,7 +208,8 @@ library metadata, usually from `jaunt skill add <name> --lib <package>`.
 - `0`: success
 - `2`: config/discovery/dependency-cycle errors
 - `3`: generation errors (LLM/backend/validation/import)
-- `4`: pytest failure (only when `jaunt test` actually runs pytest)
+- `4`: pytest failure, contract check/reconcile block, or daemon job failed/parked during `jobs wait`
+- `5`: timeout while waiting for daemon jobs
 
 Note: `jaunt test` runs pytest only on the generated test files it just wrote (not the entire suite). Run `pytest` separately for a full test run.
 

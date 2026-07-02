@@ -261,6 +261,7 @@ jaunt eject <module:func>     # Remove contract tracking; leave plain Python + p
 jaunt daemon start            # Background codegen: commit-triggered isolated jobs, auto-commit on green
 jaunt daemon stop|status      # Stop / inspect the daemon
 jaunt jobs                    # Job records + would-rebuild preview; show <id> [--full]; retry <id>
+jaunt jobs wait               # Block until daemon jobs finish (0 green, 4 failed/parked, 5 timeout)
 jaunt log                     # Tail the JAUNT_LOG change journal (-n N, --module X)
 jaunt guard                   # PreToolUse hook: warn when agents touch __generated__ (see docs/hooks.md)
 
@@ -269,7 +270,7 @@ jaunt watch --test            # Build + test on change
 ```
 
 Common flags: `--root`, `--config`, `--jobs N`, `--force`, `--target`,
-`--no-infer-deps`, `--no-progress`, `--json`.
+`--no-infer-deps`, `--progress {auto,rich,plain,none}`, `--no-progress`, `--json`.
 
 Note: `jaunt check` returns exit code `4` on any blocking drift state (unbuilt /
 stale-prose / signature-drift / behavior-drift).

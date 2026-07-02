@@ -66,7 +66,11 @@ def test_command_and_exit_tables_render() -> None:
     text = instructions.render(project=None)
     assert "| Command | What it does |" in text
     assert "`jaunt instructions`" in text
+    assert "`jaunt jobs wait`" in text
     assert "| Code | Meaning |" in text
+    assert "| 5 | Timeout while waiting for daemon jobs. |" in text
+    assert "`git commit … && jaunt jobs wait --timeout 1800`" in text
+    assert "`--progress {auto,rich,plain,none}`" in text
 
 
 def test_render_no_project_includes_init_note() -> None:
@@ -185,7 +189,7 @@ def test_command_table_matches_real_subcommands() -> None:
     assert sub_actions, "expected a subparsers action"
     real = set(sub_actions[0].choices.keys())  # includes aliases
 
-    listed = {name for name, _ in instructions.COMMANDS}
+    listed = {name.split()[0] for name, _ in instructions.COMMANDS}
     # No typos / removed commands in the curated table.
     assert listed <= real, f"primer lists unknown commands: {listed - real}"
     # No silent gaps: every real subcommand is listed or explicitly omitted.
@@ -193,3 +197,6 @@ def test_command_table_matches_real_subcommands() -> None:
         "missing_from_primer": real - listed - set(instructions.OMITTED_COMMANDS),
         "stale_omitted": set(instructions.OMITTED_COMMANDS) - real,
     }
+    ns = jaunt.cli.parse_args(["jobs", "wait"])
+    assert ns.command == "jobs"
+    assert ns.jobs_command == "wait"

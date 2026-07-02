@@ -227,6 +227,7 @@ Flags:
 - `--config /path/to/jaunt.toml`: override config path.
 - `--target MODULE[:QUALNAME]`: restrict work to one or more modules (currently module-level; the `:QUALNAME` portion is ignored for filtering).
 - `--no-infer-deps`: disables best-effort dependency inference (explicit `deps=` still applies).
+- `--progress {auto,rich,plain,none}`: progress output mode; `auto` is rich on a TTY and plain lines off-TTY.
 
 Exit codes:
 
@@ -234,6 +235,7 @@ Exit codes:
 - `2`: config/discovery/dependency-cycle errors
 - `3`: generation errors (LLM/backend/validation/import)
 - `4`: pytest failure (only when `jaunt test` actually runs pytest)
+- `5`: timeout while waiting for daemon jobs
 
 Important behavior:
 

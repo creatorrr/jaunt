@@ -19,8 +19,8 @@ from jaunt.generate.shared import render_template
 if TYPE_CHECKING:
     from jaunt.config import JauntConfig
 
-# Curated, ranked command surface shown in the primer. Each entry maps to a real
-# CLI subcommand; `test_instructions` asserts this stays in sync with the parser.
+# Curated, ranked command surface shown in the primer. Entries map to real CLI
+# commands; `test_instructions` asserts top-level coverage stays in sync with the parser.
 COMMANDS: list[tuple[str, str]] = [
     ("build", "Generate implementations for `@jaunt.magic` specs."),
     ("test", "Generate tests for `@jaunt.test` specs and run pytest."),
@@ -29,6 +29,10 @@ COMMANDS: list[tuple[str, str]] = [
     ("log", "Show the `JAUNT_LOG` change journal (recent builds/adopts)."),
     ("daemon", "Run, stop, or inspect the background codegen daemon."),
     ("jobs", "List daemon jobs, inspect parked failures, or retry landing."),
+    (
+        "jobs wait",
+        "Block for daemon completion: 0 green, 4 failed/parked, 5 timeout, 2 daemon-not-running.",
+    ),
     ("watch", "Rebuild (and optionally test) on file changes."),
     ("init", "Scaffold `jaunt.toml` + source/test directories."),
     ("clean", "Remove `__generated__/` directories."),
@@ -50,6 +54,7 @@ EXIT_CODES: list[tuple[int, str]] = [
     (2, "Config, discovery, or dependency-cycle error."),
     (3, "Code generation error."),
     (4, "Pytest failure, or a contract `check`/`reconcile` block."),
+    (5, "Timeout while waiting for daemon jobs."),
 ]
 
 
