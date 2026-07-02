@@ -199,3 +199,24 @@ def test_failed_gate_blocks_landing(repo: Path, jaunt_cfg: JauntConfig) -> None:
     failed = jobs.list_jobs(repo, states={jobs.FAILED})
     assert failed and "check failed" in failed[0].error
     assert not (repo / "src" / "__generated__" / "app.py").exists()
+
+
+def test_recover_orphans_and_prunes_worktrees(repo: Path, jaunt_cfg: JauntConfig) -> None:
+    job = jobs.JobRecord.new(
+        module="app",
+        spec_digest="d",
+        base_commit=_git(repo, "rev-parse", "HEAD"),
+        branch="main",
+    )
+    jobs.save_job(repo, job)
+    jobs.mark(repo, job, jobs.RUNNING)
+    stray = repo / ".jaunt" / "worktrees" / "zombie"
+    _git(repo, "worktree", "add", "--detach", str(stray), "HEAD")
+
+    affected = daemon.recover(repo)
+
+    assert job.id in affected
+    recovered = jobs.load_job(repo, job.id)
+    assert recovered is not None
+    assert recovered.state == jobs.FAILED
+    assert not stray.exists()

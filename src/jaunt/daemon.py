@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json as _json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -173,6 +174,31 @@ def _remove_worktree(root: Path, path: Path) -> None:
     )
 
 
+def recover(root: Path) -> list[str]:
+    affected = []
+    for job in jobs_mod.list_jobs(root, states={jobs_mod.RUNNING, jobs_mod.GREEN}):
+        jobs_mod.mark(root, job, jobs_mod.FAILED, error="orphaned by daemon restart")
+        affected.append(job.id)
+
+    wt_dir = _worktrees_dir(root)
+    if wt_dir.exists():
+        for path in wt_dir.iterdir():
+            _remove_worktree(root, path)
+            if path.exists():
+                if path.is_dir():
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    path.unlink(missing_ok=True)
+
+    subprocess.run(
+        ["git", "-C", str(root), "worktree", "prune"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return affected
+
+
 def _execute_job(
     root: Path, cfg: JauntConfig, job: jobs_mod.JobRecord, runner: Runner
 ) -> JobResult:
@@ -323,6 +349,7 @@ def run_daemon(
     from jaunt.config import load_config
 
     cfg = load_config(root=root)
+    recover(root)
     daemon_runner = runner or CliRunner()
     state = DaemonState()
     max_jobs = cfg.daemon.max_jobs or cfg.build.jobs
