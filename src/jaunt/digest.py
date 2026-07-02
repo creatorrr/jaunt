@@ -435,47 +435,113 @@ class ContractDigests:
     body: str
 
 
-def load_function_node(source_file: str, qualname: str) -> ast.FunctionDef:
-    """Load a top-level sync function node by name (v1: no classes/methods/async)."""
+def load_contract_node(
+    source_file: str, qualname: str
+) -> ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef:
+    """Load a top-level function (sync or async) or class node by name."""
 
     if "." in qualname:
-        raise ValueError(f"Contract specs must be top-level functions in v1, got {qualname!r}.")
+        raise ValueError(
+            f"Contract specs are top-level functions or whole classes; "
+            f"adopt the whole class instead of {qualname!r}."
+        )
     src = Path(source_file).read_text(encoding="utf-8")
     tree = ast.parse(src, filename=source_file)
     for top in tree.body:
-        if isinstance(top, ast.AsyncFunctionDef) and top.name == qualname:
-            raise ValueError(f"Contract function {qualname!r} is async; unsupported in v1.")
-        if isinstance(top, ast.FunctionDef) and top.name == qualname:
+        if (
+            isinstance(top, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and top.name == qualname
+        ):
             return top
-    raise ValueError(f"Top-level function {qualname!r} not found in {source_file}.")
+    raise ValueError(f"Top-level function or class {qualname!r} not found in {source_file}.")
+
+
+def load_function_node(source_file: str, qualname: str) -> ast.FunctionDef:
+    """Back-compat shim: contract loader restricted to sync functions."""
+
+    node = load_contract_node(source_file, qualname)
+    if not isinstance(node, ast.FunctionDef):
+        raise ValueError(f"{qualname!r} is not a top-level sync function.")
+    return node
 
 
 def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def contract_digests(source_file: str, qualname: str) -> ContractDigests:
-    """Compute stable prose/signature/body digests for a contract function.
-
-    - prose: the cleaned docstring (PEP-257), or "" if absent.
-    - signature: AST-unparsed argument list + return annotation (normalizes formatting).
-    - body: AST-unparsed body with the docstring statement stripped (normalizes
-      comments/whitespace; changes only when the executable body changes).
-    """
-
-    node = load_function_node(source_file, qualname)
-    prose = ast.get_docstring(node, clean=True) or ""
-
+def _contract_fn_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+    # Sync rendering must stay byte-identical to the historical form.
     sig = ast.unparse(node.args) + " -> " + (ast.unparse(node.returns) if node.returns else "")
+    if isinstance(node, ast.AsyncFunctionDef):
+        return "async " + sig
+    return sig
 
+
+def _contract_fn_body(
+    node: ast.FunctionDef | ast.AsyncFunctionDef, *, strip_docstring: bool = True
+) -> str:
+    # NO stub-body elision here: adopted code is real code, and eliding would
+    # change existing digests (see the adoption-parity design spec).
     body = list(node.body)
     if (
-        body
+        strip_docstring
+        and body
         and isinstance(body[0], ast.Expr)
         and isinstance(body[0].value, ast.Constant)
         and isinstance(body[0].value.value, str)
     ):
         body = body[1:]
-    body_src = "\n".join(ast.unparse(stmt) for stmt in body)
+    return "\n".join(ast.unparse(stmt) for stmt in body)
 
+
+def _contract_class_inputs(node: ast.ClassDef) -> tuple[str, str, str]:
+    """(prose, signature, body) strings for a whole-class contract."""
+
+    methods = [n for n in node.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+
+    prose_parts = [ast.get_docstring(node, clean=True) or ""]
+    for m in methods:
+        if m.name.startswith("_"):
+            continue
+        doc = ast.get_docstring(m, clean=True) or ""
+        if doc:
+            prose_parts.append(f"{m.name}:\n{doc}")
+    prose = "\n\n".join(prose_parts)
+
+    attributes: list[str] = []
+    for child in node.body:
+        if isinstance(child, ast.Assign):
+            attributes += [t.id for t in child.targets if isinstance(t, ast.Name)]
+        elif isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name):
+            attributes.append(child.target.id)
+    shape = {
+        "bases": [ast.unparse(b) for b in node.bases],
+        "attributes": sorted(attributes),
+        "methods": {
+            m.name: {
+                "kind": "async_method" if isinstance(m, ast.AsyncFunctionDef) else "method",
+                "signature": _contract_fn_signature(m),
+            }
+            for m in methods
+        },
+    }
+    signature = json.dumps(shape, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+    body = "\n\n".join(
+        f"{m.name}:\n{_contract_fn_body(m, strip_docstring=not m.name.startswith('_'))}"
+        for m in methods
+    )
+    return prose, signature, body
+
+
+def contract_digests(source_file: str, qualname: str) -> ContractDigests:
+    """Stable prose/signature/body digests for a contract function or class."""
+
+    node = load_contract_node(source_file, qualname)
+    if isinstance(node, ast.ClassDef):
+        prose, sig, body_src = _contract_class_inputs(node)
+    else:
+        prose = ast.get_docstring(node, clean=True) or ""
+        sig = _contract_fn_signature(node)
+        body_src = _contract_fn_body(node)
     return ContractDigests(prose=_sha(prose), signature=_sha(sig), body=_sha(body_src))
