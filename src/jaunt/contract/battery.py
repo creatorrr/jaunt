@@ -55,13 +55,15 @@ def render_battery(
     regions: list[DerivedRegion],
     header_fields: dict[str, str],
     preserved: str = "",
+    extra_imports: tuple[str, ...] = (),
 ) -> str:
     parts = [
         _header_text(header_fields).rstrip(),
         "import pytest",
         f"from {import_module} import {func_name}",
-        "",
     ]
+    parts += [f"from {import_module} import {name}" for name in extra_imports]
+    parts.append("")
     for region in regions:
         parts.append(_region_block(region))
         parts.append("")
@@ -142,6 +144,7 @@ def merge_battery(
     func_name: str,
     regions: list[DerivedRegion],
     header_fields: dict[str, str],
+    extra_imports: tuple[str, ...] = (),
 ) -> str:
     preserved = ""
     if existing is not None:
@@ -152,4 +155,5 @@ def merge_battery(
         regions=regions,
         header_fields=header_fields,
         preserved=preserved,
+        extra_imports=extra_imports,
     )

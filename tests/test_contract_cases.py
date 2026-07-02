@@ -125,3 +125,98 @@ class TestMerged:
         m = a.merged(b)
         assert len(m.examples) == 1 and len(m.raises) == 1
         assert m.fixtures_declared == ("db", "tmp_path")
+
+
+from jaunt.contract.derive import (  # noqa: E402
+    battery_extra_imports,
+    derive_case_regions,
+    derive_regions,
+    extract_blocks_structured,
+)
+
+
+class TestRenderRegions:
+    def test_all_legacy_renders_byte_identical_to_today(self) -> None:
+        doc = "Examples:\n    - 'a b' -> 'a-b'\n\nRaises:\n    - 1 raises TypeError\n"
+        old = derive_regions(
+            extract_blocks_structured(doc), func_name="f", derive=["examples", "errors"]
+        )
+        new = derive_case_regions(_parse(doc), target="f", derive=["examples", "errors"])
+        assert [(r.region_id, r.code) for r in new] == [(r.region_id, r.code) for r in old]
+
+    def test_general_form_multi_arg(self) -> None:
+        blocks = _parse("Examples:\n    - f([1, 2], sep='-') == '1-2'\n")
+        [region] = derive_case_regions(blocks, target="f", derive=["examples"])
+        assert region.region_id == "examples"
+        assert "def test_examples():  # derived from: Examples" in region.code
+        assert "assert f([1, 2], sep='-') == '1-2'" in region.code
+
+    def test_async_examples_awaited(self) -> None:
+        blocks = _parse("Examples:\n    - f(1) == 2\n", async_map={"f": True})
+        [region] = derive_case_regions(blocks, target="f", derive=["examples"])
+        assert "async def test_examples():" in region.code
+        assert "assert await f(1) == 2" in region.code
+
+    def test_fixture_params(self) -> None:
+        doc = "Examples:\n    - f(db, 'a') == 1\n\nFixtures: db\n"
+        [region] = derive_case_regions(_parse(doc), target="f", derive=["examples"])
+        assert "def test_examples(db):" in region.code
+
+    def test_region_suffix_for_methods(self) -> None:
+        blocks = _parse("Examples:\n    - C().go(1) == 2\n", target="C", async_map={"C.go": False})
+        [region] = derive_case_regions(blocks, target="C", derive=["examples"], region_suffix="go")
+        assert region.region_id == "examples-go"
+        assert "def test_examples_go():" in region.code
+
+    def test_general_raises(self) -> None:
+        blocks = _parse("Raises:\n    - C(start=-1) raises ValueError\n", target="C", async_map={})
+        [region] = derive_case_regions(blocks, target="C", derive=["errors"])
+        assert "with pytest.raises(ValueError):" in region.code
+        assert "C(start=-1)" in region.code
+
+    def test_extra_imports_union(self) -> None:
+        doc = "Examples:\n    - f('a') == User('a')\n    - f('b') == User('b')\n"
+        blocks = _parse(doc, module_names=frozenset({"User"}))
+        assert battery_extra_imports(blocks) == ("User",)
+
+
+class TestBatteryExtraImports:
+    def test_render_battery_emits_one_line_per_extra_import(self) -> None:
+        from jaunt.contract.battery import render_battery
+
+        text = render_battery(
+            import_module="m",
+            func_name="f",
+            regions=[],
+            header_fields={
+                "derived_from": "m:f",
+                "prose_digest": "0" * 64,
+                "signature": "sha256:" + "0" * 64,
+                "body_digest": "0" * 64,
+                "strength": "0/0",
+                "tool_version": "test",
+            },
+            extra_imports=("User",),
+        )
+        assert "from m import f\nfrom m import User\n" in text
+
+    def test_no_extra_imports_is_byte_identical(self) -> None:
+        from jaunt.contract.battery import render_battery
+
+        header: dict[str, str] = {
+            "derived_from": "m:f",
+            "prose_digest": "0" * 64,
+            "signature": "sha256:" + "0" * 64,
+            "body_digest": "0" * 64,
+            "strength": "0/0",
+            "tool_version": "test",
+        }
+        without = render_battery(import_module="m", func_name="f", regions=[], header_fields=header)
+        with_empty = render_battery(
+            import_module="m",
+            func_name="f",
+            regions=[],
+            header_fields=header,
+            extra_imports=(),
+        )
+        assert without == with_empty

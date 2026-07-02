@@ -203,3 +203,121 @@ def evaluate_blocks(fn: object, blocks: ContractBlocks, namespace: dict[str, obj
                 f"raises {row.input_expr}: expected {row.exc_name}, got {type(exc).__name__}"
             )
     return failures
+
+
+# ---------------------------------------------------------------------------
+# Call-plan IR renderers (adoption parity). The legacy renderers above are kept
+# so all-legacy blocks emit byte-identical output.
+# ---------------------------------------------------------------------------
+
+from jaunt.contract.cases import CallCase, CaseBlocks  # noqa: E402
+
+
+def battery_extra_imports(blocks: CaseBlocks) -> tuple[str, ...]:
+    names: set[str] = set()
+    for case in (*blocks.examples, *blocks.raises):
+        names.update(case.imports)
+    return tuple(sorted(names))
+
+
+def _fixture_params(cases: tuple[CallCase, ...], declared: tuple[str, ...]) -> str:
+    used = {f for c in cases for f in c.fixtures}
+    ordered = [f for f in declared if f in used]
+    return ", ".join(ordered)
+
+
+def _all_plain_legacy(cases: tuple[CallCase, ...]) -> bool:
+    return all(c.legacy and not c.is_async and not c.fixtures for c in cases)
+
+
+def _suffix_id(base: str, region_suffix: str) -> str:
+    return f"{base}-{region_suffix}" if region_suffix else base
+
+
+def _suffix_fn(base: str, region_suffix: str) -> str:
+    return f"{base}_{region_suffix}" if region_suffix else base
+
+
+def _render_examples_cases(
+    cases: tuple[CallCase, ...],
+    *,
+    declared: tuple[str, ...],
+    region_suffix: str,
+) -> DerivedRegion:
+    if _all_plain_legacy(cases) and not region_suffix:
+        # Legacy cases are parser-built as target(<input>), so slicing between
+        # the first "(" and trailing ")" recovers the exact original input
+        # expression before the old renderer produces today's bytes.
+        rows = tuple(
+            ExampleRow(c.call_expr[c.call_expr.index("(") + 1 : -1], c.expected_expr or "")
+            for c in cases
+        )
+        target = cases[0].call_expr[: cases[0].call_expr.index("(")]
+        return _render_examples_region(rows, target)
+    is_async = any(c.is_async for c in cases)
+    params = _fixture_params(cases, declared)
+    prefix = "async def" if is_async else "def"
+    fn_name = _suffix_fn("test_examples", region_suffix)
+    lines = [f"{prefix} {fn_name}({params}):  # derived from: Examples"]
+    for c in cases:
+        call = f"await {c.call_expr}" if c.is_async else c.call_expr
+        lines.append(f"    assert {call} == {c.expected_expr}")
+    return DerivedRegion(region_id=_suffix_id("examples", region_suffix), code="\n".join(lines))
+
+
+def _render_raises_cases(
+    cases: tuple[CallCase, ...],
+    *,
+    declared: tuple[str, ...],
+    region_suffix: str,
+) -> DerivedRegion:
+    if _all_plain_legacy(cases) and not region_suffix:
+        # Legacy cases are parser-built as target(<input>), so slicing between
+        # the first "(" and trailing ")" recovers the exact original input
+        # expression before the old renderer produces today's bytes.
+        rows = tuple(
+            RaisesRow(c.call_expr[c.call_expr.index("(") + 1 : -1], c.exc_name or "") for c in cases
+        )
+        target = cases[0].call_expr[: cases[0].call_expr.index("(")]
+        return _render_errors_region(rows, target)
+    by_exc: dict[str, list[CallCase]] = {}
+    for c in cases:
+        by_exc.setdefault(c.exc_name or "Exception", []).append(c)
+    blocks_out: list[str] = []
+    for exc, exc_cases in by_exc.items():
+        is_async = any(c.is_async for c in exc_cases)
+        params = _fixture_params(tuple(exc_cases), declared)
+        prefix = "async def" if is_async else "def"
+        fn_name = _suffix_fn(f"test_raises_{exc.lower()}", region_suffix)
+        lines = [f"{prefix} {fn_name}({params}):  # derived from: Raises"]
+        for c in exc_cases:
+            call = f"await {c.call_expr}" if c.is_async else c.call_expr
+            lines.append(f"    with pytest.raises({exc}):")
+            lines.append(f"        {call}")
+        blocks_out.append("\n".join(lines))
+    return DerivedRegion(
+        region_id=_suffix_id("errors", region_suffix), code="\n\n".join(blocks_out)
+    )
+
+
+def derive_case_regions(
+    blocks: CaseBlocks,
+    *,
+    target: str,
+    derive: list[str],
+    region_suffix: str = "",
+) -> list[DerivedRegion]:
+    regions: list[DerivedRegion] = []
+    if "examples" in derive and blocks.examples:
+        regions.append(
+            _render_examples_cases(
+                blocks.examples, declared=blocks.fixtures_declared, region_suffix=region_suffix
+            )
+        )
+    if "errors" in derive and blocks.raises:
+        regions.append(
+            _render_raises_cases(
+                blocks.raises, declared=blocks.fixtures_declared, region_suffix=region_suffix
+            )
+        )
+    return regions
