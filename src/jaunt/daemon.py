@@ -35,6 +35,10 @@ class GateOutcome:
     detail: str = ""
 
 
+class ProbeError(Exception):
+    """Raised when a status probe subprocess fails; never treated as a clean HEAD."""
+
+
 @dataclass
 class JobResult:
     job_id: str
@@ -55,6 +59,7 @@ class Runner(Protocol):
 @dataclass
 class DaemonState:
     last_head: str = ""
+    last_probe_error: str = ""
     futures: dict[str, Future[JobResult]] = field(default_factory=dict)
     pending: dict[str, JobResult] = field(default_factory=dict)
 
@@ -67,7 +72,7 @@ def drain(state: DaemonState) -> None:
 class CliRunner:
     """Default runner: drives jaunt's own CLI JSON contracts in a worktree."""
 
-    def _run(self, worktree: Path, *argv: str) -> dict:
+    def _run(self, worktree: Path, *argv: str) -> tuple[int, dict]:
         proc = subprocess.run(
             [sys.executable, "-m", "jaunt", *argv],
             cwd=worktree,
@@ -76,19 +81,25 @@ class CliRunner:
             check=False,
         )
         try:
-            return _json.loads(proc.stdout or "{}")
+            return proc.returncode, _json.loads(proc.stdout or "{}")
         except _json.JSONDecodeError:
-            return {"ok": False, "error": (proc.stderr or proc.stdout)[-500:]}
+            return proc.returncode, {"ok": False, "error": (proc.stderr or proc.stdout)[-500:]}
 
     def probe(self, worktree: Path) -> tuple[dict[str, str], dict[str, str]]:
-        payload = self._run(worktree, "status", "--json", "--magic-only")
+        returncode, payload = self._run(worktree, "status", "--json", "--magic-only")
+        if returncode != 0 or payload.get("ok") is not True:
+            detail = payload.get(
+                "error",
+                f"status probe failed with returncode {returncode} and ok={payload.get('ok')!r}",
+            )
+            raise ProbeError(_one_line_detail(detail))
         stale = payload.get("stale", [])
         changes = payload.get("stale_changes", {})
         digests = payload.get("digests", {})
         return {m: changes.get(m, "structural") for m in stale}, digests
 
     def build(self, worktree: Path, module: str) -> BuildOutcome:
-        payload = self._run(
+        _, payload = self._run(
             worktree,
             "build",
             "--target",
@@ -105,7 +116,7 @@ class CliRunner:
         return BuildOutcome(ok=False, refrozen=False, error=error.splitlines()[0][:200])
 
     def gate(self, worktree: Path, module: str) -> GateOutcome:
-        payload = self._run(worktree, "check", "--json")
+        _, payload = self._run(worktree, "check", "--json")
         checked = payload.get("checked", [])
         blocked = payload.get("blocked", [])
         if payload.get("ok", False):
@@ -113,6 +124,12 @@ class CliRunner:
             return GateOutcome(ok=True, battery=battery)
         detail = str(payload.get("error", "jaunt check failed")).splitlines()[0][:200]
         return GateOutcome(ok=False, detail=detail)
+
+
+def _one_line_detail(detail: object, limit: int = 200) -> str:
+    text = str(detail).replace("\r", "\n")
+    line = next((part.strip() for part in text.splitlines() if part.strip()), "")
+    return (line or "-")[:limit]
 
 
 def _lock_path(root: Path) -> Path:
@@ -349,30 +366,40 @@ def run_once(
 ) -> None:
     head = _head(root)
     if head != state.last_head:
-        state.last_head = head
-        stale, digests = _probe_head(root, head, runner)
-        branch = _branch(root)
-        for module, _change in sorted(stale.items()):
-            digest = digests.get(module, "")
-            existing = jobs_mod.active_for_module(root, module)
-            if existing is not None:
-                if existing.spec_digest == digest:
-                    continue
-                jobs_mod.mark(root, existing, jobs_mod.SUPERSEDED)
-                state.futures.pop(existing.id, None)
-                state.pending.pop(existing.id, None)
-            job = jobs_mod.JobRecord.new(
-                module=module, spec_digest=digest, base_commit=head, branch=branch
-            )
-            jobs_mod.save_job(root, job)
+        try:
+            stale, digests = _probe_head(root, head, runner)
+        except ProbeError as err:
+            detail = _one_line_detail(err)
+            if detail != state.last_probe_error:
+                journal_mod.append_events(
+                    root, [journal_mod.JournalEvent("probe-fail", "-", detail)]
+                )
+            state.last_probe_error = detail
+        else:
+            state.last_probe_error = ""
+            state.last_head = head
+            branch = _branch(root)
+            for module, _change in sorted(stale.items()):
+                digest = digests.get(module, "")
+                existing = jobs_mod.active_for_module(root, module)
+                if existing is not None:
+                    if existing.spec_digest == digest:
+                        continue
+                    jobs_mod.mark(root, existing, jobs_mod.SUPERSEDED)
+                    state.futures.pop(existing.id, None)
+                    state.pending.pop(existing.id, None)
+                job = jobs_mod.JobRecord.new(
+                    module=module, spec_digest=digest, base_commit=head, branch=branch
+                )
+                jobs_mod.save_job(root, job)
 
-        # A module absent from the latest probe is no longer stale at this HEAD
-        # (spec deleted/ejected/reverted): its in-flight job must never land.
-        for job in jobs_mod.list_jobs(root, states=jobs_mod.ACTIVE_STATES):
-            if job.module not in stale:
-                jobs_mod.mark(root, job, jobs_mod.SUPERSEDED)
-                state.futures.pop(job.id, None)
-                state.pending.pop(job.id, None)
+            # A module absent from the latest probe is no longer stale at this HEAD
+            # (spec deleted/ejected/reverted): its in-flight job must never land.
+            for job in jobs_mod.list_jobs(root, states=jobs_mod.ACTIVE_STATES):
+                if job.module not in stale:
+                    jobs_mod.mark(root, job, jobs_mod.SUPERSEDED)
+                    state.futures.pop(job.id, None)
+                    state.pending.pop(job.id, None)
 
     _collect_finished(state, root)
     _land_pending(root, cfg, state)

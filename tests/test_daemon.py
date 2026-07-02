@@ -203,6 +203,89 @@ def test_supersede_on_newer_spec_commit(repo: Path, jaunt_cfg: JauntConfig) -> N
     assert landed and landed[0].spec_digest == "digest-v2"
 
 
+def test_probe_failure_is_loud_and_non_destructive(repo: Path, jaunt_cfg: JauntConfig) -> None:
+    (repo / journal.JOURNAL_FILE).touch()
+    release = threading.Event()
+    started = threading.Event()
+
+    class ProbeFailingRunner(FakeRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail_probe = False
+
+        def probe(self, worktree: Path) -> tuple[dict[str, str], dict[str, str]]:
+            if self.fail_probe:
+                raise daemon.ProbeError("status exploded")
+            return {self.module: self.change}, {self.module: self.digest}
+
+        def build(self, worktree: Path, module: str) -> daemon.BuildOutcome:
+            started.set()
+            release.wait(timeout=10)
+            return super().build(worktree, module)
+
+    runner = ProbeFailingRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        _spec_commit(repo)
+        daemon.run_once(repo, jaunt_cfg, state, runner, pool)
+        assert started.wait(timeout=5)
+        first = jobs.list_jobs(repo, states={jobs.RUNNING})[0]
+        last_successful_head = state.last_head
+
+        runner.fail_probe = True
+        _spec_commit(repo, '"""spec v3"""\n')
+        daemon.run_once(repo, jaunt_cfg, state, runner, pool)
+
+        loaded = jobs.load_job(repo, first.id)
+        assert loaded is not None
+        assert loaded.state != jobs.SUPERSEDED
+        assert state.last_head == last_successful_head
+        probe_fail_lines = [line for line in journal.read_lines(repo) if "probe-fail" in line]
+        assert len(probe_fail_lines) == 1
+
+        daemon.run_once(repo, jaunt_cfg, state, runner, pool)
+        probe_fail_lines = [line for line in journal.read_lines(repo) if "probe-fail" in line]
+        assert len(probe_fail_lines) == 1
+
+        runner.fail_probe = False
+        daemon.run_once(repo, jaunt_cfg, state, runner, pool)
+        release.set()
+        daemon.drain(state)
+        daemon.run_once(repo, jaunt_cfg, state, runner, pool)
+
+    loaded = jobs.load_job(repo, first.id)
+    assert loaded is not None
+    assert loaded.state == jobs.LANDED
+    assert not jobs.list_jobs(repo, states={jobs.SUPERSEDED})
+
+
+def test_cli_runner_probe_raises_on_failed_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = daemon.CliRunner()
+
+    monkeypatch.setattr(runner, "_run", lambda *_args: (2, {"ok": True, "stale": []}))
+    with pytest.raises(daemon.ProbeError):
+        runner.probe(Path("/tmp/worktree"))
+
+    monkeypatch.setattr(runner, "_run", lambda *_args: (0, {"ok": False, "error": "boom"}))
+    with pytest.raises(daemon.ProbeError, match="boom"):
+        runner.probe(Path("/tmp/worktree"))
+
+    monkeypatch.setattr(
+        runner,
+        "_run",
+        lambda *_args: (
+            0,
+            {
+                "ok": True,
+                "stale": ["m"],
+                "stale_changes": {"m": "prose"},
+                "digests": {"m": "d"},
+            },
+        ),
+    )
+    assert runner.probe(Path("/tmp/worktree")) == ({"m": "prose"}, {"m": "d"})
+
+
 def test_failed_build_journals_and_marks_failed(repo: Path, jaunt_cfg: JauntConfig) -> None:
     (repo / journal.JOURNAL_FILE).touch()
 
