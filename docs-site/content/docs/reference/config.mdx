@@ -61,6 +61,14 @@ infer_deps = true
 # Passed through to pytest as repeated "--pytest-args" flags.
 pytest_args = ["-q"]
 
+[daemon]
+# Seconds between HEAD polls.
+poll_interval = 2.0
+# Max background jobs; 0 uses build.jobs.
+max_jobs = 0
+# Optional shell command run after each landed, parked, or failed job.
+notify_command = ""
+
 [agent]
 # Code-generation engine. "codex" is the only supported value.
 engine = "codex"

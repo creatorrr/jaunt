@@ -104,6 +104,10 @@ the public contract. Include negative/error-path cases. Names must start with
 
 For exact flags on any command, run `jaunt <cmd> --help`. Common flags:
 `--root`, `--config`, `--json`, `--force`, `--target MODULE`, `--no-infer-deps`.
+Progress: `--progress {auto,rich,plain,none}` (`auto` = rich on TTY, plain lines
+off-TTY; explicit `plain` works with `--json`).
+
+Agent loop: `git commit … && jaunt jobs wait --timeout 1800`.
 
 ## Exit codes
 

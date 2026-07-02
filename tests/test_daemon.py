@@ -84,7 +84,9 @@ class FakeRunner:
             return {}, {}
         return {self.module: self.change}, {self.module: self.digest}
 
-    def build(self, worktree: Path, module: str) -> daemon.BuildOutcome:
+    def build(
+        self, worktree: Path, module: str, heartbeat: daemon.Heartbeat | None = None
+    ) -> daemon.BuildOutcome:
         gen = worktree / "src" / "__generated__"
         gen.mkdir(parents=True, exist_ok=True)
         (gen / f"{module}.py").write_text("generated = True\n", encoding="utf-8")
@@ -303,6 +305,26 @@ def test_daemon_status_json_when_stopped(tmp_path: Path, capsys) -> None:
     }
 
 
+def test_daemon_status_prints_and_emits_phase(
+    repo: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = jobs.JobRecord.new(module="app", spec_digest="d", base_commit="c", branch="main")
+    jobs.save_job(repo, job)
+    running = jobs.mark(repo, job, jobs.RUNNING, phase="[build] app: generating")
+    monkeypatch.setattr(daemon, "probe_lock", lambda _root: (True, 1234))
+
+    assert cli.main(["daemon", "status", "--root", str(repo)]) == 0
+    out = capsys.readouterr().out
+
+    assert f"- {running.id} app: running — [build] app: generating" in out
+
+    assert cli.main(["daemon", "status", "--root", str(repo), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["jobs"] == [
+        {"id": running.id, "module": "app", "state": "running", "phase": running.phase}
+    ]
+
+
 def test_run_once_full_cycle_lands_and_journals(repo: Path, jaunt_cfg: JauntConfig) -> None:
     _opt_into_journal(repo)
     runner = FakeRunner()
@@ -394,8 +416,10 @@ def test_worker_journal_change_is_ignored_and_job_lands(
     _opt_into_journal(repo)
 
     class WorkerJournalRunner(FakeRunner):
-        def build(self, worktree: Path, module: str) -> daemon.BuildOutcome:
-            outcome = super().build(worktree, module)
+        def build(
+            self, worktree: Path, module: str, heartbeat: daemon.Heartbeat | None = None
+        ) -> daemon.BuildOutcome:
+            outcome = super().build(worktree, module, heartbeat=heartbeat)
             with open(worktree / journal.JOURNAL_FILE, "a", encoding="utf-8") as f:
                 f.write("worker-build journal line\n")
             return outcome
@@ -637,9 +661,11 @@ def test_supersede_on_newer_spec_commit(repo: Path, jaunt_cfg: JauntConfig) -> N
     event = threading.Event()
 
     class BlockingRunner(FakeRunner):
-        def build(self, worktree: Path, module: str) -> daemon.BuildOutcome:
+        def build(
+            self, worktree: Path, module: str, heartbeat: daemon.Heartbeat | None = None
+        ) -> daemon.BuildOutcome:
             event.wait(timeout=10)
-            return super().build(worktree, module)
+            return super().build(worktree, module, heartbeat=heartbeat)
 
     runner = BlockingRunner()
     state = daemon.DaemonState()
@@ -667,9 +693,11 @@ def test_active_supersede_on_newer_spec_commit_journals(repo: Path, jaunt_cfg: J
     event = threading.Event()
 
     class BlockingRunner(FakeRunner):
-        def build(self, worktree: Path, module: str) -> daemon.BuildOutcome:
+        def build(
+            self, worktree: Path, module: str, heartbeat: daemon.Heartbeat | None = None
+        ) -> daemon.BuildOutcome:
             event.wait(timeout=10)
-            return super().build(worktree, module)
+            return super().build(worktree, module, heartbeat=heartbeat)
 
     runner = BlockingRunner()
     state = daemon.DaemonState()
@@ -707,10 +735,12 @@ def test_probe_failure_is_loud_and_non_destructive(repo: Path, jaunt_cfg: JauntC
                 raise daemon.ProbeError("status exploded")
             return {self.module: self.change}, {self.module: self.digest}
 
-        def build(self, worktree: Path, module: str) -> daemon.BuildOutcome:
+        def build(
+            self, worktree: Path, module: str, heartbeat: daemon.Heartbeat | None = None
+        ) -> daemon.BuildOutcome:
             started.set()
             release.wait(timeout=10)
-            return super().build(worktree, module)
+            return super().build(worktree, module, heartbeat=heartbeat)
 
     runner = ProbeFailingRunner()
     state = daemon.DaemonState()
@@ -775,11 +805,157 @@ def test_cli_runner_probe_raises_on_failed_status(monkeypatch: pytest.MonkeyPatc
     assert runner.probe(Path("/tmp/worktree")) == ({"m": "prose"}, {"m": "d"})
 
 
+def test_cli_runner_build_streams_stderr_heartbeats(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_executable = sys.executable
+    fake_python = tmp_path / "fake-python"
+    fake_python.write_text(
+        "\n".join(
+            [
+                f"#!{real_executable}",
+                "import json",
+                "import sys",
+                "import time",
+                "",
+                "argv = sys.argv",
+                "assert '--progress' in argv and argv[argv.index('--progress') + 1] == 'plain'",
+                "assert '--json' in argv",
+                "print('  [build] app: starting  ', file=sys.stderr, flush=True)",
+                "time.sleep(0.02)",
+                "print('x' * 200, file=sys.stderr, flush=True)",
+                "print(json.dumps({'ok': True, 'generated': ['app'], 'failed': {}}))",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    monkeypatch.setattr(daemon.sys, "executable", str(fake_python))
+    heartbeats: list[str] = []
+
+    outcome = daemon.CliRunner().build(tmp_path, "app", heartbeat=heartbeats.append)
+
+    assert outcome == daemon.BuildOutcome(ok=True, refrozen=False)
+    assert heartbeats == ["[build] app: starting", "x" * 160]
+
+
+def test_cli_runner_build_drains_stdout_while_stderr_is_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stdout_read = threading.Event()
+
+    class FakeStdout:
+        def read(self) -> str:
+            stdout_read.set()
+            return json.dumps({"ok": True, "generated": ["app"], "failed": {}})
+
+    class FakeStderr:
+        def __iter__(self) -> FakeStderr:
+            return self
+
+        def __next__(self) -> str:
+            if not stdout_read.wait(1.0):
+                raise AssertionError("stdout was not drained concurrently")
+            raise StopIteration
+
+    class FakeProc:
+        def __init__(self) -> None:
+            self.stdout = FakeStdout()
+            self.stderr = FakeStderr()
+            self.returncode: int | None = None
+
+        def wait(self) -> int:
+            self.returncode = 0
+            return 0
+
+    monkeypatch.setattr(daemon.subprocess, "Popen", lambda *_args, **_kwargs: FakeProc())
+
+    returncode, payload = daemon.CliRunner()._run_build(tmp_path, "app", heartbeat=None)
+
+    assert returncode == 0
+    assert payload == {"ok": True, "generated": ["app"], "failed": {}}
+
+
+def test_job_heartbeat_throttles_and_last_line_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = jobs.JobRecord.new(module="app", spec_digest="d", base_commit="c", branch="main")
+    jobs.save_job(tmp_path, job)
+    running = jobs.mark(tmp_path, job, jobs.RUNNING)
+    now = 0.0
+
+    def clock() -> float:
+        return now
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    original_save = jobs.save_job
+    saves: list[tuple[float, str]] = []
+
+    def save_spy(root: Path, record: jobs.JobRecord) -> None:
+        saves.append((clock(), record.phase))
+        original_save(root, record)
+
+    monkeypatch.setattr(daemon.jobs_mod, "save_job", save_spy)
+    heartbeat = daemon._JobHeartbeat(tmp_path, running, clock=clock, sleep=sleep)
+
+    heartbeat("first")
+    now = 0.4
+    heartbeat("second")
+    now = 1.0
+    heartbeat("third")
+    now = 1.2
+    heartbeat("last")
+    heartbeat.flush()
+
+    assert saves == [(0.0, "first"), (1.0, "third"), (2.0, "last")]
+    loaded = jobs.load_job(tmp_path, job.id)
+    assert loaded is not None
+    assert loaded.phase == "last"
+
+
+def test_job_heartbeat_first_line_persists_immediately(tmp_path: Path) -> None:
+    # The opening "generating" line may be the only stderr output for the
+    # entire model call; it must not sit buffered until flush.
+    job = jobs.JobRecord.new(module="app", spec_digest="d", base_commit="c", branch="main")
+    jobs.save_job(tmp_path, job)
+    running = jobs.mark(tmp_path, job, jobs.RUNNING)
+
+    heartbeat = daemon._JobHeartbeat(tmp_path, running, clock=lambda: 0.0, sleep=lambda _s: None)
+    heartbeat("[build] app: generating")
+
+    loaded = jobs.load_job(tmp_path, job.id)
+    assert loaded is not None
+    assert loaded.phase == "[build] app: generating"
+
+
+def test_job_heartbeat_save_failure_is_best_effort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = jobs.JobRecord.new(module="app", spec_digest="d", base_commit="c", branch="main")
+    jobs.save_job(tmp_path, job)
+    running = jobs.mark(tmp_path, job, jobs.RUNNING)
+
+    def fail_save(_root: Path, _record: jobs.JobRecord) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(daemon.jobs_mod, "save_job", fail_save)
+    heartbeat = daemon._JobHeartbeat(tmp_path, running)
+
+    heartbeat("line")
+    heartbeat.flush()
+
+
 def test_failed_build_journals_and_marks_failed(repo: Path, jaunt_cfg: JauntConfig) -> None:
     _opt_into_journal(repo)
 
     class FailingRunner(FakeRunner):
-        def build(self, worktree: Path, module: str) -> daemon.BuildOutcome:
+        def build(
+            self, worktree: Path, module: str, heartbeat: daemon.Heartbeat | None = None
+        ) -> daemon.BuildOutcome:
             self.built.append(module)
             return daemon.BuildOutcome(ok=False, refrozen=False, error="codex exited 3")
 
@@ -798,7 +974,9 @@ def test_worker_exception_marks_failed_and_survives(repo: Path, jaunt_cfg: Jaunt
     _opt_into_journal(repo)
 
     class ExplodingRunner(FakeRunner):
-        def build(self, worktree: Path, module: str) -> daemon.BuildOutcome:
+        def build(
+            self, worktree: Path, module: str, heartbeat: daemon.Heartbeat | None = None
+        ) -> daemon.BuildOutcome:
             raise RuntimeError("boom")
 
     state = daemon.DaemonState()

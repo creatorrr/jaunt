@@ -122,3 +122,29 @@ def test_cli_build_non_json_prints_summary(tmp_path: Path, monkeypatch, capsys) 
     assert rc == jaunt.cli.EXIT_OK
     assert "Built " in out
     assert "module(s), skipped" in out
+
+
+def test_cli_build_json_with_explicit_plain_progress_keeps_stdout_json(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    project, prefix = _make_cli_build_project(tmp_path)
+    before = {
+        prefix: sys.modules.get(prefix),
+        f"{prefix}.specs": sys.modules.get(f"{prefix}.specs"),
+    }
+    orig_sys_path = list(sys.path)
+    monkeypatch.setattr(jaunt.cli, "_build_backend", lambda cfg: GoodBackend())
+
+    try:
+        rc = jaunt.cli.main(["build", "--root", str(project), "--json", "--progress", "plain"])
+    finally:
+        sys.path[:] = orig_sys_path
+        _restore_modules([prefix], before=before)
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert rc == jaunt.cli.EXIT_OK
+    assert payload["ok"] is True
+    assert "[build] " in captured.err
+    assert "[build] app.specs: generating" in captured.err
+    assert "[build] 1/1 ok=1 fail=0 app.specs" in captured.err

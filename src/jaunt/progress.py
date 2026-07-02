@@ -4,7 +4,7 @@ import sys
 import time
 from dataclasses import dataclass
 from shutil import get_terminal_size
-from typing import Any
+from typing import Any, Literal
 
 
 def _stream_is_tty(stream: Any) -> bool:
@@ -26,22 +26,26 @@ class ProgressBar:
     total: int
     enabled: bool = True
     stream: Any = sys.stderr
+    mode: Literal["rich", "plain"] = "rich"
     width: int = 28
     min_interval_s: float = 0.08
 
     def __post_init__(self) -> None:
+        if self.mode not in {"rich", "plain"}:
+            raise ValueError("progress mode must be 'rich' or 'plain'")
         self._done = 0
         self._ok = 0
         self._fail = 0
         self._last_render = 0.0
         self._finished = False
         self._console: Any = None
-        if _stream_is_tty(self.stream):
+        if self.mode == "rich" and _stream_is_tty(self.stream):
             try:
                 self._console = _make_rich_console(self.stream)
             except Exception:
                 self._console = None
-        self._render("")  # initial line
+        if self.mode == "rich":
+            self._render("")  # initial line
 
     def advance(self, item: str, *, ok: bool) -> None:
         if self._finished:
@@ -51,12 +55,20 @@ class ProgressBar:
             self._ok += 1
         else:
             self._fail += 1
+        if self.mode == "plain":
+            done, total = self._progress_counts()
+            self._write(f"[{self.label}] {done}/{total} ok={self._ok} fail={self._fail} {item}\n")
+            return
         self._render(item)
 
     def finish(self) -> None:
         if self._finished:
             return
         self._finished = True
+        if self.mode == "plain":
+            done, total = self._progress_counts()
+            self._write(f"[{self.label}] done {done}/{total} ok={self._ok} fail={self._fail}\n")
+            return
         self._render("done", force=True)
         self._write("\n")
 
@@ -66,6 +78,9 @@ class ProgressBar:
         label = f"[{self.label}] {item}: {stage}"
         if detail:
             label += f" ({detail})"
+        if self.mode == "plain":
+            self._write(label + "\n")
+            return
         if self._console is not None:
             try:
                 self._write("\r")
@@ -87,6 +102,11 @@ class ProgressBar:
             # Progress is best-effort; never fail the CLI because of rendering.
             self.enabled = False
 
+    def _progress_counts(self) -> tuple[int, int]:
+        total = max(0, int(self.total))
+        done = min(max(0, int(self._done)), total) if total else int(self._done)
+        return done, total
+
     def _render(self, item: str, *, force: bool = False) -> None:
         if not self.enabled:
             return
@@ -96,8 +116,7 @@ class ProgressBar:
             return
         self._last_render = now
 
-        total = max(0, int(self.total))
-        done = min(max(0, int(self._done)), total) if total else int(self._done)
+        done, total = self._progress_counts()
         frac = (done / total) if total else 1.0
 
         fill = int(round(self.width * frac))

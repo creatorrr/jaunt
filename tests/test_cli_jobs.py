@@ -157,6 +157,36 @@ def test_jobs_list_empty(capsys, monkeypatch, scaffolded_project: Path) -> None:
     assert payload["would_rebuild"] == {}
 
 
+def test_jobs_list_and_show_print_and_emit_phase(
+    capsys, monkeypatch, scaffolded_project: Path
+) -> None:
+    monkeypatch.chdir(scaffolded_project)
+    job = jobs.JobRecord.new(module="app", spec_digest="d", base_commit="c", branch="main")
+    jobs.save_job(scaffolded_project, job)
+    running = jobs.mark(
+        scaffolded_project,
+        job,
+        jobs.RUNNING,
+        phase="[build] app: generating (calling codex)",
+    )
+
+    assert main(["jobs"]) == 0
+    out = capsys.readouterr().out
+    assert f"- {running.id} app: running — [build] app: generating (calling codex)" in out
+
+    assert main(["jobs", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["jobs"][0]["phase"] == running.phase
+
+    assert main(["jobs", "show", running.id]) == 0
+    out = capsys.readouterr().out
+    assert "state: running — [build] app: generating (calling codex)" in out
+
+    assert main(["jobs", "show", running.id, "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["job"]["phase"] == running.phase
+
+
 def test_jobs_show_full_reads_detail_log(capsys, monkeypatch, scaffolded_project: Path) -> None:
     monkeypatch.chdir(scaffolded_project)
     root = Path(scaffolded_project)

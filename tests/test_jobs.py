@@ -1,3 +1,5 @@
+import json
+from dataclasses import asdict
 from pathlib import Path
 
 from jaunt import jobs
@@ -27,6 +29,21 @@ def test_save_load_roundtrip(tmp_path: Path):
     assert jobs.load_job(tmp_path, "nope") is None
 
 
+def test_load_old_format_record_without_phase(tmp_path: Path):
+    job = _mk(tmp_path)
+    payload = asdict(job)
+    del payload["phase"]
+    (jobs.jobs_dir(tmp_path) / f"{job.id}.json").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+
+    loaded = jobs.load_job(tmp_path, job.id)
+
+    assert loaded is not None
+    assert loaded.phase == ""
+
+
 def test_list_jobs_filters_and_sorts(tmp_path: Path):
     j1 = _mk(tmp_path, module="a")
     j2 = _mk(tmp_path, module="b")
@@ -53,3 +70,15 @@ def test_mark_updates_fields_and_persists(tmp_path: Path):
     assert loaded is not None
     assert loaded.battery == "47/47"
     assert updated.updated >= updated.created
+
+
+def test_terminal_mark_clears_phase(tmp_path: Path):
+    job = _mk(tmp_path)
+    running = jobs.mark(tmp_path, job, jobs.RUNNING, phase="[build] app: generating")
+
+    failed = jobs.mark(tmp_path, running, jobs.FAILED, error="boom")
+
+    assert failed.phase == ""
+    loaded = jobs.load_job(tmp_path, job.id)
+    assert loaded is not None
+    assert loaded.phase == ""

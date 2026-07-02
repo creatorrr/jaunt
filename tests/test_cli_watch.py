@@ -22,6 +22,7 @@ def test_parse_watch_defaults() -> None:
     assert ns.target == []
     assert ns.no_infer_deps is False
     assert ns.no_progress is False
+    assert ns.progress == "auto"
     assert ns.instructions == []
     assert ns.include_target_tests is None
 
@@ -53,6 +54,8 @@ def test_parse_watch_all_flags() -> None:
             "pkg.mod",
             "--no-infer-deps",
             "--no-progress",
+            "--progress",
+            "none",
             "--instruction",
             "Prefer narrow imports.",
             "--include-target-tests",
@@ -67,6 +70,7 @@ def test_parse_watch_all_flags() -> None:
     assert ns.target == ["pkg.mod"]
     assert ns.no_infer_deps is True
     assert ns.no_progress is True
+    assert ns.progress == "none"
     assert ns.instructions == ["Prefer narrow imports."]
     assert ns.include_target_tests is True
 
