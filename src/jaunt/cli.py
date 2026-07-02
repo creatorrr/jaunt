@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import os
+import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -222,6 +223,20 @@ def _build_parser() -> argparse.ArgumentParser:
     log_p.add_argument("--module", default=None, help="Filter by module name.")
     log_p.add_argument("--root", default=".", help="Project root.")
     log_p.add_argument("--json", action="store_true", dest="json_output")
+
+    daemon_p = subparsers.add_parser("daemon", help="Background codegen daemon.")
+    daemon_sub = daemon_p.add_subparsers(dest="daemon_command", required=True)
+    daemon_start_p = daemon_sub.add_parser(
+        "start",
+        help="Run the daemon (foreground; Ctrl-C to stop).",
+    )
+    daemon_start_p.add_argument("--root", default=".")
+    daemon_start_p.add_argument("--json", action="store_true", dest="json_output")
+    daemon_stop_p = daemon_sub.add_parser("stop", help="Stop a running daemon.")
+    daemon_stop_p.add_argument("--root", default=".")
+    daemon_status_p = daemon_sub.add_parser("status", help="Show daemon and job status.")
+    daemon_status_p.add_argument("--root", default=".")
+    daemon_status_p.add_argument("--json", action="store_true", dest="json_output")
 
     instructions_p = subparsers.add_parser(
         "instructions",
@@ -573,6 +588,76 @@ def cmd_log(args: argparse.Namespace) -> int:
     for line in lines:
         print(line)
     return EXIT_OK
+
+
+def cmd_daemon(args: argparse.Namespace) -> int:
+    import signal
+
+    from jaunt import daemon as daemon_mod
+    from jaunt import jobs as jobs_mod
+
+    root = Path(args.root).resolve()
+    if args.daemon_command == "stop":
+        pid = daemon_mod.lock_pid(root)
+        if pid is None:
+            print("Daemon not running.")
+            return EXIT_OK
+        os.kill(pid, signal.SIGTERM)
+        print(f"Sent SIGTERM to daemon (pid {pid}).")
+        return EXIT_OK
+
+    if args.daemon_command == "status":
+        pid = daemon_mod.lock_pid(root)
+        records = jobs_mod.list_jobs(root)
+        if _is_json_mode(args):
+            _emit_json(
+                {
+                    "command": "daemon-status",
+                    "ok": True,
+                    "running": pid is not None,
+                    "pid": pid,
+                    "jobs": [
+                        {"id": job.id, "module": job.module, "state": job.state} for job in records
+                    ],
+                }
+            )
+        else:
+            status = f"running (pid {pid})" if pid else "stopped"
+            print(f"Daemon: {status}")
+            for job in records[-10:]:
+                print(f"- {job.id} {job.module}: {job.state}")
+        return EXIT_OK
+
+    if os.environ.get(daemon_mod.DISABLE_ENV):
+        print(f"{daemon_mod.DISABLE_ENV} is set; refusing to start.", file=sys.stderr)
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    ignored = (
+        subprocess.run(
+            ["git", "-C", str(root), "check-ignore", "-q", ".jaunt"],
+            capture_output=True,
+            check=False,
+        ).returncode
+        == 0
+    )
+    if not ignored:
+        print(
+            "error: .jaunt/ must be gitignored before running the daemon "
+            "(its cache and job state would otherwise trip the landing allowlist). "
+            "Add '.jaunt/' to .gitignore.",
+            file=sys.stderr,
+        )
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    if not daemon_mod.acquire_lock(root):
+        print("Daemon already running.", file=sys.stderr)
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    try:
+        daemon_mod.run_daemon(root)
+        return EXIT_OK
+    finally:
+        daemon_mod.release_lock(root)
 
 
 def _sync_generated_dir_env(cfg: JauntConfig) -> None:
@@ -2608,6 +2693,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_status(args)
     if args.command == "log":
         return cmd_log(args)
+    if args.command == "daemon":
+        return cmd_daemon(args)
     if args.command == "instructions":
         return cmd_instructions(args)
     if args.command == "tree":
