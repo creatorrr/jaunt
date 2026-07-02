@@ -1248,6 +1248,7 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
                     module_namespace=vars(module),
                     tool_version=__version__,
                     model_extract=_model_extract,
+                    source_roots=cfg.paths.source_roots,
                 )
             )
 
@@ -1320,6 +1321,7 @@ def cmd_adopt(args: argparse.Namespace) -> int:
             entry,
             module_namespace=vars(mod),
             tool_version=__version__,
+            source_roots=cfg.paths.source_roots,
         )
 
         if result.ok:
