@@ -1300,6 +1300,12 @@ def cmd_adopt(args: argparse.Namespace) -> int:
             module, _, func = ref.rpartition(".")
         if not module or not func:
             raise JauntConfigError(f"adopt expects a 'module:func' ref, got {ref!r}.")
+        if "." in func:
+            _eprint(
+                f"error: contract mode adopts the whole class: "
+                f"jaunt adopt {module}:{func.split('.')[0]}"
+            )
+            return EXIT_CONFIG_OR_DISCOVERY
 
         src_path = _resolve_contract_source_file(root=root, cfg=cfg, module=module)
         source = src_path.read_text(encoding="utf-8")
@@ -1381,6 +1387,12 @@ def cmd_eject(args: argparse.Namespace) -> int:
             module, sep, func = ref.partition(":")
             if not sep:
                 module, _, func = ref.rpartition(".")
+            if "." in func:
+                _eprint(
+                    f"error: contract mode ejects the whole class: "
+                    f"jaunt eject {module}:{func.split('.')[0]}"
+                )
+                return EXIT_CONFIG_OR_DISCOVERY
             targets = [e for e in specs.values() if e.module == module and e.qualname == func]
             if not targets:
                 raise JauntDiscoveryError(f"No contract function matches {ref!r}.")

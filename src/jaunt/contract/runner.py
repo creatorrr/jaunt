@@ -153,8 +153,19 @@ def reconcile_entry(
 
     node = load_contract_node(entry.source_file, entry.qualname)
     if isinstance(node, ast.ClassDef):
-        # Task 9 wires whole-class reconcile; keep the error explicit until then.
-        raise ValueError("whole-class reconcile not wired yet (adoption-parity Task 9)")
+        return _reconcile_class(
+            node,
+            root=root,
+            battery_dir=battery_dir,
+            derive=derive,
+            strength_enabled=strength_enabled,
+            entry=entry,
+            module_namespace=module_namespace,
+            tool_version=tool_version,
+            path=path,
+            spec_ref=spec_ref,
+            source_roots=source_roots,
+        )
 
     module_names = _module_top_level_names(entry.source_file)
     async_map = {entry.qualname: isinstance(node, ast.AsyncFunctionDef)}
@@ -227,6 +238,132 @@ def reconcile_entry(
     if blocks.has_fixture_cases():
         ok = _validate_via_pytest(text, path, root=root, entry=entry, source_roots=source_roots)
         if not ok:
+            return ReconcileResult(
+                spec_ref,
+                False,
+                "0/0",
+                ["fixture-dependent cases failed under pytest; run the battery for detail"],
+                path,
+                False,
+            )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return ReconcileResult(spec_ref, True, strength, [], path, True)
+
+
+def _reconcile_class(
+    node,
+    *,
+    root: Path,
+    battery_dir: str,
+    derive: list[str],
+    strength_enabled: bool,
+    entry: SpecEntry,
+    module_namespace: dict[str, object],
+    tool_version: str,
+    path: Path,
+    spec_ref: str,
+    source_roots: list[str],
+) -> ReconcileResult:
+    import ast
+
+    from jaunt.contract.battery import merge_battery
+    from jaunt.contract.cases import CaseBlocks, CaseParseError, parse_case_blocks
+    from jaunt.contract.derive import (
+        battery_extra_imports,
+        derive_case_regions,
+        evaluate_cases,
+    )
+    from jaunt.contract.strength import compute_case_strength, format_strength
+    from jaunt.digest import contract_digests
+
+    cls_name = entry.qualname
+    methods = [m for m in node.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    async_map: dict[str, bool] = {cls_name: False}
+    for m in methods:
+        async_map[f"{cls_name}.{m.name}"] = isinstance(m, ast.AsyncFunctionDef)
+    module_names = _module_top_level_names(entry.source_file)
+
+    # Partition by which docstring each case came from: class-docstring cases
+    # render in the base `examples`/`errors` regions, method-docstring cases in
+    # `examples-<method>`/`errors-<method>` regions. (Do NOT partition by
+    # `case.method` — a class-docstring case like `Counter(1).peek() == 1` has
+    # `method="peek"` for async resolution but still belongs to the class region.)
+    try:
+        class_doc_blocks = parse_case_blocks(
+            ast.get_docstring(node, clean=True) or "",
+            target=cls_name,
+            async_map=async_map,
+            module_names=module_names,
+        )
+        all_blocks = class_doc_blocks
+        method_blocks: list[tuple[str, CaseBlocks]] = []
+        for m in methods:
+            if m.name.startswith("_"):
+                continue
+            doc = ast.get_docstring(m, clean=True) or ""
+            if not doc:
+                continue
+            mb = parse_case_blocks(
+                doc,
+                target=cls_name,
+                async_map=async_map,
+                module_names=module_names,
+                method=m.name,
+            )
+            if not mb.is_empty():
+                method_blocks.append((m.name, mb))
+                all_blocks = all_blocks.merged(mb)
+    except CaseParseError as exc:
+        return ReconcileResult(spec_ref, False, "0/0", [f"{exc} (line: {exc.line})"], path, False)
+
+    cls_obj = module_namespace.get(cls_name)
+    if not callable(cls_obj):
+        return ReconcileResult(spec_ref, False, "0/0", ["class not importable"], path, False)
+
+    eval_ns: dict[str, object] = {cls_name: cls_obj}
+    for case in (*all_blocks.examples, *all_blocks.raises):
+        for name in case.imports:
+            eval_ns[name] = module_namespace.get(name)
+
+    failures = evaluate_cases(all_blocks, namespace=eval_ns)
+    if failures:
+        return ReconcileResult(spec_ref, False, "0/0", failures, path, False)
+
+    digs = contract_digests(entry.source_file, entry.qualname)
+    strength = "0/0"
+    excluded = 0
+    if strength_enabled:
+        killed, applicable, excluded = compute_case_strength(
+            ast.unparse(node), cls_name, all_blocks, eval_ns
+        )
+        strength = format_strength(killed, applicable)
+
+    regions = derive_case_regions(class_doc_blocks, target=cls_name, derive=derive)
+    for name, mb in method_blocks:
+        regions += derive_case_regions(mb, target=cls_name, derive=derive, region_suffix=name)
+
+    existing = path.read_text(encoding="utf-8") if path.is_file() else None
+    text = merge_battery(
+        existing,
+        import_module=entry.module,
+        func_name=cls_name,
+        regions=regions,
+        header_fields={
+            "derived_from": spec_ref,
+            "prose_digest": digs.prose,
+            "signature": digs.signature,
+            "body_digest": digs.body,
+            "strength": strength,
+            "strength_excluded": str(excluded),
+            "tool_version": tool_version,
+        },
+        extra_imports=battery_extra_imports(all_blocks),
+    )
+
+    if all_blocks.has_fixture_cases():
+        if not _validate_via_pytest(text, path, root=root, entry=entry, source_roots=source_roots):
             return ReconcileResult(
                 spec_ref,
                 False,
