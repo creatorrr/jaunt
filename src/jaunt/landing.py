@@ -148,6 +148,10 @@ def land(
         if apply_proc.returncode != 0:
             _rollback_paths(repo, patch_paths)
             return None
+        # This only narrows the race; git has no compare-and-swap commit primitive.
+        if git_out(repo, "rev-parse", "HEAD").strip() != expected_head:
+            _rollback_paths(repo, patch_paths)
+            return HEAD_MOVED
         commit_paths = [*patch_paths, *extra_commit_paths]
         try:
             git_out(repo, "add", "--", *commit_paths)

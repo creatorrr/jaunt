@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -169,6 +170,51 @@ def test_land_defers_when_head_moved(repo: Path) -> None:
     )
     assert result == landing.HEAD_MOVED
     assert _git(repo, "status", "--porcelain") == ""  # nothing applied
+
+
+def test_land_defers_when_head_moves_between_apply_and_commit(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    patch, _, paths = _patch_for(repo, "src/__generated__/app.py", "y = 10\n")
+    original_run = subprocess.run
+    interleaved = False
+
+    def run_with_interleaved_commit(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal interleaved
+        proc = original_run(*args, **kwargs)
+        command = args[0] if args else kwargs.get("args")
+        if (
+            not interleaved
+            and isinstance(command, list)
+            and len(command) >= 4
+            and command[0] == "git"
+            and command[1] == "-C"
+            and command[3] == "apply"
+            and proc.returncode == 0
+        ):
+            interleaved = True
+            (repo / "other.txt").write_text("x\n", encoding="utf-8")
+            original_run(
+                ["git", "-C", str(repo), "add", "--", "other.txt"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            original_run(
+                ["git", "-C", str(repo), "commit", "-m", "user commit moves HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        return proc
+
+    monkeypatch.setattr(landing.subprocess, "run", run_with_interleaved_commit)
+
+    result = _land(repo, patch, paths, msg="regen(app): interleaved")
+
+    assert result == landing.HEAD_MOVED
+    assert _git(repo, "status", "--porcelain", "--", *paths) == ""
+    assert "regen(app): interleaved" not in _git(repo, "log", "--format=%s")
 
 
 def test_land_parks_on_wrong_branch(repo: Path) -> None:
