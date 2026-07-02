@@ -153,6 +153,22 @@ def release_lock(root: Path) -> None:
     _lock_path(root).unlink(missing_ok=True)
 
 
+def jaunt_dir_ignored(root: Path) -> bool:
+    """True if ``.jaunt/`` is gitignored.
+
+    Creates the directory first: dir-only ignore rules (``.jaunt/``) do not match a
+    path that does not exist on disk, so a freshly initialized project would fail the
+    check before its first daemon run. The daemon needs the directory anyway.
+    """
+    (root / ".jaunt").mkdir(parents=True, exist_ok=True)
+    proc = subprocess.run(
+        ["git", "-C", str(root), "check-ignore", "-q", ".jaunt"],
+        capture_output=True,
+        check=False,
+    )
+    return proc.returncode == 0
+
+
 def _head(repo: Path) -> str:
     return landing.git_out(repo, "rev-parse", "HEAD").strip()
 
@@ -349,6 +365,14 @@ def run_once(
                 module=module, spec_digest=digest, base_commit=head, branch=branch
             )
             jobs_mod.save_job(root, job)
+
+        # A module absent from the latest probe is no longer stale at this HEAD
+        # (spec deleted/ejected/reverted): its in-flight job must never land.
+        for job in jobs_mod.list_jobs(root, states=jobs_mod.ACTIVE_STATES):
+            if job.module not in stale:
+                jobs_mod.mark(root, job, jobs_mod.SUPERSEDED)
+                state.futures.pop(job.id, None)
+                state.pending.pop(job.id, None)
 
     _collect_finished(state, root)
     _land_pending(root, cfg, state)

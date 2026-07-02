@@ -10,7 +10,6 @@ import asyncio
 import hashlib
 import json
 import os
-import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -660,15 +659,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         print(f"{daemon_mod.DISABLE_ENV} is set; refusing to start.", file=sys.stderr)
         return EXIT_CONFIG_OR_DISCOVERY
 
-    ignored = (
-        subprocess.run(
-            ["git", "-C", str(root), "check-ignore", "-q", ".jaunt"],
-            capture_output=True,
-            check=False,
-        ).returncode
-        == 0
-    )
-    if not ignored:
+    if not daemon_mod.jaunt_dir_ignored(root):
         print(
             "error: .jaunt/ must be gitignored before running the daemon "
             "(its cache and job state would otherwise trip the landing allowlist). "

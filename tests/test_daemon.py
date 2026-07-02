@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -257,3 +258,50 @@ def test_recover_orphans_and_prunes_worktrees(repo: Path, jaunt_cfg: JauntConfig
     assert recovered is not None
     assert recovered.state == jobs.FAILED
     assert not stray.exists()
+
+
+def test_supersede_when_module_vanishes_from_probe(repo: Path, jaunt_cfg: JauntConfig) -> None:
+    """A spec deleted mid-job must supersede the job, never land its stale patch."""
+
+    class VanishingRunner(FakeRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.vanished = False
+
+        def probe(self, worktree: Path) -> tuple[dict[str, str], dict[str, str]]:
+            if self.vanished:
+                return {}, {}
+            return super().probe(worktree)
+
+    runner = VanishingRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        _spec_commit(repo)
+        daemon.run_once(repo, jaunt_cfg, state, runner, pool)  # enqueue + spawn
+        daemon.drain(state)  # job future completes, not yet collected
+        runner.vanished = True  # spec removed: module no longer stale
+        _spec_commit(repo, body="# spec deleted\n")
+        daemon.run_once(repo, jaunt_cfg, state, runner, pool)  # probe supersedes before landing
+        daemon.run_once(repo, jaunt_cfg, state, runner, pool)
+    superseded = jobs.list_jobs(repo, states={jobs.SUPERSEDED})
+    assert superseded and superseded[0].module == "app"
+    assert not jobs.list_jobs(repo, states={jobs.LANDED})
+    assert not (repo / "src" / "__generated__" / "app.py").exists()
+    assert "regen" not in _git(repo, "log", "-1", "--format=%s")
+
+
+def test_jaunt_dir_ignored_creates_missing_dir(repo: Path) -> None:
+    jaunt_dir = repo / ".jaunt"
+    if jaunt_dir.exists():
+        shutil.rmtree(jaunt_dir)
+    assert daemon.jaunt_dir_ignored(repo) is True  # rule matches even from a fresh clone
+    assert jaunt_dir.is_dir()  # created as a side effect
+
+
+def test_jaunt_dir_ignored_false_without_rule(tmp_path: Path) -> None:
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    _git(bare, "init", "-b", "main")
+    _git(bare, "config", "user.email", "t@example.com")
+    _git(bare, "config", "user.name", "T")
+    assert daemon.jaunt_dir_ignored(bare) is False
