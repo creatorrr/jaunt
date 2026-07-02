@@ -44,6 +44,16 @@ def test_append_requires_existing_file_unless_create(tmp_path: Path):
     assert text.count("\n") == 2
 
 
+def test_append_empty_events_with_create_creates_journal(tmp_path: Path):
+    assert journal.append_events(tmp_path, [], create=True) is True
+    assert (tmp_path / journal.JOURNAL_FILE).exists()
+
+
+def test_append_empty_events_without_create_preserves_missing_journal(tmp_path: Path):
+    assert journal.append_events(tmp_path, [], create=False) is False
+    assert not (tmp_path / journal.JOURNAL_FILE).exists()
+
+
 def test_append_rejects_newlines_in_detail(tmp_path: Path):
     with pytest.raises(ValueError):
         journal.append_events(tmp_path, [_event(detail="two\nlines")], create=True)

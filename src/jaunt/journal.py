@@ -43,6 +43,8 @@ def append_events(root: Path, events: Sequence[JournalEvent], *, create: bool = 
             if "\n" in field or "\r" in field:
                 raise ValueError(f"journal fields must be single-line: {field!r}")
         lines.append(format_line(event))
+    if create and not path.exists():
+        path.touch()
     if not lines:
         return path.exists()
     with open(path, "a", encoding="utf-8") as f:
