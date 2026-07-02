@@ -2,9 +2,90 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from jaunt import cli, daemon
+import pytest
+
+from jaunt import cli, daemon, jobs, journal
+from jaunt.config import JauntConfig, load_config
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+@pytest.fixture()
+def repo(tmp_path: Path) -> Path:
+    r = tmp_path / "repo"
+    r.mkdir()
+    _git(r, "init", "-b", "main")
+    _git(r, "config", "user.email", "t@example.com")
+    _git(r, "config", "user.name", "T")
+    (r / "src").mkdir()
+    (r / "src" / "app.py").write_text('"""spec v1"""\n', encoding="utf-8")
+    (r / ".gitignore").write_text(".jaunt/\n", encoding="utf-8")
+    (r / "jaunt.toml").write_text(
+        'version = 1\n\n[paths]\nsource_roots = ["src"]\n',
+        encoding="utf-8",
+    )
+    _git(r, "add", "-A")
+    _git(r, "commit", "-m", "init")
+    return r
+
+
+@pytest.fixture()
+def jaunt_cfg(repo: Path) -> JauntConfig:
+    return load_config(root=repo)
+
+
+class FakeRunner:
+    """Stale until built; probe returns a controllable digest so tests can supersede."""
+
+    def __init__(self, module: str = "app", change: str = "prose") -> None:
+        self.module = module
+        self.change = change
+        self.digest = "digest-v1"
+        self.built: list[str] = []
+
+    def probe(self, worktree: Path) -> tuple[dict[str, str], dict[str, str]]:
+        if self.built:
+            return {}, {}
+        return {self.module: self.change}, {self.module: self.digest}
+
+    def build(self, worktree: Path, module: str) -> daemon.BuildOutcome:
+        gen = worktree / "src" / "__generated__"
+        gen.mkdir(parents=True, exist_ok=True)
+        (gen / f"{module}.py").write_text("generated = True\n", encoding="utf-8")
+        self.built.append(module)
+        return daemon.BuildOutcome(ok=True, refrozen=False)
+
+    def gate(self, worktree: Path, module: str) -> daemon.GateOutcome:
+        return daemon.GateOutcome(ok=True, battery="3/3")
+
+
+def _spec_commit(repo: Path, body: str = '"""spec v2"""\n') -> None:
+    (repo / "src" / "app.py").write_text(body, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "spec commit")
+
+
+def _cycle(
+    repo: Path,
+    cfg: JauntConfig,
+    state: daemon.DaemonState,
+    runner: FakeRunner,
+    pool: ThreadPoolExecutor,
+    n: int = 3,
+) -> None:
+    """Drive run_once to quiescence: probe/spawn, drain, collect/land."""
+    for _ in range(n):
+        daemon.run_once(repo, cfg, state, runner, pool)
+        daemon.drain(state)
 
 
 def test_lock_acquire_release(tmp_path: Path) -> None:
@@ -36,3 +117,85 @@ def test_daemon_status_json_when_stopped(tmp_path: Path, capsys) -> None:
         "pid": None,
         "jobs": [],
     }
+
+
+def test_run_once_full_cycle_lands_and_journals(repo: Path, jaunt_cfg: JauntConfig) -> None:
+    (repo / journal.JOURNAL_FILE).touch()
+    runner = FakeRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        _spec_commit(repo)
+        _cycle(repo, jaunt_cfg, state, runner, pool)
+
+    landed = jobs.list_jobs(repo, states={jobs.LANDED})
+    assert len(landed) == 1 and landed[0].module == "app"
+    assert landed[0].spec_digest == "digest-v1"
+    assert "regen(app)" in _git(repo, "log", "-1", "--format=%s")
+    assert any(
+        "build" in line and "app" in line and "3/3" in line for line in journal.read_lines(repo)
+    )
+    assert (repo / "src" / "__generated__" / "app.py").exists()
+
+
+def test_supersede_on_newer_spec_commit(repo: Path, jaunt_cfg: JauntConfig) -> None:
+    event = threading.Event()
+
+    class BlockingRunner(FakeRunner):
+        def build(self, worktree: Path, module: str) -> daemon.BuildOutcome:
+            event.wait(timeout=10)
+            return super().build(worktree, module)
+
+    runner = BlockingRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        _spec_commit(repo)
+        daemon.run_once(repo, jaunt_cfg, state, runner, pool)
+        first = jobs.list_jobs(repo, states={jobs.RUNNING})[0]
+
+        runner.digest = "digest-v2"
+        _spec_commit(repo, '"""spec v3"""\n')
+        daemon.run_once(repo, jaunt_cfg, state, runner, pool)
+        event.set()
+        _cycle(repo, jaunt_cfg, state, runner, pool)
+
+    loaded = jobs.load_job(repo, first.id)
+    assert loaded is not None
+    assert loaded.state == jobs.SUPERSEDED
+    landed = jobs.list_jobs(repo, states={jobs.LANDED})
+    assert landed and landed[0].spec_digest == "digest-v2"
+
+
+def test_failed_build_journals_and_marks_failed(repo: Path, jaunt_cfg: JauntConfig) -> None:
+    (repo / journal.JOURNAL_FILE).touch()
+
+    class FailingRunner(FakeRunner):
+        def build(self, worktree: Path, module: str) -> daemon.BuildOutcome:
+            self.built.append(module)
+            return daemon.BuildOutcome(ok=False, refrozen=False, error="codex exited 3")
+
+    runner = FailingRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        _spec_commit(repo)
+        _cycle(repo, jaunt_cfg, state, runner, pool)
+
+    failed = jobs.list_jobs(repo, states={jobs.FAILED})
+    assert failed and "codex exited 3" in failed[0].error
+    assert any("job-fail" in line for line in journal.read_lines(repo))
+
+
+def test_failed_gate_blocks_landing(repo: Path, jaunt_cfg: JauntConfig) -> None:
+    class GateFailRunner(FakeRunner):
+        def gate(self, worktree: Path, module: str) -> daemon.GateOutcome:
+            return daemon.GateOutcome(ok=False, detail="jaunt check failed")
+
+    runner = GateFailRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        _spec_commit(repo)
+        _cycle(repo, jaunt_cfg, state, runner, pool)
+
+    assert not jobs.list_jobs(repo, states={jobs.LANDED})
+    failed = jobs.list_jobs(repo, states={jobs.FAILED})
+    assert failed and "check failed" in failed[0].error
+    assert not (repo / "src" / "__generated__" / "app.py").exists()
