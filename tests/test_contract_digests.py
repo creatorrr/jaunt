@@ -153,3 +153,16 @@ class TestClassDigests:
         assert d1.body != d2.body
         assert d1.signature == d2.signature
         assert d1.prose == d2.prose
+
+    def test_method_decorator_edit_changes_signature_only(self, tmp_path: Path) -> None:
+        f1 = _write(tmp_path, CLASS_SRC)
+        d1 = contract_digests(f1, "Counter")
+        edited = CLASS_SRC.replace(
+            "    def increment(self, by: int) -> int:",
+            "    @staticmethod\n    def increment(self, by: int) -> int:",
+        )
+        (tmp_path / "m.py").write_text(edited, "utf-8")
+        d2 = contract_digests(str(tmp_path / "m.py"), "Counter")
+        assert d1.signature != d2.signature
+        assert d1.prose == d2.prose
+        assert d1.body == d2.body

@@ -113,7 +113,8 @@ def _call_root_and_method(expr: ast.expr, target: str) -> tuple[bool, str | None
             node = node.func
             continue
         if isinstance(node, ast.Attribute):
-            method = node.attr
+            if method is None:
+                method = node.attr
             node = node.value
             continue
         break
@@ -176,6 +177,8 @@ def _make_case(
     method_override: str | None,
 ) -> CallCase:
     exprs = [call_expr] + ([expected_expr] if expected_expr else [])
+    if exc_name is not None and exc_name not in _BUILTIN_NAMES:
+        exprs.append(exc_name)
     fixtures_used, imports = _classify_names(
         source_line=source_line,
         exprs=exprs,

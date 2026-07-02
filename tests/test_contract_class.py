@@ -112,6 +112,32 @@ def test_class_reconcile_catches_bad_example(tmp_path: Path) -> None:
     assert not res.battery_path.exists()
 
 
+def test_class_strength_namespace_includes_module_names(tmp_path: Path, monkeypatch) -> None:
+    root = _project(tmp_path)
+    (root / "src" / "mod.py").write_text("LIMIT = 10\n" + CLASS_SRC, encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def fake_compute_case_strength(source, target, blocks, namespace):
+        captured.update(namespace)
+        return (0, 0, 0)
+
+    monkeypatch.setattr(
+        "jaunt.contract.strength.compute_case_strength",
+        fake_compute_case_strength,
+    )
+    res = reconcile_entry(
+        root,
+        "tests/contract",
+        ["examples", "errors"],
+        True,
+        _entry(root),
+        module_namespace={"Counter": Counter, "LIMIT": 10},
+        tool_version="t",
+    )
+    assert res.ok, res.failures
+    assert captured["LIMIT"] == 10
+
+
 class TestClassDriftMatrix:
     def _evaluated(self, root: Path):
         return evaluate_entry(

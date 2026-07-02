@@ -338,8 +338,12 @@ def _reconcile_class(
     strength = "0/0"
     excluded = 0
     if strength_enabled:
+        strength_ns = dict(eval_ns)
+        for name in module_names:
+            if name in module_namespace:
+                strength_ns[name] = module_namespace[name]
         killed, applicable, excluded = compute_case_strength(
-            ast.unparse(node), cls_name, all_blocks, eval_ns
+            ast.unparse(node), cls_name, all_blocks, strength_ns
         )
         strength = format_strength(killed, applicable)
 

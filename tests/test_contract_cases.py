@@ -82,6 +82,15 @@ class TestCallForm:
         assert blocks.examples[0].is_async is True
         assert blocks.examples[0].method == "go"
 
+    def test_chained_method_uses_outermost_attribute_for_async_flag(self) -> None:
+        blocks = _parse(
+            "Examples:\n    - C().sync().ago() == 2\n",
+            target="C",
+            async_map={"C.sync": False, "C.ago": True},
+        )
+        assert blocks.examples[0].is_async is True
+        assert blocks.examples[0].method == "ago"
+
 
 class TestNameClassification:
     def test_module_level_name_becomes_import(self) -> None:
@@ -100,6 +109,31 @@ class TestNameClassification:
             _parse("Examples:\n    - f(mystery) == 1\n")
         assert "mystery" in str(ei.value)
         assert ei.value.line == "f(mystery) == 1"
+
+    def test_custom_raises_exception_becomes_import(self) -> None:
+        blocks = _parse(
+            "Raises:\n    - f('') raises MyError\n",
+            module_names=frozenset({"MyError"}),
+        )
+        assert blocks.raises[0].imports == ("MyError",)
+
+    def test_builtin_raises_exception_is_not_imported(self) -> None:
+        blocks = _parse(
+            "Raises:\n    - f('') raises ValueError\n",
+            module_names=frozenset({"ValueError"}),
+        )
+        assert blocks.raises[0].imports == ()
+
+    def test_builtin_raises_exception_is_not_treated_as_fixture(self) -> None:
+        blocks = _parse("Raises:\n    - f('') raises ValueError\n\nFixtures: ValueError\n")
+        assert blocks.raises[0].fixtures == ()
+        assert blocks.has_fixture_cases() is False
+
+    def test_unknown_raises_exception_is_parse_error(self) -> None:
+        with pytest.raises(CaseParseError) as ei:
+            _parse("Raises:\n    - f('') raises MyError\n")
+        assert "MyError" in str(ei.value)
+        assert ei.value.line == "f('') raises MyError"
 
 
 class TestFixtures:
@@ -267,6 +301,23 @@ class TestEvaluateCases:
 
         blocks = _parse("Raises:\n    - f('') raises ValueError\n")
         assert evaluate_cases(blocks, namespace={"f": f}) == []
+
+    def test_custom_raises_case(self) -> None:
+        from jaunt.contract.derive import evaluate_cases
+
+        class MyError(Exception):
+            pass
+
+        def f(x):
+            if x == "":
+                raise MyError("empty")
+            return x
+
+        blocks = _parse(
+            "Raises:\n    - f('') raises MyError\n",
+            module_names=frozenset({"MyError"}),
+        )
+        assert evaluate_cases(blocks, namespace={"f": f, "MyError": MyError}) == []
 
     def test_class_constructor_case(self) -> None:
         from jaunt.contract.derive import evaluate_cases

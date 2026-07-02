@@ -50,7 +50,7 @@ def _mutation_targets(tree: ast.Module) -> list[ast.AST]:
 def _skip_constant_ids(tree: ast.Module) -> set[int]:
     skip: set[int] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.body:
             first = node.body[0]
             if (
                 isinstance(first, ast.Expr)

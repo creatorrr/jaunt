@@ -519,6 +519,7 @@ def _contract_class_inputs(node: ast.ClassDef) -> tuple[str, str, str]:
         "attributes": sorted(attributes),
         "methods": {
             m.name: {
+                "decorators": sorted(ast.unparse(d) for d in m.decorator_list),
                 "kind": "async_method" if isinstance(m, ast.AsyncFunctionDef) else "method",
                 "signature": _contract_fn_signature(m),
             }

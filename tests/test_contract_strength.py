@@ -3,7 +3,12 @@ from __future__ import annotations
 import ast
 
 from jaunt.contract.cases import CaseBlocks, parse_case_blocks
-from jaunt.contract.strength import compute_case_strength, format_strength, iter_mutants
+from jaunt.contract.strength import (
+    _skip_constant_ids,
+    compute_case_strength,
+    format_strength,
+    iter_mutants,
+)
 
 STRONG_SRC = '''
 def clamp(n: int) -> int:
@@ -86,6 +91,25 @@ def test_comparison_boundary_mutant_is_produced() -> None:
     mutants = list(iter_mutants(STRONG_SRC))
     assert any("n < 1" in m for m in mutants)
     assert any("n > 11" in m for m in mutants)
+
+
+def test_async_function_and_class_docstring_constants_are_skipped() -> None:
+    tree = ast.parse(
+        '''
+class C:
+    """CLASSDOC."""
+
+    async def value(self):
+        """ASYNCDOC."""
+        return "RESULT"
+'''
+    )
+    skipped_values = {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and id(node) in _skip_constant_ids(tree)
+    }
+    assert skipped_values == {"CLASSDOC.", "ASYNCDOC."}
 
 
 def test_format_strength_exact() -> None:
