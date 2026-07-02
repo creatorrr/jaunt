@@ -1259,7 +1259,12 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
                     "command": "reconcile",
                     "ok": not failed,
                     "reconciled": [
-                        {"ref": r.spec_ref, "strength": r.strength, "wrote": r.wrote}
+                        {
+                            "ref": r.spec_ref,
+                            "strength": r.strength,
+                            "strength_excluded": r.strength_excluded,
+                            "wrote": r.wrote,
+                        }
                         for r in results
                         if r.ok
                     ],
@@ -1269,7 +1274,9 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
         else:
             for r in results:
                 if r.ok:
-                    print(f"[ok] {r.spec_ref}: in sync (strength {r.strength})")
+                    excluded = r.strength_excluded
+                    suffix = f" ({excluded} fixture cases not scored)" if excluded else ""
+                    print(f"[ok] {r.spec_ref}: in sync (strength {r.strength}){suffix}")
                 else:
                     print(f"[FAIL] {r.spec_ref}: body does not satisfy contract")
                     for f in r.failures:
@@ -1351,11 +1358,14 @@ def cmd_adopt(args: argparse.Namespace) -> int:
                     "ok": result.ok,
                     "ref": result.spec_ref,
                     "strength": result.strength,
+                    "strength_excluded": result.strength_excluded,
                     "failures": result.failures,
                 }
             )
         elif result.ok:
-            print(f"Adopted {result.spec_ref} (strength {result.strength}).")
+            excluded = result.strength_excluded
+            suffix = f" ({excluded} fixture cases not scored)" if excluded else ""
+            print(f"Adopted {result.spec_ref} (strength {result.strength}){suffix}.")
         else:
             print(f"Adopted {result.spec_ref} but the body disagrees with its docstring:")
             for f in result.failures:
@@ -1542,6 +1552,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                         "ref": ref,
                         "state": st.state.value,
                         "strength": st.strength or "0/0",
+                        "strength_excluded": st.strength_excluded,
                         "review": ref in review,
                     }
                 )
@@ -1589,7 +1600,12 @@ def cmd_status(args: argparse.Namespace) -> int:
                     print(f"Contracts ({len(contract_rows)}):")
                     for row in contract_rows:
                         flag = " [review]" if row["review"] else ""
-                        print(f"- {row['ref']}: {row['state']} (strength {row['strength']})" + flag)
+                        excluded = row["strength_excluded"]
+                        suffix = f" ({excluded} fixture cases not scored)" if excluded else ""
+                        print(
+                            f"- {row['ref']}: {row['state']} (strength {row['strength']}){suffix}"
+                            + flag
+                        )
                 if tree_drift is not None:
                     print(f"tree: {tree_drift} (run jaunt tree)")
             return EXIT_OK
@@ -1630,7 +1646,12 @@ def cmd_status(args: argparse.Namespace) -> int:
                 print(f"Contracts ({len(contract_rows)}):")
                 for row in contract_rows:
                     flag = " [review]" if row["review"] else ""
-                    print(f"- {row['ref']}: {row['state']} (strength {row['strength']})" + flag)
+                    excluded = row["strength_excluded"]
+                    suffix = f" ({excluded} fixture cases not scored)" if excluded else ""
+                    print(
+                        f"- {row['ref']}: {row['state']} (strength {row['strength']}){suffix}"
+                        + flag
+                    )
             if tree_drift is not None:
                 print(f"tree: {tree_drift} (run jaunt tree)")
 

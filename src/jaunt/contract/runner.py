@@ -28,6 +28,7 @@ class ContractStatus:
     strength: str | None
     battery_path: Path
     detail: str = ""
+    strength_excluded: int = 0
 
 
 def _norm(value: str) -> str:
@@ -58,6 +59,7 @@ def evaluate_entry(
     signature_match = _norm(header.get("signature", "")) == digs.signature
     body_match = _norm(header.get("body-digest", "")) == digs.body
     strength = header.get("strength")
+    excluded = int(header.get("strength-excluded", "0"))
 
     # Short-circuit before running the battery (steps 1-3).
     if not (prose_match and signature_match):
@@ -68,7 +70,7 @@ def evaluate_entry(
             body_match=body_match,
             battery_passed=None,
         )
-        return ContractStatus(spec_ref, state, strength, path)
+        return ContractStatus(spec_ref, state, strength, path, strength_excluded=excluded)
 
     passed = run_battery(path)
     state = compute_drift_state(
@@ -78,7 +80,7 @@ def evaluate_entry(
         body_match=body_match,
         battery_passed=passed,
     )
-    return ContractStatus(spec_ref, state, strength, path)
+    return ContractStatus(spec_ref, state, strength, path, strength_excluded=excluded)
 
 
 def run_battery_file(path: Path, *, root: Path, source_roots: list[str]) -> bool:
@@ -121,6 +123,7 @@ class ReconcileResult:
     failures: list[str]
     battery_path: Path
     wrote: bool
+    strength_excluded: int = 0
 
 
 def reconcile_entry(
@@ -249,7 +252,7 @@ def reconcile_entry(
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
-    return ReconcileResult(spec_ref, True, strength, [], path, True)
+    return ReconcileResult(spec_ref, True, strength, [], path, True, strength_excluded=excluded)
 
 
 def _reconcile_class(
@@ -375,7 +378,7 @@ def _reconcile_class(
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
-    return ReconcileResult(spec_ref, True, strength, [], path, True)
+    return ReconcileResult(spec_ref, True, strength, [], path, True, strength_excluded=excluded)
 
 
 def _module_top_level_names(source_file: str) -> frozenset[str]:
