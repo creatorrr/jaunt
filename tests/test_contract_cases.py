@@ -130,19 +130,30 @@ class TestMerged:
 from jaunt.contract.derive import (  # noqa: E402
     battery_extra_imports,
     derive_case_regions,
-    derive_regions,
-    extract_blocks_structured,
 )
 
 
 class TestRenderRegions:
     def test_all_legacy_renders_byte_identical_to_today(self) -> None:
         doc = "Examples:\n    - 'a b' -> 'a-b'\n\nRaises:\n    - 1 raises TypeError\n"
-        old = derive_regions(
-            extract_blocks_structured(doc), func_name="f", derive=["examples", "errors"]
-        )
         new = derive_case_regions(_parse(doc), target="f", derive=["examples", "errors"])
-        assert [(r.region_id, r.code) for r in new] == [(r.region_id, r.code) for r in old]
+        golden_examples = (
+            '@pytest.mark.parametrize("arg,want", [\n'
+            "        ('a b', 'a-b'),\n"
+            "    ])\n"
+            "def test_examples(arg, want):  # derived from: Examples\n"
+            "    assert f(arg) == want"
+        )
+        golden_errors = (
+            '@pytest.mark.parametrize("arg", [1])\n'
+            "def test_raises_typeerror(arg):  # derived from: Raises\n"
+            "    with pytest.raises(TypeError):\n"
+            "        f(arg)"
+        )
+        assert [(r.region_id, r.code) for r in new] == [
+            ("examples", golden_examples),
+            ("errors", golden_errors),
+        ]
 
     def test_general_form_multi_arg(self) -> None:
         blocks = _parse("Examples:\n    - f([1, 2], sep='-') == '1-2'\n")

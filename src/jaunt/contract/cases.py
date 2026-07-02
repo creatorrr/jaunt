@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import TypedDict
 
 _HEADER_RE = re.compile(r"([A-Za-z][A-Za-z ]*):\s*$")
-_EXC_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_CASE_EXCEPTION_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _FIXTURES_RE = re.compile(r"^Fixtures:\s*(.+)$", re.MULTILINE)
 _BUILTIN_NAMES = frozenset(dir(builtins))
 
@@ -70,7 +70,7 @@ class CaseBlocks:
         )
 
 
-def _section_lines(docstring: str, name: str) -> list[str]:
+def _case_lines_for_section(docstring: str, name: str) -> list[str]:
     lines = docstring.splitlines()
     out: list[str] = []
     collecting = False
@@ -93,10 +93,10 @@ def _parse_fixtures(docstring: str) -> tuple[str, ...]:
     if not m:
         return ()
     names = [n.strip() for n in m.group(1).split(",")]
-    return tuple(n for n in names if n and _EXC_NAME_RE.match(n))
+    return tuple(n for n in names if n and _CASE_EXCEPTION_NAME_RE.match(n))
 
 
-def _is_expr(text: str) -> bool:
+def _valid_case_expr(text: str) -> bool:
     try:
         ast.parse(text, mode="eval")
         return True
@@ -237,7 +237,7 @@ def parse_case_blocks(
     }
 
     examples: list[CallCase] = []
-    for line in _section_lines(docstring, "Examples"):
+    for line in _case_lines_for_section(docstring, "Examples"):
         pair = _split_top_level_eq(line)
         if pair is not None:
             call_expr, expected = pair
@@ -260,7 +260,7 @@ def parse_case_blocks(
         if "->" in line:
             left, right = line.split("->", 1)
             left, right = left.strip(), right.strip()
-            if _is_expr(left) and _is_expr(right):
+            if _valid_case_expr(left) and _valid_case_expr(right):
                 examples.append(
                     _make_case(
                         source_line=line,
@@ -274,11 +274,11 @@ def parse_case_blocks(
         # Anything else under Examples: prose; skipped (legacy behavior).
 
     raises: list[CallCase] = []
-    for line in _section_lines(docstring, "Raises"):
+    for line in _case_lines_for_section(docstring, "Raises"):
         if " raises " in line:
             inp, exc = line.split(" raises ", 1)
             inp, exc = inp.strip(), exc.strip().rstrip(".")
-            if not (_is_expr(inp) and _EXC_NAME_RE.match(exc)):
+            if not (_valid_case_expr(inp) and _CASE_EXCEPTION_NAME_RE.match(exc)):
                 continue
             tree = ast.parse(inp, mode="eval")
             rooted, _ = _call_root_and_method(tree.body, target)
@@ -306,7 +306,7 @@ def parse_case_blocks(
                 )
             continue
         m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s+on\s+(.+)$", line)
-        if m and _is_expr(m.group(2).strip()):
+        if m and _valid_case_expr(m.group(2).strip()):
             raises.append(
                 _make_case(
                     source_line=line,

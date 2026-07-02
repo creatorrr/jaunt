@@ -7,8 +7,6 @@ import copy
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
-from jaunt.contract.derive import ContractBlocks, evaluate_blocks
-
 if TYPE_CHECKING:
     from jaunt.contract.cases import CaseBlocks
 
@@ -202,36 +200,6 @@ def _default_return(t: ast.AST) -> bool:
         t.value = ast.Constant(value=None)
         return True
     return False
-
-
-def compute_strength(
-    func_source: str,
-    func_name: str,
-    blocks: ContractBlocks,
-    namespace: dict[str, object],
-) -> tuple[int, int]:
-    """Return (killed, applicable). A mutant is killed if any derived case fails."""
-
-    if blocks.is_empty():
-        # Nothing pins the body; every mutant survives by definition.
-        applicable = sum(1 for _ in iter_mutants(func_source))
-        return (0, applicable)
-
-    killed = 0
-    applicable = 0
-    for mutant_src in iter_mutants(func_source):
-        ns: dict[str, object] = dict(namespace)
-        try:
-            exec(compile(mutant_src, "<mutant>", "exec"), ns)  # noqa: S102
-        except Exception:  # noqa: BLE001 - non-applicable mutant
-            continue
-        fn = ns.get(func_name)
-        if not callable(fn):
-            continue
-        applicable += 1
-        if evaluate_blocks(fn, blocks, ns):  # any failure -> killed
-            killed += 1
-    return (killed, applicable)
 
 
 def format_strength(killed: int, applicable: int) -> str:

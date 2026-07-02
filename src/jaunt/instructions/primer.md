@@ -36,7 +36,9 @@ Both coexist and are selected per symbol by decorator.
 - **Contract mode** — `@jaunt.contract`. The *committed code* is canonical; the
   docstring is a contract; Jaunt derives a committed pytest battery under
   `tests/contract/` (it does not generate the implementation). Use this to pin
-  behavior of code you want to keep hand-written.
+  behavior of code you want to keep hand-written. It covers top-level functions
+  (sync or async) and whole classes, and derived cases may declare pytest
+  fixtures resolved from `tests/contract/conftest.py`.
 
 ## The build/test loop
 

@@ -83,7 +83,9 @@ examples/           # Runnable example projects
 - **Contract mode**: Committed code is canonical; `@jaunt.contract` is a runtime
   no-op marker; the docstring is the contract. Jaunt derives a committed pytest
   battery in `tests/contract/`. `reconcile` is the only model-calling command,
-  while `check` is the deterministic CI gate (no API key).
+  while `check` is the deterministic CI gate (no API key). Covers top-level
+  functions (sync or async) and whole classes; derived cases may declare pytest
+  fixtures (`Fixtures: db`) resolved from `tests/contract/conftest.py`.
 - **Generated dir**: Output directory (default `__generated__/`) where LLM-
   generated code is written. Configurable via `jaunt.toml` or
   `JAUNT_GENERATED_DIR` env var.
