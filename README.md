@@ -43,8 +43,7 @@ See `examples/contract_slugify/` for a Contract-mode walkthrough.
 pip install jaunt
 
 # The base install is batteries-included (rich, watchfiles, pytest,
-# pytest-asyncio, anyio). The only optional extra is the MCP server:
-pip install 'jaunt[mcp]'     # for jaunt mcp serve
+# pytest-asyncio, anyio) — no optional extras.
 
 # Jaunt drives the external OpenAI Codex CLI, which you install and
 # authenticate separately:
