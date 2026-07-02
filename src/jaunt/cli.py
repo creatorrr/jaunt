@@ -13,7 +13,7 @@ import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from jaunt import __version__
 from jaunt.diagnostics import (
@@ -79,6 +79,12 @@ def _add_common_flags(p: argparse.ArgumentParser) -> None:
         "--no-progress",
         action="store_true",
         help="Disable progress bars.",
+    )
+    p.add_argument(
+        "--progress",
+        choices=("auto", "rich", "plain", "none"),
+        default="auto",
+        help="Progress output mode (default: auto).",
     )
     p.add_argument(
         "--no-cache",
@@ -614,6 +620,24 @@ def _build_backend(cfg: JauntConfig):
 
 def _is_json_mode(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "json_output", False))
+
+
+def _make_progress(
+    args: argparse.Namespace, *, label: str, total: int, json_mode: bool
+) -> ProgressBar | None:
+    if total == 0 or bool(getattr(args, "no_progress", False)):
+        return None
+
+    requested = str(getattr(args, "progress", "auto") or "auto")
+    if requested == "none":
+        return None
+    if json_mode and requested == "auto":
+        return None
+    if requested == "auto":
+        mode = "rich" if sys.stderr.isatty() else "plain"
+    else:
+        mode = cast(Literal["rich", "plain"], requested)
+    return ProgressBar(label=label, total=total, enabled=True, stream=sys.stderr, mode=mode)
 
 
 def _eprint(msg: str) -> None:
@@ -1897,19 +1921,12 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             # whose only change was judged EQUIVALENT (semantic caching).
             api_changed = api_changed - refrozen_modules
         stale = expanded_stale
-        progress = None
-        if (
-            expanded_stale
-            and not json_mode
-            and (not bool(args.no_progress))
-            and sys.stderr.isatty()
-        ):
-            progress = ProgressBar(
-                label="build",
-                total=len(expanded_stale),
-                enabled=True,
-                stream=sys.stderr,
-            )
+        progress = _make_progress(
+            args,
+            label="build",
+            total=len(expanded_stale),
+            json_mode=json_mode,
+        )
 
         from jaunt.cache import ResponseCache
 
@@ -2293,10 +2310,8 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             test_refrozen_modules = set(test_plan.refrozen)
             stale = set(test_plan.rebuild)
 
-        progress = None
         total = len(stale & set(module_specs.keys()))
-        if total and not json_mode and (not bool(args.no_progress)) and sys.stderr.isatty():
-            progress = ProgressBar(label="test", total=total, enabled=True, stream=sys.stderr)
+        progress = _make_progress(args, label="test", total=total, json_mode=json_mode)
 
         from jaunt.cache import ResponseCache
         from jaunt.cost import CostTracker
@@ -2905,13 +2920,7 @@ def cmd_skill(args: argparse.Namespace) -> int:
             return EXIT_CONFIG_OR_DISCOVERY
 
         # Run LLM
-        progress = None
-        if (
-            not json_mode
-            and (not bool(getattr(args, "no_progress", False)))
-            and sys.stderr.isatty()
-        ):
-            progress = ProgressBar(label="skill", total=1, enabled=True, stream=sys.stderr)
+        progress = _make_progress(args, label="skill", total=1, json_mode=json_mode)
         try:
             from jaunt.skill_builder import SkillBuilder
 
