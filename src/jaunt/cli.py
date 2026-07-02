@@ -217,6 +217,12 @@ def _build_parser() -> argparse.ArgumentParser:
     status_p = subparsers.add_parser("status", help="Show project build status.")
     _add_common_flags(status_p)
 
+    log_p = subparsers.add_parser("log", help="Show the JAUNT_LOG change journal.")
+    log_p.add_argument("-n", "--lines", type=int, default=20, help="Number of lines (0 = all).")
+    log_p.add_argument("--module", default=None, help="Filter by module name.")
+    log_p.add_argument("--root", default=".", help="Project root.")
+    log_p.add_argument("--json", action="store_true", dest="json_output")
+
     instructions_p = subparsers.add_parser(
         "instructions",
         help="Print a project-aware agent primer for using Jaunt.",
@@ -551,6 +557,22 @@ def _print_error(e: BaseException) -> None:
 def _emit_json(data: dict[str, object]) -> None:
     """Write structured JSON to stdout."""
     print(json.dumps(data, indent=2, default=str))
+
+
+def cmd_log(args: argparse.Namespace) -> int:
+    from jaunt import journal
+
+    root = Path(args.root).resolve()
+    lines = journal.read_lines(root, limit=args.lines, module=args.module)
+    if _is_json_mode(args):
+        _emit_json({"command": "log", "ok": True, "lines": lines})
+        return EXIT_OK
+    if not lines:
+        print("No journal entries (no JAUNT_LOG file, or it is empty).")
+        return EXIT_OK
+    for line in lines:
+        print(line)
+    return EXIT_OK
 
 
 def _sync_generated_dir_env(cfg: JauntConfig) -> None:
@@ -967,6 +989,20 @@ def cmd_adopt(args: argparse.Namespace) -> int:
             module_namespace=vars(mod),
             tool_version=__version__,
         )
+
+        if result.ok:
+            from jaunt import journal as _journal
+
+            _journal.append_events(
+                root,
+                [
+                    _journal.JournalEvent(
+                        action="adopt",
+                        module=result.spec_ref,
+                        detail=f"battery derived (strength {result.strength})",
+                    )
+                ],
+            )
 
         if json_mode:
             _emit_json(
@@ -1543,6 +1579,22 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
 
         if report.failed and not json_mode:
             _eprint(format_build_failures(report.failed))
+
+        from jaunt import journal as _journal
+
+        events = []
+        for mod in sorted(report.generated):
+            events.append(_journal.JournalEvent(action="build", module=mod, detail="rebuilt"))
+        for mod in sorted(refrozen_modules):
+            events.append(
+                _journal.JournalEvent(
+                    action="refreeze", module=mod, detail="cosmetic (gate: EQUIVALENT)"
+                )
+            )
+        for mod, err in sorted(report.failed.items()):
+            first = str(err).splitlines()[0][:120] if str(err) else "generation failed"
+            events.append(_journal.JournalEvent(action="build-fail", module=mod, detail=first))
+        _journal.append_events(root, events)
 
         if not json_mode and (cost_tracker.api_calls > 0 or cost_tracker.cache_hits > 0):
             _eprint(cost_tracker.format_summary())
@@ -2554,6 +2606,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_clean(args)
     if args.command == "status":
         return cmd_status(args)
+    if args.command == "log":
+        return cmd_log(args)
     if args.command == "instructions":
         return cmd_instructions(args)
     if args.command == "tree":
