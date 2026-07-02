@@ -36,6 +36,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("reconcile", "Derive/refresh committed contract batteries (calls the model)."),
     ("check", "Verify committed contract batteries deterministically (CI gate)."),
     ("eject", "Remove contract tracking; leave plain Python + pytest."),
+    ("guard", "Warn-on-access PreToolUse hook for `__generated__/` (see docs/hooks.md)."),
 ]
 
 # Real subcommands intentionally NOT surfaced in the primer (advanced / rare).
