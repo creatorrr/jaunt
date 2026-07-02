@@ -59,11 +59,13 @@ jobs:
       - name: Commit CHANGELOG.md
         if: steps.version.outputs.published == 'false'
         run: |
-          if git diff --quiet -- CHANGELOG.md; then
+          git add CHANGELOG.md
+          # `git diff` alone is blind to a brand-new (untracked) CHANGELOG.md,
+          # so stage first and compare against HEAD.
+          if git diff --cached --quiet -- CHANGELOG.md; then
             echo "CHANGELOG.md unchanged."
             exit 0
           fi
-          git add CHANGELOG.md
           git commit -m "chore: update CHANGELOG.md for v${{ steps.version.outputs.version }} [skip ci]"
           git pull --rebase origin main
           git push origin HEAD:main
