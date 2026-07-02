@@ -217,6 +217,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     status_p = subparsers.add_parser("status", help="Show project build status.")
     _add_common_flags(status_p)
+    status_p.add_argument(
+        "--magic-only",
+        action="store_true",
+        dest="magic_only",
+        help="Probe only @jaunt.magic freshness; skip contract checks and repo-map drift.",
+    )
 
     log_p = subparsers.add_parser("log", help="Show the JAUNT_LOG change journal.")
     log_p.add_argument("-n", "--lines", type=int, default=20, help="Number of lines (0 = all).")
@@ -1213,6 +1219,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     json_mode = _is_json_mode(args)
     try:
         root, cfg = _load_config(args)
+        magic_only = bool(getattr(args, "magic_only", False))
         include_target_tests = _effective_include_target_tests(cfg, args)
         build_instructions = _effective_build_instructions(cfg, args)
 
@@ -1220,7 +1227,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         _prepend_sys_path([*source_dirs, root])
 
         tree_drift = None
-        if cfg.context.repo_map:
+        if cfg.context.repo_map and not magic_only:
             from jaunt.repo_context import api as rc_api
 
             try:
@@ -1296,22 +1303,30 @@ def cmd_status(args: argparse.Namespace) -> int:
             force=bool(args.force),
             target=args.target,
         )
-        contract_rows, review_refs = _contract_rows(infer_default)
+        contract_rows: list[dict[str, object]] = []
+        review_refs: set[str] = set()
+        if not magic_only:
+            contract_rows, review_refs = _contract_rows(infer_default)
 
         if mstatus.total == 0:
             if json_mode:
-                _emit_json(
-                    {
-                        "command": "status",
-                        "ok": True,
-                        "stale": [],
-                        "stale_changes": {},
-                        "fresh": [],
-                        "contracts": contract_rows,
-                        "contract_review": sorted(review_refs),
-                        "tree": tree_drift,
-                    }
-                )
+                payload: dict[str, object] = {
+                    "command": "status",
+                    "ok": True,
+                    "stale": [],
+                    "stale_changes": {},
+                    "fresh": [],
+                    "digests": mstatus.digests,
+                }
+                if not magic_only:
+                    payload.update(
+                        {
+                            "contracts": contract_rows,
+                            "contract_review": sorted(review_refs),
+                            "tree": tree_drift,
+                        }
+                    )
+                _emit_json(payload)
             else:
                 print("Status: 0 module(s) total")
                 print("No magic specs discovered.")
@@ -1329,18 +1344,23 @@ def cmd_status(args: argparse.Namespace) -> int:
         stale_changes = mstatus.stale_changes
 
         if json_mode:
-            _emit_json(
-                {
-                    "command": "status",
-                    "ok": True,
-                    "stale": sorted(stale),
-                    "stale_changes": stale_changes,
-                    "fresh": sorted(fresh),
-                    "contracts": contract_rows,
-                    "contract_review": sorted(review_refs),
-                    "tree": tree_drift,
-                }
-            )
+            payload = {
+                "command": "status",
+                "ok": True,
+                "stale": sorted(stale),
+                "stale_changes": stale_changes,
+                "fresh": sorted(fresh),
+                "digests": mstatus.digests,
+            }
+            if not magic_only:
+                payload.update(
+                    {
+                        "contracts": contract_rows,
+                        "contract_review": sorted(review_refs),
+                        "tree": tree_drift,
+                    }
+                )
+            _emit_json(payload)
         else:
             stale_sorted = sorted(stale)
             fresh_sorted = sorted(fresh)
