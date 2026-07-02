@@ -66,7 +66,10 @@ class DaemonState:
 
 def drain(state: DaemonState) -> None:
     for fut in list(state.futures.values()):
-        fut.result()
+        try:
+            fut.result()
+        except Exception:
+            pass
 
 
 class CliRunner:
@@ -266,12 +269,25 @@ def _probe_head(root: Path, head: str, runner: Runner) -> tuple[dict[str, str], 
         _remove_worktree(root, probe)
 
 
-def _collect_finished(state: DaemonState, root: Path) -> None:
+def _collect_finished(state: DaemonState, root: Path, cfg: JauntConfig) -> None:
     for job_id, fut in list(state.futures.items()):
         if not fut.done():
             continue
         del state.futures[job_id]
-        result = fut.result()
+        try:
+            result = fut.result()
+        except Exception as exc:
+            job = jobs_mod.load_job(root, job_id)
+            if job is not None and job.state == jobs_mod.RUNNING:
+                message_lines = str(exc).splitlines()
+                message = message_lines[0][:200] if message_lines else ""
+                error = f"{type(exc).__name__}: {message}"
+                updated = jobs_mod.mark(root, job, jobs_mod.FAILED, error=error)
+                _notify(cfg, updated)
+                journal_mod.append_events(
+                    root, [journal_mod.JournalEvent("job-fail", job.module, error, job.id)]
+                )
+            continue
         job = jobs_mod.load_job(root, job_id)
         green = result.build.ok and (result.gate is None or result.gate.ok)
         if job is not None and job.state == jobs_mod.RUNNING and green:
@@ -401,7 +417,7 @@ def run_once(
                     state.futures.pop(job.id, None)
                     state.pending.pop(job.id, None)
 
-    _collect_finished(state, root)
+    _collect_finished(state, root, cfg)
     _land_pending(root, cfg, state)
 
     max_jobs = cfg.daemon.max_jobs or cfg.build.jobs

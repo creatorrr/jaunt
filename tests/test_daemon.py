@@ -305,6 +305,33 @@ def test_failed_build_journals_and_marks_failed(repo: Path, jaunt_cfg: JauntConf
     assert any("job-fail" in line for line in journal.read_lines(repo))
 
 
+def test_worker_exception_marks_failed_and_survives(repo: Path, jaunt_cfg: JauntConfig) -> None:
+    (repo / journal.JOURNAL_FILE).touch()
+
+    class ExplodingRunner(FakeRunner):
+        def build(self, worktree: Path, module: str) -> daemon.BuildOutcome:
+            raise RuntimeError("boom")
+
+    state = daemon.DaemonState()
+    exploding = ExplodingRunner()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        _spec_commit(repo)
+        _cycle(repo, jaunt_cfg, state, exploding, pool)
+
+        failed = jobs.list_jobs(repo, states={jobs.FAILED})
+        assert failed and "RuntimeError: boom" in failed[0].error
+        assert any("job-fail" in line for line in journal.read_lines(repo))
+
+        healthy = FakeRunner()
+        healthy.digest = "digest-v2"
+        _spec_commit(repo, '"""spec v3"""\n')
+        _cycle(repo, jaunt_cfg, state, healthy, pool)
+
+    landed = jobs.list_jobs(repo, states={jobs.LANDED})
+    assert landed and landed[0].spec_digest == "digest-v2"
+    assert (repo / "src" / "__generated__" / "app.py").exists()
+
+
 def test_failed_gate_blocks_landing(repo: Path, jaunt_cfg: JauntConfig) -> None:
     class GateFailRunner(FakeRunner):
         def gate(self, worktree: Path, module: str) -> daemon.GateOutcome:
