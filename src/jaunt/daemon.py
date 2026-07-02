@@ -445,6 +445,22 @@ def run_once(
                     jobs_mod.mark(root, existing, jobs_mod.SUPERSEDED)
                     state.futures.pop(existing.id, None)
                     state.pending.pop(existing.id, None)
+                parked = jobs_mod.parked_for_module(root, module)
+                if parked is not None:
+                    if parked.spec_digest == digest:
+                        continue
+                    jobs_mod.mark(root, parked, jobs_mod.SUPERSEDED)
+                    journal_mod.append_events(
+                        root,
+                        [
+                            journal_mod.JournalEvent(
+                                "job-supersede",
+                                parked.module,
+                                "parked patch stale; spec changed",
+                                parked.id,
+                            )
+                        ],
+                    )
                 job = jobs_mod.JobRecord.new(
                     module=module, spec_digest=digest, base_commit=head, branch=branch
                 )

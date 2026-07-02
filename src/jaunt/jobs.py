@@ -100,6 +100,13 @@ def active_for_module(root: Path, module: str) -> JobRecord | None:
     return None
 
 
+def parked_for_module(root: Path, module: str) -> JobRecord | None:
+    for job in list_jobs(root, states={PARKED}):
+        if job.module == module:
+            return job
+    return None
+
+
 def mark(root: Path, job: JobRecord, state: str, **updates: str) -> JobRecord:
     updated = replace(job, state=state, updated=time.time(), **updates)
     save_job(root, updated)

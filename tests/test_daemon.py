@@ -290,6 +290,65 @@ def test_commit_failure_parks_without_killing_daemon(repo: Path, jaunt_cfg: Jaun
     assert not any("build" in line and parked[0].id in line for line in lines)
 
 
+def test_restart_preserves_parked_job(repo: Path, jaunt_cfg: JauntConfig) -> None:
+    runner = FakeRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        _spec_commit(repo)
+        _install_failing_pre_commit(repo)
+        _cycle(repo, jaunt_cfg, state, runner, pool)
+
+        parked = jobs.list_jobs(repo, states={jobs.PARKED})[0]
+        patch_path = jobs.jobs_dir(repo) / f"{parked.id}.patch"
+        patch_content = patch_path.read_text(encoding="utf-8")
+
+        runner.built = []
+        restarted = daemon.DaemonState()
+        daemon.run_once(repo, jaunt_cfg, restarted, runner, pool)
+        daemon.drain(restarted)
+
+    loaded = jobs.load_job(repo, parked.id)
+    assert loaded is not None
+    assert loaded.state == jobs.PARKED
+    assert loaded.patch_paths == parked.patch_paths
+    assert loaded.updated == parked.updated
+    assert loaded.error == parked.error
+    assert patch_path.read_text(encoding="utf-8") == patch_content
+    assert [
+        job for job in jobs.list_jobs(repo, states=jobs.ACTIVE_STATES) if job.module == "app"
+    ] == []
+
+
+def test_restart_supersedes_stale_parked_job_and_enqueues_fresh(
+    repo: Path, jaunt_cfg: JauntConfig
+) -> None:
+    (repo / journal.JOURNAL_FILE).touch()
+    runner = FakeRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        _spec_commit(repo)
+        _install_failing_pre_commit(repo)
+        _cycle(repo, jaunt_cfg, state, runner, pool)
+
+        parked = jobs.list_jobs(repo, states={jobs.PARKED})[0]
+        runner.digest = "digest-v2"
+        runner.built = []
+        (repo / ".git" / "hooks" / "pre-commit").unlink()
+        _spec_commit(repo, '"""spec v3"""\n')
+
+        restarted = daemon.DaemonState()
+        _cycle(repo, jaunt_cfg, restarted, runner, pool)
+
+    loaded = jobs.load_job(repo, parked.id)
+    assert loaded is not None
+    assert loaded.state == jobs.SUPERSEDED
+    landed = jobs.list_jobs(repo, states={jobs.LANDED})
+    assert any(job.module == "app" and job.spec_digest == "digest-v2" for job in landed)
+    assert any(
+        "job-supersede" in line and parked.id in line for line in journal.read_lines(repo, limit=0)
+    )
+
+
 def test_park_truncates_preappended_success_line(repo: Path, jaunt_cfg: JauntConfig) -> None:
     (repo / journal.JOURNAL_FILE).touch()
     runner = FakeRunner()
