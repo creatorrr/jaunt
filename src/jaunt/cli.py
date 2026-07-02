@@ -630,29 +630,34 @@ def cmd_daemon(args: argparse.Namespace) -> int:
 
     root = Path(args.root).resolve()
     if args.daemon_command == "stop":
-        verdict, pid = daemon_mod.lock_verdict(root)
-        if verdict is daemon_mod.LockVerdict.UNVERIFIABLE:
-            if pid is None:
-                print("Daemon lockfile cannot be verified; refusing to signal.")
-            else:
-                print(f"Daemon lockfile cannot be verified (pid {pid} alive); refusing to signal.")
-            return EXIT_OK
-        if verdict is daemon_mod.LockVerdict.STALE or pid is None:
+        try:
+            running, pid = daemon_mod.probe_lock(root)
+        except RuntimeError as e:
+            print(str(e), file=sys.stderr)
+            return EXIT_CONFIG_OR_DISCOVERY
+        if not running:
             print("Daemon not running.")
+            return EXIT_OK
+        if pid is None:
+            print("Daemon lockfile is locked but has no readable pid; refusing to signal.")
             return EXIT_OK
         os.kill(pid, signal.SIGTERM)
         print(f"Sent SIGTERM to daemon (pid {pid}).")
         return EXIT_OK
 
     if args.daemon_command == "status":
-        pid = daemon_mod.lock_pid(root)
+        try:
+            running, pid = daemon_mod.probe_lock(root)
+        except RuntimeError as e:
+            print(str(e), file=sys.stderr)
+            return EXIT_CONFIG_OR_DISCOVERY
         records = jobs_mod.list_jobs(root)
         if _is_json_mode(args):
             _emit_json(
                 {
                     "command": "daemon-status",
                     "ok": True,
-                    "running": pid is not None,
+                    "running": running,
                     "pid": pid,
                     "jobs": [
                         {"id": job.id, "module": job.module, "state": job.state} for job in records
@@ -660,7 +665,12 @@ def cmd_daemon(args: argparse.Namespace) -> int:
                 }
             )
         else:
-            status = f"running (pid {pid})" if pid else "stopped"
+            if running and pid is not None:
+                status = f"running (pid {pid})"
+            elif running:
+                status = "running (pid unknown)"
+            else:
+                status = "stopped"
             print(f"Daemon: {status}")
             for job in records[-10:]:
                 print(f"- {job.id} {job.module}: {job.state}")
@@ -679,7 +689,12 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         )
         return EXIT_CONFIG_OR_DISCOVERY
 
-    if not daemon_mod.acquire_lock(root):
+    try:
+        lock = daemon_mod.acquire_lock(root)
+    except RuntimeError as e:
+        print(str(e), file=sys.stderr)
+        return EXIT_CONFIG_OR_DISCOVERY
+    if lock is None:
         print("Daemon already running.", file=sys.stderr)
         return EXIT_CONFIG_OR_DISCOVERY
 
@@ -687,7 +702,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         daemon_mod.run_daemon(root)
         return EXIT_OK
     finally:
-        daemon_mod.release_lock(root)
+        daemon_mod.release_lock(lock)
 
 
 def _jobs_magic_status(root: Path, args: argparse.Namespace, target: tuple[str, ...]):

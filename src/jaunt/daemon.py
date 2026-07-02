@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import json as _json
+import errno
 import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 from concurrent.futures import Executor, Future
 from dataclasses import dataclass, field
-from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
@@ -21,19 +20,6 @@ from jaunt import landing
 from jaunt.config import JauntConfig
 
 DISABLE_ENV = "JAUNT_DAEMON_DISABLE"
-_PROC_STARTTIME_INDEX = 19
-
-
-class LockVerdict(Enum):
-    OURS = "ours"
-    STALE = "stale"
-    UNVERIFIABLE = "unverifiable"
-
-
-class _LockReadStatus(Enum):
-    OK = "ok"
-    MISSING = "missing"
-    CORRUPT = "corrupt"
 
 
 @dataclass(frozen=True)
@@ -48,6 +34,15 @@ class GateOutcome:
     ok: bool
     battery: str = "-"
     detail: str = ""
+
+
+@dataclass(frozen=True)
+class DaemonLock:
+    fd: int
+    path: Path
+
+
+_LOCK_ACQUIRE_ATTEMPTS = 5
 
 
 class ProbeError(Exception):
@@ -155,106 +150,106 @@ def _lock_path(root: Path) -> Path:
     return root / ".jaunt" / "daemon.pid"
 
 
-def _process_start_token(pid: int) -> str | None:
+def _fcntl_module():
     try:
-        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-    except (FileNotFoundError, PermissionError, OSError):
+        import fcntl
+    except ImportError as e:
+        raise RuntimeError("daemon requires a POSIX platform (fcntl unavailable)") from e
+    return fcntl
+
+
+def _read_pid_from_fd(fd: int) -> int | None:
+    os.lseek(fd, 0, os.SEEK_SET)
+    data = os.read(fd, 100).decode("utf-8", errors="replace").strip().split()
+    if not data:
         return None
     try:
-        _, fields = stat.rsplit(")", 1)
+        pid = int(data[0])
     except ValueError:
         return None
-    parts = fields.strip().split()
-    if len(parts) <= _PROC_STARTTIME_INDEX:
-        return None
-    return parts[_PROC_STARTTIME_INDEX]
+    return pid if pid > 0 else None
 
 
-def _lock_contents(path: Path) -> tuple[int | None, str | None, bool, _LockReadStatus]:
+def _path_refs_fd_inode(fd: int, path: Path) -> bool:
+    """True when path still names the locked fd's inode."""
+    st = os.fstat(fd)
     try:
-        parts = path.read_text(encoding="utf-8").strip().split()
+        pst = os.stat(path)
     except FileNotFoundError:
-        return None, None, False, _LockReadStatus.MISSING
-    except (PermissionError, OSError):
-        return None, None, False, _LockReadStatus.CORRUPT
-    if not parts:
-        return None, None, False, _LockReadStatus.CORRUPT
-    try:
-        pid = int(parts[0])
-    except ValueError:
-        return None, None, False, _LockReadStatus.CORRUPT
-    if pid <= 0:
-        return None, None, False, _LockReadStatus.CORRUPT
-    has_token = len(parts) > 1
-    return pid, parts[1] if has_token else None, has_token, _LockReadStatus.OK
+        return False
+    return (pst.st_dev, pst.st_ino) == (st.st_dev, st.st_ino)
 
 
-def lock_verdict(root: Path) -> tuple[LockVerdict, int | None]:
-    path = _lock_path(root)
-    pid, stored_token, has_token, status = _lock_contents(path)
-    if status is _LockReadStatus.MISSING:
-        return LockVerdict.STALE, None
-    if status is _LockReadStatus.CORRUPT:
-        return LockVerdict.UNVERIFIABLE, pid
-    assert pid is not None
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return LockVerdict.STALE, pid
-    except (PermissionError, OSError):
-        return LockVerdict.UNVERIFIABLE, pid
-    if not has_token:
-        return LockVerdict.UNVERIFIABLE, pid
-    current_token = _process_start_token(pid)
-    if current_token is None or stored_token is None:
-        return LockVerdict.UNVERIFIABLE, pid
-    if current_token != stored_token:
-        return LockVerdict.STALE, pid
-    return LockVerdict.OURS, pid
-
-
-def lock_pid(root: Path) -> int | None:
-    verdict, pid = lock_verdict(root)
-    return pid if verdict is LockVerdict.OURS else None
-
-
-def acquire_lock(root: Path) -> bool:
-    """Acquire by atomically linking a complete pidfile into place."""
+def acquire_lock(root: Path) -> DaemonLock | None:
+    """Acquire and hold the daemon's kernel lock for the returned handle lifetime."""
+    fcntl = _fcntl_module()
     path = _lock_path(root)
     lock_dir = path.parent
     lock_dir.mkdir(parents=True, exist_ok=True)
-    for _ in range(2):
-        tmp_name: str | None = None
+    for _ in range(_LOCK_ACQUIRE_ATTEMPTS):
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0), 0o644)
         try:
-            with tempfile.NamedTemporaryFile(
-                "w",
-                dir=lock_dir,
-                prefix=".daemon.pid.",
-                suffix=".tmp",
-                encoding="utf-8",
-                delete=False,
-            ) as f:
-                tmp_name = f.name
-                pid = os.getpid()
-                token = _process_start_token(pid)
-                f.write(f"{pid} {token}\n" if token is not None else f"{pid}\n")
-            os.chmod(tmp_name, 0o644)
-            os.link(tmp_name, path)
-        except FileExistsError:
-            verdict, _ = lock_verdict(root)
-            if verdict is not LockVerdict.STALE:
-                return False
-            path.unlink(missing_ok=True)
-            continue
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as e:
+                if e.errno in {errno.EWOULDBLOCK, errno.EAGAIN}:
+                    os.close(fd)
+                    return None
+                raise
+            # If the pidfile was unlinked/recreated before flock landed, this fd
+            # locks an orphaned inode. Retry so all daemons contend on one inode.
+            if not _path_refs_fd_inode(fd, path):
+                os.close(fd)
+                continue
+            os.ftruncate(fd, 0)
+            os.write(fd, f"{os.getpid()}\n".encode("utf-8"))
+            os.fsync(fd)
+            return DaemonLock(fd=fd, path=path)
+        except Exception:
+            os.close(fd)
+            raise
+    return None
+
+
+def release_lock(lock: DaemonLock) -> None:
+    try:
+        try:
+            # Only unlink while holding the lock, and only if the path still
+            # points at our inode; otherwise a newer daemon owns the pidfile.
+            if _path_refs_fd_inode(lock.fd, lock.path):
+                lock.path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    finally:
+        os.close(lock.fd)
+
+
+def probe_lock(root: Path) -> tuple[bool, int | None]:
+    """Return whether another daemon process holds the lock and its recorded pid."""
+    fcntl = _fcntl_module()
+    path = _lock_path(root)
+    try:
+        fd = os.open(path, os.O_RDWR | getattr(os, "O_CLOEXEC", 0))
+    except FileNotFoundError:
+        return False, None
+
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            if e.errno in {errno.EWOULDBLOCK, errno.EAGAIN}:
+                return True, _read_pid_from_fd(fd)
+            raise
+        try:
+            # Remove stale unlocked pidfiles while still holding the same inode's
+            # lock; skip if another starter has replaced the path.
+            if _path_refs_fd_inode(fd, path):
+                path.unlink(missing_ok=True)
+            return False, None
         finally:
-            if tmp_name is not None:
-                Path(tmp_name).unlink(missing_ok=True)
-        return True
-    return False
-
-
-def release_lock(root: Path) -> None:
-    _lock_path(root).unlink(missing_ok=True)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def jaunt_dir_ignored(root: Path) -> bool:
