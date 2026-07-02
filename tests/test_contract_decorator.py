@@ -109,7 +109,7 @@ def test_contract_bare_form_registers_top_level_qualname(tmp_path: Path) -> None
 
 
 # ---------------------------------------------------------------------------
-# v1-scope rejection tests: nested/closure, classes/methods, async.
+# Runtime gate tests: nested/closure and methods still reject; classes/async admit.
 # ---------------------------------------------------------------------------
 
 
@@ -130,12 +130,17 @@ def test_contract_rejects_nested_closure(tmp_path: Path) -> None:
         _import_module_from_source(tmp_path, "tmp_contract_closure", src)
 
 
-def test_contract_rejects_class() -> None:
-    with pytest.raises(JauntError):
+def test_contract_registers_class() -> None:
+    @jaunt.contract
+    class Widget:
+        """A class."""
 
-        @jaunt.contract
-        class Widget:
-            """A class."""
+    entries = list(registry.get_contract_registry().values())
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.kind == "contract"
+    assert entry.qualname == "Widget"
+    assert isinstance(entry.obj, type)
 
 
 def test_contract_rejects_method(tmp_path: Path) -> None:
@@ -152,10 +157,15 @@ def test_contract_rejects_method(tmp_path: Path) -> None:
         _import_module_from_source(tmp_path, "tmp_contract_method", src)
 
 
-def test_contract_rejects_async() -> None:
-    with pytest.raises(JauntError):
+def test_contract_registers_async() -> None:
+    @jaunt.contract
+    async def fetch() -> int:
+        """Async return."""
+        return 1
 
-        @jaunt.contract
-        async def fetch() -> int:
-            """Async return."""
-            return 1
+    entries = list(registry.get_contract_registry().values())
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.kind == "contract"
+    assert entry.qualname == "fetch"
+    assert entry.obj is fetch
