@@ -250,10 +250,15 @@ def _build_parser() -> argparse.ArgumentParser:
     jobs_show_p = jobs_sub.add_parser("show", help="Show one job record.")
     jobs_show_p.add_argument("job_id")
     jobs_show_p.add_argument("--full", action="store_true", help="Include full local detail log.")
-    jobs_show_p.add_argument("--root", default=".")
+    jobs_show_p.add_argument("--root", default=argparse.SUPPRESS)
     jobs_retry_p = jobs_sub.add_parser("retry", help="Retry landing a parked job.")
     jobs_retry_p.add_argument("job_id")
-    jobs_retry_p.add_argument("--root", default=".")
+    jobs_retry_p.add_argument("--root", default=argparse.SUPPRESS)
+    jobs_retry_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Land even if the spec changed since the job parked.",
+    )
 
     guard_p = subparsers.add_parser(
         "guard",
@@ -679,7 +684,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         daemon_mod.release_lock(root)
 
 
-def _jobs_would_rebuild(root: Path, args: argparse.Namespace) -> dict[str, str]:
+def _jobs_magic_status(root: Path, args: argparse.Namespace, target: tuple[str, ...]):
     from jaunt.config import load_config
 
     cfg = load_config(root=root)
@@ -688,7 +693,7 @@ def _jobs_would_rebuild(root: Path, args: argparse.Namespace) -> dict[str, str]:
     source_dirs = [root / sr for sr in cfg.paths.source_roots]
     _prepend_sys_path([*source_dirs, root])
     infer_default = bool(cfg.build.infer_deps)
-    mstatus = compute_magic_status(
+    return compute_magic_status(
         root=root,
         cfg=cfg,
         source_dirs=source_dirs,
@@ -696,8 +701,17 @@ def _jobs_would_rebuild(root: Path, args: argparse.Namespace) -> dict[str, str]:
         include_target_tests=include_target_tests,
         infer_deps=infer_default,
         force=False,
-        target=(),
+        target=target,
     )
+
+
+def _module_current_digest(root: Path, args: argparse.Namespace, module: str) -> str | None:
+    mstatus = _jobs_magic_status(root, args, (module,))
+    return mstatus.digests.get(module)
+
+
+def _jobs_would_rebuild(root: Path, args: argparse.Namespace) -> dict[str, str]:
+    mstatus = _jobs_magic_status(root, args, ())
     return {mod: mstatus.stale_changes.get(mod, "structural") for mod in sorted(mstatus.stale)}
 
 
@@ -794,6 +808,15 @@ def _cmd_jobs_retry(args: argparse.Namespace) -> int:
         return EXIT_CONFIG_OR_DISCOVERY
 
     patch = patch_file.read_text(encoding="utf-8")
+    if not args.force:
+        current_digest = _module_current_digest(root, args, job.module)
+        if current_digest is None or current_digest != job.spec_digest:
+            _eprint(
+                f"error: {job.module} spec changed since this job parked; "
+                "the daemon will rebuild it -- use --force to land anyway"
+            )
+            return EXIT_PYTEST_FAILURE
+
     try:
         expected_head = landing.git_out(root, "rev-parse", "HEAD").strip()
         sha = landing.land(

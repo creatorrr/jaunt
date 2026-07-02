@@ -139,6 +139,13 @@ def _lock_path(root: Path) -> Path:
     return root / ".jaunt" / "daemon.pid"
 
 
+def _pid_is_jaunt(pid: int) -> bool:
+    try:
+        return b"jaunt" in Path(f"/proc/{pid}/cmdline").read_bytes()
+    except (FileNotFoundError, PermissionError, OSError):
+        return True
+
+
 def lock_pid(root: Path) -> int | None:
     path = _lock_path(root)
     if not path.exists():
@@ -147,6 +154,8 @@ def lock_pid(root: Path) -> int | None:
         pid = int(path.read_text(encoding="utf-8").strip())
         os.kill(pid, 0)
     except (ValueError, ProcessLookupError, PermissionError):
+        return None
+    if not _pid_is_jaunt(pid):
         return None
     return pid
 

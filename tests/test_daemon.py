@@ -135,6 +135,49 @@ def test_stale_lock_is_reclaimed(tmp_path: Path) -> None:
     daemon.release_lock(tmp_path)
 
 
+def test_lock_pid_ignores_live_non_jaunt_pid(tmp_path: Path, monkeypatch) -> None:
+    lock = tmp_path / ".jaunt" / "daemon.pid"
+    lock.parent.mkdir(parents=True)
+    lock.write_text(f"{os.getpid()}\n", encoding="utf-8")
+    monkeypatch.setattr(daemon, "_pid_is_jaunt", lambda pid: False)
+
+    assert daemon.lock_pid(tmp_path) is None
+
+
+def test_lock_pid_accepts_live_jaunt_pid(tmp_path: Path, monkeypatch) -> None:
+    lock = tmp_path / ".jaunt" / "daemon.pid"
+    lock.parent.mkdir(parents=True)
+    lock.write_text(f"{os.getpid()}\n", encoding="utf-8")
+    monkeypatch.setattr(daemon, "_pid_is_jaunt", lambda pid: True)
+
+    assert daemon.lock_pid(tmp_path) == os.getpid()
+
+
+def test_daemon_stop_does_not_kill_live_non_jaunt_pid(tmp_path: Path, capsys, monkeypatch) -> None:
+    lock = tmp_path / ".jaunt" / "daemon.pid"
+    lock.parent.mkdir(parents=True)
+    foreign_pid = os.getpid()
+    lock.write_text(f"{foreign_pid}\n", encoding="utf-8")
+    monkeypatch.setattr(daemon, "_pid_is_jaunt", lambda pid: False)
+    real_kill = os.kill
+    killed: list[tuple[int, int]] = []
+
+    def kill_spy(pid: int, sig: int) -> None:
+        if sig == 0:
+            real_kill(pid, sig)
+            return
+        killed.append((pid, sig))
+        pytest.fail(f"attempted to signal foreign pid {pid}")
+
+    monkeypatch.setattr(os, "kill", kill_spy)
+
+    rc = cli.main(["daemon", "stop", "--root", str(tmp_path)])
+
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "Daemon not running."
+    assert killed == []
+
+
 def test_daemon_status_json_when_stopped(tmp_path: Path, capsys) -> None:
     assert cli.main(["daemon", "status", "--root", str(tmp_path), "--json"]) == 0
 
