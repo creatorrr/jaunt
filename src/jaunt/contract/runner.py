@@ -17,7 +17,8 @@ from jaunt.registry import SpecEntry
 
 def battery_path(root: Path, battery_dir: str, entry: SpecEntry) -> Path:
     parts = entry.module.split(".")
-    return root / battery_dir / Path(*parts) / f"test_{entry.qualname}.py"
+    fname = f"test_{entry.qualname.replace('.', '_')}.py"
+    return root / battery_dir / Path(*parts) / fname
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +100,10 @@ def run_battery_file(path: Path, *, root: Path, source_roots: list[str]) -> bool
             "-p",
             "no:cacheprovider",
             "--import-mode=importlib",
+            "-p",
+            "pytest_asyncio",
+            "-o",
+            "asyncio_mode=auto",
         ],
         cwd=str(root),
         env=env,
