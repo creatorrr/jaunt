@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json as _json
 import errno
+import inspect
 import os
 import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from concurrent.futures import Executor, Future
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,6 +22,7 @@ from jaunt import landing
 from jaunt.config import JauntConfig
 
 DISABLE_ENV = "JAUNT_DAEMON_DISABLE"
+Heartbeat = Callable[[str], None]
 
 
 @dataclass(frozen=True)
@@ -61,7 +64,9 @@ class JobResult:
 class Runner(Protocol):
     def probe(self, worktree: Path) -> tuple[dict[str, str], dict[str, str]]: ...
 
-    def build(self, worktree: Path, module: str) -> BuildOutcome: ...
+    def build(
+        self, worktree: Path, module: str, heartbeat: Heartbeat | None = None
+    ) -> BuildOutcome: ...
 
     def gate(self, worktree: Path, module: str) -> GateOutcome: ...
 
@@ -99,6 +104,43 @@ class CliRunner:
         except _json.JSONDecodeError:
             return proc.returncode, {"ok": False, "error": (proc.stderr or proc.stdout)[-500:]}
 
+    def _run_build(
+        self, worktree: Path, module: str, heartbeat: Heartbeat | None
+    ) -> tuple[int, dict]:
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "jaunt",
+                "build",
+                "--target",
+                module,
+                "--json",
+                "--progress",
+                "plain",
+                "--no-repo-map",
+                "--no-auto-skills",
+            ],
+            cwd=worktree,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        stderr_parts: list[str] = []
+        if proc.stderr is not None:
+            for raw_line in proc.stderr:
+                stderr_parts.append(raw_line)
+                if heartbeat is not None:
+                    heartbeat(raw_line.strip()[:160])
+        stdout, stderr_tail = proc.communicate()
+        if stderr_tail:
+            stderr_parts.append(stderr_tail)
+        stderr = "".join(stderr_parts)
+        try:
+            return proc.returncode, _json.loads(stdout or "{}")
+        except _json.JSONDecodeError:
+            return proc.returncode, {"ok": False, "error": (stderr or stdout)[-500:]}
+
     def probe(self, worktree: Path) -> tuple[dict[str, str], dict[str, str]]:
         returncode, payload = self._run(worktree, "status", "--json", "--magic-only")
         if returncode != 0 or payload.get("ok") is not True:
@@ -112,16 +154,10 @@ class CliRunner:
         digests = payload.get("digests", {})
         return {m: changes.get(m, "structural") for m in stale}, digests
 
-    def build(self, worktree: Path, module: str) -> BuildOutcome:
-        _, payload = self._run(
-            worktree,
-            "build",
-            "--target",
-            module,
-            "--json",
-            "--no-repo-map",
-            "--no-auto-skills",
-        )
+    def build(
+        self, worktree: Path, module: str, heartbeat: Heartbeat | None = None
+    ) -> BuildOutcome:
+        _, payload = self._run_build(worktree, module, heartbeat)
         if module in payload.get("refrozen", []):
             return BuildOutcome(ok=True, refrozen=True)
         if module in payload.get("generated", []):
@@ -144,6 +180,56 @@ def _one_line_detail(detail: object, limit: int = 200) -> str:
     text = str(detail).replace("\r", "\n")
     line = next((part.strip() for part in text.splitlines() if part.strip()), "")
     return (line or "-")[:limit]
+
+
+class _JobHeartbeat:
+    def __init__(
+        self,
+        root: Path,
+        job: jobs_mod.JobRecord,
+        *,
+        interval: float = 1.0,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self.root = root
+        self.job = job
+        self.interval = interval
+        self._clock = clock
+        self._sleep = sleep
+        self._next_save = clock() + interval
+        self._has_pending = False
+        self._pending = ""
+        self._has_saved = False
+
+    def __call__(self, line: str) -> None:
+        self._pending = line.strip()[:160]
+        self._has_pending = True
+        if self._clock() >= self._next_save:
+            self._save_pending()
+
+    def flush(self) -> None:
+        if not self._has_pending:
+            return
+        if self._has_saved:
+            delay = self._next_save - self._clock()
+            if delay > 0:
+                self._sleep(delay)
+        self._save_pending()
+
+    def _save_pending(self) -> None:
+        phase = self._pending
+        self._has_pending = False
+        now = self._clock()
+        self._next_save = now + self.interval
+        self._has_saved = True
+        try:
+            current = jobs_mod.load_job(self.root, self.job.id)
+            if current is None or current.state != jobs_mod.RUNNING:
+                return
+            self.job = jobs_mod.mark(self.root, current, jobs_mod.RUNNING, phase=phase)
+        except Exception:
+            pass
 
 
 def _lock_path(root: Path) -> Path:
@@ -289,10 +375,27 @@ def _remove_worktree(root: Path, path: Path) -> None:
     )
 
 
+def _runner_build(
+    runner: Runner, worktree: Path, module: str, heartbeat: Heartbeat | None
+) -> BuildOutcome:
+    if heartbeat is None:
+        return runner.build(worktree, module)
+    try:
+        parameters = inspect.signature(runner.build).parameters
+    except (TypeError, ValueError):
+        return runner.build(worktree, module, heartbeat=heartbeat)
+    supports_heartbeat = "heartbeat" in parameters or any(
+        param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()
+    )
+    if supports_heartbeat:
+        return runner.build(worktree, module, heartbeat=heartbeat)
+    return runner.build(worktree, module)
+
+
 def recover(root: Path) -> list[str]:
     affected = []
     for job in jobs_mod.list_jobs(root, states={jobs_mod.RUNNING, jobs_mod.GREEN}):
-        jobs_mod.mark(root, job, jobs_mod.FAILED, error="orphaned by daemon restart")
+        jobs_mod.mark(root, job, jobs_mod.FAILED, error="orphaned by daemon restart", phase="")
         affected.append(job.id)
 
     wt_dir = _worktrees_dir(root)
@@ -319,8 +422,10 @@ def _execute_job(
 ) -> JobResult:
     wt = _worktrees_dir(root) / job.id
     landing.git_out(root, "worktree", "add", "--detach", str(wt), job.base_commit)
+    heartbeat = _JobHeartbeat(root, job)
     try:
-        build = runner.build(wt, job.module)
+        build = _runner_build(runner, wt, job.module, heartbeat)
+        heartbeat.flush()
         if not build.ok:
             return JobResult(job_id=job.id, build=build)
         gate = runner.gate(wt, job.module)
@@ -371,7 +476,7 @@ def _collect_finished(state: DaemonState, root: Path, cfg: JauntConfig) -> None:
                 message_lines = str(exc).splitlines()
                 message = message_lines[0][:200] if message_lines else ""
                 error = f"{type(exc).__name__}: {message}"
-                updated = jobs_mod.mark(root, job, jobs_mod.FAILED, error=error)
+                updated = jobs_mod.mark(root, job, jobs_mod.FAILED, error=error, phase="")
                 _notify(cfg, updated)
                 journal_mod.append_events(
                     root, [journal_mod.JournalEvent("job-fail", job.module, error, job.id)]
@@ -380,7 +485,7 @@ def _collect_finished(state: DaemonState, root: Path, cfg: JauntConfig) -> None:
         job = jobs_mod.load_job(root, job_id)
         green = result.build.ok and (result.gate is None or result.gate.ok)
         if job is not None and job.state == jobs_mod.RUNNING and green:
-            jobs_mod.mark(root, job, jobs_mod.GREEN)
+            jobs_mod.mark(root, job, jobs_mod.GREEN, phase="")
         state.pending[job_id] = result
 
 
@@ -464,7 +569,7 @@ def _land_pending(root: Path, cfg: JauntConfig, state: DaemonState) -> None:
             continue
         if not result.build.ok or (result.gate is not None and not result.gate.ok):
             detail = result.build.error or (result.gate.detail if result.gate else "gate failed")
-            updated = jobs_mod.mark(root, job, jobs_mod.FAILED, error=detail)
+            updated = jobs_mod.mark(root, job, jobs_mod.FAILED, error=detail, phase="")
             _notify(cfg, updated)
             journal_mod.append_events(
                 root, [journal_mod.JournalEvent("job-fail", job.module, detail, job.id)]
@@ -525,6 +630,7 @@ def _land_pending(root: Path, cfg: JauntConfig, state: DaemonState) -> None:
                 job,
                 jobs_mod.PARKED,
                 patch_paths=_json.dumps(list(result.patch_paths)),
+                phase="",
             )
             _notify(cfg, updated)
             journal_mod.append_events(
@@ -532,7 +638,7 @@ def _land_pending(root: Path, cfg: JauntConfig, state: DaemonState) -> None:
             )
         else:
             state.last_head = sha
-            updated = jobs_mod.mark(root, job, jobs_mod.LANDED, landed_commit=sha)
+            updated = jobs_mod.mark(root, job, jobs_mod.LANDED, landed_commit=sha, phase="")
             _notify(cfg, updated)
 
 
@@ -566,7 +672,7 @@ def run_once(
                 if existing is not None:
                     if existing.spec_digest == digest:
                         continue
-                    jobs_mod.mark(root, existing, jobs_mod.SUPERSEDED)
+                    jobs_mod.mark(root, existing, jobs_mod.SUPERSEDED, phase="")
                     journal_mod.append_events(
                         root,
                         [
@@ -584,7 +690,7 @@ def run_once(
                 if parked is not None:
                     if parked.spec_digest == digest:
                         continue
-                    jobs_mod.mark(root, parked, jobs_mod.SUPERSEDED)
+                    jobs_mod.mark(root, parked, jobs_mod.SUPERSEDED, phase="")
                     journal_mod.append_events(
                         root,
                         [
@@ -605,7 +711,7 @@ def run_once(
             # (spec deleted/ejected/reverted): its in-flight job must never land.
             for job in jobs_mod.list_jobs(root, states=jobs_mod.ACTIVE_STATES):
                 if job.module not in stale:
-                    jobs_mod.mark(root, job, jobs_mod.SUPERSEDED)
+                    jobs_mod.mark(root, job, jobs_mod.SUPERSEDED, phase="")
                     journal_mod.append_events(
                         root,
                         [

@@ -39,6 +39,7 @@ from jaunt.status_core import (
 
 if TYPE_CHECKING:  # pragma: no cover
     from jaunt.config import JauntConfig
+    from jaunt.jobs import JobRecord
     from jaunt.registry import SpecEntry
     from jaunt.spec_ref import SpecRef
 
@@ -257,6 +258,12 @@ def _build_parser() -> argparse.ArgumentParser:
     jobs_show_p.add_argument("job_id")
     jobs_show_p.add_argument("--full", action="store_true", help="Include full local detail log.")
     jobs_show_p.add_argument("--root", default=argparse.SUPPRESS)
+    jobs_show_p.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        default=argparse.SUPPRESS,
+    )
     jobs_retry_p = jobs_sub.add_parser("retry", help="Retry landing a parked job.")
     jobs_retry_p.add_argument("job_id")
     jobs_retry_p.add_argument("--root", default=argparse.SUPPRESS)
@@ -653,6 +660,10 @@ def _emit_json(data: dict[str, object]) -> None:
     print(json.dumps(data, indent=2, default=str))
 
 
+def _job_state_label(job: JobRecord) -> str:
+    return f"{job.state} — {job.phase}" if job.phase else job.state
+
+
 def cmd_log(args: argparse.Namespace) -> int:
     from jaunt import journal
 
@@ -707,7 +718,13 @@ def cmd_daemon(args: argparse.Namespace) -> int:
                     "running": running,
                     "pid": pid,
                     "jobs": [
-                        {"id": job.id, "module": job.module, "state": job.state} for job in records
+                        {
+                            "id": job.id,
+                            "module": job.module,
+                            "state": job.state,
+                            "phase": job.phase,
+                        }
+                        for job in records
                     ],
                 }
             )
@@ -720,7 +737,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
                 status = "stopped"
             print(f"Daemon: {status}")
             for job in records[-10:]:
-                print(f"- {job.id} {job.module}: {job.state}")
+                print(f"- {job.id} {job.module}: {_job_state_label(job)}")
         return EXIT_OK
 
     if os.environ.get(daemon_mod.DISABLE_ENV):
@@ -813,7 +830,7 @@ def _cmd_jobs_list(args: argparse.Namespace) -> int:
     if not records:
         print("No job records.")
     for job in records:
-        print(f"- {job.id} {job.module}: {job.state}")
+        print(f"- {job.id} {job.module}: {_job_state_label(job)}")
         if job.battery:
             print(f"  battery {job.battery}")
         if job.error:
@@ -834,8 +851,17 @@ def _cmd_jobs_show(args: argparse.Namespace) -> int:
         _eprint(f"error: job not found: {args.job_id}")
         return EXIT_CONFIG_OR_DISCOVERY
 
+    if _is_json_mode(args):
+        _emit_json({"command": "jobs-show", "ok": True, "job": asdict(job)})
+        return EXIT_OK
+
     for key, value in asdict(job).items():
-        print(f"{key}: {value}")
+        if key == "state":
+            print(f"state: {_job_state_label(job)}")
+        elif key == "phase" and job.phase:
+            continue
+        else:
+            print(f"{key}: {value}")
     if args.full and job.detail_log:
         detail = Path(job.detail_log)
         if detail.exists():
@@ -908,7 +934,7 @@ def _cmd_jobs_retry(args: argparse.Namespace) -> int:
         _eprint(f"parked: retry could not land job {job.id}")
         return EXIT_PYTEST_FAILURE
 
-    jobs_mod.mark(root, job, jobs_mod.LANDED, landed_commit=sha)
+    jobs_mod.mark(root, job, jobs_mod.LANDED, landed_commit=sha, phase="")
     print(sha)
     return EXIT_OK
 

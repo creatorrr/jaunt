@@ -17,6 +17,7 @@ FAILED = "failed"
 SUPERSEDED = "superseded"
 
 ACTIVE_STATES = frozenset({QUEUED, RUNNING, GREEN})
+PHASE_CLEAR_STATES = frozenset({GREEN, LANDED, PARKED, FAILED, SUPERSEDED})
 
 
 def new_job_id(module: str, spec_digest: str, base_commit: str) -> str:
@@ -33,6 +34,7 @@ class JobRecord:
     state: str
     created: float
     updated: float
+    phase: str = ""
     gate: str = ""
     battery: str = ""
     landed_commit: str = ""
@@ -108,6 +110,8 @@ def parked_for_module(root: Path, module: str) -> JobRecord | None:
 
 
 def mark(root: Path, job: JobRecord, state: str, **updates: str) -> JobRecord:
+    if state in PHASE_CLEAR_STATES and "phase" not in updates:
+        updates["phase"] = ""
     updated = replace(job, state=state, updated=time.time(), **updates)
     save_job(root, updated)
     return updated
