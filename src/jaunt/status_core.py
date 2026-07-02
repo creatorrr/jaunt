@@ -97,6 +97,7 @@ class MagicStatus:
     fresh: set[str]
     # Per-stale-module change kind: "structural" | "prose". Empty when total == 0.
     stale_changes: dict[str, str]
+    digests: dict[str, str]
 
 
 def compute_magic_status(
@@ -138,7 +139,7 @@ def compute_magic_status(
 
     specs = dict(registry.get_magic_registry())
     if not specs:
-        return MagicStatus(total=0, stale=set(), fresh=set(), stale_changes={})
+        return MagicStatus(total=0, stale=set(), fresh=set(), stale_changes={}, digests={})
 
     spec_graph = build_spec_graph(specs, infer_default=infer_deps)
     module_dag = collapse_to_module_dag(spec_graph)
@@ -200,6 +201,12 @@ def compute_magic_status(
     else:
         all_mods = set(module_specs.keys())
 
+    from jaunt.digest import module_digest
+
+    digests = {
+        module_name: module_digest(module_name, module_specs[module_name], specs, spec_graph)
+        for module_name in sorted(all_mods)
+    }
     stale = builder.expand_stale_modules(module_dag, stale & all_mods, changed_modules=api_changed)
     fresh = all_mods - stale
 
@@ -212,7 +219,13 @@ def compute_magic_status(
         )
         for m in sorted(stale)
     }
-    return MagicStatus(total=len(all_mods), stale=stale, fresh=fresh, stale_changes=stale_changes)
+    return MagicStatus(
+        total=len(all_mods),
+        stale=stale,
+        fresh=fresh,
+        stale_changes=stale_changes,
+        digests=digests,
+    )
 
 
 def _norm_digest(d: str | None) -> str | None:
