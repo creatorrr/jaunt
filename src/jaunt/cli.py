@@ -11,7 +11,8 @@ import hashlib
 import json
 import os
 import sys
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -48,6 +49,9 @@ EXIT_OK = 0
 EXIT_CONFIG_OR_DISCOVERY = 2
 EXIT_GENERATION_ERROR = 3
 EXIT_PYTEST_FAILURE = 4
+EXIT_TIMEOUT = 5
+
+_JOBS_WAIT_POLL_SECONDS = 1.0
 
 
 def _add_common_flags(p: argparse.ArgumentParser) -> None:
@@ -133,6 +137,26 @@ def _add_build_generation_flags(p: argparse.ArgumentParser) -> None:
         dest="no_builtin_skills",
         help="Do not seed Jaunt's bundled builtin skills into the Codex workspace.",
     )
+
+
+def _positive_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError("must be a number") from e
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than 0")
+    return parsed
+
+
+def _nonnegative_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError("must be a number") from e
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be greater than or equal to 0")
+    return parsed
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -271,6 +295,33 @@ def _build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Land even if the spec changed since the job parked.",
+    )
+    jobs_wait_p = jobs_sub.add_parser("wait", help="Wait for daemon jobs to finish.")
+    jobs_wait_p.add_argument("job_id", nargs="?")
+    jobs_wait_p.add_argument("--root", default=argparse.SUPPRESS)
+    jobs_wait_p.add_argument(
+        "--timeout",
+        type=_positive_float,
+        default=None,
+        help="Maximum seconds to wait before exiting 5.",
+    )
+    jobs_wait_p.add_argument(
+        "--settle",
+        type=_nonnegative_float,
+        default=None,
+        help="Idle seconds required before returning (default: 2 x daemon.poll_interval).",
+    )
+    jobs_wait_p.add_argument(
+        "--progress",
+        choices=("auto", "rich", "plain", "none"),
+        default=argparse.SUPPRESS,
+        help="Progress output mode (default: auto).",
+    )
+    jobs_wait_p.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        default=argparse.SUPPRESS,
     )
 
     guard_p = subparsers.add_parser(
@@ -629,10 +680,10 @@ def _is_json_mode(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "json_output", False))
 
 
-def _make_progress(
-    args: argparse.Namespace, *, label: str, total: int, json_mode: bool
-) -> ProgressBar | None:
-    if total == 0 or bool(getattr(args, "no_progress", False)):
+def _resolve_progress_mode(
+    args: argparse.Namespace, *, json_mode: bool
+) -> Literal["rich", "plain"] | None:
+    if bool(getattr(args, "no_progress", False)):
         return None
 
     requested = str(getattr(args, "progress", "auto") or "auto")
@@ -641,9 +692,18 @@ def _make_progress(
     if json_mode and requested == "auto":
         return None
     if requested == "auto":
-        mode = "rich" if sys.stderr.isatty() else "plain"
-    else:
-        mode = cast(Literal["rich", "plain"], requested)
+        return "rich" if sys.stderr.isatty() else "plain"
+    return cast(Literal["rich", "plain"], requested)
+
+
+def _make_progress(
+    args: argparse.Namespace, *, label: str, total: int, json_mode: bool
+) -> ProgressBar | None:
+    if total == 0:
+        return None
+    mode = _resolve_progress_mode(args, json_mode=json_mode)
+    if mode is None:
+        return None
     return ProgressBar(label=label, total=total, enabled=True, stream=sys.stderr, mode=mode)
 
 
@@ -800,6 +860,306 @@ def _jobs_would_rebuild(root: Path, args: argparse.Namespace) -> dict[str, str]:
     return {mod: mstatus.stale_changes.get(mod, "structural") for mod in sorted(mstatus.stale)}
 
 
+class _WaitPrinter:
+    def __init__(self, mode: Literal["rich", "plain"] | None) -> None:
+        self.mode = mode
+        self.enabled = mode is not None
+
+    def job(self, job: JobRecord) -> None:
+        if not self.enabled:
+            return
+        self._write(_wait_line(job) + "\n")
+
+    def _write(self, text: str) -> None:
+        if not self.enabled:
+            return
+        try:
+            sys.stderr.write(text)
+            sys.stderr.flush()
+        except Exception:
+            self.enabled = False
+
+
+def _wait_line(job: JobRecord) -> str:
+    status = job.state
+    if job.state in {"failed", "parked"} and job.error:
+        status = f"{job.state}: {job.error.splitlines()[0]}"
+    elif job.phase:
+        status = f"{job.state} — {job.phase}"
+    return f"[wait] {job.id} {job.module}: {status}"
+
+
+def _wait_payload(job: JobRecord) -> dict[str, str]:
+    return {
+        "id": job.id,
+        "module": job.module,
+        "state": job.state,
+        "phase": job.phase,
+        "error": job.error,
+    }
+
+
+def _emit_jobs_wait_json(
+    *,
+    json_mode: bool,
+    ok: bool,
+    timed_out: bool,
+    watched: dict[str, JobRecord],
+) -> None:
+    if not json_mode:
+        return
+    jobs_payload = [
+        _wait_payload(job) for job in sorted(watched.values(), key=lambda j: (j.created, j.id))
+    ]
+    _emit_json(
+        {
+            "command": "jobs",
+            "action": "wait",
+            "ok": ok,
+            "timed_out": timed_out,
+            "jobs": jobs_payload,
+        }
+    )
+
+
+def _jobs_wait_settle_seconds(root: Path, args: argparse.Namespace) -> float:
+    if getattr(args, "settle", None) is not None:
+        return float(args.settle)
+
+    from jaunt.config import load_config
+
+    cfg = load_config(root=root)
+    return float(cfg.daemon.poll_interval) * 2
+
+
+def _jobs_wait_sleep(
+    *,
+    now: float,
+    deadline: float | None,
+    sleep: Callable[[float], None],
+) -> None:
+    delay = _JOBS_WAIT_POLL_SECONDS
+    if deadline is not None:
+        delay = min(delay, max(0.0, deadline - now))
+    if delay > 0:
+        sleep(delay)
+
+
+def _jobs_wait_daemon_running(root: Path) -> bool:
+    from jaunt import daemon as daemon_mod
+
+    running, _pid = daemon_mod.probe_lock(root)
+    return running
+
+
+def _jobs_wait_result_code(watched: dict[str, JobRecord]) -> int:
+    if any(job.state in {"failed", "parked"} for job in watched.values()):
+        return EXIT_PYTEST_FAILURE
+    return EXIT_OK
+
+
+def _cmd_jobs_wait(
+    args: argparse.Namespace,
+    *,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> int:
+    from jaunt import jobs as jobs_mod
+
+    json_mode = _is_json_mode(args)
+    root = Path(args.root).resolve()
+    target_id = getattr(args, "job_id", None)
+    printer = _WaitPrinter(_resolve_progress_mode(args, json_mode=json_mode))
+    watched: dict[str, JobRecord] = {}
+    seen_status: dict[str, tuple[str, str, str]] = {}
+
+    def remember(job: JobRecord) -> None:
+        watched[job.id] = job
+        key = (
+            job.state,
+            job.phase,
+            job.error if job.state in {"failed", "parked"} else "",
+        )
+        if seen_status.get(job.id) != key:
+            seen_status[job.id] = key
+            printer.job(job)
+
+    if target_id is not None:
+        initial = jobs_mod.load_job(root, target_id)
+        if initial is None:
+            _eprint(f"error: job not found: {target_id}")
+            return EXIT_CONFIG_OR_DISCOVERY
+        remember(initial)
+        if initial.state not in jobs_mod.ACTIVE_STATES:
+            rc = _jobs_wait_result_code(watched)
+            _emit_jobs_wait_json(
+                json_mode=json_mode,
+                ok=rc == EXIT_OK,
+                timed_out=False,
+                watched=watched,
+            )
+            return rc
+    elif not jobs_mod.jobs_dir(root).exists():
+        _emit_jobs_wait_json(json_mode=json_mode, ok=True, timed_out=False, watched=watched)
+        return EXIT_OK
+
+    try:
+        settle = _jobs_wait_settle_seconds(root, args) if target_id is None else 0.0
+    except JauntConfigError as e:
+        _print_error(e)
+        _emit_jobs_wait_json(json_mode=json_mode, ok=False, timed_out=False, watched=watched)
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    deadline = None
+    if getattr(args, "timeout", None) is not None:
+        deadline = clock() + float(args.timeout)
+    idle_since: float | None = None
+
+    while True:
+        now = clock()
+
+        if target_id is not None:
+            current = jobs_mod.load_job(root, target_id)
+            if current is None:
+                _eprint(f"error: job disappeared while waiting: {target_id}")
+                _emit_jobs_wait_json(
+                    json_mode=json_mode,
+                    ok=False,
+                    timed_out=False,
+                    watched=watched,
+                )
+                return EXIT_CONFIG_OR_DISCOVERY
+            remember(current)
+            if current.state not in jobs_mod.ACTIVE_STATES:
+                rc = _jobs_wait_result_code(watched)
+                _emit_jobs_wait_json(
+                    json_mode=json_mode,
+                    ok=rc == EXIT_OK,
+                    timed_out=False,
+                    watched=watched,
+                )
+                return rc
+            try:
+                daemon_running = _jobs_wait_daemon_running(root)
+            except RuntimeError as e:
+                _eprint(str(e))
+                _emit_jobs_wait_json(
+                    json_mode=json_mode,
+                    ok=False,
+                    timed_out=False,
+                    watched=watched,
+                )
+                return EXIT_CONFIG_OR_DISCOVERY
+            if not daemon_running:
+                _eprint(f"daemon died mid-job; active job record is stale: {target_id}")
+                _emit_jobs_wait_json(
+                    json_mode=json_mode,
+                    ok=False,
+                    timed_out=False,
+                    watched=watched,
+                )
+                return EXIT_CONFIG_OR_DISCOVERY
+        else:
+            records = jobs_mod.list_jobs(root)
+            records_by_id = {job.id: job for job in records}
+            active = [job for job in records if job.state in jobs_mod.ACTIVE_STATES]
+            for job in active:
+                remember(job)
+            for job_id in list(watched):
+                current = records_by_id.get(job_id)
+                if current is not None:
+                    remember(current)
+
+            if active:
+                idle_since = None
+                try:
+                    daemon_running = _jobs_wait_daemon_running(root)
+                except RuntimeError as e:
+                    _eprint(str(e))
+                    _emit_jobs_wait_json(
+                        json_mode=json_mode,
+                        ok=False,
+                        timed_out=False,
+                        watched=watched,
+                    )
+                    return EXIT_CONFIG_OR_DISCOVERY
+                if not daemon_running:
+                    _eprint("daemon died mid-job; active job records are stale")
+                    _emit_jobs_wait_json(
+                        json_mode=json_mode,
+                        ok=False,
+                        timed_out=False,
+                        watched=watched,
+                    )
+                    return EXIT_CONFIG_OR_DISCOVERY
+            else:
+                if not records and not watched:
+                    try:
+                        daemon_running = _jobs_wait_daemon_running(root)
+                    except RuntimeError as e:
+                        _eprint(str(e))
+                        _emit_jobs_wait_json(
+                            json_mode=json_mode,
+                            ok=False,
+                            timed_out=False,
+                            watched=watched,
+                        )
+                        return EXIT_CONFIG_OR_DISCOVERY
+                    if not daemon_running:
+                        _emit_jobs_wait_json(
+                            json_mode=json_mode,
+                            ok=True,
+                            timed_out=False,
+                            watched=watched,
+                        )
+                        return EXIT_OK
+                elif records and not watched:
+                    try:
+                        daemon_running = _jobs_wait_daemon_running(root)
+                    except RuntimeError as e:
+                        _eprint(str(e))
+                        _emit_jobs_wait_json(
+                            json_mode=json_mode,
+                            ok=False,
+                            timed_out=False,
+                            watched=watched,
+                        )
+                        return EXIT_CONFIG_OR_DISCOVERY
+                    if not daemon_running:
+                        _eprint("daemon not running; run `jaunt daemon start` to enqueue new jobs")
+                        _emit_jobs_wait_json(
+                            json_mode=json_mode,
+                            ok=False,
+                            timed_out=False,
+                            watched=watched,
+                        )
+                        return EXIT_CONFIG_OR_DISCOVERY
+
+                if idle_since is None:
+                    idle_since = now
+                if settle <= 0 or now - idle_since >= settle:
+                    rc = _jobs_wait_result_code(watched)
+                    _emit_jobs_wait_json(
+                        json_mode=json_mode,
+                        ok=rc == EXIT_OK,
+                        timed_out=False,
+                        watched=watched,
+                    )
+                    return rc
+
+        now = clock()
+        if deadline is not None and now >= deadline:
+            _eprint("timed out waiting for jobs")
+            _emit_jobs_wait_json(
+                json_mode=json_mode,
+                ok=False,
+                timed_out=True,
+                watched=watched,
+            )
+            return EXIT_TIMEOUT
+        _jobs_wait_sleep(now=now, deadline=deadline, sleep=sleep)
+
+
 def _cmd_jobs_list(args: argparse.Namespace) -> int:
     from dataclasses import asdict
 
@@ -944,6 +1304,8 @@ def cmd_jobs(args: argparse.Namespace) -> int:
         return _cmd_jobs_show(args)
     if args.jobs_command == "retry":
         return _cmd_jobs_retry(args)
+    if args.jobs_command == "wait":
+        return _cmd_jobs_wait(args)
     return _cmd_jobs_list(args)
 
 
