@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import ast
 
-from jaunt.contract.derive import ContractBlocks, ExampleRow, extract_blocks_structured
-from jaunt.contract.strength import compute_strength, format_strength, iter_mutants
+from jaunt.contract.cases import CaseBlocks, parse_case_blocks
+from jaunt.contract.strength import (
+    _skip_constant_ids,
+    compute_case_strength,
+    format_strength,
+    iter_mutants,
+)
 
 STRONG_SRC = '''
 def clamp(n: int) -> int:
@@ -37,8 +42,10 @@ def test_iter_mutants_produces_multiple_variants() -> None:
 
 
 def test_strong_contract_kills_most_mutants() -> None:
-    blocks = extract_blocks_structured(STRONG_DOC)
-    killed, applicable = compute_strength(STRONG_SRC, "clamp", blocks, {})
+    blocks = parse_case_blocks(
+        STRONG_DOC, target="clamp", async_map={"clamp": False}, module_names=frozenset()
+    )
+    killed, applicable, _ = compute_case_strength(STRONG_SRC, "clamp", blocks, {})
     assert applicable >= 5
     assert killed / applicable >= 0.6
     assert "/" in format_strength(killed, applicable)
@@ -46,13 +53,18 @@ def test_strong_contract_kills_most_mutants() -> None:
 
 def test_vacuous_contract_scores_low() -> None:
     # No example/raises rows -> nothing pins the body -> all mutants survive.
-    killed, applicable = compute_strength(STRONG_SRC, "clamp", ContractBlocks(), {})
+    killed, applicable, _ = compute_case_strength(STRONG_SRC, "clamp", CaseBlocks(), {})
     assert killed == 0
 
 
 def test_single_weak_example_survives_many_mutants() -> None:
-    blocks = ContractBlocks(examples=(ExampleRow("5", "5"),))
-    killed, applicable = compute_strength(STRONG_SRC, "clamp", blocks, {})
+    blocks = parse_case_blocks(
+        "Examples:\n- 5 -> 5\n",
+        target="clamp",
+        async_map={"clamp": False},
+        module_names=frozenset(),
+    )
+    killed, applicable, _ = compute_case_strength(STRONG_SRC, "clamp", blocks, {})
     # Only the n=5 passthrough is pinned; boundary mutants survive.
     assert killed < applicable
 
@@ -79,6 +91,25 @@ def test_comparison_boundary_mutant_is_produced() -> None:
     mutants = list(iter_mutants(STRONG_SRC))
     assert any("n < 1" in m for m in mutants)
     assert any("n > 11" in m for m in mutants)
+
+
+def test_async_function_and_class_docstring_constants_are_skipped() -> None:
+    tree = ast.parse(
+        '''
+class C:
+    """CLASSDOC."""
+
+    async def value(self):
+        """ASYNCDOC."""
+        return "RESULT"
+'''
+    )
+    skipped_values = {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and id(node) in _skip_constant_ids(tree)
+    }
+    assert skipped_values == {"CLASSDOC.", "ASYNCDOC."}
 
 
 def test_format_strength_exact() -> None:

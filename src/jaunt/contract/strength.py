@@ -5,8 +5,10 @@ from __future__ import annotations
 import ast
 import copy
 from collections.abc import Iterator
+from typing import TYPE_CHECKING
 
-from jaunt.contract.derive import ContractBlocks, evaluate_blocks
+if TYPE_CHECKING:
+    from jaunt.contract.cases import CaseBlocks
 
 EJECT_STRENGTH_WARN = 0.5
 
@@ -48,7 +50,7 @@ def _mutation_targets(tree: ast.Module) -> list[ast.AST]:
 def _skip_constant_ids(tree: ast.Module) -> set[int]:
     skip: set[int] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.body:
             first = node.body[0]
             if (
                 isinstance(first, ast.Expr)
@@ -200,35 +202,46 @@ def _default_return(t: ast.AST) -> bool:
     return False
 
 
-def compute_strength(
-    func_source: str,
-    func_name: str,
-    blocks: ContractBlocks,
-    namespace: dict[str, object],
-) -> tuple[int, int]:
-    """Return (killed, applicable). A mutant is killed if any derived case fails."""
+def format_strength(killed: int, applicable: int) -> str:
+    return f"{killed}/{applicable}"
 
-    if blocks.is_empty():
-        # Nothing pins the body; every mutant survives by definition.
-        applicable = sum(1 for _ in iter_mutants(func_source))
-        return (0, applicable)
+
+def compute_case_strength(
+    source: str,
+    target: str,
+    blocks: "CaseBlocks",
+    namespace: dict[str, object],
+) -> tuple[int, int, int]:
+    """(killed, applicable, excluded) over the call-plan IR. Fixture cases are
+    excluded from scoring (mutating + re-running pytest per mutant is unbounded
+    for DB fixtures); the count is surfaced in the battery header."""
+
+    from jaunt.contract.cases import CaseBlocks
+    from jaunt.contract.derive import evaluate_cases
+
+    excluded = sum(1 for c in (*blocks.examples, *blocks.raises) if c.fixtures)
+    pure = CaseBlocks(
+        examples=tuple(c for c in blocks.examples if not c.fixtures),
+        raises=tuple(c for c in blocks.raises if not c.fixtures),
+        fixtures_declared=blocks.fixtures_declared,
+    )
+    if pure.is_empty():
+        applicable = sum(1 for _ in iter_mutants(source))
+        return (0, applicable, excluded)
 
     killed = 0
     applicable = 0
-    for mutant_src in iter_mutants(func_source):
+    for mutant_src in iter_mutants(source):
         ns: dict[str, object] = dict(namespace)
         try:
             exec(compile(mutant_src, "<mutant>", "exec"), ns)  # noqa: S102
         except Exception:  # noqa: BLE001 - non-applicable mutant
             continue
-        fn = ns.get(func_name)
-        if not callable(fn):
+        obj = ns.get(target)
+        if not callable(obj):
             continue
         applicable += 1
-        if evaluate_blocks(fn, blocks, ns):  # any failure -> killed
+        ns_eval = dict(ns)
+        if evaluate_cases(pure, namespace=ns_eval):
             killed += 1
-    return (killed, applicable)
-
-
-def format_strength(killed: int, applicable: int) -> str:
-    return f"{killed}/{applicable}"
+    return (killed, applicable, excluded)

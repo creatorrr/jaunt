@@ -55,6 +55,19 @@ def _classify_qualname(obj: object) -> str | None:
     )
 
 
+def _pytest_local_contract_tail(qualname: str) -> tuple[str, ...] | None:
+    """Return the local-definition tail for pytest-scoped contract fixtures."""
+
+    parts = qualname.split(".")
+    try:
+        local_index = parts.index("<locals>")
+    except ValueError:
+        return None
+    if local_index == 1 and parts[0].startswith("test_"):
+        return tuple(parts[local_index + 1 :])
+    return None
+
+
 def _source_file(obj: object) -> str:
     # Avoid filesystem I/O: capture best-effort metadata only.
     try:
@@ -477,30 +490,52 @@ def contract(obj: None = ..., *, deps: object | None = ...) -> Callable[[F], F]:
 
 
 def contract(obj: F | None = None, *, deps: object | None = None) -> F | Callable[[F], F]:
-    """Mark a fully-implemented function as contract-tracked.
+    """Mark a fully-implemented function or class as contract-tracked.
 
     Runtime no-op: returns the function unchanged (like a type annotation). At
     import time it registers a ``kind="contract"`` SpecEntry so discovery and the
     contract commands (`reconcile`/`check`/`adopt`/`eject`) can find it. There is
     NO import-time substitution and NO ``__generated__`` import — the committed
-    body is the thing that runs. Accepts ``@jaunt.contract`` and
-    ``@jaunt.contract()``.
+    body is the thing that runs. Accepts top-level functions — sync or async —
+    and whole classes via ``@jaunt.contract`` and ``@jaunt.contract()``.
     """
 
     def _decorate(fn: F) -> F:
         if isinstance(fn, (classmethod, staticmethod)):
-            raise JauntError("@contract must decorate a plain function (v1: top-level sync only).")
-        if isinstance(fn, type):
-            raise JauntError("@contract does not support classes in v1 (top-level sync functions).")
-        if inspect.iscoroutinefunction(fn):
-            raise JauntError("@contract does not support async functions in v1.")
-
-        class_name = _classify_qualname(fn)  # rejects closures/deep nesting
-        if class_name is not None:
-            raise JauntError("@contract does not support methods in v1 (top-level functions only).")
+            raise JauntError(
+                "@contract must decorate a plain function or class "
+                "(adopt the whole class, not a classmethod/staticmethod)."
+            )
 
         f = cast(Any, fn)
         qualname = cast(str, f.__qualname__)
+        if isinstance(fn, type):
+            local_tail = _pytest_local_contract_tail(qualname)
+            if "." in qualname and local_tail is None:
+                raise JauntError("@contract supports top-level classes only (not nested classes).")
+            if local_tail is not None:
+                if len(local_tail) != 1:
+                    raise JauntError(
+                        "@contract supports top-level classes only (not nested classes)."
+                    )
+                qualname = local_tail[0]
+        else:
+            local_tail = _pytest_local_contract_tail(qualname)
+            if local_tail is not None:
+                if len(local_tail) == 1:
+                    class_name = None
+                    qualname = local_tail[0]
+                elif len(local_tail) == 2:
+                    class_name = local_tail[0]
+                else:
+                    _classify_qualname(fn)
+            else:
+                class_name = _classify_qualname(fn)  # rejects closures/deep nesting
+            if class_name is not None:
+                raise JauntError(
+                    "@contract does not support methods; adopt the whole class instead."
+                )
+
         spec_ref = spec_ref_from_object(fn)
 
         decorator_kwargs: dict[str, object] = {}

@@ -5,12 +5,15 @@ from __future__ import annotations
 import ast
 
 
-def _find_func(source: str, func_name: str) -> ast.FunctionDef:
+def _find_target(source: str, name: str) -> ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef:
     tree = ast.parse(source)
     for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name == func_name:
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node.name == name
+        ):
             return node
-    raise ValueError(f"top-level function {func_name!r} not found")
+    raise ValueError(f"top-level function or class {name!r} not found")
 
 
 def _ensure_import_jaunt(lines: list[str]) -> list[str]:
@@ -27,17 +30,17 @@ def _ensure_import_jaunt(lines: list[str]) -> list[str]:
 
 
 def add_contract_marker(source: str, func_name: str) -> str:
-    node = _find_func(source, func_name)
+    target = _find_target(source, func_name)
 
     # Already marked?
-    for dec in node.decorator_list:
+    for dec in target.decorator_list:
         text = ast.unparse(dec)
         if text in ("jaunt.contract", "jaunt.contract()") or text.endswith(".contract"):
             return source
 
     lines = source.splitlines()
     # Insert above the first decorator if present, else above `def`.
-    anchor = node.decorator_list[0].lineno if node.decorator_list else node.lineno
+    anchor = target.decorator_list[0].lineno if target.decorator_list else target.lineno
     insert_idx = anchor - 1  # 1-based lineno -> 0-based index
     indent = lines[insert_idx][: len(lines[insert_idx]) - len(lines[insert_idx].lstrip())]
     lines.insert(insert_idx, f"{indent}@jaunt.contract")
@@ -47,9 +50,9 @@ def add_contract_marker(source: str, func_name: str) -> str:
 
 
 def remove_contract_marker(source: str, func_name: str) -> str:
-    node = _find_func(source, func_name)
+    target = _find_target(source, func_name)
     targets = set()
-    for dec in node.decorator_list:
+    for dec in target.decorator_list:
         text = ast.unparse(dec)
         if text in ("jaunt.contract", "jaunt.contract()"):
             targets.add(dec.lineno)

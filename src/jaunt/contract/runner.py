@@ -17,7 +17,8 @@ from jaunt.registry import SpecEntry
 
 def battery_path(root: Path, battery_dir: str, entry: SpecEntry) -> Path:
     parts = entry.module.split(".")
-    return root / battery_dir / Path(*parts) / f"test_{entry.qualname}.py"
+    fname = f"test_{entry.qualname.replace('.', '_')}.py"
+    return root / battery_dir / Path(*parts) / fname
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +28,7 @@ class ContractStatus:
     strength: str | None
     battery_path: Path
     detail: str = ""
+    strength_excluded: int = 0
 
 
 def _norm(value: str) -> str:
@@ -57,6 +59,7 @@ def evaluate_entry(
     signature_match = _norm(header.get("signature", "")) == digs.signature
     body_match = _norm(header.get("body-digest", "")) == digs.body
     strength = header.get("strength")
+    excluded = int(header.get("strength-excluded", "0"))
 
     # Short-circuit before running the battery (steps 1-3).
     if not (prose_match and signature_match):
@@ -67,7 +70,7 @@ def evaluate_entry(
             body_match=body_match,
             battery_passed=None,
         )
-        return ContractStatus(spec_ref, state, strength, path)
+        return ContractStatus(spec_ref, state, strength, path, strength_excluded=excluded)
 
     passed = run_battery(path)
     state = compute_drift_state(
@@ -77,7 +80,7 @@ def evaluate_entry(
         body_match=body_match,
         battery_passed=passed,
     )
-    return ContractStatus(spec_ref, state, strength, path)
+    return ContractStatus(spec_ref, state, strength, path, strength_excluded=excluded)
 
 
 def run_battery_file(path: Path, *, root: Path, source_roots: list[str]) -> bool:
@@ -99,6 +102,10 @@ def run_battery_file(path: Path, *, root: Path, source_roots: list[str]) -> bool
             "-p",
             "no:cacheprovider",
             "--import-mode=importlib",
+            "-p",
+            "pytest_asyncio",
+            "-o",
+            "asyncio_mode=auto",
         ],
         cwd=str(root),
         env=env,
@@ -116,6 +123,7 @@ class ReconcileResult:
     failures: list[str]
     battery_path: Path
     wrote: bool
+    strength_excluded: int = 0
 
 
 def reconcile_entry(
@@ -128,45 +136,90 @@ def reconcile_entry(
     module_namespace: dict[str, object],
     tool_version: str,
     model_extract: Callable[[str], ContractBlocks] | None = None,
+    source_roots: list[str] | None = None,
 ) -> ReconcileResult:
+    import ast
+
+    from jaunt.contract.battery import merge_battery
+    from jaunt.contract.cases import CaseParseError, parse_case_blocks
     from jaunt.contract.derive import (
-        derive_regions,
-        evaluate_blocks,
-        extract_blocks_structured,
+        battery_extra_imports,
+        derive_case_regions,
+        evaluate_cases,
     )
-    from jaunt.contract.strength import compute_strength, format_strength
-    from jaunt.digest import contract_digests, load_function_node
+    from jaunt.contract.strength import compute_case_strength, format_strength
+    from jaunt.digest import contract_digests, load_contract_node
 
     spec_ref = str(entry.spec_ref)
     path = battery_path(root, battery_dir, entry)
+    source_roots = source_roots or []
 
-    node = load_function_node(entry.source_file, entry.qualname)
+    node = load_contract_node(entry.source_file, entry.qualname)
+    if isinstance(node, ast.ClassDef):
+        return _reconcile_class(
+            node,
+            root=root,
+            battery_dir=battery_dir,
+            derive=derive,
+            strength_enabled=strength_enabled,
+            entry=entry,
+            module_namespace=module_namespace,
+            tool_version=tool_version,
+            path=path,
+            spec_ref=spec_ref,
+            source_roots=source_roots,
+        )
+
+    module_names = _module_top_level_names(entry.source_file)
+    async_map = {entry.qualname: isinstance(node, ast.AsyncFunctionDef)}
     docstring = _docstring_of(node)
-    blocks = extract_blocks_structured(docstring)
-    if blocks.is_empty() and model_extract is not None and docstring.strip():
-        blocks = model_extract(docstring)
+
+    try:
+        blocks = parse_case_blocks(
+            docstring,
+            target=entry.qualname,
+            async_map=async_map,
+            module_names=module_names,
+        )
+        if blocks.is_empty() and model_extract is not None and docstring.strip():
+            legacy = model_extract(docstring)
+            blocks = parse_case_blocks(
+                _legacy_blocks_to_docstring(legacy),
+                target=entry.qualname,
+                async_map=async_map,
+                module_names=module_names,
+            )
+    except CaseParseError as exc:
+        return ReconcileResult(spec_ref, False, "0/0", [f"{exc} (line: {exc.line})"], path, False)
 
     fn = module_namespace.get(entry.qualname)
     if not callable(fn):
         return ReconcileResult(spec_ref, False, "0/0", ["function not importable"], path, False)
 
-    failures = evaluate_blocks(fn, blocks, module_namespace)
+    eval_ns: dict[str, object] = {entry.qualname: fn}
+    for case in (*blocks.examples, *blocks.raises):
+        for name in case.imports:
+            eval_ns[name] = module_namespace.get(name)
+
+    failures = evaluate_cases(blocks, namespace=eval_ns)
     if failures:
         return ReconcileResult(spec_ref, False, "0/0", failures, path, False)
 
     digs = contract_digests(entry.source_file, entry.qualname)
     strength = "0/0"
+    excluded = 0
     if strength_enabled:
-        import ast
-
-        func_src = ast.unparse(node)
-        killed, applicable = compute_strength(func_src, entry.qualname, blocks, module_namespace)
+        strength_ns = dict(eval_ns)
+        for name in module_names:
+            if name in module_namespace:
+                strength_ns[name] = module_namespace[name]
+        killed, applicable, excluded = compute_case_strength(
+            ast.unparse(node), entry.qualname, blocks, strength_ns
+        )
         strength = format_strength(killed, applicable)
 
-    regions = derive_regions(blocks, func_name=entry.qualname, derive=derive)
+    regions = derive_case_regions(blocks, target=entry.qualname, derive=derive)
     existing = path.read_text(encoding="utf-8") if path.is_file() else None
-    from jaunt.contract.battery import merge_battery
-
     text = merge_battery(
         existing,
         import_module=entry.module,
@@ -178,12 +231,208 @@ def reconcile_entry(
             "signature": digs.signature,
             "body_digest": digs.body,
             "strength": strength,
+            "strength_excluded": str(excluded),
             "tool_version": tool_version,
         },
+        extra_imports=battery_extra_imports(blocks),
     )
+
+    if blocks.has_fixture_cases():
+        ok = _validate_via_pytest(text, path, root=root, entry=entry, source_roots=source_roots)
+        if not ok:
+            return ReconcileResult(
+                spec_ref,
+                False,
+                "0/0",
+                ["fixture-dependent cases failed under pytest; run the battery for detail"],
+                path,
+                False,
+            )
+
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
-    return ReconcileResult(spec_ref, True, strength, [], path, True)
+    return ReconcileResult(spec_ref, True, strength, [], path, True, strength_excluded=excluded)
+
+
+def _reconcile_class(
+    node,
+    *,
+    root: Path,
+    battery_dir: str,
+    derive: list[str],
+    strength_enabled: bool,
+    entry: SpecEntry,
+    module_namespace: dict[str, object],
+    tool_version: str,
+    path: Path,
+    spec_ref: str,
+    source_roots: list[str],
+) -> ReconcileResult:
+    import ast
+
+    from jaunt.contract.battery import merge_battery
+    from jaunt.contract.cases import CaseBlocks, CaseParseError, parse_case_blocks
+    from jaunt.contract.derive import (
+        battery_extra_imports,
+        derive_case_regions,
+        evaluate_cases,
+    )
+    from jaunt.contract.strength import compute_case_strength, format_strength
+    from jaunt.digest import contract_digests
+
+    cls_name = entry.qualname
+    methods = [m for m in node.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    async_map: dict[str, bool] = {cls_name: False}
+    for m in methods:
+        async_map[f"{cls_name}.{m.name}"] = isinstance(m, ast.AsyncFunctionDef)
+    module_names = _module_top_level_names(entry.source_file)
+
+    # Partition by which docstring each case came from: class-docstring cases
+    # render in the base `examples`/`errors` regions, method-docstring cases in
+    # `examples-<method>`/`errors-<method>` regions. (Do NOT partition by
+    # `case.method` — a class-docstring case like `Counter(1).peek() == 1` has
+    # `method="peek"` for async resolution but still belongs to the class region.)
+    try:
+        class_doc_blocks = parse_case_blocks(
+            ast.get_docstring(node, clean=True) or "",
+            target=cls_name,
+            async_map=async_map,
+            module_names=module_names,
+        )
+        all_blocks = class_doc_blocks
+        method_blocks: list[tuple[str, CaseBlocks]] = []
+        for m in methods:
+            if m.name.startswith("_"):
+                continue
+            doc = ast.get_docstring(m, clean=True) or ""
+            if not doc:
+                continue
+            mb = parse_case_blocks(
+                doc,
+                target=cls_name,
+                async_map=async_map,
+                module_names=module_names,
+                method=m.name,
+            )
+            if not mb.is_empty():
+                method_blocks.append((m.name, mb))
+                all_blocks = all_blocks.merged(mb)
+    except CaseParseError as exc:
+        return ReconcileResult(spec_ref, False, "0/0", [f"{exc} (line: {exc.line})"], path, False)
+
+    cls_obj = module_namespace.get(cls_name)
+    if not callable(cls_obj):
+        return ReconcileResult(spec_ref, False, "0/0", ["class not importable"], path, False)
+
+    eval_ns: dict[str, object] = {cls_name: cls_obj}
+    for case in (*all_blocks.examples, *all_blocks.raises):
+        for name in case.imports:
+            eval_ns[name] = module_namespace.get(name)
+
+    failures = evaluate_cases(all_blocks, namespace=eval_ns)
+    if failures:
+        return ReconcileResult(spec_ref, False, "0/0", failures, path, False)
+
+    digs = contract_digests(entry.source_file, entry.qualname)
+    strength = "0/0"
+    excluded = 0
+    if strength_enabled:
+        strength_ns = dict(eval_ns)
+        for name in module_names:
+            if name in module_namespace:
+                strength_ns[name] = module_namespace[name]
+        killed, applicable, excluded = compute_case_strength(
+            ast.unparse(node), cls_name, all_blocks, strength_ns
+        )
+        strength = format_strength(killed, applicable)
+
+    regions = derive_case_regions(class_doc_blocks, target=cls_name, derive=derive)
+    for name, mb in method_blocks:
+        regions += derive_case_regions(mb, target=cls_name, derive=derive, region_suffix=name)
+
+    existing = path.read_text(encoding="utf-8") if path.is_file() else None
+    text = merge_battery(
+        existing,
+        import_module=entry.module,
+        func_name=cls_name,
+        regions=regions,
+        header_fields={
+            "derived_from": spec_ref,
+            "prose_digest": digs.prose,
+            "signature": digs.signature,
+            "body_digest": digs.body,
+            "strength": strength,
+            "strength_excluded": str(excluded),
+            "tool_version": tool_version,
+        },
+        extra_imports=battery_extra_imports(all_blocks),
+    )
+
+    if all_blocks.has_fixture_cases():
+        if not _validate_via_pytest(text, path, root=root, entry=entry, source_roots=source_roots):
+            return ReconcileResult(
+                spec_ref,
+                False,
+                "0/0",
+                ["fixture-dependent cases failed under pytest; run the battery for detail"],
+                path,
+                False,
+            )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return ReconcileResult(spec_ref, True, strength, [], path, True, strength_excluded=excluded)
+
+
+def _module_top_level_names(source_file: str) -> frozenset[str]:
+    import ast
+
+    tree = ast.parse(Path(source_file).read_text(encoding="utf-8"))
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            names.update((a.asname or a.name).split(".")[0] for a in node.names)
+    return frozenset(names)
+
+
+def _legacy_blocks_to_docstring(blocks: ContractBlocks) -> str:
+    lines = []
+    if blocks.examples:
+        lines.append("Examples:")
+        lines += [f"    - {r.input_expr} -> {r.expected_expr}" for r in blocks.examples]
+        lines.append("")
+    if blocks.raises:
+        lines.append("Raises:")
+        lines += [f"    - {r.input_expr} raises {r.exc_name}" for r in blocks.raises]
+    return "\n".join(lines)
+
+
+def _validate_via_pytest(
+    text: str,
+    path: Path,
+    *,
+    root: Path,
+    entry: SpecEntry,
+    source_roots: list[str],
+) -> bool:
+    """Write the merged battery to a temp sibling, run it, and always clean up."""
+
+    tmp = path.with_name(f"_jaunt_validate_{path.name}")
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    module_parts = entry.module.split(".")
+    derived_root = Path(entry.source_file).resolve().parents[len(module_parts) - 1]
+    effective_roots = [str(derived_root), *source_roots]
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        return run_battery_file(tmp, root=root, source_roots=effective_roots)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _docstring_of(node) -> str:

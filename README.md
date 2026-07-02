@@ -33,7 +33,9 @@ decorator:
 - **Magic mode** (`@jaunt.magic` / `@jaunt.test`): the docstring is canonical and
   Jaunt generates implementations under `__generated__/`.
 - **Contract mode** (`@jaunt.contract`): committed code is canonical and Jaunt
-  derives a committed pytest battery under `tests/contract/`.
+  derives a committed pytest battery under `tests/contract/`. Covers top-level
+  functions (sync or async) and whole classes; derived cases may use pytest
+  fixtures resolved from `tests/contract/conftest.py`.
 
 See `examples/contract_slugify/` for a Contract-mode walkthrough.
 
