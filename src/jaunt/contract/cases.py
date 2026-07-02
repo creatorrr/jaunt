@@ -123,8 +123,36 @@ def _call_root_and_method(expr: ast.expr, target: str) -> tuple[bool, str | None
     return False, None
 
 
+def _target_names(target: ast.AST) -> set[str]:
+    return {n.id for n in ast.walk(target) if isinstance(n, ast.Name)}
+
+
+def _lambda_arg_names(args: ast.arguments) -> set[str]:
+    names = {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
+    if args.vararg is not None:
+        names.add(args.vararg.arg)
+    if args.kwarg is not None:
+        names.add(args.kwarg.arg)
+    return names
+
+
+def _bound_names_in_expr(tree: ast.AST) -> set[str]:
+    bound: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            for generator in node.generators:
+                bound |= _target_names(generator.target)
+        elif isinstance(node, ast.Lambda):
+            bound |= _lambda_arg_names(node.args)
+        elif isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
+            bound.add(node.target.id)
+    return bound
+
+
 def _names_in(expr: str) -> set[str]:
-    return {n.id for n in ast.walk(ast.parse(expr, mode="eval")) if isinstance(n, ast.Name)}
+    tree = ast.parse(expr, mode="eval")
+    names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    return names - _bound_names_in_expr(tree)
 
 
 def _classify_names(

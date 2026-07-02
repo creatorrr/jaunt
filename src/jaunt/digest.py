@@ -498,6 +498,19 @@ def _contract_class_inputs(node: ast.ClassDef) -> tuple[str, str, str]:
     """(prose, signature, body) strings for a whole-class contract."""
 
     methods = [n for n in node.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    class_body = list(node.body)
+    if (
+        class_body
+        and isinstance(class_body[0], ast.Expr)
+        and isinstance(class_body[0].value, ast.Constant)
+        and isinstance(class_body[0].value.value, str)
+    ):
+        class_body = class_body[1:]
+    class_level_statements = [
+        n
+        for n in class_body
+        if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    ]
 
     prose_parts = [ast.get_docstring(node, clean=True) or ""]
     for m in methods:
@@ -516,10 +529,11 @@ def _contract_class_inputs(node: ast.ClassDef) -> tuple[str, str, str]:
             attributes.append(child.target.id)
     shape = {
         "bases": [ast.unparse(b) for b in node.bases],
+        "decorators": [ast.unparse(d) for d in node.decorator_list],
         "attributes": sorted(attributes),
         "methods": {
             m.name: {
-                "decorators": sorted(ast.unparse(d) for d in m.decorator_list),
+                "decorators": [ast.unparse(d) for d in m.decorator_list],
                 "kind": "async_method" if isinstance(m, ast.AsyncFunctionDef) else "method",
                 "signature": _contract_fn_signature(m),
             }
@@ -528,10 +542,14 @@ def _contract_class_inputs(node: ast.ClassDef) -> tuple[str, str, str]:
     }
     signature = json.dumps(shape, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
-    body = "\n\n".join(
+    body_segments: list[str] = []
+    if class_level_statements:
+        body_segments.append("\n".join(ast.unparse(stmt) for stmt in class_level_statements))
+    body_segments.extend(
         f"{m.name}:\n{_contract_fn_body(m, strip_docstring=not m.name.startswith('_'))}"
         for m in methods
     )
+    body = "\n\n".join(body_segments)
     return prose, signature, body
 
 

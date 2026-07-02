@@ -181,17 +181,16 @@ def reconcile_entry(
             async_map=async_map,
             module_names=module_names,
         )
+        if blocks.is_empty() and model_extract is not None and docstring.strip():
+            legacy = model_extract(docstring)
+            blocks = parse_case_blocks(
+                _legacy_blocks_to_docstring(legacy),
+                target=entry.qualname,
+                async_map=async_map,
+                module_names=module_names,
+            )
     except CaseParseError as exc:
         return ReconcileResult(spec_ref, False, "0/0", [f"{exc} (line: {exc.line})"], path, False)
-
-    if blocks.is_empty() and model_extract is not None and docstring.strip():
-        legacy = model_extract(docstring)
-        blocks = parse_case_blocks(
-            _legacy_blocks_to_docstring(legacy),
-            target=entry.qualname,
-            async_map=async_map,
-            module_names=module_names,
-        )
 
     fn = module_namespace.get(entry.qualname)
     if not callable(fn):

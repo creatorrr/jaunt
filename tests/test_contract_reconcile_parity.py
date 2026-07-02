@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from jaunt.contract.derive import ContractBlocks, ExampleRow
 from jaunt.contract.runner import reconcile_entry
 from jaunt.registry import SpecEntry
 from jaunt.spec_ref import normalize_spec_ref
@@ -143,6 +144,35 @@ def test_case_parse_error_reports_line(tmp_path: Path) -> None:
     assert res.ok is False
     assert any("mystery" in f for f in res.failures)
     assert not res.battery_path.exists()
+
+
+def test_model_extract_parse_error_returns_failure_and_preserves_battery(
+    tmp_path: Path,
+) -> None:
+    src = 'def f(x):\n    """Unstructured prose only."""\n    return x\n'
+    root = _project(tmp_path, src)
+    battery_path = root / "tests" / "contract" / "mod" / "test_f.py"
+    battery_path.parent.mkdir(parents=True)
+    battery_path.write_text("ORIGINAL BATTERY\n", encoding="utf-8")
+
+    def model_extract(prose: str) -> ContractBlocks:
+        assert "Unstructured" in prose
+        return ContractBlocks(examples=(ExampleRow("mystery", "1"),))
+
+    res = reconcile_entry(
+        root,
+        "tests/contract",
+        ["examples", "errors"],
+        False,
+        _entry(root, "f", lambda x: x),
+        module_namespace={"f": lambda x: x},
+        tool_version="t",
+        model_extract=model_extract,
+    )
+    assert res.ok is False
+    assert res.wrote is False
+    assert any("mystery" in f for f in res.failures)
+    assert battery_path.read_text(encoding="utf-8") == "ORIGINAL BATTERY\n"
 
 
 def test_strength_excluded_in_header(tmp_path: Path) -> None:

@@ -110,6 +110,23 @@ class TestNameClassification:
         assert "mystery" in str(ei.value)
         assert ei.value.line == "f(mystery) == 1"
 
+    def test_comprehension_target_is_expression_local(self) -> None:
+        blocks = _parse("Examples:\n    - f([x * 2 for x in items]) == [2, 4]\n\nFixtures: items\n")
+        case = blocks.examples[0]
+        assert case.fixtures == ("items",)
+        assert case.imports == ()
+
+    def test_lambda_parameter_is_expression_local(self) -> None:
+        blocks = _parse("Examples:\n    - f(sorted(xs, key=lambda a: a)) == xs\n\nFixtures: xs\n")
+        case = blocks.examples[0]
+        assert case.fixtures == ("xs",)
+        assert case.imports == ()
+
+    def test_unknown_free_name_still_raises(self) -> None:
+        with pytest.raises(CaseParseError) as ei:
+            _parse("Examples:\n    - f([x for x in mystery]) == []\n")
+        assert "unknown name(s) mystery:" in str(ei.value)
+
     def test_custom_raises_exception_becomes_import(self) -> None:
         blocks = _parse(
             "Raises:\n    - f('') raises MyError\n",
@@ -199,8 +216,19 @@ class TestRenderRegions:
     def test_async_examples_awaited(self) -> None:
         blocks = _parse("Examples:\n    - f(1) == 2\n", async_map={"f": True})
         [region] = derive_case_regions(blocks, target="f", derive=["examples"])
+        assert "@pytest.mark.asyncio\nasync def test_examples():" in region.code
         assert "async def test_examples():" in region.code
         assert "assert await f(1) == 2" in region.code
+
+    def test_async_raises_marked(self) -> None:
+        blocks = _parse("Raises:\n    - f(1) raises ValueError\n", async_map={"f": True})
+        [region] = derive_case_regions(blocks, target="f", derive=["errors"])
+        assert "@pytest.mark.asyncio\nasync def test_raises_valueerror():" in region.code
+
+    def test_sync_regions_do_not_get_asyncio_marker(self) -> None:
+        blocks = _parse("Examples:\n    - f(1) == 2\n\nRaises:\n    - f(0) raises ValueError\n")
+        regions = derive_case_regions(blocks, target="f", derive=["examples", "errors"])
+        assert all("@pytest.mark.asyncio" not in region.code for region in regions)
 
     def test_fixture_params(self) -> None:
         doc = "Examples:\n    - f(db, 'a') == 1\n\nFixtures: db\n"

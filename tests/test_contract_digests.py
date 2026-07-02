@@ -154,6 +154,24 @@ class TestClassDigests:
         assert d1.signature == d2.signature
         assert d1.prose == d2.prose
 
+    def test_class_attribute_value_edit_changes_body_only(self, tmp_path: Path) -> None:
+        f1 = _write(tmp_path, CLASS_SRC)
+        d1 = contract_digests(f1, "Counter")
+        (tmp_path / "m.py").write_text(CLASS_SRC.replace("start = 0", "start = 1"), "utf-8")
+        d2 = contract_digests(str(tmp_path / "m.py"), "Counter")
+        assert d1.body != d2.body
+        assert d1.signature == d2.signature
+        assert d1.prose == d2.prose
+
+    def test_class_decorator_edit_changes_signature(self, tmp_path: Path) -> None:
+        src1 = "@final\n" + CLASS_SRC
+        src2 = "@sealed\n" + CLASS_SRC
+        f1 = _write(tmp_path, src1)
+        d1 = contract_digests(f1, "Counter")
+        (tmp_path / "m.py").write_text(src2, "utf-8")
+        d2 = contract_digests(str(tmp_path / "m.py"), "Counter")
+        assert d1.signature != d2.signature
+
     def test_method_decorator_edit_changes_signature_only(self, tmp_path: Path) -> None:
         f1 = _write(tmp_path, CLASS_SRC)
         d1 = contract_digests(f1, "Counter")
@@ -166,3 +184,18 @@ class TestClassDigests:
         assert d1.signature != d2.signature
         assert d1.prose == d2.prose
         assert d1.body == d2.body
+
+    def test_method_decorator_order_changes_signature(self, tmp_path: Path) -> None:
+        src1 = """
+class C:
+    @outer
+    @inner
+    def f(self) -> int:
+        return 1
+"""
+        src2 = src1.replace("    @outer\n    @inner", "    @inner\n    @outer")
+        f1 = _write(tmp_path, src1)
+        d1 = contract_digests(f1, "C")
+        (tmp_path / "m.py").write_text(src2, "utf-8")
+        d2 = contract_digests(str(tmp_path / "m.py"), "C")
+        assert d1.signature != d2.signature

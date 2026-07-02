@@ -152,7 +152,10 @@ def _render_examples_cases(
     params = _fixture_params(cases, declared)
     prefix = "async def" if is_async else "def"
     fn_name = _suffix_fn("test_examples", region_suffix)
-    lines = [f"{prefix} {fn_name}({params}):  # derived from: Examples"]
+    lines = []
+    if is_async:
+        lines.append("@pytest.mark.asyncio")
+    lines.append(f"{prefix} {fn_name}({params}):  # derived from: Examples")
     for c in cases:
         call = f"await {c.call_expr}" if c.is_async else c.call_expr
         lines.append(f"    assert {call} == {c.expected_expr}")
@@ -183,7 +186,10 @@ def _render_raises_cases(
         params = _fixture_params(tuple(exc_cases), declared)
         prefix = "async def" if is_async else "def"
         fn_name = _suffix_fn(f"test_raises_{exc.lower()}", region_suffix)
-        lines = [f"{prefix} {fn_name}({params}):  # derived from: Raises"]
+        lines = []
+        if is_async:
+            lines.append("@pytest.mark.asyncio")
+        lines.append(f"{prefix} {fn_name}({params}):  # derived from: Raises")
         for c in exc_cases:
             call = f"await {c.call_expr}" if c.is_async else c.call_expr
             lines.append(f"    with pytest.raises({exc}):")
