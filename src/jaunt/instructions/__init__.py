@@ -26,6 +26,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("test", "Generate tests for `@jaunt.test` specs and run pytest."),
     ("status", "Show which modules are stale vs fresh (and why)."),
     ("log", "Show the `JAUNT_LOG` change journal (recent builds/adopts)."),
+    ("daemon", "Run, stop, or inspect the background codegen daemon."),
     ("watch", "Rebuild (and optionally test) on file changes."),
     ("init", "Scaffold `jaunt.toml` + source/test directories."),
     ("clean", "Remove `__generated__/` directories."),
