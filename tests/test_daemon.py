@@ -840,6 +840,43 @@ def test_cli_runner_build_streams_stderr_heartbeats(
     assert heartbeats == ["[build] app: starting", "x" * 160]
 
 
+def test_cli_runner_build_drains_stdout_while_stderr_is_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stdout_read = threading.Event()
+
+    class FakeStdout:
+        def read(self) -> str:
+            stdout_read.set()
+            return json.dumps({"ok": True, "generated": ["app"], "failed": {}})
+
+    class FakeStderr:
+        def __iter__(self) -> FakeStderr:
+            return self
+
+        def __next__(self) -> str:
+            if not stdout_read.wait(1.0):
+                raise AssertionError("stdout was not drained concurrently")
+            raise StopIteration
+
+    class FakeProc:
+        def __init__(self) -> None:
+            self.stdout = FakeStdout()
+            self.stderr = FakeStderr()
+            self.returncode: int | None = None
+
+        def wait(self) -> int:
+            self.returncode = 0
+            return 0
+
+    monkeypatch.setattr(daemon.subprocess, "Popen", lambda *_args, **_kwargs: FakeProc())
+
+    returncode, payload = daemon.CliRunner()._run_build(tmp_path, "app", heartbeat=None)
+
+    assert returncode == 0
+    assert payload == {"ok": True, "generated": ["app"], "failed": {}}
+
+
 def test_job_heartbeat_throttles_and_last_line_wins(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

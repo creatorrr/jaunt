@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import Executor, Future
@@ -126,15 +127,23 @@ class CliRunner:
             stderr=subprocess.PIPE,
             text=True,
         )
+        stdout_parts: list[str] = []
+
+        def read_stdout() -> None:
+            if proc.stdout is not None:
+                stdout_parts.append(proc.stdout.read())
+
+        stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+        stdout_thread.start()
         stderr_parts: list[str] = []
         if proc.stderr is not None:
             for raw_line in proc.stderr:
                 stderr_parts.append(raw_line)
                 if heartbeat is not None:
                     heartbeat(raw_line.strip()[:160])
-        stdout, stderr_tail = proc.communicate()
-        if stderr_tail:
-            stderr_parts.append(stderr_tail)
+        proc.wait()
+        stdout_thread.join()
+        stdout = "".join(stdout_parts)
         stderr = "".join(stderr_parts)
         try:
             return proc.returncode, _json.loads(stdout or "{}")

@@ -53,7 +53,7 @@ EXIT_CODES: list[tuple[int, str]] = [
     (0, "Success."),
     (2, "Config, discovery, or dependency-cycle error."),
     (3, "Code generation error."),
-    (4, "Pytest failure, or a contract `check`/`reconcile` block."),
+    (4, "Pytest failure, contract `check`/`reconcile` block, or daemon job failed/parked."),
     (5, "Timeout while waiting for daemon jobs."),
 ]
 

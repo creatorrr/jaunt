@@ -68,9 +68,27 @@ def test_command_and_exit_tables_render() -> None:
     assert "`jaunt instructions`" in text
     assert "`jaunt jobs wait`" in text
     assert "| Code | Meaning |" in text
+    assert (
+        "| 4 | Pytest failure, contract `check`/`reconcile` block, or daemon job failed/parked. |"
+    ) in text
     assert "| 5 | Timeout while waiting for daemon jobs. |" in text
     assert "`git commit … && jaunt jobs wait --timeout 1800`" in text
     assert "`--progress {auto,rich,plain,none}`" in text
+
+
+def test_exit_code_docs_include_jobs_wait_failed_parked() -> None:
+    root = Path(__file__).resolve().parents[1]
+    docs = (root / "DOCS.md").read_text(encoding="utf-8")
+    claude = (root / "CLAUDE.md").read_text(encoding="utf-8")
+
+    assert (
+        "`4`: pytest failure, contract `check`/`reconcile` block, "
+        "or daemon job failed/parked while waiting"
+    ) in docs
+    assert (
+        "| 4    | Pytest failure, contract `check`/`reconcile` block, "
+        "or daemon job failed/parked while waiting |"
+    ) in claude
 
 
 def test_render_no_project_includes_init_note() -> None:

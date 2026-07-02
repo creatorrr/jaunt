@@ -467,6 +467,64 @@ def test_cycle_runner_calls_cmd_test_when_enabled(monkeypatch) -> None:
     assert test_calls[0] == (True, False, False, [])
 
 
+def test_cycle_runner_propagates_progress_mode(monkeypatch) -> None:
+    build_calls: list[tuple[str, bool]] = []
+    test_calls: list[tuple[str, bool]] = []
+
+    async def fake_cmd_build(args: Any) -> int:
+        build_calls.append((args.progress, bool(args.no_progress)))
+        return 0
+
+    async def fake_cmd_test(args: Any) -> int:
+        test_calls.append((args.progress, bool(args.no_progress)))
+        return 0
+
+    monkeypatch.setattr("jaunt.cli._cmd_build_async", fake_cmd_build)
+    monkeypatch.setattr("jaunt.cli._cmd_test_async", fake_cmd_test)
+
+    import jaunt.cli
+
+    ns = jaunt.cli.parse_args(["watch", "--test", "--progress", "none"])
+    runner = build_cycle_runner(ns, run_tests=True)
+
+    event = WatchEvent(changed_paths=frozenset({Path("/src/a.py")}), timestamp=1000.0)
+    result = asyncio.run(runner(event))
+
+    assert result.build_exit_code == 0
+    assert result.test_exit_code == 0
+    assert build_calls == [("none", False)]
+    assert test_calls == [("none", False)]
+
+
+def test_cycle_runner_still_propagates_no_progress_alias(monkeypatch) -> None:
+    build_calls: list[tuple[str, bool]] = []
+    test_calls: list[tuple[str, bool]] = []
+
+    async def fake_cmd_build(args: Any) -> int:
+        build_calls.append((args.progress, bool(args.no_progress)))
+        return 0
+
+    async def fake_cmd_test(args: Any) -> int:
+        test_calls.append((args.progress, bool(args.no_progress)))
+        return 0
+
+    monkeypatch.setattr("jaunt.cli._cmd_build_async", fake_cmd_build)
+    monkeypatch.setattr("jaunt.cli._cmd_test_async", fake_cmd_test)
+
+    import jaunt.cli
+
+    ns = jaunt.cli.parse_args(["watch", "--test", "--progress", "plain", "--no-progress"])
+    runner = build_cycle_runner(ns, run_tests=True)
+
+    event = WatchEvent(changed_paths=frozenset({Path("/src/a.py")}), timestamp=1000.0)
+    result = asyncio.run(runner(event))
+
+    assert result.build_exit_code == 0
+    assert result.test_exit_code == 0
+    assert build_calls == [("plain", True)]
+    assert test_calls == [("plain", True)]
+
+
 def test_cycle_runner_skips_test_on_build_failure(monkeypatch) -> None:
     async def fake_cmd_build(args: Any) -> int:
         return 3

@@ -282,7 +282,7 @@ stale-prose / signature-drift / behavior-drift).
 | 0    | Success |
 | 2    | Config, discovery, or dependency cycle error |
 | 3    | Code generation error |
-| 4    | Pytest failure, or contract `check`/`reconcile` block (stale prose, signature/behavior drift) |
+| 4    | Pytest failure, contract `check`/`reconcile` block, or daemon job failed/parked while waiting |
 | 5    | Timeout while waiting for daemon jobs |
 
 ## Testing Changes

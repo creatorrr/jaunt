@@ -63,7 +63,18 @@ def _daemon_running(monkeypatch: pytest.MonkeyPatch, running: bool) -> None:
 
 def test_parse_jobs_wait_flags() -> None:
     ns = jaunt.cli.parse_args(
-        ["jobs", "wait", "abc123", "--timeout", "30", "--settle", "0", "--progress", "plain"]
+        [
+            "jobs",
+            "wait",
+            "abc123",
+            "--timeout",
+            "30",
+            "--settle",
+            "0",
+            "--progress",
+            "plain",
+            "--no-progress",
+        ]
     )
 
     assert ns.command == "jobs"
@@ -72,6 +83,8 @@ def test_parse_jobs_wait_flags() -> None:
     assert ns.timeout == 30.0
     assert ns.settle == 0.0
     assert ns.progress == "plain"
+    assert ns.no_progress is True
+    assert jaunt.cli._resolve_progress_mode(ns, json_mode=False) is None
 
 
 @pytest.mark.parametrize("value", ["0", "-1"])
@@ -102,6 +115,20 @@ def test_jobs_wait_idle_resolves_after_settle_window(
 ) -> None:
     _write_config(tmp_path, poll_interval=1.0)
     jobs.jobs_dir(tmp_path).mkdir(parents=True)
+    _daemon_running(monkeypatch, True)
+    clock = FakeClock()
+
+    rc = _run_wait(tmp_path, "--settle", "2", "--progress", "none", clock=clock)
+
+    assert rc == jaunt.cli.EXIT_OK
+    assert clock.sleeps == [1.0, 1.0]
+    assert clock.now == 2.0
+
+
+def test_jobs_wait_missing_jobs_dir_resolves_after_settle_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(tmp_path, poll_interval=1.0)
     _daemon_running(monkeypatch, True)
     clock = FakeClock()
 
@@ -160,6 +187,53 @@ def test_jobs_wait_settle_catches_new_job_enqueued_inside_window(
         ],
     }
     assert clock.now == 4.0
+
+
+def test_jobs_wait_observes_terminal_job_created_between_polls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_config(tmp_path, poll_interval=1.0)
+    _daemon_running(monkeypatch, True)
+    clock = FakeClock()
+    monkeypatch.setattr(jaunt.cli.time, "time", lambda: clock.now)
+    created: dict[str, jobs.JobRecord] = {}
+
+    def create_and_fail() -> None:
+        job = _new_job(tmp_path, module="fast")
+        created["job"] = jobs.mark(tmp_path, job, jobs.FAILED, error="boom")
+
+    clock.add_event(0.5, create_and_fail)
+
+    rc = _run_wait(
+        tmp_path,
+        "--settle",
+        "2",
+        "--json",
+        "--progress",
+        "none",
+        clock=clock,
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == jaunt.cli.EXIT_PYTEST_FAILURE
+    assert payload == {
+        "command": "jobs",
+        "action": "wait",
+        "ok": False,
+        "timed_out": False,
+        "jobs": [
+            {
+                "id": created["job"].id,
+                "module": "fast",
+                "state": "failed",
+                "phase": "",
+                "error": "boom",
+            }
+        ],
+    }
+    assert clock.sleeps == [1.0, 1.0]
 
 
 @pytest.mark.parametrize("state", [jobs.FAILED, jobs.PARKED])

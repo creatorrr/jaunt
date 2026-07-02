@@ -318,6 +318,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Progress output mode (default: auto).",
     )
     jobs_wait_p.add_argument(
+        "--no-progress",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Disable progress bars.",
+    )
+    jobs_wait_p.add_argument(
         "--json",
         action="store_true",
         dest="json_output",
@@ -972,6 +978,7 @@ def _cmd_jobs_wait(
     printer = _WaitPrinter(_resolve_progress_mode(args, json_mode=json_mode))
     watched: dict[str, JobRecord] = {}
     seen_status: dict[str, tuple[str, str, str]] = {}
+    wait_started_at = time.time()
 
     def remember(job: JobRecord) -> None:
         watched[job.id] = job
@@ -999,10 +1006,6 @@ def _cmd_jobs_wait(
                 watched=watched,
             )
             return rc
-    elif not jobs_mod.jobs_dir(root).exists():
-        _emit_jobs_wait_json(json_mode=json_mode, ok=True, timed_out=False, watched=watched)
-        return EXIT_OK
-
     try:
         settle = _jobs_wait_settle_seconds(root, args) if target_id is None else 0.0
     except JauntConfigError as e:
@@ -1063,7 +1066,14 @@ def _cmd_jobs_wait(
             records = jobs_mod.list_jobs(root)
             records_by_id = {job.id: job for job in records}
             active = [job for job in records if job.state in jobs_mod.ACTIVE_STATES]
+            recent = [
+                job
+                for job in records
+                if job.created >= wait_started_at or job.updated >= wait_started_at
+            ]
             for job in active:
+                remember(job)
+            for job in recent:
                 remember(job)
             for job_id in list(watched):
                 current = records_by_id.get(job_id)

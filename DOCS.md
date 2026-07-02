@@ -234,7 +234,7 @@ Exit codes:
 - `0`: success
 - `2`: config/discovery/dependency-cycle errors
 - `3`: generation errors (LLM/backend/validation/import)
-- `4`: pytest failure (only when `jaunt test` actually runs pytest)
+- `4`: pytest failure, contract `check`/`reconcile` block, or daemon job failed/parked while waiting
 - `5`: timeout while waiting for daemon jobs
 
 Important behavior:
