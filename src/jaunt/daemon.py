@@ -246,7 +246,28 @@ def _collect_finished(state: DaemonState, root: Path) -> None:
         state.pending[job_id] = result
 
 
-def _land_pending(root: Path, state: DaemonState) -> None:
+def _notify(cfg: JauntConfig, job: jobs_mod.JobRecord) -> None:
+    if not cfg.daemon.notify_command:
+        return
+    env = dict(
+        os.environ,
+        JAUNT_JOB_ID=job.id,
+        JAUNT_JOB_MODULE=job.module,
+        JAUNT_JOB_STATE=job.state,
+    )
+    try:
+        subprocess.run(
+            cfg.daemon.notify_command,
+            shell=True,
+            env=env,
+            timeout=10,
+            check=False,
+        )
+    except Exception:
+        pass
+
+
+def _land_pending(root: Path, cfg: JauntConfig, state: DaemonState) -> None:
     for job_id, result in list(state.pending.items()):
         job = jobs_mod.load_job(root, job_id)
         if job is None or job.state not in (jobs_mod.RUNNING, jobs_mod.GREEN):
@@ -254,7 +275,8 @@ def _land_pending(root: Path, state: DaemonState) -> None:
             continue
         if not result.build.ok or (result.gate is not None and not result.gate.ok):
             detail = result.build.error or (result.gate.detail if result.gate else "gate failed")
-            jobs_mod.mark(root, job, jobs_mod.FAILED, error=detail)
+            updated = jobs_mod.mark(root, job, jobs_mod.FAILED, error=detail)
+            _notify(cfg, updated)
             journal_mod.append_events(
                 root, [journal_mod.JournalEvent("job-fail", job.module, detail, job.id)]
             )
@@ -276,12 +298,13 @@ def _land_pending(root: Path, state: DaemonState) -> None:
         del state.pending[job_id]
         if sha is None:
             (jobs_mod.jobs_dir(root) / f"{job.id}.patch").write_text(result.patch, encoding="utf-8")
-            jobs_mod.mark(
+            updated = jobs_mod.mark(
                 root,
                 job,
                 jobs_mod.PARKED,
                 patch_paths=_json.dumps(list(result.patch_paths)),
             )
+            _notify(cfg, updated)
             journal_mod.append_events(
                 root, [journal_mod.JournalEvent("job-park", job.module, "landing conflict", job.id)]
             )
@@ -289,7 +312,8 @@ def _land_pending(root: Path, state: DaemonState) -> None:
             state.last_head = sha
             action = "refreeze" if result.build.refrozen else "build"
             battery = result.gate.battery if result.gate else "-"
-            jobs_mod.mark(root, job, jobs_mod.LANDED, landed_commit=sha)
+            updated = jobs_mod.mark(root, job, jobs_mod.LANDED, landed_commit=sha)
+            _notify(cfg, updated)
             journal_mod.append_events(
                 root,
                 [
@@ -327,7 +351,7 @@ def run_once(
             jobs_mod.save_job(root, job)
 
     _collect_finished(state, root)
-    _land_pending(root, state)
+    _land_pending(root, cfg, state)
 
     max_jobs = cfg.daemon.max_jobs or cfg.build.jobs
     for job in jobs_mod.list_jobs(root, states={jobs_mod.QUEUED}):
