@@ -4,8 +4,9 @@
 **Status:** Living reference. Doubles as a roadmap compass for jaunt.
 **Last synced with `src/jaunt/`:** 2026-07-01 — the shipped/designed markers in Part 2
 were re-verified against the code on this date.
-**Shape:** Hybrid — three altitudes (developer · tool · factory) over one set of
-cross-cutting laws, with the unresolved tensions kept honest rather than flattened.
+**Shape:** Hybrid — three altitudes (developer · tool · factory) over six core
+laws plus named corollaries, with the unresolved tensions kept honest rather than
+flattened.
 
 ---
 
@@ -50,22 +51,36 @@ document:
 
 ### The cross-cutting laws (named once, threaded throughout)
 
+The laws come in two tiers. **Six core laws** are the axioms — none is derivable
+from the others, and each marks an independent axis (value, verdict, structure,
+judgment, trust, time). The rest are **named corollaries**: real, load-bearing
+principles, but each follows from a core law plus a fact this document already
+states. Numbering is historical and stable — corollaries keep their original
+L-numbers so cross-references stay valid. (L14 is retired: its content — checker
+independence — is now the second condition of L4.)
+
+**Core laws:**
+
 | # | Law | One line | Small example |
 |---|---|---|---|
 | **L1** | Value migrates to spec + verification | The two things worth scarce attention when typing is free. | A failing test handed to the agent does more than a paragraph describing the bug. |
-| **L2** | The spec is the durable artifact; code is a projection | Maintain intent, not just output. | Edit a `@jaunt.magic` docstring; the `__generated__/` body is rebuilt from it. |
-| **L3** | Push work down into deterministic layers | Spend the model only on the irreducible residue. | Strip formatting before deciding a spec "changed," so a reformat triggers no work. |
-| **L4** | The model proposes; deterministic checks dispose | A wrong model verdict should cost money, never correctness. | `jaunt check` reruns committed tests with no API key — the model never gives the verdict. |
-| **L5** | Specify *what*, not *how* | Over-spec kills design latitude; under-spec passes wrong code. | "Return results sorted by score, descending" — not `sorted(key=...)`. |
+| **L4** | The model proposes; a verdict counts only if it is deterministic *and* independent of what it judges | A wrong model verdict should cost money, never correctness — and an oracle the implementer can see is one it games. | `jaunt check` reruns committed tests with no API key; the implementer gets pass/fail, never `expected 42, got 41`. |
 | **L6** | Architecture is an amplifier | Bounded units multiply quality; tangle multiplies *confident* mistakes. | Ten focused files let the agent read only what it edits; one 2k-line module forces guessing. |
-| **L7** | Verification capacity must scale with generation capacity | Or the constraint just moves to review. | Merge 10× the PRs and it's review capacity, not generation, that decides throughput. |
-| **L8** | Keep the human at the gate as director, not author | Taste = knowing what to trust. | You approve the contract and the diff's intent; you don't hand-type the body. |
-| **L9** | Pin the artifact, not the sampler | LLMs aren't reproducible; regenerate only on input change. | The build re-runs only when the spec, model, or prompt-template digest changes. |
-| **L10** | Standardize the path, not the thought | Golden paths raise the floor without capping the ceiling. | `jaunt init` drops every project onto the same validated layout. |
-| **L11** | Rewrite from the spec, not the code | Regeneration is cheap now — and as safe as your contract is complete. | Point a newer model at the unchanged docstring; the committed battery proves the rewrite. |
+| **L8** | The human is the terminal oracle | Verification chains end in a person: the spec itself has no external check, so the human directs intent, owns the merge, and is accountable for what ships — and taste is produced by practice, so maintain it like the asset it is. | You approve the contract and the diff's intent; you don't hand-type the body. |
 | **L12** | Treat everything the model reads and pulls as untrusted | Prompt injection and slopsquatting are input, not edge cases. | The build fails if generated code imports a package absent from your declared deps. |
 | **L13** | Make engineering compound | Each task should leave the system better at the next one. | Every fixed bug becomes a battery case, so it can't silently regress. |
-| **L14** | Keep the checker independent of the author | Tests are a held-out set; an oracle the implementer can see is one it games. | Hand the implementer pass/fail, never `expected 42, got 41` — the diff is the answer key, not feedback. |
+
+**Corollaries** (each hangs under a core law):
+
+| # | Corollary | Of | Derivation | Small example |
+|---|---|---|---|---|
+| **L2** | The spec is the durable artifact; maintain intent alongside code | L1 | Maintain the scarce asset, not just its output. | Edit a `@jaunt.magic` docstring; the `__generated__/` body is rebuilt from it. |
+| **L3** | Push work down into deterministic layers | L4 | Minimize the non-deterministic residue the model must judge. | Strip formatting before deciding a spec "changed," so a reformat triggers no work. |
+| **L5** | Specify *what*, not *how* | L1 | How to write the asset without destroying its value. | "Return results sorted by score, descending" — not `sorted(key=...)`. |
+| **L7** | Verification capacity must scale with generation capacity | L1 | Fund the scarce asset's other half, or the constraint just moves to review. | Merge 10× the PRs and it's review capacity, not generation, that decides throughput. |
+| **L9** | Pin the artifact, not the sampler | L4 | Determinism extended over time: regenerate only on input change. | The build re-runs only when the spec, model, or prompt-template digest changes. |
+| **L10** | Standardize the path, not the thought | L13 | Paved roads are compounded learning made the default. | `jaunt init` drops every project onto the same validated layout. |
+| **L11** | Rewrite from the spec, not the code | L1 | Cash the asset in — as safe as your contract is complete. | Point a newer model at the unchanged docstring; the committed battery proves the rewrite. |
 
 ### How to use this document
 
@@ -83,7 +98,7 @@ is a feature — it marks where judgment, not a rule, must live.
 
 ## 1. Building with coding agents (developer altitude)
 
-*Dominant laws at this altitude: **L1, L3, L4, L6, L8, L14** — and where L11–L13 first
+*Dominant laws at this altitude: **L1, L4, L6, L8** (with corollary L3) — and where L11–L13 first
 surface. The unit is one engineer directing one or a few agents inside a real
 codebase.*
 
@@ -166,11 +181,19 @@ independent subtasks; serialize anything that shares state.
 research-shaped tasks but cost an order of magnitude more tokens and add coordination
 and emergent-failure complexity. A longer loop can just lengthen the review queue.
 
-### 1.9 The human is director and reviewer; cultivate taste, own the merge. (L8)
-The agent writes; the human decides what to trust and owns the integration. The scarce
-skill shifts from authoring to judgment — architectural consistency, knowing which
+### 1.9 The human is the terminal oracle; cultivate taste, own the merge. (L8)
+The agent writes; the human decides what to trust and owns the integration. The deeper
+reason this is a *law* and not an efficiency preference: every verification chain ends
+in a person. L4 demands each verdict have an oracle independent of its author — the spec
+for code, the battery for behavior — but the spec *itself* has no external check. The
+chain has to terminate somewhere, and it terminates in human intent; the human gate is
+the one verifier that is neither deterministic nor independent, and it is the carve-out
+where L4's conditions cannot be met. That is also why accountability stays human even
+where AI review is strong: someone must be answerable for what ships. The scarce skill
+shifts from authoring to judgment — architectural consistency, knowing which
 plausible-looking diff is actually right. "The loop automates the typing, not the
-judgment."
+judgment." And judgment has a supply chain: taste is produced by practice, so a workflow
+that removes all authorship must find another way to grow its reviewers.
 **Tension:** review is now the bottleneck (Part 3), and it is unclear that more or
 better AI reviewers help rather than adding one more sensor a human must still
 adjudicate.
@@ -322,7 +345,7 @@ still needs the L4 backstop (fail-safe to rebuild; a deterministic check holds t
 verdict). And keying inputs is not pinning outputs: the sampler below the API line stays
 non-deterministic, which is why the deterministic layers, not the model, must dispose.
 
-### 1.19 Treat tests as a held-out set; keep the implementer and tester blind to each other. (L14, L4)
+### 1.19 Treat tests as a held-out set; keep the implementer and tester blind to each other. (L4 — the independence condition)
 The check in 1.1 is only honest if the code's author did not write it to pass: a
 retrofitted test blesses whatever the agent already did (1.1's own tension), and a test
 written while staring at the implementation just restates it. The fix is the oldest one in
@@ -466,7 +489,7 @@ is the "push determinism down" principle made concrete, and shipped.
   opens — generated code embedding a hallucinated or injection-suggested import — is now
   guarded deterministically: validation fails the build if `__generated__/` imports a
   package absent from the project's declared dependencies (roadmap item 8, done).
-- **L14 — keep the checker independent of the author.** *(shipped, both sides)* The
+- **L4 (independence condition) — keep the checker independent of the author.** *(shipped, both sides)* The
   **tester-side** barrier holds at two layers: the test generator's context never includes
   generated implementation source (`dependency_generated_modules` is empty for tests — it
   gets only public dependency signatures and the contract), and `public_api_only` (on by
@@ -556,7 +579,7 @@ shipped items are kept for the record, marked ✅.
    doesn't resolve to a declared dependency — a deterministic, model-free gate (fits L4)
    that closes the one supply-chain hole a codegen tool uniquely opens, whether the
    import was hallucinated (slopsquatting) or suggested by an injected docstring.
-9. ✅ **Make the implementer-side held-out barrier explicit, not incidental. (L14, L4)**
+9. ✅ **Make the implementer-side held-out barrier explicit, not incidental. (L4)**
    *Shipped* (`heldout.py`): repair feedback is tiered — full detail from example-tier
    cases (the shared spec), an opaque id plus exception class from derived battery cases,
    a leak-assertion guard on the redacted output, and `--no-redact-derived` as the
@@ -568,7 +591,7 @@ shipped items are kept for the record, marked ✅.
 
 ## 3. Building software factories (organization altitude)
 
-*Dominant laws at this altitude: **L1, L7, L10, L12, L13, L14.** The unit is a pipeline that
+*Dominant laws at this altitude: **L1, L4, L12, L13** (with corollaries L7, L10). The unit is a pipeline that
 turns specifications into verified, integrated changes — at the scale of many agents and
 many repositories.*
 
@@ -671,7 +694,7 @@ security, the design system. Slice too thin and they duplicate or quietly diverg
 exactly those; the craft is cutting along genuine seams, and some concerns must stay
 horizontal and shared.
 
-### 3.14 Keep generation and verification independent — at the org level too. (L14, L7)
+### 3.14 Keep generation and verification independent — at the org level too. (L4, L7)
 The held-out discipline of 1.19 is also an *organizational* control. At fleet scale, the
 agents (or teams) that author implementations and the ones that author the acceptance oracle
 should be independent — the way safety-critical shops keep **IV&V** organizationally separate
@@ -873,7 +896,7 @@ tension is propaganda — so each is stated honestly, followed by **our current 
 - Every, *Compound Engineering Gets an Upgrade* — the pattern is still evolving; treat it
   as a practice to test, not settled evidence. https://every.to/p/compound-engineering-gets-an-upgrade
 
-**Independence & held-out verification (Part 1 §1.19 / L14):**
+**Independence & held-out verification (Part 1 §1.19 / L4's independence condition):**
 - Dwork, Feldman, Hardt, Pitassi, Reingold & Roth, *Generalization in Adaptive Data Analysis
   and Holdout Reuse* (NeurIPS 2015) — querying a held-out set adaptively overfits it even at
   one bit of feedback per round. https://arxiv.org/abs/1506.02629 — companion *Science* (2015)
