@@ -386,14 +386,37 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Run tests after each successful build.",
     )
 
-    mcp_p = subparsers.add_parser("mcp", help="MCP server commands.")
-    mcp_sub = mcp_p.add_subparsers(dest="mcp_command", required=True)
-    serve_p = mcp_sub.add_parser("serve", help="Start MCP server (stdio transport).")
-    serve_p.add_argument(
+    specs_p = subparsers.add_parser(
+        "specs", help="List @jaunt.magic specs and their dependency graph."
+    )
+    specs_p.add_argument(
         "--root",
         type=str,
         default=None,
-        help="Project root (defaults to searching upward for jaunt.toml).",
+        help="Project root (defaults to searching upward from cwd for jaunt.toml).",
+    )
+    specs_p.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to jaunt.toml (defaults to <root>/jaunt.toml).",
+    )
+    specs_p.add_argument(
+        "--module",
+        type=str,
+        default=None,
+        help="Restrict output to a single module.",
+    )
+    specs_p.add_argument(
+        "--no-infer-deps",
+        action="store_true",
+        help="Disable best-effort dependency inference (uses explicit deps only).",
+    )
+    specs_p.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Emit structured JSON output to stdout.",
     )
 
     cache_p = subparsers.add_parser("cache", help="Manage LLM response cache.")
@@ -2899,16 +2922,71 @@ def cmd_skill(args: argparse.Namespace) -> int:
     return EXIT_CONFIG_OR_DISCOVERY
 
 
-def cmd_mcp(args: argparse.Namespace) -> int:
+def cmd_specs(args: argparse.Namespace) -> int:
+    """List discovered @jaunt.magic specs and their dependency graph."""
+    json_mode = _is_json_mode(args)
     try:
-        from jaunt.mcp_server import run_server
+        root, cfg = _load_config(args)
+        source_dirs = [root / sr for sr in cfg.paths.source_roots]
+        _prepend_sys_path([*source_dirs, root])
 
-        root = getattr(args, "root", None)
-        run_server(root=root)
-    except ImportError:
-        _eprint("error: fastmcp is not installed. Install it with: pip install jaunt[mcp]")
+        from jaunt import discovery, registry
+        from jaunt.deps import build_spec_graph
+
+        registry.clear_registries()
+        modules = discovery.discover_modules(
+            roots=[d for d in source_dirs if d.exists()],
+            exclude=[],
+            generated_dir=cfg.paths.generated_dir,
+        )
+        discovery.evict_modules_for_import(
+            module_names=modules,
+            roots=[d for d in source_dirs if d.exists()],
+        )
+        discovery.import_and_collect(modules, kind="magic")
+
+        specs = dict(registry.get_magic_registry())
+        infer_default = bool(cfg.build.infer_deps) and not bool(args.no_infer_deps)
+        spec_graph = build_spec_graph(specs, infer_default=infer_default)
+
+        module_filter = args.module
+        spec_list = [
+            {
+                "ref": str(ref),
+                "module": entry.module,
+                "qualname": entry.qualname,
+                "source_file": entry.source_file,
+            }
+            for ref, entry in sorted(specs.items())
+            if not module_filter or entry.module == module_filter
+        ]
+        dep_graph = {
+            str(ref): sorted(str(d) for d in deps)
+            for ref, deps in sorted(spec_graph.items())
+            if not module_filter or str(ref).startswith(module_filter + ":")
+        }
+
+        if json_mode:
+            _emit_json(
+                {
+                    "command": "specs",
+                    "ok": True,
+                    "specs": spec_list,
+                    "dependency_graph": dep_graph,
+                }
+            )
+        else:
+            print(f"specs: {len(spec_list)}")
+            for item in spec_list:
+                deps = dep_graph.get(str(item["ref"]), [])
+                suffix = f"  <- {', '.join(deps)}" if deps else ""
+                print(f"- {item['ref']} ({item['source_file']}){suffix}")
+        return EXIT_OK
+    except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError, KeyError) as e:
+        _print_error(e)
+        if json_mode:
+            _emit_json({"command": "specs", "ok": False, "error": str(e)})
         return EXIT_CONFIG_OR_DISCOVERY
-    return EXIT_OK
 
 
 def _guard_generated_dir(args: argparse.Namespace, payload: dict[str, object]) -> str:
@@ -2982,8 +3060,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_eval(args)
     if args.command == "watch":
         return cmd_watch(args)
-    if args.command == "mcp":
-        return cmd_mcp(args)
+    if args.command == "specs":
+        return cmd_specs(args)
     if args.command == "cache":
         return cmd_cache(args)
     if args.command in ("skill", "skills"):

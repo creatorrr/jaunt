@@ -13,9 +13,68 @@ jobs:
     environment: pypi
     permissions:
       id-token: write  # Required for OIDC Trusted Publishing
+      contents: write  # Tag the release + commit CHANGELOG.md
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # git-cliff needs full history + tags
       - uses: astral-sh/setup-uv@v7
+
+      - name: Check whether this version is already on PyPI
+        id: version
+        run: |
+          version="$(uvx --from toml-cli toml get --toml-path pyproject.toml project.version)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          if curl -fsSL -H 'Accept: application/vnd.pypi.simple.v1+json' \
+              https://pypi.org/simple/jaunt/ | jq -e --arg v "$version" \
+              '.versions | index($v)' > /dev/null; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "jaunt ${version} is already on PyPI; skipping publish."
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - run: uv build
+        if: steps.version.outputs.published == 'false'
       - name: Publish package distributions to PyPI
+        if: steps.version.outputs.published == 'false'
         uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Tag the release
+        if: steps.version.outputs.published == 'false'
+        run: |
+          tag="v${{ steps.version.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "jaunt ${{ steps.version.outputs.version }}"
+          git push origin "$tag"
+
+      - name: Generate CHANGELOG.md
+        if: steps.version.outputs.published == 'false'
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --output CHANGELOG.md
+
+      - name: Commit CHANGELOG.md
+        if: steps.version.outputs.published == 'false'
+        run: |
+          if git diff --quiet -- CHANGELOG.md; then
+            echo "CHANGELOG.md unchanged."
+            exit 0
+          fi
+          git add CHANGELOG.md
+          git commit -m "chore: update CHANGELOG.md for v${{ steps.version.outputs.version }} [skip ci]"
+          git pull --rebase origin main
+          git push origin HEAD:main
+
+      - name: Create GitHub Release
+        if: steps.version.outputs.published == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v${{ steps.version.outputs.version }}"
+          uvx --from git-cliff git-cliff --config cliff.toml --latest --strip all \
+            --output release-notes.md
+          gh release create "$tag" --title "jaunt ${{ steps.version.outputs.version }}" \
+            --notes-file release-notes.md

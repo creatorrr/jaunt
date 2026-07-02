@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 keywords = ["llm", "code-generation", "testing", "developer-tools", "cli"]
 classifiers = [
-  "Development Status :: 4 - Beta",
+  "Development Status :: 5 - Production/Stable",
   "Intended Audience :: Developers",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
@@ -29,9 +29,6 @@ Homepage = "https://github.com/creatorrr/jaunt"
 Repository = "https://github.com/creatorrr/jaunt"
 Issues = "https://github.com/creatorrr/jaunt/issues"
 
-[project.optional-dependencies]
-mcp = ["fastmcp>=2.0.0"]
-
 [project.scripts]
 jaunt = "jaunt.cli:main"
 
@@ -50,7 +47,9 @@ dev = [
   "syrupy>=4.8.0",
   "ruff>=0.9",
   "ty",
-  "fastmcp>=2.0.0",
+  # Examples (jwt_auth, 04_pydantic_validation) import pydantic; it used to
+  # arrive transitively via the removed fastmcp dependency.
+  "pydantic>=2",
 ]
 
 [tool.pytest.ini_options]

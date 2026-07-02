@@ -25,6 +25,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("build", "Generate implementations for `@jaunt.magic` specs."),
     ("test", "Generate tests for `@jaunt.test` specs and run pytest."),
     ("status", "Show which modules are stale vs fresh (and why)."),
+    ("specs", "List `@jaunt.magic` specs and their dependency graph."),
     ("log", "Show the `JAUNT_LOG` change journal (recent builds/adopts)."),
     ("daemon", "Run, stop, or inspect the background codegen daemon."),
     ("jobs", "List daemon jobs, inspect parked failures, or retry landing."),
@@ -42,7 +43,7 @@ COMMANDS: list[tuple[str, str]] = [
 # Real subcommands intentionally NOT surfaced in the primer (advanced / rare).
 # The drift-guard test requires every real subcommand to be in COMMANDS or here,
 # so adding a new command forces an explicit decision.
-OMITTED_COMMANDS: frozenset[str] = frozenset({"tree", "eval", "cache", "mcp", "skill", "skills"})
+OMITTED_COMMANDS: frozenset[str] = frozenset({"tree", "eval", "cache", "skill", "skills"})
 
 EXIT_CODES: list[tuple[int, str]] = [
     (0, "Success."),

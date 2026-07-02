@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "jaunt": {
-      "command": "uv",
-      "args": ["run", "jaunt", "mcp", "serve"]
-    }
-  }
-}

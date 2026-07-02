@@ -30,8 +30,7 @@ uv run ty check
 cd examples/jwt_auth && uv run --project ../.. jaunt build
 
 # Batteries included: pytest, pytest-asyncio, anyio, rich, and watchfiles
-# ship in the base install. The only optional extra is the MCP server:
-pip install jaunt[mcp]       # fastmcp, for jaunt mcp serve
+# ship in the base install — no optional extras.
 
 # Run with JSON output (for programmatic consumption)
 jaunt build --json
@@ -240,6 +239,9 @@ jaunt clean --dry-run         # Show what would be removed
 
 jaunt status                  # Show which modules are stale, including upstream API fallout
 jaunt status --json           # Machine-readable status
+
+jaunt specs                   # List @jaunt.magic specs and their dependency graph
+jaunt specs --json            # Machine-readable spec list (for agents/tooling)
 
 jaunt instructions            # Print a project-aware agent primer (load into an agent's context)
 jaunt instructions --json     # {command, ok, text, project} for tooling/MCP
