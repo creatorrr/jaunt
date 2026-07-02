@@ -149,6 +149,35 @@ def test_cmd_status_with_stale_specs(tmp_path: Path, monkeypatch, capsys) -> Non
                 del sys.modules[mod_name]
 
 
+def test_status_json_exposes_module_digests_and_magic_only(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from jaunt.registry import clear_registries
+
+    pkg = "statuspkg_digest"
+    _make_spec_project(tmp_path, pkg=pkg)
+
+    monkeypatch.chdir(tmp_path)
+    orig_path = list(sys.path)
+    before_modules = set(sys.modules.keys())
+
+    try:
+        rc = jaunt.cli.main(["status", "--json", "--magic-only"])
+        assert rc == 0
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["stale"]
+        for module in payload["stale"]:
+            assert payload["digests"][module]
+        assert "contracts" not in payload
+    finally:
+        clear_registries()
+        sys.path[:] = orig_path
+        for mod_name in list(sys.modules.keys()):
+            if mod_name not in before_modules:
+                del sys.modules[mod_name]
+
+
 def test_cmd_status_with_stale_specs_non_json(tmp_path: Path, monkeypatch, capsys) -> None:
     from jaunt.registry import clear_registries
 

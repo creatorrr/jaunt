@@ -125,6 +125,14 @@ current project (resolved paths, engine/model, and which modules are stale). It
 ships with the package, so the briefing always matches the installed version. Run
 it before you start working.
 
+## Background Daemon
+
+`jaunt daemon start` runs background codegen with commit-triggered isolated jobs
+and auto-commit on green. `jaunt daemon stop|status` stops or inspects it.
+Use `jaunt jobs` for job records, would-rebuild previews, `show <id> [--full]`,
+and `retry <id>`. `jaunt log` tails `JAUNT_LOG` (`-n N`, `--module X`), and
+`jaunt guard` warns when agents touch `__generated__` via the PreToolUse hook.
+
 ## Freshness Model
 
 - The full cleaned docstring is part of the spec contract, not just the first summary line.

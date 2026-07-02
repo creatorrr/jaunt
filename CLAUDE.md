@@ -137,6 +137,11 @@ jobs = 4
 infer_deps = true
 pytest_args = ["-q"]
 
+[daemon]
+poll_interval = 2.0         # seconds between HEAD polls
+max_jobs = 0                # 0 -> build.jobs
+notify_command = ""         # optional shell command run on job completion
+
 [skills]
 auto = true                 # auto-generate PyPI helper skills for imported libs
 builtin = true              # seed Jaunt's bundled builtin skills into the Codex workspace
@@ -248,6 +253,12 @@ jaunt adopt <module:func>     # Add @jaunt.contract to existing code and derive 
 jaunt reconcile               # Derive/refresh committed contract batteries (calls the model)
 jaunt check                   # Verify committed batteries deterministically (CI gate, no model)
 jaunt eject <module:func>     # Remove contract tracking; leave plain Python + plain pytest
+
+jaunt daemon start            # Background codegen: commit-triggered isolated jobs, auto-commit on green
+jaunt daemon stop|status      # Stop / inspect the daemon
+jaunt jobs                    # Job records + would-rebuild preview; show <id> [--full]; retry <id>
+jaunt log                     # Tail the JAUNT_LOG change journal (-n N, --module X)
+jaunt guard                   # PreToolUse hook: warn when agents touch __generated__ (see docs/hooks.md)
 
 jaunt watch                   # Auto-rebuild on file changes
 jaunt watch --test            # Build + test on change

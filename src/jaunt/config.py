@@ -95,6 +95,13 @@ class CodexConfig:
 
 
 @dataclass(frozen=True)
+class DaemonConfig:
+    poll_interval: float = 2.0
+    max_jobs: int = 0
+    notify_command: str = ""
+
+
+@dataclass(frozen=True)
 class SkillsConfig:
     auto: bool = True
     max_chars_per_skill: int = 8000
@@ -144,6 +151,7 @@ class JauntConfig:
     prompts: PromptsConfig
     agent: AgentConfig = field(default_factory=AgentConfig)
     codex: CodexConfig = field(default_factory=CodexConfig)
+    daemon: DaemonConfig = field(default_factory=DaemonConfig)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     contract: ContractConfig = field(default_factory=ContractConfig)
     context: ContextConfig = field(default_factory=ContextConfig)
@@ -267,6 +275,7 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     prompts_tbl = _as_table(data.get("prompts"), name="prompts")
     agent_tbl = _as_table(data.get("agent"), name="agent")
     codex_tbl = _as_table(data.get("codex"), name="codex")
+    daemon_tbl = _as_table(data.get("daemon"), name="daemon")
     skills_tbl = _as_table(data.get("skills"), name="skills")
     contract_tbl = _as_table(data.get("contract"), name="contract")
     semantic_gate_tbl = _as_table(data.get("semantic_gate"), name="semantic_gate")
@@ -495,6 +504,21 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     else:
         codex_config = {}
 
+    if "poll_interval" in daemon_tbl:
+        daemon_poll_interval = _as_float(daemon_tbl["poll_interval"], name="daemon.poll_interval")
+    else:
+        daemon_poll_interval = 2.0
+
+    if "max_jobs" in daemon_tbl:
+        daemon_max_jobs = _as_int(daemon_tbl["max_jobs"], name="daemon.max_jobs")
+    else:
+        daemon_max_jobs = 0
+
+    if "notify_command" in daemon_tbl:
+        daemon_notify_command = _as_str(daemon_tbl["notify_command"], name="daemon.notify_command")
+    else:
+        daemon_notify_command = ""
+
     if "auto" in skills_tbl:
         skills_auto = _as_bool(skills_tbl["auto"], name="skills.auto")
     else:
@@ -690,6 +714,11 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             fingerprint_cli_version=codex_fingerprint_cli_version,
             features=codex_features,
             config=codex_config,
+        ),
+        daemon=DaemonConfig(
+            poll_interval=daemon_poll_interval,
+            max_jobs=daemon_max_jobs,
+            notify_command=daemon_notify_command,
         ),
         skills=SkillsConfig(
             auto=skills_auto,

@@ -128,6 +128,33 @@ def test_cmd_init_creates_tests_dir(tmp_path: Path, monkeypatch) -> None:
     assert (tmp_path / "tests").is_dir()
 
 
+def test_init_scaffolds_journal_and_attributes(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    ns = jaunt.cli.parse_args(["init"])
+    rc = jaunt.cli.cmd_init(ns)
+    assert rc == 0
+    assert (tmp_path / "JAUNT_LOG").exists()
+    assert "JAUNT_LOG merge=union" in (tmp_path / ".gitattributes").read_text(encoding="utf-8")
+    assert ".jaunt/" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
+
+
+def test_init_journal_scaffolding_is_idempotent(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    ns = jaunt.cli.parse_args(["init"])
+    rc = jaunt.cli.cmd_init(ns)
+    assert rc == 0
+
+    ns = jaunt.cli.parse_args(["init", "--force"])
+    rc = jaunt.cli.cmd_init(ns)
+    assert rc == 0
+
+    gitattributes_lines = (tmp_path / ".gitattributes").read_text(encoding="utf-8").splitlines()
+    gitignore_lines = (tmp_path / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert gitattributes_lines.count("JAUNT_LOG merge=union") == 1
+    assert gitignore_lines.count(".jaunt/") == 1
+
+
 def test_cmd_init_json_output(tmp_path: Path, monkeypatch, capsys) -> None:
     monkeypatch.chdir(tmp_path)
     (tmp_path / "src").mkdir()

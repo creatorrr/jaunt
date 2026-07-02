@@ -42,6 +42,9 @@ def test_load_minimal_config_defaults_apply(tmp_path: Path) -> None:
     assert cfg.prompts.test_module == ""
     assert cfg.agent.engine == "codex"
     assert cfg.codex.fingerprint_cli_version is True
+    assert cfg.daemon.poll_interval == 2.0
+    assert cfg.daemon.max_jobs == 0
+    assert cfg.daemon.notify_command == ""
 
 
 def test_load_config_overrides_work(tmp_path: Path) -> None:
@@ -184,6 +187,34 @@ def test_codex_engine_defaults_load(tmp_path: Path) -> None:
     assert cfg.codex.sandbox == "workspace-write"
     assert cfg.codex.features == []
     assert cfg.codex.config == {}
+
+
+def test_daemon_config_defaults_and_parses(tmp_path: Path) -> None:
+    (tmp_path / "jaunt.toml").write_text("version = 1\n", encoding="utf-8")
+    cfg = load_config(root=tmp_path)
+    assert cfg.daemon.poll_interval == 2.0
+    assert cfg.daemon.max_jobs == 0
+    assert cfg.daemon.notify_command == ""
+
+    (tmp_path / "jaunt-daemon.toml").write_text(
+        "\n".join(
+            [
+                "version = 1",
+                "",
+                "[daemon]",
+                "poll_interval = 5.0",
+                "max_jobs = 2",
+                'notify_command = "notify-send jaunt"',
+                "",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    cfg2 = load_config(config_path=tmp_path / "jaunt-daemon.toml", root=tmp_path)
+    assert cfg2.daemon.poll_interval == 5.0
+    assert cfg2.daemon.max_jobs == 2
+    assert cfg2.daemon.notify_command == "notify-send jaunt"
 
 
 def test_skills_config_defaults_and_parses(tmp_path: Path) -> None:
