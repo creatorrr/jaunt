@@ -97,6 +97,12 @@ def _spec_commit(repo: Path, body: str = '"""spec v2"""\n') -> None:
     _git(repo, "commit", "-m", "spec commit")
 
 
+def _install_failing_pre_commit(repo: Path) -> None:
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+
+
 def _cycle(
     repo: Path,
     cfg: JauntConfig,
@@ -158,6 +164,63 @@ def test_run_once_full_cycle_lands_and_journals(repo: Path, jaunt_cfg: JauntConf
         "build" in line and "app" in line and "3/3" in line for line in journal.read_lines(repo)
     )
     assert (repo / "src" / "__generated__" / "app.py").exists()
+
+
+def test_landed_regen_commit_includes_jaunt_log(repo: Path, jaunt_cfg: JauntConfig) -> None:
+    (repo / journal.JOURNAL_FILE).touch()
+    runner = FakeRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        _spec_commit(repo)
+        _cycle(repo, jaunt_cfg, state, runner, pool)
+
+    committed = set(_git(repo, "show", "--name-only", "--format=", "HEAD").splitlines())
+    assert "src/__generated__/app.py" in committed
+    assert journal.JOURNAL_FILE in committed
+    blob = _git(repo, "show", f"HEAD:{journal.JOURNAL_FILE}")
+    assert "build" in blob and "app" in blob
+    assert _git(repo, "status", "--porcelain") == ""
+
+
+def test_commit_failure_parks_without_killing_daemon(repo: Path, jaunt_cfg: JauntConfig) -> None:
+    (repo / journal.JOURNAL_FILE).touch()
+    runner = FakeRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        _spec_commit(repo)
+        _install_failing_pre_commit(repo)
+        _cycle(repo, jaunt_cfg, state, runner, pool)
+
+    parked = jobs.list_jobs(repo, states={jobs.PARKED})
+    assert parked and parked[0].module == "app"
+    assert _git(repo, "status", "--porcelain", "--", "src/__generated__/app.py") == ""
+    assert _git(repo, "diff", "--cached", "--name-only") == ""
+    lines = journal.read_lines(repo, limit=0)
+    assert any("job-park" in line and parked[0].id in line for line in lines)
+    assert not any("build" in line and parked[0].id in line for line in lines)
+
+
+def test_park_truncates_preappended_success_line(repo: Path, jaunt_cfg: JauntConfig) -> None:
+    (repo / journal.JOURNAL_FILE).touch()
+    runner = FakeRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        _spec_commit(repo)
+        daemon.run_once(repo, jaunt_cfg, state, runner, pool)
+        daemon.drain(state)
+        before = (repo / journal.JOURNAL_FILE).read_text(encoding="utf-8")
+        dirty = repo / "src" / "__generated__" / "app.py"
+        dirty.parent.mkdir(parents=True, exist_ok=True)
+        dirty.write_text("local edit\n", encoding="utf-8")
+        daemon.run_once(repo, jaunt_cfg, state, runner, pool)
+
+    parked = jobs.list_jobs(repo, states={jobs.PARKED})
+    assert parked and parked[0].module == "app"
+    after = (repo / journal.JOURNAL_FILE).read_text(encoding="utf-8")
+    appended = after.removeprefix(before).splitlines()
+    assert len(appended) == 1
+    assert "job-park" in appended[0] and parked[0].id in appended[0]
+    assert "build" not in after
 
 
 def test_notify_command_fires_with_env(

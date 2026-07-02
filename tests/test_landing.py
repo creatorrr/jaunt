@@ -79,6 +79,12 @@ def _land(
     )
 
 
+def _install_failing_pre_commit(repo: Path) -> None:
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+
+
 def test_land_commits_with_trailers(repo: Path) -> None:
     patch, _, paths = _patch_for(repo, "src/__generated__/app.py", "y = 2\n")
     msg = landing.build_commit_message("app", "prose change", "a1b2c3d4", "abcd1234")
@@ -145,3 +151,11 @@ def test_land_parks_on_conflict(repo: Path) -> None:
     assert result is None
     status = _git(repo, "status", "--porcelain")
     assert status == ""  # no half-applied state left behind
+
+
+def test_land_rolls_back_when_commit_hook_fails(repo: Path) -> None:
+    patch, _, paths = _patch_for(repo, "src/__generated__/app.py", "y = 7\n")
+    _install_failing_pre_commit(repo)
+
+    assert _land(repo, patch, paths) is None
+    assert _git(repo, "status", "--porcelain") == ""

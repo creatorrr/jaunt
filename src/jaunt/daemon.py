@@ -316,6 +316,11 @@ def _notify(cfg: JauntConfig, job: jobs_mod.JobRecord) -> None:
         pass
 
 
+def _truncate_journal(path: Path, size: int) -> None:
+    with open(path, "r+", encoding="utf-8") as f:
+        f.truncate(size)
+
+
 def _land_pending(root: Path, cfg: JauntConfig, state: DaemonState) -> None:
     for job_id, result in list(state.pending.items()):
         job = jobs_mod.load_job(root, job_id)
@@ -333,19 +338,46 @@ def _land_pending(root: Path, cfg: JauntConfig, state: DaemonState) -> None:
             continue
 
         cause = "cosmetic (gate: EQUIVALENT)" if result.build.refrozen else "spec change"
+        action = "refreeze" if result.build.refrozen else "build"
+        battery = result.gate.battery if result.gate else "-"
         message = landing.build_commit_message(job.module, cause, job.id, job.spec_digest)
-        sha = landing.land(
-            root,
-            result.patch,
-            patch_paths=list(result.patch_paths),
-            message=message,
-            expected_branch=job.branch,
-            expected_head=state.last_head,
-        )
+        journal_path = root / journal_mod.JOURNAL_FILE
+        journal_opted_in = journal_path.exists()
+        snapshot_len = 0
+        extra_paths: tuple[str, ...] = ()
+        if journal_opted_in:
+            snapshot_len = journal_path.stat().st_size
+            journal_mod.append_events(
+                root,
+                [
+                    journal_mod.JournalEvent(
+                        action, job.module, f"{cause}; battery {battery}", job.id
+                    )
+                ],
+            )
+            extra_paths = (journal_mod.JOURNAL_FILE,)
+        try:
+            sha = landing.land(
+                root,
+                result.patch,
+                patch_paths=list(result.patch_paths),
+                message=message,
+                expected_branch=job.branch,
+                expected_head=state.last_head,
+                extra_commit_paths=extra_paths,
+            )
+        except Exception:
+            if journal_opted_in:
+                _truncate_journal(journal_path, snapshot_len)
+            raise
         if sha == landing.HEAD_MOVED:
+            if journal_opted_in:
+                _truncate_journal(journal_path, snapshot_len)
             continue
         del state.pending[job_id]
         if sha is None:
+            if journal_opted_in:
+                _truncate_journal(journal_path, snapshot_len)
             (jobs_mod.jobs_dir(root) / f"{job.id}.patch").write_text(result.patch, encoding="utf-8")
             updated = jobs_mod.mark(
                 root,
@@ -359,18 +391,8 @@ def _land_pending(root: Path, cfg: JauntConfig, state: DaemonState) -> None:
             )
         else:
             state.last_head = sha
-            action = "refreeze" if result.build.refrozen else "build"
-            battery = result.gate.battery if result.gate else "-"
             updated = jobs_mod.mark(root, job, jobs_mod.LANDED, landed_commit=sha)
             _notify(cfg, updated)
-            journal_mod.append_events(
-                root,
-                [
-                    journal_mod.JournalEvent(
-                        action, job.module, f"{cause}; battery {battery}", job.id
-                    )
-                ],
-            )
 
 
 def run_once(

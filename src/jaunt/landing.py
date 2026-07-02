@@ -72,6 +72,26 @@ def _rollback_paths(repo: Path, patch_paths: Sequence[str]) -> None:
     )
 
 
+def _unstage_paths(repo: Path, paths: Sequence[str]) -> None:
+    if not paths:
+        return
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "restore",
+            "--staged",
+            "--source=HEAD",
+            "--",
+            *paths,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def _apply_include_args(patch_paths: Sequence[str]) -> list[str]:
     return [f"--include={path}" for path in patch_paths]
 
@@ -84,6 +104,7 @@ def land(
     message: str,
     expected_branch: str,
     expected_head: str,
+    extra_commit_paths: Sequence[str] = (),
 ) -> str | None:
     if not patch or not patch_paths:
         return None
@@ -119,9 +140,15 @@ def land(
         if apply_proc.returncode != 0:
             _rollback_paths(repo, patch_paths)
             return None
-        git_out(repo, "add", "--", *patch_paths)
-        git_out(repo, "commit", "-m", message, "--", *patch_paths)
-        return git_out(repo, "rev-parse", "HEAD").strip()
+        commit_paths = [*patch_paths, *extra_commit_paths]
+        try:
+            git_out(repo, "add", "--", *commit_paths)
+            git_out(repo, "commit", "-m", message, "--", *commit_paths)
+            return git_out(repo, "rev-parse", "HEAD").strip()
+        except LandingError:
+            _rollback_paths(repo, patch_paths)
+            _unstage_paths(repo, extra_commit_paths)
+            return None
     finally:
         if patch_file:
             Path(patch_file).unlink(missing_ok=True)
