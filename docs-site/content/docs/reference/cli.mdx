@@ -37,6 +37,15 @@ uv run jaunt build --json
 
 If an upstream module's exported API changed, `jaunt build` also regenerates its stale dependents.
 
+Generation-shaping flags (also accepted by `jaunt test` and `jaunt watch`):
+
+- `--instruction "..."`: extra build instruction appended to the prompt (repeatable).
+- `--include-target-tests` / `--no-include-target-tests`: include targeted test-spec source in build prompts (default: off, or `[build] include_target_tests`).
+- `--no-auto-skills`: skip auto-generated PyPI skills for this run.
+- `--no-builtin-skills`: don't seed Jaunt's bundled builtin skills into the Codex workspace.
+- `--no-repo-map` (build only): disable repo-map injection for this build. See [Repo Context](/docs/reference/repo-context).
+- `--no-semantic-gate` (build/test): force every normalized-digest change to rebuild, skipping the Layer B semantic gate (Layer A linter-resistance still applies). See [Change Detection](/docs/reference/change-detection).
+
 ## Test
 
 Generate tests for `@jaunt.test` specs and run pytest:
@@ -59,6 +68,23 @@ it would otherwise game), while *example* failures keep full detail. `--no-redac
 disables this and feeds full failure detail back for all tiers — a **debugging escape
 hatch only**; it defeats the implementer/tester barrier and logs a warning.
 
+## Contract Mode
+
+Adopt existing, committed code under docstring contracts and keep a derived
+pytest battery in sync (see the [Contract Mode guide](/docs/guides/contract-mode)):
+
+```bash
+uv run jaunt adopt my_app.slug:slugify   # add @jaunt.contract + derive its battery
+uv run jaunt reconcile                   # derive/refresh committed batteries (calls the model)
+uv run jaunt check                       # verify batteries deterministically (CI gate, no model)
+uv run jaunt eject my_app.slug:slugify   # remove contract tracking; leave plain pytest
+uv run jaunt eject --all
+```
+
+`jaunt reconcile` is the only contract command that calls the model. `jaunt check`
+is deterministic and exits `4` on any blocking drift state (unbuilt /
+stale-prose / signature-drift / behavior-drift), which makes it the CI gate.
+
 ## Eval
 
 <Callout type="warning">
@@ -75,10 +101,22 @@ Show stale/fresh modules:
 ```bash
 uv run jaunt status
 uv run jaunt status --target my_app.specs
+uv run jaunt status --magic-only
 uv run jaunt status --json
 ```
 
-`jaunt status` should reflect the same dependency-driven freshness model as `jaunt build`, including modules invalidated by an upstream dependency API change.
+`jaunt status` should reflect the same dependency-driven freshness model as `jaunt build`, including modules invalidated by an upstream dependency API change. `--magic-only` probes only `@jaunt.magic` freshness, skipping contract checks and repo-map drift.
+
+## Specs
+
+List `@jaunt.magic` specs and their dependency graph (useful for agents and tooling):
+
+```bash
+uv run jaunt specs
+uv run jaunt specs --module my_app.specs
+uv run jaunt specs --no-infer-deps
+uv run jaunt specs --json
+```
 
 ## Instructions
 
@@ -106,6 +144,30 @@ framework rules plus a note to run `jaunt init`. `--json` emits
   bundled Claude Code / Codex skills are thin stubs that point here, so they
   cannot drift from the installed CLI.
 </Callout>
+
+## Tree
+
+Maintain `treedocs.yaml`, the one-line-per-path repo map injected into build
+prompts (see [Repo Context](/docs/reference/repo-context)):
+
+```bash
+uv run jaunt tree             # sync the tree (AST-only descriptions by default)
+uv run jaunt tree --check     # CI gate: exit 4 if the tree is stale
+```
+
+LLM enrichment of descriptions is controlled by the `[context] enrich` config
+flag (default `false` — AST-only, offline).
+
+## Log
+
+Tail the `JAUNT_LOG` change journal that build/test/daemon runs append to:
+
+```bash
+uv run jaunt log
+uv run jaunt log -n 50          # 0 = all lines
+uv run jaunt log --module my_app.specs
+uv run jaunt log --json
+```
 
 ## Clean
 
@@ -159,16 +221,29 @@ until the daemon is idle; `--settle N` controls the idle race-guard window and
   | Push notification | Set `[daemon] notify_command` to run your hook on landed, parked, or failed jobs. |
 </Callout>
 
-## MCP
+See the [Background Daemon guide](/docs/guides/daemon) for the full workflow.
 
-Start the stdio MCP server:
+## Guard
+
+A PreToolUse hook for coding agents that warns when a tool call is about to
+touch files under the generated dir:
 
 ```bash
-uv run jaunt mcp serve
-uv run jaunt mcp serve --root /path/to/project
+uv run jaunt guard
+uv run jaunt guard --generated-dir __generated__
 ```
 
-`mcp` requires the optional dependency: `pip install jaunt[mcp]`.
+It reads the hook payload on stdin and emits a warning for `__generated__`
+paths (see `docs/hooks.md` in the repo for Claude Code wiring).
+
+## Cache
+
+Inspect or clear the LLM response cache under `.jaunt/`:
+
+```bash
+uv run jaunt cache info
+uv run jaunt cache clear
+```
 
 ## Skills
 

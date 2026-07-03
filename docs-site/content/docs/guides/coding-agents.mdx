@@ -1,0 +1,74 @@
+---
+title: For Coding Agents
+description: "Point Claude Code, Codex, Cursor, or CI at Jaunt with one command."
+---
+
+Jaunt is built to be operated by coding agents as much as by humans. Everything
+an agent needs is exposed through the CLI — no plugin or server integration
+required.
+
+## The Primer: `jaunt instructions`
+
+Load a tight, project-aware briefing into the agent's context before it
+operates Jaunt:
+
+```bash
+jaunt instructions          # framework rules + a live snapshot of this project
+jaunt instructions --json   # {command, ok, text, project} for tooling
+```
+
+The output covers the framework rules — the two authoring modes, the build/test
+loop, how to write a good spec, the command and exit-code reference — followed
+by a live snapshot of the current project: resolved `[paths]`, engine/model,
+semantic-gate and repo-map settings, and which modules are stale. It ships with
+the package, so the briefing always matches the installed version.
+
+Run outside an initialized project it still succeeds (exit `0`), printing the
+framework rules plus a note to run `jaunt init`.
+
+## Machine-Readable Output
+
+The commands agents drive — `build`, `test`, `status`, `specs`, `instructions`,
+`jobs`, `log`, `tree`, `clean`, `watch` — accept `--json` (structured output on
+stdout, errors on stderr). A few interactive/hook commands (`guard`,
+`daemon stop`, `skill show`) do not:
+
+```bash
+jaunt specs --json      # spec list + dependency graph
+jaunt status --json     # stale/fresh modules, contract drift, strength
+jaunt build --json      # {"command": "build", "ok": true, "generated": [...], "refrozen": [...], ...}
+```
+
+Progress output is agent-aware too: `--progress {auto,rich,plain,none}` — `auto`
+is rich on a TTY and plain lines off-TTY, and an explicit `--progress plain`
+composes with `--json` (progress on stderr, JSON on stdout).
+
+## The Agent Loop
+
+The intended workflow with the [background daemon](/docs/guides/daemon)
+running:
+
+```bash
+git commit -m "spec: tighten normalize_email contract" \
+  && jaunt jobs wait --timeout 1800
+```
+
+Exit codes are the protocol: `0` green, `4` a job failed or parked, `5`
+timeout. See the full table in the [CLI reference](/docs/reference/cli#exit-codes).
+
+## Keeping Agents Out Of `__generated__/`
+
+Generated code is overwritten on every build, so agents must fix specs, not
+output. `jaunt guard` is a PreToolUse hook that warns on access — see
+[Background Daemon: Guarding Generated Code](/docs/guides/daemon#guarding-generated-code-jaunt-guard).
+
+## The Principles Behind The Design
+
+Jaunt's design follows a written coding-agent principles framework — six core
+laws plus named corollaries (value migrates to spec + verification; the model
+proposes, a deterministic and independent verdict disposes; treat everything
+the model reads as untrusted; …). The full document lives in the repo at
+`docs/principles/2026-06-29-building-with-coding-agents.md`, and the build
+prompt preamble embeds the laws so the generator operates under the same rules.
+
+Next: [Contract Mode](/docs/guides/contract-mode).

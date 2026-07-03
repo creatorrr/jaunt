@@ -14,7 +14,7 @@ export default async function Page(props: PageProps<'/docs/[[...slug]]'>) {
   // Optional overrides:
   // - NEXT_PUBLIC_GITHUB_REPO="https://github.com/<user>/<repo>"
   // - NEXT_PUBLIC_GITHUB_BRANCH="main"
-  const githubRepo = process.env.NEXT_PUBLIC_GITHUB_REPO ?? 'https://github.com/ijindal1/jaunt';
+  const githubRepo = process.env.NEXT_PUBLIC_GITHUB_REPO ?? 'https://github.com/creatorrr/jaunt';
   const githubBranch = process.env.NEXT_PUBLIC_GITHUB_BRANCH ?? 'main';
   const githubUrl =
     githubRepo && githubRepo.startsWith('http')

@@ -56,8 +56,10 @@ sandbox = "workspace-write"
 
 For each module Jaunt needs to generate:
 
-1. Jaunt renders the prompt (system template + your spec's source segment +
-   optional per-spec extras and PyPI skills).
+1. Jaunt renders the prompt (Jaunt preamble + system template + your spec's
+   source segment + optional per-spec extras and the repo map) and seeds
+   builtin/project skills into the workspace at `.agents/skills/` for Codex to
+   discover natively.
 2. It spawns one `codex exec --json` subprocess and passes the prompt on stdin.
 3. Codex edits inside the configured sandbox; Jaunt parses the JSONL event
    stream for the final result.

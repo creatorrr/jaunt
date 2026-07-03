@@ -21,6 +21,10 @@ Named after *jaunting* -- teleportation by thought alone -- from Bester's
 
 You write **specs** — real Python stubs with types and docstrings. Jaunt sends them to an LLM and generates real implementations + tests under `__generated__/`. You review, iterate, and ship. The spec is the contract — everything flows from it.
 
+There's a second, inverse mode too: [`@jaunt.contract`](/docs/guides/contract-mode)
+keeps your committed code canonical and derives a committed pytest battery from
+the docstring instead.
+
 ## The Wow Gap
 
 A tiny spec on the left. Real code on the right.
@@ -108,6 +112,8 @@ def create_token(user_id: str, secret: str, *, ttl: timedelta = timedelta(hours=
   <Card title="Quickstart" href="/docs/quickstart" />
   <Card title="How It Works" href="/docs/how-it-works" />
   <Card title="Writing Specs" href="/docs/writing-specs/magic" />
+  <Card title="Contract Mode" href="/docs/guides/contract-mode" />
+  <Card title="For Coding Agents" href="/docs/guides/coding-agents" />
   <Card title="Codex Engine" href="/docs/reference/codex-engine" />
 </Cards>
 

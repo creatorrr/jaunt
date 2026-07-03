@@ -1,9 +1,9 @@
 ---
 title: Limitations / Gotchas
-description: "Current behavioral constraints in the MVP implementation."
+description: "Current behavioral constraints and sharp edges."
 ---
 
-Jaunt is an MVP. These are the sharp edges you should know about.
+These are the sharp edges you should know about.
 
 ## Code-Generation Engine
 
@@ -13,10 +13,7 @@ running generation commands.
 
 Jaunt is batteries-included: runtime helpers (`rich`, `watchfiles`) and the test
 stack (`pytest`, `pytest-asyncio`, `anyio`) are core dependencies. There are no
-extras to install for watch mode, tests, or rich output.
-
-The only optional extra is `jaunt[mcp]`, which enables the MCP server
-integration.
+optional extras.
 
 ## Hardcoded `__generated__` Dir Name
 

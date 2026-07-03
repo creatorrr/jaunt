@@ -1,0 +1,66 @@
+---
+title: Change Detection
+description: "Two-layer freshness: AST-normalized digests plus a semantic gate that re-freezes equivalent edits."
+---
+
+Jaunt decides what to rebuild in two layers, so cosmetic edits cost nothing and
+behaviorally-equivalent prose edits cost one cheap model call instead of a full
+rebuild.
+
+## Layer A: AST-Normalized Contract Digests
+
+Spec freshness is computed from an **AST-normalized contract digest**, not the
+raw file bytes. Ruff reformatting, comment edits, whitespace, and quote-style
+changes do not change the digest, so they no longer mark a module stale. This
+layer is deterministic, applies to both build and test freshness, and cannot be
+disabled.
+
+What *does* change the digest:
+
+- signature changes (parameters, annotations, return type)
+- edits anywhere in the cleaned docstring contract
+- decorator kwargs (`deps=`, `prompt=`, …)
+- for whole-class specs: adding/removing/changing declared members or method
+  signatures
+- transitive dependency API changes
+
+## Layer B: The Semantic Gate
+
+When a spec's docstring genuinely changed but its signature/structure did not,
+a small `[semantic_gate]` model judges whether the edit is **behaviorally
+meaningful**:
+
+- **Equivalent** (a typo fix, rewording, clarifying comment-level prose): Jaunt
+  **re-freezes** the module — it rewrites the header digests over the
+  validated, unchanged generated body instead of paying for a full rebuild
+  with the main model. `--json` reports these under `"refrozen"`.
+- **Meaningful**: the module rebuilds normally.
+
+Structural changes, validation failures, and any gate error **fail safe to a
+rebuild** — the gate can only save work, never skip a real change.
+
+```toml
+[semantic_gate]
+enabled = true              # gate behaviorally-equivalent edits before a full rebuild
+model = "gpt-5.4-mini"      # small judge model (must be runnable via `codex exec`)
+reasoning_effort = "high"   # low | medium | high
+```
+
+Skip the gate for one run with `jaunt build --no-semantic-gate` (or
+`jaunt test --no-semantic-gate`): every normalized-digest change then rebuilds.
+Layer A still applies.
+
+<Callout type="info">
+  The gate model must be runnable via `codex exec` (e.g. `gpt-5.4-mini`);
+  `gpt-5.4-nano` is not — `codex exec` attaches a `tool_search` tool nano
+  rejects.
+</Callout>
+
+## What Else Participates In Freshness
+
+Beyond the spec contract itself, Jaunt fingerprints the generation runtime:
+`agent.engine`, `codex.model` / `sandbox` / `reasoning_effort`, prompt template
+content (including the preamble), and each module's exported dependency API.
+`jaunt status` shows the resulting stale set, including upstream API fallout.
+
+Next: [Repo Context](/docs/reference/repo-context).

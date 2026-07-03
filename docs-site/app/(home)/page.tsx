@@ -12,12 +12,12 @@ export default function HomePage() {
         <Link href="/docs" className="font-medium underline">
           Read the docs
         </Link>
-        <Link href="/docs/getting-started" className="font-medium underline">
-          Getting started
+        <Link href="/docs/quickstart" className="font-medium underline">
+          Quickstart
         </Link>
         <a
           className="font-medium underline"
-          href="https://github.com/ijindal1/jaunt"
+          href="https://github.com/creatorrr/jaunt"
           rel="noreferrer noopener"
           target="_blank"
         >

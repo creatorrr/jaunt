@@ -7,7 +7,7 @@ Add to `.claude/settings.json` in a jaunt project:
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Edit|Write|Read|NotebookEdit",
+        "matcher": "Edit|MultiEdit|Write|Read|NotebookEdit",
         "hooks": [{"type": "command", "command": "jaunt guard"}]
       }
     ]
