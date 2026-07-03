@@ -80,25 +80,49 @@ liberty it has.
 
 Method decorators evaluate before the class decorator. An inner `@jaunt.magic` therefore
 first registers as a standalone method spec (the `class_name is not None` branch,
-`runtime.py:267-268`). When the class-level `@jaunt.magic` then runs
-(`runtime.py:270-297`), it:
+`runtime.py:267-268`) and returns `_make_method_wrapper` (`runtime.py:363-403`). When
+the class-level `@jaunt.magic` then runs (`runtime.py:270-297`), it:
 
-1. scans its own members for method-spec wrappers (`__jaunt_spec_ref__` on the wrapper),
-2. **unregisters** those method specs from the registry,
-3. records the member names as the whole-class spec's `sealed_members`,
-4. restores the original undecorated function objects onto the class body it registers
-   (so the source AST and the runtime object agree).
+1. **queries the registry** for method specs whose `module` matches and whose
+   `class_name` equals this class's name — absorption keys off the registry, not
+   wrapper-sniffing (the wrappers carry no jaunt marker today). This requires a new
+   internal registry operation, `unregister_magic(spec_ref)` (`registry.py` has no
+   removal API).
+2. **unregisters** those method specs and records the member names as the whole-class
+   spec's `sealed_members`.
+3. **restores the original functions** onto the class body it registers. The wrapper is
+   built with `functools.wraps(fn)`, so the original is recoverable via `__wrapped__`.
+   Descriptor stacking must be reconstructed: a member slot holding
+   `classmethod(wrapper)` / `staticmethod(wrapper)` (correct decorator order puts the
+   descriptor outermost) is unwrapped via `__func__`, the original recovered, and the
+   same descriptor re-applied. `@abstractmethod` flags are carried over. This keeps the
+   registered runtime object and the source AST in agreement.
+
+Descriptor support matrix for sealed members (v1): plain methods, `@classmethod`,
+`@staticmethod`, and `@abstractmethod` stacking are supported; **`@property` + inner
+`@jaunt.magic` is rejected** with a clear error (`_unwrap_from_class`,
+`runtime.py:348-360`, does not handle property descriptors even for standalone method
+magic — sealing properties waits until that path exists).
 
 If the class is never decorated, the inner specs remain standalone method specs —
 existing behavior, zero migration. Because absorption happens at import time, discovery
 (`discovery.py`) and `jaunt specs` never see phantom method specs for absorbed members.
 
+**The mixed-magic guard changes meaning.** `_build_expected_names`
+(`builder.py:1203-1238`) currently errors when a class has both whole-class and
+per-method `@magic` ("Use one or the other."), and `tests/test_builder_methods.py`
+locks that behavior. After absorption, that registry state is unreachable via a real
+import — mixing *is* the sealed feature. The guard stays as defense-in-depth for
+hand-constructed registry states, but its message is reworded to point at absorption
+("inner @magic methods of a whole-class spec should have been absorbed; this indicates
+a registration bug") and the locking test is updated accordingly.
+
 On the build side, detection is AST-based and does not depend on the runtime absorption:
-`class_analysis.py` gains `is_magic_decorator` (mirror of `is_preserve_decorator`,
-`class_analysis.py:39-60`) and `MemberSplit` grows a third bucket:
-`MemberSplit(stubs, sealed, preserved, preserve_marked)`. `classify_class_mode` counts
-sealed methods as stubs (a class of only sealed methods is still `stubs` mode). The seed
-scaffold (`build_class_scaffold`, `class_analysis.py:207-247`) strips inner
+`class_analysis.py` already has a private `_is_magic_decorator` (`class_analysis.py:144`)
+— it is promoted/reused for member classification, and `MemberSplit` grows a third
+bucket: `MemberSplit(stubs, sealed, preserved, preserve_marked)`. `classify_class_mode`
+counts sealed methods as stubs (a class of only sealed methods is still `stubs` mode).
+The seed scaffold (`build_class_scaffold`, `class_analysis.py:207-247`) strips inner
 `@jaunt.magic` exactly as it strips `@jaunt.preserve`.
 
 ### Errors (decoration-time where possible, discovery-time otherwise)
@@ -108,27 +132,47 @@ scaffold (`build_class_scaffold`, `class_analysis.py:207-247`) strips inner
   "hand-written body: use `@jaunt.preserve` to keep it, or reduce it to a stub for Jaunt
   to implement."
 - Inner `@jaunt.magic(...)` with any kwargs inside a whole-class spec → error (v1).
+- `@property` combined with inner `@jaunt.magic` inside a whole-class spec → error (v1,
+  see support matrix above).
 - The existing wrong-order guard (`@classmethod`/`@staticmethod` above `@magic`,
   `runtime.py:199-207`) applies to inner magic unchanged.
 
-All three surface as config/discovery errors (exit 2), before any model call.
+Note on timing: at method-decoration time the runtime cannot know the class will be
+whole-class-decorated, so the kwargs / non-stub / property errors fire at
+**class-decoration (absorption) time**; the stacked-markers error can fire earlier via
+AST analysis at discovery. All surface as config/discovery errors (exit 2), before any
+model call.
 
 ## 2. Dependency graph: always-on base edges
 
-`SpecEntry` (`registry.py:25-39`) gains `base_refs: list[str]` — the project base-class
-spec refs `resolve_base_contract` already computes (`class_analysis.py:102-138`) —
+`SpecEntry` (`registry.py:25-39`, frozen/slotted) gains two fields:
+`sealed_members: tuple[str, ...] = ()` (recorded during absorption, §1) and
+`base_deps: tuple[SpecRef, ...] = ()` — normalized at decoration time from the project
+base refs `resolve_base_contract` already computes (`class_analysis.py:102-138`) —
 recorded **separately** instead of merged into `auto_deps` (today's
-`runtime.py:236-247` merge is removed).
+`runtime.py:236-247` merge is removed). `resolve_base_contract` records any non-stdlib
+base, so `build_spec_graph` filters `base_deps` against known specs before adding edges
+(a hand-written project base is context, not a dependency node).
 
-`build_spec_graph` (`deps.py:226-379`) applies `base_refs` **unconditionally**, at the
-same rank as explicit `deps=` — not gated by `infer_deps` overrides or `infer_default`
-(`deps.py:252-274`). Rationale: inheritance is structural fact from the class header,
-not an inference; B cannot be planned without A. Consequences:
+`build_spec_graph` (`deps.py:226-379`) applies the filtered `base_deps`
+**unconditionally**, at the same rank as explicit `deps=` — not gated by `infer_deps`
+overrides or `infer_default` (`deps.py:252-274`). Rationale: inheritance is structural
+fact from the class header, not an inference; B cannot be planned without A.
+Consequences:
 
-- A always builds before B; A's generated source/API land in B's dependency context
-  (`_collect_dependency_context`, `builder.py:1488-1517`) even with inference off.
-- `graph_digest` transitivity (`digest.py:354-384`) always covers the base.
-- A base cycle is now always a hard cycle error (exit 2) — correct: it is a real cycle.
+- **Cross-module base** (A and B in different modules): A's module always builds before
+  B's; A's generated public API lands in B's build context (the Codex path seeds
+  dependency API `.pyi` files, `codex_backend.py:332`) even with inference off, and
+  `graph_digest` transitivity (`digest.py:354-384`) covers the base.
+- **Same-module base** (A and B in one source module): `collapse_to_module_dag`
+  (`deps.py:382-400`) drops same-module edges by design, and connected specs generate as
+  one component — there is **no** "A artifact on disk before B". That is the correct
+  behavior, not a gap: the model designs A and B coherently in a single shot, seeing
+  both specs, and staleness is trivial because they rebuild together. The
+  inherited-generated-API mechanics (§3) and base-API staleness (§5) therefore apply to
+  **cross-module spec'd bases only**; same-module inheritance is handled by
+  co-generation plus the in-prompt base contract.
+- A cross-module base cycle is a hard cycle error (exit 2) — correct: it is a real cycle.
 
 ## 3. Prompt & context
 
@@ -153,19 +197,25 @@ A new fixed paragraph in the same block, present for every whole-class build:
 > in the inherited API below — build on it: call it, extend it via `super()`, or override
 > it deliberately. Do not reimplement inherited behavior.
 
-No config knob; it is prompt prose that is essentially never wrong. Its text is part of
-the build fingerprint like the rest of the contract block (one-time restale of
-whole-class modules on upgrade — function-only projects are untouched; see §5).
+No config knob; it is prompt prose that is essentially never wrong. Note that today the
+whole-class contract block is **not** hashed anywhere — `module_context_digest`
+(`builder.py:726`) does not include it, and the generation fingerprint
+(`generate/fingerprint.py:69`) hashes prompt *template files* only, not this rendered
+block. §5 makes the contract block participate in freshness explicitly; the one-time
+restale of whole-class modules on upgrade comes from that change (function-only projects
+are untouched).
 
 ### Inherited generated API block
 
-For each **spec'd** base that has a built artifact on disk, the builder renders the
-generated class's public API — signatures + docstrings — from the artifact via
-`module_api.build_generated_class_api_summary` (`module_api.py:268-296`), **replacing**
-the runtime-object MRO snapshot for that base. External / non-spec bases keep the
-existing `resolve_base_contract` runtime walk (it is correct for them: they don't change
-mid-build). Because the scheduler orders A before B (§2) and payloads are assembled when
-a component runs (`_component_payload`, `builder.py:1654-1727`), B always reads fresh-A.
+For each **cross-module spec'd** base that has a built artifact on disk, the builder
+renders the generated class's public API — signatures + docstrings — from the artifact
+via `module_api.build_generated_class_api_summary` (`module_api.py:268-296`),
+**replacing** the runtime-object MRO snapshot for that base. External / non-spec bases
+keep the existing `resolve_base_contract` runtime walk (it is correct for them: they
+don't change mid-build); same-module spec'd bases are co-generated and need no artifact
+view (§2). Because the scheduler orders A's module before B's (§2) and payloads are
+assembled when a component runs (`_component_payload`, `builder.py:1654-1727`), B
+always reads fresh-A.
 
 Codex path unchanged in shape: the block travels in
 `_context/whole_class_contract.md` (`codex_backend.py:341-345`) and
@@ -177,9 +227,14 @@ Codex path unchanged in shape: the block travels in
 
 - **Sealed drift is an error.** Each sealed method's generated signature must match the
   spec's AST-normalized signature exactly: parameter names, order, kinds, defaults,
-  annotations, and return annotation (normalization reuses the digest layer's
-  canonicalization so formatting/quoting differences don't false-positive). Errors feed
-  `generate_with_retry` (`generate/base.py:117-185`) like any validation failure.
+  annotations, and return annotation. This needs a real data path: today
+  `_class_validation_inputs` (`builder.py:582-630`) passes only `stub_methods` and
+  `preserved_segments`, and the digest layer's signature rendering is a plain
+  `ast.unparse` string (`digest.py:258`), not an equality API. Add a
+  `sealed_signatures` field to the validation inputs and a **canonical signature
+  comparator** (AST-normalized, formatting/quoting-insensitive) shared by digest and
+  validation so the two layers cannot disagree. Errors feed `generate_with_retry`
+  (`generate/base.py:117-185`) like any validation failure.
 - **Guidepost drift stays warn-only** (`class_build_warnings`,
   `validation.py:903-929`), and the dropped-parameter warning is kept as-is.
 - Everything else is unchanged: stubs implemented and non-stub, preserved methods
@@ -196,16 +251,35 @@ checks by virtue of being a stub member.
   sealed methods** (e.g. a `"sealed"` tag on that member's tuple). Marker-free projects
   produce byte-identical digests → no mass rebuild on upgrade. Adding/removing an inner
   `@jaunt.magic` changes the class digest → rebuild, as it should.
-- **Base API staleness.** B's `module_context_digest` (`builder.py:726-746`)
-  incorporates, for each spec'd base, the base's `generated_public_api_digest`
-  (`module_api.py:268-296`) read from the artifact on disk — replacing the current
-  frozen-runtime `base_contract_block` hash for spec'd bases. Interface change in
-  generated A ⇒ B's context digest moves ⇒ B stale. Body-only rebuild of A (same public
-  API) ⇒ digest unchanged ⇒ B untouched. Unbuilt base ⇒ a sentinel value that flips once
-  A first builds.
-- **Prompt-template fingerprint.** The contract-block text changes (§3), which restales
-  existing *whole-class* modules once. Acceptable and honest: their prompts genuinely
-  changed. Function-only modules see no change.
+- **Base API staleness (cross-module spec'd bases).** B's `module_context_digest`
+  (`builder.py:726-746`) incorporates, per such base, a hash of the **rendered inherited
+  generated API block** (§3) — signatures *and* docstrings, read from A's artifact on
+  disk. Hashing the rendered block rather than `generated_public_api_digest` is
+  deliberate: that digest hashes only member names/signatures (`module_api.py:292`),
+  but docstrings are behavioral contract in jaunt and are injected as B's context, so a
+  doc change in A's public API must restale B. Body-only rebuild of A (same signatures,
+  same docstrings) ⇒ block unchanged ⇒ B untouched. Unbuilt base ⇒ a fixed
+  `unbuilt:<ref>` sentinel.
+- **One computation, one timing rule.** Context digests are computed in three places
+  today — `jaunt build`/`jaunt status` precompute before scheduling (`cli.py:2236`,
+  `status_core.py:158`), `run_build` recomputes before writing headers
+  (`builder.py:1805`, `1932`), and refreeze reuses precomputed header fields
+  (`builder.py:460`). The base-API contribution is centralized in one helper used by
+  all three, with this rule: **headers always store the post-dependency (fresh) digest**
+  — `run_build` computes B's contribution after A's module completed, so the stored
+  header matches what a subsequent `status` recomputes from the same artifacts (no
+  flapping). The `unbuilt` sentinel appears in a header only when A genuinely failed to
+  build; A's later success then legitimately restales B once.
+- **Refreeze guard.** The Layer B refreeze path rewrites header digests over an
+  unchanged generated body using precomputed values. When B's stored context digest
+  differs from the fresh one *because a spec'd base's API block moved* (or is the
+  `unbuilt` sentinel), refreeze is not allowed — fail safe to a full rebuild, consistent
+  with the existing "any gate doubt ⇒ rebuild" policy.
+- **Whole-class contract block joins the context digest.** The rendered contract block
+  (tier sections + composition paragraph, §3) is hashed into `module_context_digest`
+  for whole-class modules — it is real prompt input and today isn't fingerprinted at
+  all (§3). This is what restales existing whole-class modules once on upgrade.
+  Function-only modules see no change.
 - The Layer B semantic gate is unaffected: sealed-signature edits are structural
   (Layer A catches them); gate behavior for docstring-only edits is unchanged.
 
@@ -215,8 +289,13 @@ Unit (all against the mocked backend; no API keys):
 
 - `test_magic_decorator.py` / new: inner `@jaunt.magic` absorbed (registry has one
   whole-class spec, zero method specs; `sealed_members` populated); bare and called
-  forms; standalone method-magic on an undecorated class unchanged.
-- Errors: magic+preserve stacked; inner magic on non-stub body; inner magic with kwargs.
+  forms; standalone method-magic on an undecorated class unchanged; originals restored
+  with `@classmethod`/`@staticmethod`/`@abstractmethod` descriptors reconstructed.
+- Errors: magic+preserve stacked; inner magic on non-stub body; inner magic with
+  kwargs; `@property` + inner magic rejected.
+- `test_builder_methods.py`: the existing mixed-magic conflict test (~line 260) is
+  reworked — a real import never reaches the guard anymore; the guard's
+  defense-in-depth message is asserted on a hand-constructed registry state instead.
 - `test_class_analysis.py`: 3-way `MemberSplit`; `is_magic_decorator` both forms;
   scaffold strips inner magic; mode classification counts sealed as stubs.
 - `test_prompt_quality.py` / contract render: three tier sections present; composition
@@ -226,11 +305,15 @@ Unit (all against the mocked backend; no API keys):
 - `test_validation_class.py`: sealed signature drift (renamed param, changed default,
   changed return annotation) ⇒ error; guidepost drift ⇒ warn only.
 - `digest`: marker-free class digest byte-identical to pre-change; adding inner magic
-  changes it; B restaled by A's public-API change; B *not* restaled by A's body-only
-  change.
-- End-to-end (`test_builder_whole_class.py`): `class B(A)` both `@magic` through a full
-  mocked build — ordering, inherited-API injection, validation. Runtime: generated B
-  calling `super().method()` into generated A works through import-time substitution.
+  changes it; B restaled by A's public-API signature change *and* by a docstring-only
+  change to A's public API; B *not* restaled by A's body-only change; header digest
+  equals a post-build `jaunt status` recomputation (no flap); refreeze refused when the
+  base API block moved (falls back to rebuild).
+- End-to-end (`test_builder_whole_class.py`): cross-module `class B(A)` both `@magic`
+  through a full mocked build — ordering, inherited-API injection, validation;
+  same-module `class B(A)` co-generated as one component with no conflict error.
+  Runtime: generated B calling `super().method()` into generated A works through
+  import-time substitution.
 
 ## 7. Documentation
 
@@ -257,3 +340,11 @@ Unit (all against the mocked backend; no API keys):
   and adds no new public symbol. Rejected `@jaunt.preserve` reuse: preserve's defining
   purpose is marking stub-*looking* bodies as hand-written; overloading it on body shape
   would invert that guarantee.
+- **Same-module inheritance = co-generation** (post-review): `collapse_to_module_dag`
+  drops same-module edges by design, so artifact-based inherited context and base-API
+  staleness apply to cross-module bases only; a same-module base pair is designed
+  coherently in one component and rebuilds together.
+- **Hash the rendered inherited-API block, not `generated_public_api_digest`** (post-
+  review): the existing digest ignores docstrings, but docstrings are contract and are
+  injected as subclass context — doc changes to a base's public API must restale
+  subclasses.
