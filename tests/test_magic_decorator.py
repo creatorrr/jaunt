@@ -620,6 +620,57 @@ def test_whole_class_records_project_base_dep(
         sys.modules.pop(module_name, None)
 
 
+def test_magic_class_substitution_preserves_super_composition(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    clear_registries()
+
+    class _GenBase:
+        def describe(self) -> str:
+            return "base"
+
+    class _GenChild(_GenBase):
+        def describe(self) -> str:
+            return "child+" + super().describe()
+
+    def _import(name: str) -> Any:
+        if "child" in name:
+            return SimpleNamespace(B=_GenChild)
+        if "base" in name:
+            return SimpleNamespace(A=_GenBase)
+        raise ModuleNotFoundError(name)
+
+    monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+    base_module_name = "tmp_super_base_mod"
+    child_module_name = "tmp_super_child_mod"
+    base_src = """
+    import jaunt
+
+    @jaunt.magic()
+    class A:
+        \"\"\"a\"\"\"
+        def describe(self) -> str: ...
+    """
+    child_src = f"""
+    import jaunt
+    from {base_module_name} import A
+
+    @jaunt.magic()
+    class B(A):
+        \"\"\"b\"\"\"
+        def describe(self) -> str: ...
+    """
+
+    try:
+        _import_module_from_source(tmp_path, base_module_name, base_src)
+        child_module = _import_module_from_source(tmp_path, child_module_name, child_src)
+        assert child_module.B().describe() == "child+base"
+    finally:
+        sys.modules.pop(base_module_name, None)
+        sys.modules.pop(child_module_name, None)
+
+
 # ---------------------------------------------------------------------------
 # Whole-class absorption of inner @magic method specs (sealed tier)
 # ---------------------------------------------------------------------------
