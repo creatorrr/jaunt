@@ -17,9 +17,10 @@ enrichment.
 ```bash
 jaunt tree             # sync the tree incrementally (AST-only by default)
 jaunt tree --check     # CI gate: exit 4 if the tree is stale (new/ghost paths or edited files)
-jaunt tree --enrich    # force LLM enrichment of descriptions this run
-jaunt tree --no-enrich # force AST-only this run
 ```
+
+Whether descriptions get LLM enrichment is controlled by `[context] enrich`
+(default `false` — AST-only, offline).
 
 `jaunt build` keeps the tree in sync automatically and renders a repo-map block
 (capped at `[context] max_chars`) into every build prompt. Disable it for one

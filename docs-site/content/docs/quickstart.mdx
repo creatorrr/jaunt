@@ -35,11 +35,14 @@ docs for your platform), then:
 codex login
 ```
 
-Then install Jaunt from PyPI. The base install is batteries-included:
+Then install Jaunt from PyPI. The base install is batteries-included
+(pytest, pytest-asyncio, anyio, rich, and watchfiles):
 
 ```bash
-uv add jaunt   # includes pytest, pytest-asyncio, anyio, rich, and watchfiles
-# or: pip install jaunt
+pip install jaunt
+# or, in a uv-managed project (one with a pyproject.toml — run `uv init` first
+# if you don't have one):
+uv add jaunt
 ```
 
 If you’re working from the Jaunt repo itself:

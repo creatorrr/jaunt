@@ -153,9 +153,10 @@ prompts (see [Repo Context](/docs/reference/repo-context)):
 ```bash
 uv run jaunt tree             # sync the tree (AST-only descriptions by default)
 uv run jaunt tree --check     # CI gate: exit 4 if the tree is stale
-uv run jaunt tree --enrich    # force LLM enrichment of descriptions this run
-uv run jaunt tree --no-enrich # force AST-only this run
 ```
+
+LLM enrichment of descriptions is controlled by the `[context] enrich` config
+flag (default `false` — AST-only, offline).
 
 ## Log
 

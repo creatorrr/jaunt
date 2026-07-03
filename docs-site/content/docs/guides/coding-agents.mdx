@@ -26,9 +26,12 @@ the package, so the briefing always matches the installed version.
 Run outside an initialized project it still succeeds (exit `0`), printing the
 framework rules plus a note to run `jaunt init`.
 
-## Machine-Readable Everything
+## Machine-Readable Output
 
-Every command accepts `--json` (structured output on stdout, errors on stderr):
+The commands agents drive — `build`, `test`, `status`, `specs`, `instructions`,
+`jobs`, `log`, `tree`, `clean`, `watch` — accept `--json` (structured output on
+stdout, errors on stderr). A few interactive/hook commands (`guard`,
+`daemon stop`, `skill show`) do not:
 
 ```bash
 jaunt specs --json      # spec list + dependency graph

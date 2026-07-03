@@ -62,8 +62,9 @@ Before each generation call, Jaunt copies the enabled builtin skills plus your
 project's `.agents/skills/` directories into the Codex workspace under
 `.agents/skills/`. Project skills override builtins of the same name. The build
 prompt then simply tells Codex that relevant skills are available there — Codex
-reads the ones it needs. The seeded skill set participates in build freshness,
-so editing a skill regenerates the modules that could use it.
+reads the ones it needs. Note that skill content is not part of module
+freshness: editing a `SKILL.md` does not mark already-built modules stale, so
+rebuild with `jaunt build --force` (or change the spec) to pick up skill edits.
 
 ## Builtin Skills
 

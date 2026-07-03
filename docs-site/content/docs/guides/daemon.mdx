@@ -65,7 +65,7 @@ about to touch `__generated__/**`. Wire it into Claude Code via
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Edit|Write|Read|NotebookEdit",
+        "matcher": "Edit|MultiEdit|Write|Read|NotebookEdit",
         "hooks": [{ "type": "command", "command": "jaunt guard" }]
       }
     ]
