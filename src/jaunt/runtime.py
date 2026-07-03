@@ -19,7 +19,14 @@ from typing import Any, TypeVar, cast, overload
 from jaunt.decorator_analysis import analyze_magic_decorators, resolve_qualname_for_line
 from jaunt.errors import JauntError, JauntNotBuiltError
 from jaunt.paths import spec_module_to_generated_module
-from jaunt.registry import SpecEntry, register_contract, register_magic, register_test
+from jaunt.registry import (
+    SpecEntry,
+    get_magic_registry,
+    register_contract,
+    register_magic,
+    register_test,
+    unregister_magic,
+)
 from jaunt.spec_ref import SpecRef, normalize_spec_ref, normalize_spec_refs, spec_ref_from_object
 
 F = TypeVar("F", bound=Callable[..., object])
@@ -225,6 +232,11 @@ def magic(
                 raise JauntError("@magic(test=...) must be a boolean when provided.")
             decorator_kwargs["test"] = test
 
+        sealed_members: tuple[str, ...] = ()
+        base_deps: tuple[SpecRef, ...] = ()
+        if isinstance(obj, type) and class_name is None:
+            sealed_members = _absorb_method_specs(obj, module=module, class_name=qualname)
+
         analysis = analyze_magic_decorators(
             module=module,
             qualname=qualname,
@@ -232,19 +244,16 @@ def magic(
             decorated_obj=obj,
         )
 
-        merged_auto_deps = analysis.auto_deps
         if isinstance(obj, type) and class_name is None:
             from jaunt.class_analysis import resolve_base_contract
 
-            base_refs: list[SpecRef] = []
+            refs: list[SpecRef] = []
             for ref_str in resolve_base_contract(obj).project_base_refs:
                 try:
-                    base_refs.append(normalize_spec_ref(ref_str))
+                    refs.append(normalize_spec_ref(ref_str))
                 except Exception:
                     continue
-            if base_refs:
-                merged: set[SpecRef] = set(analysis.auto_deps) | set(base_refs)
-                merged_auto_deps = tuple(sorted(merged, key=lambda ref: str(ref)))
+            base_deps = tuple(sorted(set(refs), key=lambda ref: str(ref)))
 
         entry = SpecEntry(
             kind="magic",
@@ -255,7 +264,9 @@ def magic(
             obj=obj,
             decorator_kwargs=decorator_kwargs,
             class_name=class_name,
-            auto_deps=merged_auto_deps,
+            auto_deps=analysis.auto_deps,
+            sealed_members=sealed_members,
+            base_deps=base_deps,
             decorator_api_records=analysis.records,
             effective_signature=analysis.effective_signature,
             effective_signature_source=analysis.effective_signature_source,
@@ -358,6 +369,51 @@ def _unwrap_from_class(cls: type, name: str) -> Callable[..., object]:
     if isinstance(raw, (classmethod, staticmethod)):
         return cast(Callable[..., object], raw.__func__)
     return cast(Callable[..., object], raw)
+
+
+def _absorb_method_specs(cls_obj: type, *, module: str, class_name: str) -> tuple[str, ...]:
+    """Fold inner ``@magic`` method specs into their whole-class spec.
+
+    Returns the sorted member names that become the class's sealed tier.
+    Restores original functions (recovered via ``__wrapped__``) onto the class
+    so the registered runtime object matches the source AST.
+    """
+
+    absorbed = [
+        e
+        for e in list(get_magic_registry().values())
+        if e.kind == "magic" and e.module == module and e.class_name == class_name
+    ]
+    names: list[str] = []
+    for entry in absorbed:
+        unregister_magic(entry.spec_ref)
+        member_name = entry.qualname.rsplit(".", 1)[-1]
+        if entry.decorator_kwargs:
+            raise JauntError(
+                f"{class_name}.{member_name}: inner @jaunt.magic inside a whole-class "
+                "spec takes no kwargs (v1); move deps=/test=/prompt= to the class-level "
+                "@jaunt.magic."
+            )
+        slot = cls_obj.__dict__.get(member_name)
+        if isinstance(slot, property):
+            raise JauntError(
+                f"{class_name}.{member_name}: @property cannot be sealed with inner "
+                "@jaunt.magic (v1)."
+            )
+        descriptor_type: type | None = None
+        wrapper: Any = slot
+        if isinstance(slot, (classmethod, staticmethod)):
+            descriptor_type = type(slot)
+            wrapper = slot.__func__
+        original = getattr(wrapper, "__wrapped__", None)
+        if original is None:
+            continue  # wrapper shape unknown; leave the slot alone (AST layer still seals)
+        if getattr(wrapper, "__isabstractmethod__", False):
+            original.__isabstractmethod__ = True
+        restored: object = original if descriptor_type is None else descriptor_type(original)
+        setattr(cls_obj, member_name, restored)
+        names.append(member_name)
+    return tuple(sorted(names))
 
 
 def _make_method_wrapper(

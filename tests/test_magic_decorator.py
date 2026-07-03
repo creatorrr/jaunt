@@ -611,7 +611,258 @@ def test_whole_class_records_project_base_dep(
         _import_module_from_source(tmp_path, module_name, src)
         child_ref = normalize_spec_ref(f"{module_name}:Child")
         entry = get_magic_registry()[child_ref]
-        dep_strs = {str(d) for d in entry.auto_deps}
-        assert any(d.endswith(":Base") for d in dep_strs)
+        base_strs = {str(d) for d in entry.base_deps}
+        assert any(d.endswith(":Base") for d in base_strs)
+        # The base ref is recorded in base_deps, NOT merged into auto_deps.
+        auto_strs = {str(d) for d in entry.auto_deps}
+        assert not any(d.endswith(":Base") for d in auto_strs)
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+# ---------------------------------------------------------------------------
+# Whole-class absorption of inner @magic method specs (sealed tier)
+# ---------------------------------------------------------------------------
+
+
+def test_inner_magic_absorbed_into_whole_class_spec(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def _import(_name: str) -> Any:
+        raise ModuleNotFoundError(_name)
+
+    monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+    clear_registries()
+    module_name = "tmp_absorb_basic"
+    src = '''
+    import jaunt
+
+    @jaunt.magic()
+    class Engine:
+        """An engine."""
+
+        @jaunt.magic
+        def start(self, power: int) -> bool: ...
+
+        def helper(self): ...
+    '''
+    try:
+        _import_module_from_source(tmp_path, module_name, src)
+        reg = get_magic_registry()
+        refs = [str(r) for r in reg]
+        # No phantom method spec — the inner @magic is absorbed into the class.
+        assert refs == [f"{module_name}:Engine"]
+        entry = reg[normalize_spec_ref(f"{module_name}:Engine")]
+        assert entry.sealed_members == ("start",)
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_inner_magic_original_function_restored(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def _import(_name: str) -> Any:
+        raise ModuleNotFoundError(_name)
+
+    monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+    clear_registries()
+    module_name = "tmp_absorb_restore"
+    src = '''
+    import jaunt
+
+    @jaunt.magic()
+    class Engine:
+        """An engine."""
+
+        @jaunt.magic
+        def start(self, power: int) -> bool: ...
+    '''
+    try:
+        _import_module_from_source(tmp_path, module_name, src)
+        entry = get_magic_registry()[normalize_spec_ref(f"{module_name}:Engine")]
+        cls_obj = entry.obj
+        assert isinstance(cls_obj, type)
+        member = cls_obj.__dict__["start"]
+        # The registered class member is the restored original stub, not a wrapper.
+        assert not hasattr(member, "__wrapped__")
+        assert member.__name__ == "start"
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_inner_magic_classmethod_descriptor_reconstructed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def _import(_name: str) -> Any:
+        raise ModuleNotFoundError(_name)
+
+    monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+    clear_registries()
+    module_name = "tmp_absorb_classmethod"
+    src = '''
+    import jaunt
+
+    @jaunt.magic()
+    class Engine:
+        """doc"""
+
+        @classmethod
+        @jaunt.magic
+        def make(cls) -> "Engine": ...
+    '''
+    try:
+        _import_module_from_source(tmp_path, module_name, src)
+        entry = get_magic_registry()[normalize_spec_ref(f"{module_name}:Engine")]
+        cls_obj = entry.obj
+        assert isinstance(cls_obj, type)
+        assert isinstance(cls_obj.__dict__["make"], classmethod)
+        assert entry.sealed_members == ("make",)
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_inner_magic_staticmethod_descriptor_reconstructed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def _import(_name: str) -> Any:
+        raise ModuleNotFoundError(_name)
+
+    monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+    clear_registries()
+    module_name = "tmp_absorb_staticmethod"
+    src = '''
+    import jaunt
+
+    @jaunt.magic()
+    class Engine:
+        """doc"""
+
+        @staticmethod
+        @jaunt.magic
+        def validate(value: int) -> bool: ...
+    '''
+    try:
+        _import_module_from_source(tmp_path, module_name, src)
+        entry = get_magic_registry()[normalize_spec_ref(f"{module_name}:Engine")]
+        cls_obj = entry.obj
+        assert isinstance(cls_obj, type)
+        assert isinstance(cls_obj.__dict__["validate"], staticmethod)
+        assert entry.sealed_members == ("validate",)
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_inner_magic_abstractmethod_flag_carried(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def _import(_name: str) -> Any:
+        raise ModuleNotFoundError(_name)
+
+    monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+    clear_registries()
+    module_name = "tmp_absorb_abstract"
+    # A plain class (metaclass ``type``) keeps the metaclass guard happy; the
+    # ``@abc.abstractmethod`` marker only sets ``__isabstractmethod__`` on the
+    # function, which is what we assert is carried onto the restored original.
+    src = '''
+    import abc
+    import jaunt
+
+    @jaunt.magic()
+    class Engine:
+        """doc"""
+
+        @abc.abstractmethod
+        @jaunt.magic
+        def start(self) -> None: ...
+    '''
+    try:
+        _import_module_from_source(tmp_path, module_name, src)
+        entry = get_magic_registry()[normalize_spec_ref(f"{module_name}:Engine")]
+        cls_obj = entry.obj
+        assert isinstance(cls_obj, type)
+        member = cls_obj.__dict__["start"]
+        assert getattr(member, "__isabstractmethod__", False) is True
+        assert entry.sealed_members == ("start",)
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_inner_magic_with_kwargs_rejected(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def _import(_name: str) -> Any:
+        raise ModuleNotFoundError(_name)
+
+    monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+    clear_registries()
+    module_name = "tmp_absorb_kwargs"
+    src = '''
+    import jaunt
+
+    @jaunt.magic()
+    class Engine:
+        """doc"""
+
+        @jaunt.magic(deps=[])
+        def start(self) -> None: ...
+    '''
+    try:
+        with pytest.raises(JauntError, match="kwargs"):
+            _import_module_from_source(tmp_path, module_name, src)
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_inner_magic_on_property_rejected(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def _import(_name: str) -> Any:
+        raise ModuleNotFoundError(_name)
+
+    monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+    clear_registries()
+    module_name = "tmp_absorb_property"
+    src = '''
+    import jaunt
+
+    @jaunt.magic()
+    class Engine:
+        """doc"""
+
+        @property
+        @jaunt.magic
+        def value(self) -> int: ...
+    '''
+    try:
+        with pytest.raises(JauntError, match="property"):
+            _import_module_from_source(tmp_path, module_name, src)
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_standalone_method_magic_unchanged(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def _import(_name: str) -> Any:
+        raise ModuleNotFoundError(_name)
+
+    monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+    clear_registries()
+    module_name = "tmp_standalone_method"
+    src = """
+    import jaunt
+
+    class Plain:
+        @jaunt.magic()
+        def go(self) -> int: ...
+    """
+    try:
+        _import_module_from_source(tmp_path, module_name, src)
+        # An undecorated class keeps standalone method-spec behavior (no absorption).
+        refs = [str(r) for r in get_magic_registry()]
+        assert refs == [f"{module_name}:Plain.go"]
     finally:
         sys.modules.pop(module_name, None)
