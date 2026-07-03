@@ -1231,8 +1231,10 @@ def _build_expected_names(entries: list[SpecEntry]) -> tuple[list[str], list[str
     if conflicts:
         names = ", ".join(sorted(conflicts))
         return expected, [
-            f"Conflicting @magic: class(es) {names} have both whole-class @magic "
-            f"and per-method @magic decorators. Use one or the other."
+            f"Conflicting @magic: class(es) {names} have both whole-class @magic and "
+            "per-method @magic registry entries. Inner @magic methods of a whole-class "
+            "spec should have been absorbed at import time; this indicates a "
+            "registration bug (or a hand-constructed registry)."
         ]
 
     return expected, []
