@@ -583,6 +583,7 @@ def _class_validation_inputs(entry: SpecEntry) -> dict[str, object]:
     import ast as _ast
 
     from jaunt.class_analysis import (
+        canonical_signature,
         classify_class_mode,
         is_preserve_decorator,
         resolve_base_contract,
@@ -627,6 +628,7 @@ def _class_validation_inputs(entry: SpecEntry) -> dict[str, object]:
         "spec_docstring": _ast.get_docstring(cls_node, clean=True) or "",
         "class_attributes": class_attributes,
         "require_public_method": classify_class_mode(cls_node) == "docstring_only",
+        "sealed_signatures": {name: canonical_signature(methods[name]) for name in split.sealed},
     }
 
 

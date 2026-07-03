@@ -74,6 +74,33 @@ def _is_not_implemented(node: ast.Raise) -> bool:
     return False
 
 
+def canonical_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+    """Formatting-insensitive signature identity for sealed-method comparison."""
+
+    a = node.args
+    n_pos = len(a.posonlyargs) + len(a.args)
+    pos_defaults = [None] * (n_pos - len(a.defaults)) + list(a.defaults)
+
+    def render(arg: ast.arg, default: ast.expr | None) -> list[str]:
+        return [
+            arg.arg,
+            ast.unparse(arg.annotation) if arg.annotation else "",
+            ast.unparse(default) if default is not None else "",
+        ]
+
+    parts: list[object] = ["async" if isinstance(node, ast.AsyncFunctionDef) else "def"]
+    ordered = [*a.posonlyargs, *a.args]
+    parts.append([render(arg, d) for arg, d in zip(ordered, pos_defaults, strict=True)])
+    parts.append(len(a.posonlyargs))
+    parts.append(a.vararg.arg if a.vararg else "")
+    parts.append([render(arg, d) for arg, d in zip(a.kwonlyargs, a.kw_defaults, strict=True)])
+    parts.append(a.kwarg.arg if a.kwarg else "")
+    parts.append(ast.unparse(node.returns) if node.returns else "")
+    import json
+
+    return json.dumps(parts, sort_keys=False, separators=(",", ":"))
+
+
 @dataclass(frozen=True, slots=True)
 class MemberSplit:
     stubs: tuple[str, ...]

@@ -808,6 +808,7 @@ def validate_build_class_source(
     spec_docstring: str,
     class_attributes: dict[str, str] | None = None,
     require_public_method: bool = False,
+    sealed_signatures: dict[str, str] | None = None,
 ) -> list[str]:
     try:
         mod = ast.parse(source or "")
@@ -871,6 +872,21 @@ def validate_build_class_source(
             errors.append(
                 f"{class_name}: method {name!r} was left as a stub; implement it per the spec."
             )
+
+    # Sealed methods: signature is the contract -- exact match required.
+    if sealed_signatures:
+        from jaunt.class_analysis import canonical_signature
+
+        for name, expected_sig in sealed_signatures.items():
+            node = methods.get(name)
+            if node is None:
+                continue  # the stub-existence check above already errored
+            if canonical_signature(node) != expected_sig:
+                errors.append(
+                    f"{class_name}.{name}: sealed method signature drifted; implement "
+                    f"exactly the declared signature (params, defaults, annotations, "
+                    f"and return type) -- do not rename, add, or remove parameters."
+                )
 
     # Class-attribute preservation: every spec class attribute must survive with the
     # same annotation/value (compared modulo formatting via ast.unparse round-trip).
