@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
+from jaunt.class_analysis import canonical_signature
 from jaunt.validation import class_build_warnings, validate_build_class_source
 
 
@@ -149,3 +152,149 @@ def test_passes_when_class_attribute_retained() -> None:
     src = 'class C:\n    "A class."\n    CAPACITY: int = 10\n    def do(self):\n        return 1\n'
     kw = _kw(class_attributes={"CAPACITY": "CAPACITY: int = 10"})
     assert validate_build_class_source(src, **kw) == []
+
+
+def _sig(src: str) -> str:
+    import ast
+
+    fn = ast.parse(src).body[0]
+    assert isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+    return canonical_signature(fn)
+
+
+SEALED = {"m": _sig("def m(self, x: int, *, retries: int = 3) -> bool: ...")}
+
+
+def test_sealed_exact_match_passes() -> None:
+    out = "class C:\n    def m(self, x: int, *, retries: int = 3) -> bool:\n        return True\n"
+    errs = validate_build_class_source(
+        out,
+        class_name="C",
+        stub_methods=["m"],
+        preserved_segments={},
+        declared_bases=[],
+        class_decorators=[],
+        required_abstractmethods=[],
+        spec_docstring="",
+        sealed_signatures=SEALED,
+    )
+    assert errs == []
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "def m(self, x: int, *, tries: int = 3) -> bool:",  # renamed param
+        "def m(self, x: int, *, retries: int = 5) -> bool:",  # changed default
+        "def m(self, x: int, *, retries: int = 3) -> int:",  # changed return
+        "def m(self, x: int, extra: str, *, retries: int = 3) -> bool:",  # added param
+    ],
+)
+def test_sealed_drift_is_error(bad: str) -> None:
+    out = f"class C:\n    {bad}\n        return True\n"
+    errs = validate_build_class_source(
+        out,
+        class_name="C",
+        stub_methods=["m"],
+        preserved_segments={},
+        declared_bases=[],
+        class_decorators=[],
+        required_abstractmethods=[],
+        spec_docstring="",
+        sealed_signatures=SEALED,
+    )
+    assert any("sealed" in e for e in errs)
+
+
+def test_guidepost_drift_stays_warn_only() -> None:
+    # No sealed_signatures entry for the method => drift produces no error here
+    # (class_build_warnings still warns on dropped params — unchanged).
+    out = "class C:\n    def m(self, renamed: int) -> bool:\n        return True\n"
+    errs = validate_build_class_source(
+        out,
+        class_name="C",
+        stub_methods=["m"],
+        preserved_segments={},
+        declared_bases=[],
+        class_decorators=[],
+        required_abstractmethods=[],
+        spec_docstring="",
+        sealed_signatures={},
+    )
+    assert errs == []
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "def m(self, *items: str, **opts: str) -> None:",  # vararg annotation drift
+        "def m(self, *items: int, **opts: bytes) -> None:",  # kwarg annotation drift
+        "def m(self, *items, **opts: str) -> None:",  # vararg annotation dropped
+    ],
+)
+def test_sealed_vararg_kwarg_annotation_drift_is_error(bad: str) -> None:
+    sealed = {"m": _sig("def m(self, *items: int, **opts: str) -> None: ...")}
+    out = f"class C:\n    {bad}\n        return None\n"
+    errs = validate_build_class_source(
+        out,
+        class_name="C",
+        stub_methods=["m"],
+        preserved_segments={},
+        declared_bases=[],
+        class_decorators=[],
+        required_abstractmethods=[],
+        spec_docstring="",
+        sealed_signatures=sealed,
+    )
+    assert any("sealed" in e for e in errs)
+
+
+def test_sealed_vararg_kwarg_annotations_preserved_passes() -> None:
+    sealed = {"m": _sig("def m(self, *items: int, **opts: str) -> None: ...")}
+    out = "class C:\n    def m(self, *items: int, **opts: str) -> None:\n        return None\n"
+    errs = validate_build_class_source(
+        out,
+        class_name="C",
+        stub_methods=["m"],
+        preserved_segments={},
+        declared_bases=[],
+        class_decorators=[],
+        required_abstractmethods=[],
+        spec_docstring="",
+        sealed_signatures=sealed,
+    )
+    assert errs == []
+
+
+def test_sealed_classmethod_downgraded_to_plain_is_error() -> None:
+    sealed = {"make": _sig("@classmethod\ndef make(cls) -> 'C': ...")}
+    out = "class C:\n    def make(cls) -> 'C':\n        return cls()\n"
+    errs = validate_build_class_source(
+        out,
+        class_name="C",
+        stub_methods=["make"],
+        preserved_segments={},
+        declared_bases=[],
+        class_decorators=[],
+        required_abstractmethods=[],
+        spec_docstring="",
+        sealed_signatures=sealed,
+    )
+    assert any("sealed" in e for e in errs)
+
+
+def test_sealed_classmethod_preserved_passes() -> None:
+    sealed = {"make": _sig("@classmethod\ndef make(cls) -> 'C': ...")}
+    out = "class C:\n    @classmethod\n    def make(cls) -> 'C':\n        return cls()\n"
+    errs = validate_build_class_source(
+        out,
+        class_name="C",
+        stub_methods=["make"],
+        preserved_segments={},
+        declared_bases=[],
+        class_decorators=[],
+        required_abstractmethods=[],
+        spec_docstring="",
+        sealed_signatures=sealed,
+    )
+    assert errs == []

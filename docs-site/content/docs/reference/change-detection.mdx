@@ -56,6 +56,16 @@ Layer A still applies.
   rejects.
 </Callout>
 
+## Inherited Base API (`base_api_digest`)
+
+A whole-class spec that inherits from a **cross-module** spec'd base also tracks that base's *generated public API*. Jaunt hashes the rendered inherited-API block — method signatures **and** docstrings, read from the base's built artifact — into the subclass's context digest and records it in the generated header as `base_api_digest`.
+
+- Change the base's public API — a signature **or a docstring** on any generated public method — and the subclass restales, even if you never touched the subclass's own spec.
+- A **body-only** rebuild of the base (same signatures, same docstrings) leaves the block unchanged, so the subclass stays fresh.
+- The header always stores the post-dependency (fresh) value, so a later `jaunt status` recomputes the same digest from the same artifacts — no flapping.
+
+Because a moved base API can mean the subclass body genuinely needs to change, the Layer B re-freeze path (above) is **refused** when a base's API digest has moved: Jaunt falls back to a full rebuild rather than re-freezing over a possibly-stale body.
+
 ## What Else Participates In Freshness
 
 Beyond the spec contract itself, Jaunt fingerprints the generation runtime:

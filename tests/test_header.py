@@ -4,6 +4,7 @@ import json
 
 from jaunt.header import (
     HEADER_MARKER,
+    extract_base_api_digest,
     extract_generation_fingerprint,
     extract_module_api_digest,
     extract_module_context_digest,
@@ -81,3 +82,43 @@ def test_format_header_includes_generation_fingerprint_when_provided() -> None:
     assert extract_generation_fingerprint(hdr + "x=1\n") == "sha256:deadbeef"
     assert extract_module_context_digest(hdr + "x=1\n") == "sha256:facefeed"
     assert extract_module_api_digest(hdr + "x=1\n") == "sha256:cafefeed"
+
+
+def test_base_api_digest_absent_by_default_is_byte_compatible() -> None:
+    # A header without base_api_digest must be byte-identical to the pre-feature
+    # header: the field is emitted only when non-empty.
+    without = format_header(
+        tool_version="0.1.0",
+        kind="build",
+        source_module="pkg.specs",
+        module_digest="sha256:abc123",
+        spec_refs=[],
+    )
+    with_empty = format_header(
+        tool_version="0.1.0",
+        kind="build",
+        source_module="pkg.specs",
+        module_digest="sha256:abc123",
+        base_api_digest="",
+        spec_refs=[],
+    )
+    assert without == with_empty
+    assert "base_api_digest" not in without
+    assert extract_base_api_digest(without) is None
+
+
+def test_base_api_digest_written_and_extracted_when_present() -> None:
+    hdr = format_header(
+        tool_version="0.1.0",
+        kind="build",
+        source_module="pkg.child",
+        module_digest="sha256:abc123",
+        module_context_digest="facefeed",
+        base_api_digest="beadfeed",
+        spec_refs=[],
+    )
+    parsed = parse_header(hdr)
+    assert parsed is not None
+    assert parsed["base_api_digest"] == "sha256:beadfeed"
+    assert extract_base_api_digest(hdr + "x=1\n") == "sha256:beadfeed"
+    assert extract_base_api_digest("x=1\n") is None

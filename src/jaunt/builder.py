@@ -42,10 +42,11 @@ from jaunt.digest import (
     prose_digest,
     structural_digest,
 )
-from jaunt.errors import JauntDependencyCycleError, JauntGenerationError
+from jaunt.errors import JauntDependencyCycleError, JauntError, JauntGenerationError
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
 from jaunt.generate.shared import fmt_kv_block
 from jaunt.header import (
+    extract_base_api_digest,
     extract_digest_scheme,
     extract_generation_fingerprint,
     extract_module_api_digest,
@@ -194,6 +195,7 @@ def detect_stale_modules(
     spec_graph: dict[SpecRef, set[SpecRef]],
     generation_fingerprint: str = "",
     module_context_digests: dict[str, str] | None = None,
+    module_base_api_digests: dict[str, str] | None = None,
     force: bool = False,
 ) -> set[str]:
     if force:
@@ -237,6 +239,16 @@ def detect_stale_modules(
                 or on_disk_context != computed_context
             ):
                 stale.add(module_name)
+        if module_name in stale:
+            continue
+        if module_base_api_digests is not None:
+            computed_base = module_base_api_digests.get(module_name)
+            if computed_base:
+                on_disk_base = _normalize_digest(extract_base_api_digest(existing))
+                norm_computed_base = _normalize_digest(computed_base)
+                if on_disk_base is None or on_disk_base != norm_computed_base:
+                    stale.add(module_name)
+                    continue
 
     return stale
 
@@ -450,6 +462,7 @@ async def plan_refreeze_or_rebuild(
     stale_modules: set[str],
     header_fields_by_module: dict[str, dict[str, object]],
     cfg: SemanticGateConfig,
+    base_api_changed: set[str] | frozenset[str] = frozenset(),
     gate_enabled: bool = True,
     validators_by_module: dict[str, Callable[[str], list[str]]] | None = None,
     run_exec=None,
@@ -463,6 +476,11 @@ async def plan_refreeze_or_rebuild(
     validators = validators_by_module or {}
 
     for module_name in sorted(stale_modules):
+        if module_name in base_api_changed:
+            # A spec'd base's generated public API moved (or was never captured):
+            # the generated body may genuinely need to change -- never refreeze.
+            rebuild.add(module_name)
+            continue
         entries = module_specs.get(module_name, [])
         header_fields = _header_fields_with_spec_digests(
             header_fields_by_module.get(module_name, {}),
@@ -570,6 +588,14 @@ class BuildModuleContextArtifacts:
     digest: str
 
 
+@dataclass(frozen=True, slots=True)
+class WholeClassContext:
+    base_contract_block: str
+    inherited_api_block: str
+    whole_class_contract_block: str
+    base_api_digest: str
+
+
 def _whole_class_specs(entries: list[SpecEntry]) -> dict[str, SpecEntry]:
     """Map class name -> SpecEntry for whole-class @magic specs (obj is a type, no dot)."""
     out: dict[str, SpecEntry] = {}
@@ -583,6 +609,7 @@ def _class_validation_inputs(entry: SpecEntry) -> dict[str, object]:
     import ast as _ast
 
     from jaunt.class_analysis import (
+        canonical_signature,
         classify_class_mode,
         is_preserve_decorator,
         resolve_base_contract,
@@ -627,6 +654,7 @@ def _class_validation_inputs(entry: SpecEntry) -> dict[str, object]:
         "spec_docstring": _ast.get_docstring(cls_node, clean=True) or "",
         "class_attributes": class_attributes,
         "require_public_method": classify_class_mode(cls_node) == "docstring_only",
+        "sealed_signatures": {name: canonical_signature(methods[name]) for name in split.sealed},
     }
 
 
@@ -657,13 +685,116 @@ def _class_warning_inputs(entry: SpecEntry) -> dict[str, object]:
     }
 
 
-def _base_contract_block(entries: list[SpecEntry]) -> str:
-    from jaunt.class_analysis import resolve_base_contract
+def _render_inherited_signature(signature: str, name: str) -> str:
+    """Render a generated member's signature for the inherited-API block.
 
-    blocks: list[str] = []
-    for entry in _whole_class_specs(entries).values():
-        blocks.append(resolve_base_contract(entry.obj).block)  # type: ignore[arg-type]
-    return "\n\n".join(blocks)
+    Strips the leading ``def ``/``async def ``/``class `` keyword so the line reads as
+    ``ClassName.method(args) -> ret`` when prefixed with the owning class name.
+    """
+
+    for prefix in ("async def ", "def ", "class "):
+        if signature.startswith(prefix):
+            return signature[len(prefix) :]
+    return signature or name
+
+
+def _whole_class_context(
+    entries: list[SpecEntry],
+    *,
+    specs: dict[SpecRef, SpecEntry],
+    package_dir: Path,
+    generated_dir: str,
+) -> WholeClassContext:
+    """Assemble base-class context for the whole-class specs in ``entries``."""
+
+    from jaunt.class_analysis import render_whole_class_contract, resolve_base_contract
+    from jaunt.digest import extract_source_segment
+    from jaunt.module_api import build_generated_class_api_summary
+
+    whole = _whole_class_specs(entries)
+    base_blocks: list[str] = []
+    inherited_lines: list[str] = []
+    contract_blocks: list[str] = []
+
+    for entry in whole.values():
+        # Cross-module spec'd bases are represented below by the artifact-derived
+        # inherited-API block, not the runtime MRO snapshot. Excluding them from the
+        # runtime base-contract block keeps the hashed context stable across a build
+        # and a later `jaunt status` re-import: the runtime base object reflects
+        # import-time build state (a placeholder before the base is built, the
+        # generated class after), which would otherwise flap the digest. External /
+        # non-spec bases and same-module co-generated bases keep runtime rendering.
+        cross_module_base_refs: set[str] = set()
+        for dep_ref in entry.base_deps:
+            base_spec = specs.get(dep_ref)
+            if base_spec is not None and base_spec.module != entry.module:
+                cross_module_base_refs.add(str(dep_ref))
+        base_block = resolve_base_contract(
+            entry.obj,  # type: ignore[arg-type]
+            exclude_refs=cross_module_base_refs,
+        ).block
+        base_blocks.append(base_block)
+
+        entry_inherited: list[str] = []
+        for dep_ref in entry.base_deps:
+            dep = specs.get(dep_ref)
+            if dep is None or dep.module == entry.module:
+                continue
+            gen_path = package_dir / _generated_relpath(dep.module, generated_dir=generated_dir)
+            try:
+                gen_src = gen_path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                # Base genuinely not built yet -> fixed sentinel (design §5).
+                entry_inherited.append(f"unbuilt:{dep_ref!s}")
+                continue
+            try:
+                summary = build_generated_class_api_summary(
+                    gen_src,
+                    dep.qualname,
+                    spec_docstring="",
+                )
+            except Exception as exc:
+                # A present-but-corrupt base artifact (syntax error, missing class)
+                # must surface, not silently degrade to the `unbuilt` sentinel.
+                raise JauntError(
+                    f"Base generated artifact for {dep_ref!s} at {gen_path} could not be "
+                    f"summarized ({exc}); the base's generated code is missing its class "
+                    "or is not valid Python."
+                ) from exc
+            for member in summary.members:
+                rendered_signature = _render_inherited_signature(member.signature, member.name)
+                entry_inherited.append(f"{dep.qualname}.{rendered_signature}")
+                if member.doc:
+                    # Hash the full docstring, not just the first line: docstrings are
+                    # behavioral contract, so a second-line-only change to a base's
+                    # public API must restale the subclass (design §5).
+                    doc_lines = member.doc.splitlines()
+                    if len(doc_lines) == 1:
+                        entry_inherited.append(f"  doc: {doc_lines[0]}")
+                    else:
+                        entry_inherited.append("  doc:")
+                        entry_inherited.extend(f"    {line}" for line in doc_lines)
+
+        inherited_lines.extend(entry_inherited)
+        contract_blocks.append(
+            render_whole_class_contract(
+                class_segment=extract_source_segment(entry),
+                base_contract_block=base_block,
+                inherited_api_block="\n".join(entry_inherited),
+            )
+        )
+
+    inherited_api_block = "\n".join(inherited_lines)
+    return WholeClassContext(
+        base_contract_block="\n\n".join(base_blocks),
+        inherited_api_block=inherited_api_block,
+        whole_class_contract_block="\n\n".join(contract_blocks),
+        base_api_digest=(
+            hashlib.sha256(inherited_api_block.encode("utf-8")).hexdigest()
+            if inherited_api_block
+            else ""
+        ),
+    )
 
 
 def build_module_context_artifacts(
@@ -678,10 +809,10 @@ def build_module_context_artifacts(
     generated_dir: str,
     build_instructions: Sequence[str] | None = None,
     targeted_test_entries: dict[str, list[SpecEntry]] | None = None,
-    base_contract_block: str | None = None,
+    base_contract_block: str = "",
+    whole_class_contract_block: str = "",
+    inherited_api_block: str = "",
 ) -> BuildModuleContextArtifacts:
-    if base_contract_block is None:
-        base_contract_block = _base_contract_block(entries)
     module_contract = build_module_contract(
         entries=entries,
         expected_names=expected_names,
@@ -710,6 +841,8 @@ def build_module_context_artifacts(
         attached_test_specs_block=attached_test_specs_block,
         package_context_block=package_context_block,
         base_contract_block=base_contract_block,
+        whole_class_contract_block=whole_class_contract_block,
+        inherited_api_block=inherited_api_block,
     )
     return BuildModuleContextArtifacts(
         module_contract_block=module_contract.prompt_block,
@@ -731,6 +864,8 @@ def _build_context_digest(
     attached_test_specs_block: str,
     package_context_block: str,
     base_contract_block: str,
+    whole_class_contract_block: str = "",
+    inherited_api_block: str = "",
 ) -> str:
     h = hashlib.sha256()
     for block in (
@@ -743,6 +878,10 @@ def _build_context_digest(
     ):
         h.update((block or "").encode("utf-8"))
         h.update(b"\x00")
+    for block in (whole_class_contract_block, inherited_api_block):
+        if block:
+            h.update(block.encode("utf-8"))
+            h.update(b"\x00")
     return h.hexdigest()
 
 
@@ -1231,8 +1370,10 @@ def _build_expected_names(entries: list[SpecEntry]) -> tuple[list[str], list[str
     if conflicts:
         names = ", ".join(sorted(conflicts))
         return expected, [
-            f"Conflicting @magic: class(es) {names} have both whole-class @magic "
-            f"and per-method @magic decorators. Use one or the other."
+            f"Conflicting @magic: class(es) {names} have both whole-class @magic and "
+            "per-method @magic registry entries. Inner @magic methods of a whole-class "
+            "spec should have been absorbed at import time; this indicates a "
+            "registration bug (or a hand-constructed registry)."
         ]
 
     return expected, []
@@ -1637,7 +1778,12 @@ async def run_build(
                 if lines:
                     decorator_apis[entry.spec_ref] = "\n".join(lines)
 
-            base_contract_block = _base_contract_block(component_entries)
+            wcc = _whole_class_context(
+                component_entries,
+                specs=specs,
+                package_dir=package_dir,
+                generated_dir=generated_dir,
+            )
             component_contract = build_module_context_artifacts(
                 module_name=module_name,
                 entries=entries,
@@ -1649,17 +1795,17 @@ async def run_build(
                 generated_dir=generated_dir,
                 build_instructions=build_instructions,
                 targeted_test_entries=targeted_test_entries,
-                base_contract_block=base_contract_block,
+                base_contract_block=wcc.base_contract_block,
+                whole_class_contract_block=wcc.whole_class_contract_block,
+                inherited_api_block=wcc.inherited_api_block,
             )
             whole = _whole_class_specs(component_entries)
             seed_target_content = ""
-            whole_class_contract_block = ""
+            whole_class_contract_block = wcc.whole_class_contract_block
             if whole:
                 from jaunt.class_analysis import (
                     build_class_scaffold,
                     collect_spec_module_imports,
-                    render_whole_class_contract,
-                    resolve_base_contract,
                 )
 
                 spec_src = Path(component_entries[0].source_file).read_text(encoding="utf-8")
@@ -1672,13 +1818,6 @@ async def run_build(
                     seed_parts.append("\n".join(imports))
                 seed_parts.extend(scaffolds)
                 seed_target_content = "\n\n\n".join(seed_parts).rstrip() + "\n"
-                whole_class_contract_block = "\n\n".join(
-                    render_whole_class_contract(
-                        class_segment=extract_source_segment(e),
-                        base_contract_block=resolve_base_contract(e.obj).block,  # type: ignore[arg-type]
-                    )
-                    for e in whole.values()
-                )
             relevant_block = ""
             relevant_files: tuple[tuple[str, str], ...] = ()
             if search_enabled:
@@ -1802,6 +1941,12 @@ async def run_build(
 
             return _validate_candidate, _retry_validator
 
+        wcc_module = _whole_class_context(
+            entries,
+            specs=specs,
+            package_dir=package_dir,
+            generated_dir=generated_dir,
+        )
         module_contract = build_module_context_artifacts(
             module_name=module_name,
             entries=entries,
@@ -1813,7 +1958,9 @@ async def run_build(
             generated_dir=generated_dir,
             build_instructions=build_instructions,
             targeted_test_entries=targeted_test_entries,
-            base_contract_block=_base_contract_block(entries),
+            base_contract_block=wcc_module.base_contract_block,
+            whole_class_contract_block=wcc_module.whole_class_contract_block,
+            inherited_api_block=wcc_module.inherited_api_block,
         )
         handwritten_names = module_contract.handwritten_names
 
@@ -1940,6 +2087,8 @@ async def run_build(
             "module_api_digest": module_api_digest(entries),
             "spec_refs": [str(e.spec_ref) for e in entries],
         }
+        if wcc_module.base_api_digest:
+            header_fields["base_api_digest"] = wcc_module.base_api_digest
         spec_digests = _compute_spec_digests(entries)
         snapshots = _compute_snapshots(entries)
 

@@ -301,4 +301,4 @@ def test_rejects_class_and_method_magic_on_same_class(tmp_path: Path) -> None:
     # Should fail with an error about conflicting class/method magic
     assert "pkg.mod" in report.failed
     errs = report.failed["pkg.mod"]
-    assert any("conflict" in e.lower() or "both" in e.lower() for e in errs)
+    assert any("should have been absorbed" in e for e in errs)

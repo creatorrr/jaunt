@@ -128,6 +128,38 @@ class LRUCache:
 
 This "whole-class" style hands full control to the LLM — it decides `__init__`, internal data structures, and method signatures.
 
+### Method Tiers In A Whole-Class Spec
+
+Inside a whole-class spec you can steer how much freedom the generator has per method. Every method falls into exactly one of three tiers:
+
+| Tier | Marker | Body | The generator may |
+|------|--------|------|-------------------|
+| **Preserved** | `@jaunt.preserve` | hand-written | nothing — the method is emitted verbatim |
+| **Sealed** | inner `@jaunt.magic` | stub | implement the body only; the signature (params, defaults, annotations, return type) is enforced **exactly** |
+| **Guidepost** | none (default) | stub | adapt the signature, rename/add parameters, split into several methods, or add public methods — the docstring is the contract |
+
+`@jaunt.magic` on a method *inside* a `@jaunt.magic()` class means exactly what it means everywhere else — "Jaunt implements this, as declared" — so the declared signature becomes a lock:
+
+```python
+import jaunt
+
+
+@jaunt.magic()
+class TokenBucket:
+    """A token-bucket rate limiter. Design the storage and refill internals."""
+
+    @jaunt.magic
+    def allow(self, cost: int = 1) -> bool: ...  # sealed: signature is the contract
+
+    def describe(self) -> str: ...               # guidepost: adapt freely
+
+    @jaunt.preserve
+    def reset(self) -> None:                     # preserved: kept verbatim
+        self._tokens = self.capacity
+```
+
+Sealed-signature drift is a hard build error; guidepost drift is only a warning. Inner `@jaunt.magic` inside a whole-class spec takes no kwargs and cannot sit under `@property` (v1) — use a guidepost stub or `@jaunt.preserve` instead.
+
 For dependency freshness, the exported API of a whole-class spec includes the class signature plus declared members and method signatures. Adding, removing, or changing those members is a downstream contract change.
 
 Current constraint: custom metaclasses are not supported for `@jaunt.magic` classes.
@@ -207,6 +239,8 @@ You **cannot** mix both styles on the same class. Choose one:
 |-------|-------------|
 | `@magic` on the class | Simple data structures and algorithms. You want the LLM to decide internals. |
 | `@magic` on methods | You control the class shape — `__init__`, attributes, inheritance. Only specific methods are generated. |
+
+Note: putting `@jaunt.magic` on a method *inside* a `@jaunt.magic()` class is **not** the method-level style — it is the [sealed tier](#method-tiers-in-a-whole-class-spec) of a whole-class spec, and it is fully supported. The rule above only forbids mixing whole-class `@magic` with standalone method-level `@magic` on the *same* class.
 
 ## Async Functions
 

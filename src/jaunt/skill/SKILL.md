@@ -38,6 +38,14 @@ Use `jaunt status` as the freshness check. Dependency API changes include signat
 - Hidden global behavior: environment variables, implicit network calls, reading files implicitly.
 - Over-constraining early: forcing implementation details that are not required by the product.
 
+### Whole-Class Method Tiers
+Inside a class-level `@jaunt.magic`, each method sits in exactly one tier:
+- **Preserved** (`@jaunt.preserve`): hand-written; emitted verbatim.
+- **Sealed** (inner `@jaunt.magic` on a stub): Jaunt writes the body, but the declared signature — params, defaults, annotations, return type — is enforced exactly, and drift is a hard build error. Inner `@jaunt.magic` here takes no kwargs and cannot wrap a `@property` (v1).
+- **Guidepost** (an unmarked stub): a sketch of intent; the model may adapt the signature, rename/add parameters, or split it into several methods as long as the documented behavior holds.
+
+A spec'd base class in the class header is an always-on dependency (not gated by inference), and a cross-module base's generated public API (signatures and docstrings) feeds the subclass's freshness — change the base's API and the subclass restales; a body-only rebuild of the base does not.
+
 ### Templates
 
 #### Pure Function

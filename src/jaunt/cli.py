@@ -2235,9 +2235,16 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
         )
         build_module_context_digests: dict[str, str] = {}
         build_module_api_digests: dict[str, str] = {}
+        build_module_base_api_digests: dict[str, str] = {}
         targeted_test_entries = group_test_entries_by_target_module(static_targeted_test_entries)
         for module_name, entries in module_specs.items():
             expected, _errs = builder._build_expected_names(entries)
+            wcc = builder._whole_class_context(
+                entries,
+                specs=specs,
+                package_dir=package_dir,
+                generated_dir=cfg.paths.generated_dir,
+            )
             build_module_context_digests[module_name] = builder.build_module_context_artifacts(
                 module_name=module_name,
                 entries=entries,
@@ -2248,8 +2255,12 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                 generated_dir=cfg.paths.generated_dir,
                 build_instructions=build_instructions,
                 targeted_test_entries=targeted_test_entries,
+                base_contract_block=wcc.base_contract_block,
+                whole_class_contract_block=wcc.whole_class_contract_block,
+                inherited_api_block=wcc.inherited_api_block,
             ).digest
             build_module_api_digests[module_name] = module_api_digest(entries)
+            build_module_base_api_digests[module_name] = wcc.base_api_digest
         stale = builder.detect_stale_modules(
             package_dir=package_dir,
             generated_dir=cfg.paths.generated_dir,
@@ -2258,6 +2269,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             spec_graph=spec_graph,
             generation_fingerprint=build_generation_fingerprint,
             module_context_digests=build_module_context_digests,
+            module_base_api_digests=build_module_base_api_digests,
             force=bool(args.force),
         )
         api_changed = builder.detect_api_changed_modules(
@@ -2289,6 +2301,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                 from jaunt.digest import module_digest as module_digest_fn
             from jaunt.digest import legacy_module_digest
 
+            base_api_changed: set[str] = set()
             header_fields_by_module: dict[str, dict[str, object]] = {}
             for module_name in expanded_stale:
                 entries = module_specs.get(module_name)
@@ -2307,6 +2320,19 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                     "module_api_digest": module_api_digest(entries),
                     "spec_refs": [str(e.spec_ref) for e in entries],
                 }
+                fresh_base = build_module_base_api_digests.get(module_name)
+                if fresh_base:
+                    existing_src = builder._read_generated(
+                        package_dir, cfg.paths.generated_dir, module_name
+                    )
+                    if existing_src is not None:
+                        on_disk_base = builder._normalize_digest(
+                            builder.extract_base_api_digest(existing_src)
+                        )
+                        if on_disk_base is None or on_disk_base != builder._normalize_digest(
+                            fresh_base
+                        ):
+                            base_api_changed.add(module_name)
             plan = await builder.plan_refreeze_or_rebuild(
                 package_dir=package_dir,
                 generated_dir=cfg.paths.generated_dir,
@@ -2316,6 +2342,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                 module_dag=module_dag,
                 stale_modules=expanded_stale & set(module_specs.keys()),
                 header_fields_by_module=header_fields_by_module,
+                base_api_changed=base_api_changed,
                 cfg=cfg.semantic_gate,
                 gate_enabled=cfg.semantic_gate.enabled
                 and not bool(getattr(args, "no_semantic_gate", False)),

@@ -5,7 +5,13 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from jaunt.builder import BuildReport, run_build
+from jaunt.builder import (
+    BuildReport,
+    WholeClassContext,
+    _whole_class_context,
+    build_module_context_artifacts,
+    run_build,
+)
 from jaunt.deps import build_spec_graph
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext, TokenUsage
 from jaunt.registry import SpecEntry
@@ -176,3 +182,205 @@ def test_in_loop_validator_rejects_unfilled_stub(tmp_path: Path) -> None:
     report = _run_build(tmp_path, _RecordingBackend(stub_out))
     assert "pkg.mod" in report.failed
     assert any("stub" in e for e in report.failed["pkg.mod"])
+
+
+# ---------------------------------------------------------------------------
+# Task 9: WholeClassContext / _whole_class_context (inherited-API + digest core)
+# ---------------------------------------------------------------------------
+
+
+class Base:
+    """Base for inheritance-context tests."""
+
+    def run(self) -> None: ...
+
+
+class Child(Base):
+    """A child of Base."""
+
+    def go(self) -> None: ...
+
+
+GENERATED_BASE = (
+    "class Base:\n"
+    '    """The base class."""\n'
+    "    def run(self) -> None:\n"
+    '        """does the run"""\n'
+    "        return None\n"
+)
+
+CHILD_SPEC_SRC = (
+    "import jaunt\n"
+    "\n"
+    "@jaunt.magic()\n"
+    "class Child(Base):\n"
+    '    """A child of Base."""\n'
+    "    def go(self) -> None: ...\n"
+)
+
+
+def _write_generated_module_source(tmp_path: Path, module: str, source: str) -> Path:
+    from jaunt import paths
+
+    gen_mod = paths.spec_module_to_generated_module(module, generated_dir="__generated__")
+    relpath = paths.generated_module_to_relpath(gen_mod, generated_dir="__generated__")
+    out = tmp_path / relpath
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(source, encoding="utf-8")
+    return out
+
+
+def _class_entry(
+    *,
+    module: str,
+    qualname: str,
+    obj: type,
+    source_file: Path,
+    base_deps: tuple = (),
+) -> SpecEntry:
+    return SpecEntry(
+        kind="magic",
+        spec_ref=normalize_spec_ref(f"{module}:{qualname}"),
+        module=module,
+        qualname=qualname,
+        source_file=str(source_file),
+        obj=obj,
+        decorator_kwargs={},
+        class_name=None,
+        base_deps=tuple(base_deps),
+    )
+
+
+def test_inherited_api_block_rendered_from_disk_artifact(tmp_path: Path) -> None:
+    _write_generated_module_source(tmp_path, "pkg.base", GENERATED_BASE)
+    child_spec = tmp_path / "child_spec.py"
+    child_spec.write_text(CHILD_SPEC_SRC, encoding="utf-8")
+
+    a_ref = normalize_spec_ref("pkg.base:Base")
+    child_ref = normalize_spec_ref("pkg.child:Child")
+    a_entry = _class_entry(module="pkg.base", qualname="Base", obj=Base, source_file=child_spec)
+    child_entry = _class_entry(
+        module="pkg.child",
+        qualname="Child",
+        obj=Child,
+        source_file=child_spec,
+        base_deps=(a_ref,),
+    )
+
+    ctx = _whole_class_context(
+        [child_entry],
+        specs={a_ref: a_entry, child_ref: child_entry},
+        package_dir=tmp_path,
+        generated_dir="__generated__",
+    )
+    assert isinstance(ctx, WholeClassContext)
+    assert "Base.run(" in ctx.inherited_api_block  # signature from the artifact
+    assert "does the run" in ctx.inherited_api_block  # docstring from the artifact
+    assert ctx.base_api_digest != ""
+    # The tiered contract block folds the inherited API section in.
+    assert "Inherited generated API" in ctx.whole_class_contract_block
+
+
+def test_unbuilt_base_yields_sentinel(tmp_path: Path) -> None:
+    child_spec = tmp_path / "child_spec.py"
+    child_spec.write_text(CHILD_SPEC_SRC, encoding="utf-8")
+
+    a_ref = normalize_spec_ref("pkg.base:Base")
+    child_ref = normalize_spec_ref("pkg.child:Child")
+    a_entry = _class_entry(module="pkg.base", qualname="Base", obj=Base, source_file=child_spec)
+    child_entry = _class_entry(
+        module="pkg.child",
+        qualname="Child",
+        obj=Child,
+        source_file=child_spec,
+        base_deps=(a_ref,),
+    )
+
+    ctx = _whole_class_context(
+        [child_entry],
+        specs={a_ref: a_entry, child_ref: child_entry},
+        package_dir=tmp_path,
+        generated_dir="__generated__",
+    )
+    assert "unbuilt:pkg.base:Base" in ctx.inherited_api_block
+    assert ctx.base_api_digest != ""
+
+
+def test_same_module_base_excluded(tmp_path: Path) -> None:
+    child_spec = tmp_path / "child_spec.py"
+    child_spec.write_text(CHILD_SPEC_SRC, encoding="utf-8")
+
+    # Base and Child share a module => co-generated, no artifact requirement.
+    a_ref = normalize_spec_ref("pkg.child:Base")
+    child_ref = normalize_spec_ref("pkg.child:Child")
+    a_entry = _class_entry(module="pkg.child", qualname="Base", obj=Base, source_file=child_spec)
+    child_entry = _class_entry(
+        module="pkg.child",
+        qualname="Child",
+        obj=Child,
+        source_file=child_spec,
+        base_deps=(a_ref,),
+    )
+
+    ctx = _whole_class_context(
+        [child_entry],
+        specs={a_ref: a_entry, child_ref: child_entry},
+        package_dir=tmp_path,
+        generated_dir="__generated__",
+    )
+    assert ctx.inherited_api_block == ""
+    assert ctx.base_api_digest == ""
+
+
+def _function_only_kwargs(tmp_path: Path) -> dict:
+    spec = tmp_path / "fn_spec.py"
+    spec.write_text(
+        "import jaunt\n\n@jaunt.magic()\ndef greet(name: str) -> str:\n    ...\n",
+        encoding="utf-8",
+    )
+
+    def _greet(name: str) -> str:  # pragma: no cover - obj placeholder
+        return name
+
+    entry = SpecEntry(
+        kind="magic",
+        spec_ref=normalize_spec_ref("pkg.fn:greet"),
+        module="pkg.fn",
+        qualname="greet",
+        source_file=str(spec),
+        obj=_greet,
+        decorator_kwargs={},
+        class_name=None,
+    )
+    return dict(
+        module_name="pkg.fn",
+        entries=[entry],
+        expected_names=["greet"],
+        module_specs={"pkg.fn": [entry]},
+        module_dag={"pkg.fn": set()},
+        package_dir=tmp_path,
+        generated_dir="__generated__",
+    )
+
+
+def test_context_digest_unchanged_for_function_only_modules(tmp_path: Path) -> None:
+    kwargs = _function_only_kwargs(tmp_path)
+    d1 = build_module_context_artifacts(**kwargs).digest
+    d2 = build_module_context_artifacts(
+        **kwargs, whole_class_contract_block="", inherited_api_block=""
+    ).digest
+    assert d1 == d2
+
+
+def test_context_digest_moves_with_inherited_api_block(tmp_path: Path) -> None:
+    kwargs = _function_only_kwargs(tmp_path)
+    base = build_module_context_artifacts(**kwargs, inherited_api_block="v1")
+    changed = build_module_context_artifacts(**kwargs, inherited_api_block="v2")
+    assert base.digest != changed.digest
+
+
+def test_context_digest_moves_with_whole_class_contract_block(tmp_path: Path) -> None:
+    kwargs = _function_only_kwargs(tmp_path)
+    base = build_module_context_artifacts(**kwargs, whole_class_contract_block="c1")
+    changed = build_module_context_artifacts(**kwargs, whole_class_contract_block="c2")
+    assert base.digest != changed.digest

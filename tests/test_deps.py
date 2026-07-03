@@ -6,7 +6,7 @@ from jaunt.deps import build_spec_graph, collapse_to_module_dag, find_cycles, to
 from jaunt.errors import JauntDependencyCycleError
 from jaunt.parse_cache import ParseCache
 from jaunt.registry import SpecEntry
-from jaunt.spec_ref import normalize_spec_ref
+from jaunt.spec_ref import SpecRef, normalize_spec_ref
 
 
 def _entry(
@@ -17,6 +17,7 @@ def _entry(
     qualname: str,
     source_file: str = "/fake/source.py",
     decorator_kwargs: dict[str, object] | None = None,
+    base_deps: tuple[SpecRef, ...] = (),
 ) -> SpecEntry:
     return SpecEntry(
         kind=kind,  # type: ignore[arg-type]
@@ -26,6 +27,7 @@ def _entry(
         source_file=source_file,
         obj=object(),
         decorator_kwargs=decorator_kwargs or {},
+        base_deps=base_deps,
     )
 
 
@@ -101,6 +103,54 @@ def test_build_spec_graph_ignores_auto_deps_when_inference_disabled() -> None:
     specs = {a.spec_ref: a, b.spec_ref: b}
     g = build_spec_graph(specs, infer_default=True)
     assert b.spec_ref not in g[a.spec_ref]
+
+
+def test_base_deps_edge_exists_with_inference_off() -> None:
+    """Structural base-class edges are never gated by inference."""
+    a = _entry(kind="magic", spec_ref="pkg.base:A", module="pkg.base", qualname="A")
+    b = _entry(
+        kind="magic",
+        spec_ref="pkg.child:B",
+        module="pkg.child",
+        qualname="B",
+        base_deps=(normalize_spec_ref("pkg.base:A"),),
+    )
+    specs = {a.spec_ref: a, b.spec_ref: b}
+    graph = build_spec_graph(specs, infer_default=False)
+    assert normalize_spec_ref("pkg.base:A") in graph[normalize_spec_ref("pkg.child:B")]
+
+
+def test_base_deps_ignore_unknown_and_self() -> None:
+    """A self-reference and a base that is not a known spec are dropped."""
+    b = _entry(
+        kind="magic",
+        spec_ref="pkg.child:B",
+        module="pkg.child",
+        qualname="B",
+        base_deps=(normalize_spec_ref("pkg.child:B"), normalize_spec_ref("ext:Nope")),
+    )
+    graph = build_spec_graph({b.spec_ref: b}, infer_default=False)
+    assert graph[normalize_spec_ref("pkg.child:B")] == set()
+
+
+def test_base_deps_cycle_detected() -> None:
+    """A cross-class base cycle surfaces through the graph like any other cycle."""
+    a = _entry(
+        kind="magic",
+        spec_ref="pkg.a:A",
+        module="pkg.a",
+        qualname="A",
+        base_deps=(normalize_spec_ref("pkg.b:B"),),
+    )
+    b = _entry(
+        kind="magic",
+        spec_ref="pkg.b:B",
+        module="pkg.b",
+        qualname="B",
+        base_deps=(normalize_spec_ref("pkg.a:A"),),
+    )
+    graph = build_spec_graph({a.spec_ref: a, b.spec_ref: b}, infer_default=False)
+    assert find_cycles(graph)
 
 
 def test_build_spec_graph_collects_decorator_warnings() -> None:

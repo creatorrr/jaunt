@@ -95,8 +95,20 @@ examples/           # Runnable example projects
   and whole-class member/method changes can make dependents stale too.
 - **Whole-class `@magic`**: A class-level `@jaunt.magic` can be docstring-only
   (Jaunt designs the API), stubs-only (Jaunt implements declared methods), or a
-  mix of stubs and preserved members. Use `@jaunt.preserve` on a method to keep
-  it hand-written even if its body looks like a stub.
+  mix. Each method sits in exactly one of three tiers: **preserved**
+  (`@jaunt.preserve` — hand-written, emitted verbatim even if the body looks like
+  a stub), **sealed** (inner `@jaunt.magic` on a stub — Jaunt writes the body but
+  the declared signature is enforced *exactly*: params, defaults, annotations, and
+  return type may not drift, and drift is a hard build error), and **guidepost**
+  (an unmarked stub — the model may adapt the signature, rename/add params, or
+  split it into several methods as long as the documented behavior is delivered;
+  drift is warn-only). Inner `@jaunt.magic` on a whole-class spec takes no kwargs
+  and can't sit under `@property` (v1). A spec'd base class named in the class
+  header is an **always-on dependency edge** (never gated by `infer_deps` —
+  inheritance is a structural fact), and a cross-module base's *generated public
+  API* (signatures and docstrings) participates in the subclass's staleness:
+  change the base's API and the subclass restales; a body-only rebuild of the base
+  does not.
 - **Auto-generated class tests**: Class specs can get generated pytest coverage
   through explicit `@jaunt.test(targets=Cls)` test specs, opt-in implicit
   `@jaunt.magic(test=True)`, or the `[test] auto_class_tests` config flag.
