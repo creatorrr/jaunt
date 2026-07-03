@@ -41,7 +41,8 @@ class SameA:
 class SameB(SameA):
     """Runtime stand-in for pkg.mod:B."""
 
-    def compute(self, x: int) -> int: ...
+    def compute(self, x: int) -> int:
+        raise NotImplementedError
 
     def go(self) -> None: ...
 
