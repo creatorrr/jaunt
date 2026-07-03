@@ -293,3 +293,67 @@ def test_rollup_dependent_rebuilds_when_dependency_meaningful(tmp_path: Path) ->
 
     assert plan.rebuild == {"mod_a", "mod_b"}
     assert plan.refrozen == set()
+
+
+def test_refreeze_refused_when_base_api_moved(tmp_path: Path) -> None:
+    # mod_b subclasses mod_a. A docstring-only edit to mod_a would normally let
+    # the semantic gate re-freeze both modules (EQUIVALENT). But when mod_b's
+    # spec'd-base generated API digest moved, refreeze must be refused for mod_b
+    # and it must rebuild instead. mod_a (whose base API did not move) still
+    # re-freezes, proving the guard is selective.
+    spec_a_path = tmp_path / "mod_a.py"
+    spec_b_path = tmp_path / "mod_b.py"
+    _write(spec_a_path, 'def A():\n    """Old A docstring."""\n    return 1\n')
+    _write(spec_b_path, 'def B():\n    """B docstring."""\n    return 2\n')
+    a_v1 = _entry(module="mod_a", qualname="A", source_file=str(spec_a_path))
+    b = _entry(module="mod_b", qualname="B", source_file=str(spec_b_path))
+    specs_v1 = {a_v1.spec_ref: a_v1, b.spec_ref: b}
+    build_spec_graph(specs_v1, infer_default=False)
+    write_generated_module(
+        package_dir=tmp_path,
+        generated_dir="__generated__",
+        module_name="mod_a",
+        source="def A():\n    return 1\n",
+        header_fields=_header("mod_a", "a" * 64, [str(a_v1.spec_ref)]),
+        spec_digests=_spec_digests(a_v1),
+        snapshots=_snapshots(a_v1),
+    )
+    write_generated_module(
+        package_dir=tmp_path,
+        generated_dir="__generated__",
+        module_name="mod_b",
+        source="def B():\n    return 2\n",
+        header_fields=_header("mod_b", "b" * 64, [str(b.spec_ref)]),
+        spec_digests=_spec_digests(b),
+        snapshots=_snapshots(b),
+    )
+    _write(spec_a_path, 'def A():\n    """New A docstring, same behavior."""\n    return 1\n')
+    a_v2 = _entry(module="mod_a", qualname="A", source_file=str(spec_a_path))
+    specs = {a_v2.spec_ref: a_v2, b.spec_ref: b}
+
+    async def mock_run_exec(**kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(final_message="EQUIVALENT")
+
+    plan = asyncio.run(
+        plan_refreeze_or_rebuild(
+            package_dir=tmp_path,
+            generated_dir="__generated__",
+            module_specs={"mod_a": [a_v2], "mod_b": [b]},
+            specs=specs,
+            spec_graph=build_spec_graph(specs, infer_default=False),
+            module_dag={"mod_b": {"mod_a"}, "mod_a": set()},
+            stale_modules={"mod_a", "mod_b"},
+            header_fields_by_module={
+                "mod_a": _header("mod_a", "c" * 64, [str(a_v2.spec_ref)]),
+                "mod_b": _header("mod_b", "d" * 64, [str(b.spec_ref)]),
+            },
+            cfg=SemanticGateConfig(),
+            base_api_changed={"mod_b"},
+            run_exec=mock_run_exec,
+        )
+    )
+
+    assert "mod_b" in plan.rebuild
+    assert "mod_b" not in plan.refrozen
+    assert "mod_a" in plan.refrozen
+    assert "mod_a" not in plan.rebuild

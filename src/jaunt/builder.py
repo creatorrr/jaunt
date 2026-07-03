@@ -462,6 +462,7 @@ async def plan_refreeze_or_rebuild(
     stale_modules: set[str],
     header_fields_by_module: dict[str, dict[str, object]],
     cfg: SemanticGateConfig,
+    base_api_changed: set[str] | frozenset[str] = frozenset(),
     gate_enabled: bool = True,
     validators_by_module: dict[str, Callable[[str], list[str]]] | None = None,
     run_exec=None,
@@ -475,6 +476,11 @@ async def plan_refreeze_or_rebuild(
     validators = validators_by_module or {}
 
     for module_name in sorted(stale_modules):
+        if module_name in base_api_changed:
+            # A spec'd base's generated public API moved (or was never captured):
+            # the generated body may genuinely need to change -- never refreeze.
+            rebuild.add(module_name)
+            continue
         entries = module_specs.get(module_name, [])
         header_fields = _header_fields_with_spec_digests(
             header_fields_by_module.get(module_name, {}),
