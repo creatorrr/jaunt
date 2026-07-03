@@ -290,19 +290,40 @@ def build_class_scaffold(class_segment: str) -> str:
     return _attach_sentinels(ast.unparse(new_cls)).rstrip() + "\n"
 
 
-def render_whole_class_contract(*, class_segment: str, base_contract_block: str) -> str:
+def render_whole_class_contract(
+    *,
+    class_segment: str,
+    base_contract_block: str,
+    inherited_api_block: str = "",
+) -> str:
     cls = ast.parse(class_segment).body[0]
     assert isinstance(cls, ast.ClassDef)
     split = split_class_members(cls)
     mode = classify_class_mode(cls)
 
+    guideposts = tuple(n for n in split.stubs if n not in set(split.sealed))
+    methods = {n.name: n for n in _iter_methods(cls)}
+
     lines = [f"# Whole-class generation contract: {cls.name}", ""]
-    if split.stubs:
+    if split.sealed:
         lines.append(
-            "Replace each `# jaunt:implement` method body with a real implementation "
-            "(remove the sentinel and the NotImplementedError):"
+            "Sealed methods — implement exactly these signatures; do not rename, add, "
+            "or remove parameters or change annotations/defaults/return types:"
         )
-        lines.extend(f"- {cls.name}.{name}" for name in split.stubs)
+        for name in split.sealed:
+            fn = methods[name]
+            prefix = "async def" if isinstance(fn, ast.AsyncFunctionDef) else "def"
+            ret = f" -> {ast.unparse(fn.returns)}" if fn.returns else ""
+            lines.append(f"- {prefix} {name}({ast.unparse(fn.args)}){ret}")
+        lines.append("")
+    if guideposts:
+        lines.append(
+            "Guidepost methods — these signatures are sketches of intent; you may adapt "
+            "them (parameters, splitting into several methods, additional public "
+            "methods) as long as the documented behavior is delivered. Replace each "
+            "`# jaunt:implement` body with a real implementation:"
+        )
+        lines.extend(f"- {cls.name}.{name}" for name in guideposts)
         lines.append("")
     if split.preserved:
         lines.append("Keep these methods EXACTLY as written — do not modify their bodies:")
@@ -322,6 +343,22 @@ def render_whole_class_contract(*, class_segment: str, base_contract_block: str)
         )
         lines.append(block)
         lines.append("")
+    inherited = inherited_api_block.strip()
+    if inherited:
+        lines.append(
+            "Inherited generated API — these base-class methods already exist; build on "
+            "them instead of reimplementing:"
+        )
+        lines.append(inherited)
+        lines.append("")
+    lines.append(
+        "Prefer small, single-purpose methods composed into the public interface over "
+        "monolithic bodies. When a base class provides functionality — including "
+        "generated methods listed in the inherited API above — build on it: call it, "
+        "extend it via super(), or override it deliberately. Do not reimplement "
+        "inherited behavior."
+    )
+    lines.append("")
     lines.extend(
         [
             "Retain the class docstring (you may add to it).",
