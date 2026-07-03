@@ -2235,9 +2235,16 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
         )
         build_module_context_digests: dict[str, str] = {}
         build_module_api_digests: dict[str, str] = {}
+        build_module_base_api_digests: dict[str, str] = {}
         targeted_test_entries = group_test_entries_by_target_module(static_targeted_test_entries)
         for module_name, entries in module_specs.items():
             expected, _errs = builder._build_expected_names(entries)
+            wcc = builder._whole_class_context(
+                entries,
+                specs=specs,
+                package_dir=package_dir,
+                generated_dir=cfg.paths.generated_dir,
+            )
             build_module_context_digests[module_name] = builder.build_module_context_artifacts(
                 module_name=module_name,
                 entries=entries,
@@ -2248,8 +2255,12 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                 generated_dir=cfg.paths.generated_dir,
                 build_instructions=build_instructions,
                 targeted_test_entries=targeted_test_entries,
+                base_contract_block=wcc.base_contract_block,
+                whole_class_contract_block=wcc.whole_class_contract_block,
+                inherited_api_block=wcc.inherited_api_block,
             ).digest
             build_module_api_digests[module_name] = module_api_digest(entries)
+            build_module_base_api_digests[module_name] = wcc.base_api_digest
         stale = builder.detect_stale_modules(
             package_dir=package_dir,
             generated_dir=cfg.paths.generated_dir,
@@ -2258,6 +2269,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             spec_graph=spec_graph,
             generation_fingerprint=build_generation_fingerprint,
             module_context_digests=build_module_context_digests,
+            module_base_api_digests=build_module_base_api_digests,
             force=bool(args.force),
         )
         api_changed = builder.detect_api_changed_modules(
