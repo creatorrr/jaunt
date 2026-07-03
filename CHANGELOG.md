@@ -3,6 +3,19 @@
 All notable changes to jaunt. Generated from conventional commits by
 [git-cliff](https://git-cliff.org); one section per published PyPI release.
 
+## [1.1.0] - 2026-07-03
+
+### Chores
+
+- Update CHANGELOG.md for v1.0.0 [skip ci]
+
+### Docs
+
+- Sync docs-site with v1.0.0 — drop removed features, cover new ones (#60)
+
+### Features
+
+- Class interface guideposts + inheritance-aware whole-class magic (#61)
 ## [1.0.0] - 2026-07-03
 
 ### Chores
