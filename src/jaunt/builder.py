@@ -1087,6 +1087,32 @@ def _resolve_ty_cmd() -> list[str] | None:
         return None
 
 
+def _mirror_package_sources(package_dir: Path, tmp_root: Path, relpath: Path) -> None:
+    """Copy the candidate's package subtree (``.py`` only) into the ty sandbox.
+
+    The candidate file itself is skipped — its content comes from the in-flight
+    candidate source, not disk.
+    """
+    parts = relpath.parts
+    if not parts:
+        return
+    subtree = package_dir / parts[0]
+    if not subtree.is_dir():
+        return
+    for src in subtree.rglob("*.py"):
+        if "__pycache__" in src.parts:
+            continue
+        rel = src.relative_to(package_dir)
+        if rel == relpath:
+            continue
+        dest = tmp_root / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copyfile(src, dest)
+        except OSError:
+            continue
+
+
 def _ty_error_context(
     *,
     source: str,
@@ -1101,6 +1127,12 @@ def _ty_error_context(
         tmp_path = tmp_root / relpath
         tmp_path.parent.mkdir(parents=True, exist_ok=True)
         _ensure_init_files(tmp_root, relpath)
+        # Mirror the candidate's package subtree into the sandbox. The sandbox
+        # root shadows package_dir in ty's search path, so without the mirror a
+        # bare `<pkg>/` containing only the candidate hides the real source
+        # modules — legitimate imports like `from ..specs import X` become
+        # unresolved and their targets type as Unknown.
+        _mirror_package_sources(package_dir, tmp_root, relpath)
         tmp_path.write_text((source or "").rstrip() + "\n", encoding="utf-8")
 
         env = os.environ.copy()
@@ -1150,8 +1182,21 @@ def _ty_error_context(
             # that resolve in the final project layout may be transiently
             # unresolved here. Ignore pure unresolved-import diagnostics.
             return []
-        lines = [line for line in raw.splitlines() if line.strip()]
-        snippet = "\n".join(lines[:16])
+        # Order diagnostic blocks so unresolved-import noise cannot bury the
+        # errors that actually fail the build (this text is also the model's
+        # retry feedback).
+        blocks: list[list[str]] = []
+        for line in raw.splitlines():
+            if not line.strip():
+                continue
+            if re.match(r"(error|warning)\[", line) or not blocks:
+                blocks.append([])
+            blocks[-1].append(line)
+        ordered = [b for b in blocks if not b[0].startswith("error[unresolved-import]")] + [
+            b for b in blocks if b[0].startswith("error[unresolved-import]")
+        ]
+        lines = [line for block in ordered for line in block]
+        snippet = "\n".join(lines[:40])
         return [f"ty check failed for {module_name}: {snippet}"]
 
 

@@ -597,3 +597,104 @@ def test_ty_error_context_timeout_returns_error(monkeypatch, tmp_path: Path) -> 
 
     assert errs
     assert "timed out" in errs[0]
+
+
+def test_ty_error_context_mirrors_package_sources(monkeypatch, tmp_path: Path) -> None:
+    from jaunt import builder
+
+    _write(tmp_path / "pkg" / "__init__.py", "")
+    _write(tmp_path / "pkg" / "specs.py", "class Claims:\n    pass\n")
+    _write(tmp_path / "pkg" / "__generated__" / "other.py", "OTHER = 1\n")
+    _write(tmp_path / "pkg" / "__generated__" / "specs.py", "STALE = True\n")
+    _write(tmp_path / "pkg" / "__pycache__" / "junk.py", "")
+
+    seen: dict[str, object] = {}
+
+    def _fake_run(cmd, **kwargs):
+        target = Path(cmd[-1])
+        sandbox = target.parents[2]
+        seen["candidate"] = target.read_text(encoding="utf-8")
+        seen["has_specs"] = (sandbox / "pkg" / "specs.py").exists()
+        seen["has_init"] = (sandbox / "pkg" / "__init__.py").exists()
+        seen["has_sibling"] = (sandbox / "pkg" / "__generated__" / "other.py").exists()
+        seen["has_pycache"] = (sandbox / "pkg" / "__pycache__").exists()
+
+        class _Proc:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return _Proc()
+
+    monkeypatch.setattr(builder.subprocess, "run", _fake_run)
+
+    errs = builder._ty_error_context(  # noqa: SLF001 - direct helper coverage
+        source="from ..specs import Claims\n",
+        module_name="pkg.specs",
+        package_dir=tmp_path,
+        generated_dir="__generated__",
+        ty_cmd=["ty"],
+    )
+
+    assert errs == []
+    assert seen["has_specs"] is True
+    assert seen["has_init"] is True
+    assert seen["has_sibling"] is True
+    assert seen["has_pycache"] is False
+    # The candidate slot holds the in-flight source, not the stale on-disk file.
+    assert seen["candidate"] == "from ..specs import Claims\n"
+
+
+def _fake_ty_proc(stdout: str):
+    class _Proc:
+        returncode = 1
+        stderr = ""
+
+        def __init__(self, out: str) -> None:
+            self.stdout = out
+
+    return _Proc(stdout)
+
+
+def test_ty_error_context_orders_real_errors_before_unresolved_import(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from jaunt import builder
+
+    raw = (
+        "error[unresolved-import]: Cannot resolve imported module `..specs`\n"
+        " --> specs.py:1:8\n"
+        "help: Did you mean `.specs`?\n"
+        "error[invalid-return-type]: Return type does not match returned value\n"
+        " --> specs.py:9:5\n"
+    )
+    monkeypatch.setattr(builder.subprocess, "run", lambda *a, **k: _fake_ty_proc(raw))
+
+    errs = builder._ty_error_context(  # noqa: SLF001 - direct helper coverage
+        source="def foo() -> int:\n    return 1\n",
+        module_name="pkg.mod",
+        package_dir=tmp_path,
+        generated_dir="__generated__",
+        ty_cmd=["ty"],
+    )
+
+    assert len(errs) == 1
+    assert errs[0].index("invalid-return-type") < errs[0].index("unresolved-import")
+    assert "Did you mean" in errs[0]
+
+
+def test_ty_error_context_pure_unresolved_import_is_ignored(monkeypatch, tmp_path: Path) -> None:
+    from jaunt import builder
+
+    raw = "error[unresolved-import]: Cannot resolve imported module `..specs`\n --> specs.py:1:8\n"
+    monkeypatch.setattr(builder.subprocess, "run", lambda *a, **k: _fake_ty_proc(raw))
+
+    errs = builder._ty_error_context(  # noqa: SLF001 - direct helper coverage
+        source="from ..specs import Claims\n",
+        module_name="pkg.mod",
+        package_dir=tmp_path,
+        generated_dir="__generated__",
+        ty_cmd=["ty"],
+    )
+
+    assert errs == []
