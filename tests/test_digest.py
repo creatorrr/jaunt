@@ -278,3 +278,24 @@ def test_local_digest_for_method_stable_when_unchanged(tmp_path: Path) -> None:
     d2 = local_digest(e)
     assert d1 == d2
     assert re.fullmatch(r"[0-9a-f]{64}", d1) is not None
+
+
+def _members_json(src: str) -> str:
+    import ast
+
+    from jaunt.digest import _normalized_members
+
+    node = ast.parse(src).body[0]
+    assert isinstance(node, ast.ClassDef)
+    return _normalized_members(node)
+
+
+def test_sealed_marker_changes_class_digest() -> None:
+    plain = "class C:\n    def m(self, x: int) -> int: ...\n"
+    sealed = "class C:\n    @jaunt.magic\n    def m(self, x: int) -> int: ...\n"
+    assert _members_json(plain) != _members_json(sealed)
+
+
+def test_marker_free_members_json_has_no_sealed_key() -> None:
+    plain = "class C:\n    def m(self, x: int) -> int: ...\n"
+    assert '"sealed"' not in _members_json(plain)

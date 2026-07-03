@@ -326,6 +326,8 @@ def _normalized_members(cls_node: ast.ClassDef) -> str:
             "docstring": ast.get_docstring(method, clean=True) or "",
             "body": "",
         }
+        if name in split.sealed:
+            record["sealed"] = "1"
         if name in preserved:
             record["body"] = _normalized_preserved_method(method)
         method_contracts[name] = record
