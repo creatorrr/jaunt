@@ -1,0 +1,91 @@
+---
+title: Background Daemon
+description: "Commit-triggered background codegen with isolated jobs, a change journal, and an agent guard hook."
+---
+
+`jaunt daemon` turns the build loop into a background service: you (or your
+coding agent) commit spec changes, and the daemon rebuilds what went stale in an
+isolated job, auto-committing the regenerated modules when everything is green.
+
+## Start / Stop / Status
+
+```bash
+jaunt daemon start    # run the daemon (foreground; Ctrl-C to stop)
+jaunt daemon status   # is it running? what is it doing?
+jaunt daemon stop
+```
+
+The daemon polls the repository `HEAD` (every `[daemon] poll_interval` seconds).
+When a commit changes specs, it launches an isolated worktree job that rebuilds
+the stale modules, runs validation, and — if green — commits the regenerated
+output. Failed or conflicted jobs are **parked** instead of landed.
+
+## Jobs
+
+```bash
+jaunt jobs                    # job records + would-rebuild preview + heartbeat
+jaunt jobs show <id> --full   # one record, with the full local detail log
+jaunt jobs retry <id>         # retry landing a parked job (--force if the spec moved on)
+jaunt jobs wait --timeout 1800
+jaunt jobs wait <id> --timeout 1800 --json --progress plain
+```
+
+`jaunt jobs wait` blocks until a target job finishes — or, without an id, until
+the daemon is idle. `--settle N` controls the idle race-guard window (default:
+2 × `poll_interval`). Exit codes make it loopable: `0` green, `4` a job failed
+or parked, `5` timeout.
+
+The canonical agent loop:
+
+```bash
+git commit -m "feat: tighten slugify contract" && jaunt jobs wait --timeout 1800
+```
+
+## The Change Journal (`jaunt log`)
+
+Build, test, and daemon runs append to a `JAUNT_LOG` journal at the project
+root (scaffolded by `jaunt init`). Tail it with:
+
+```bash
+jaunt log             # last 20 entries
+jaunt log -n 0        # everything
+jaunt log --module my_app.specs
+jaunt log --json
+```
+
+## Guarding Generated Code (`jaunt guard`)
+
+`jaunt guard` is a PreToolUse hook for coding agents: it reads the hook payload
+on stdin and warns (with a pointer to the owning spec) when a tool call is
+about to touch `__generated__/**`. Wire it into Claude Code via
+`.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|Read|NotebookEdit",
+        "hooks": [{ "type": "command", "command": "jaunt guard" }]
+      }
+    ]
+  }
+}
+```
+
+For harnesses without hook support, the barrier is advisory:
+`jaunt instructions` states the rule.
+
+## Configuration
+
+```toml
+[daemon]
+poll_interval = 2.0    # seconds between HEAD polls
+max_jobs = 0           # 0 -> build.jobs
+notify_command = ""    # optional shell command run on landed/parked/failed jobs
+```
+
+`notify_command` is the push-notification seam: point it at a script that pings
+Slack, `notify-send`, or your agent loop.
+
+Next: [Agents & Automation](/docs/guides/coding-agents).

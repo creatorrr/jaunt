@@ -1,4 +1,11 @@
 {
   "title": "Guides",
-  "pages": ["jwt-walkthrough", "adding-to-your-project", "pypi-skills", "claude-code-plugin"]
+  "pages": [
+    "jwt-walkthrough",
+    "adding-to-your-project",
+    "contract-mode",
+    "daemon",
+    "coding-agents",
+    "pypi-skills"
+  ]
 }

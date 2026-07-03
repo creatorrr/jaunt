@@ -45,7 +45,7 @@ Dependency API changes include:
 - edits anywhere in the cleaned docstring contract
 - for whole-class specs, adding/removing/changing declared members or method signatures
 
-Current limitation: dependency context plumbing is intentionally minimal in the MVP. Ordering and staleness propagation work, but the backend does not currently get rich "here is the generated dependency source" context for dependents.
+Current limitation: dependency context plumbing is intentionally minimal. Ordering and staleness propagation work, but the backend does not currently get rich "here is the generated dependency source" context for dependents.
 
 If a cycle exists, Jaunt raises `JauntDependencyCycleError` and exits with code `2`.
 

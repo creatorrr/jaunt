@@ -22,10 +22,15 @@ You write specs
 
 At build time, Jaunt sends the backend a prompt composed of:
 
+- A static Jaunt preamble that frames the framework and the signature/docstring contract.
 - A system template (packaged under `src/jaunt/prompts/`).
 - Your spec’s **source segment**: signature, docstring, type hints, decorator options.
 - Optional per-spec extra context (e.g., `prompt="..."`).
-- Optional "PyPI skills" text for external libraries (see guide below).
+- A repo map rendered from `treedocs.yaml` (on by default; see [Repo Context](/docs/reference/repo-context)).
+
+Library and tooling **skills** are not prompt text: Jaunt seeds them into the
+Codex workspace under `.agents/skills/`, where Codex discovers them natively
+(see guide below).
 
 The job is simple: implement the contract implied by your spec.
 
@@ -75,9 +80,9 @@ See: [Dependencies](/docs/writing-specs/dependencies).
 
 This is why you import your spec module in normal code: it’s the stable API surface.
 
-## PyPI Skills Injection (Optional)
+## PyPI Skills (Optional)
 
-On `jaunt build`, Jaunt can (best-effort) generate "skills" from PyPI READMEs for the external libraries you import, then inject those skills into the build prompt.
+On `jaunt build`, Jaunt can (best-effort) generate "skills" from PyPI READMEs for the external libraries you import. Together with Jaunt's bundled builtin skills, they are seeded into the Codex workspace under `.agents/skills/`, where Codex discovers them natively — they are not concatenated into the prompt.
 
 This tends to improve correctness for unfamiliar libraries without you writing a giant prompt.
 

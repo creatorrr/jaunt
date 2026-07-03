@@ -35,21 +35,18 @@ docs for your platform), then:
 codex login
 ```
 
-Jaunt is an MVP and is typically installed from a local checkout.
+Then install Jaunt from PyPI. The base install is batteries-included:
 
-If you’re working from the Jaunt repo:
+```bash
+uv add jaunt   # includes pytest, pytest-asyncio, anyio, rich, and watchfiles
+# or: pip install jaunt
+```
+
+If you’re working from the Jaunt repo itself:
 
 ```bash
 uv sync
 uv run jaunt --version
-```
-
-If you’re adding Jaunt to your own project, install it however you vend it
-(local path, internal index, or git). The base install is batteries-included:
-
-```bash
-# Example (from package index):
-uv add jaunt   # includes pytest, pytest-asyncio, anyio, rich, and watchfiles
 ```
 
 Codex handles its own authentication (`codex login`, or the `CODEX_API_KEY`

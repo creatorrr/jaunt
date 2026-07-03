@@ -15,7 +15,7 @@ Open http://localhost:3000 with your browser to see the result.
 
 The docs UI links back to the Jaunt repository:
 
-- https://github.com/ijindal1/jaunt
+- https://github.com/creatorrr/jaunt
 
 Optional env vars:
 

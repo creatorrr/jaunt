@@ -1,0 +1,110 @@
+---
+title: Contract Mode
+description: "Pin the behavior of committed code with @jaunt.contract and a derived pytest battery."
+---
+
+Jaunt has two first-class authoring modes, selected per symbol by decorator:
+
+- **Magic mode** (`@jaunt.magic` / `@jaunt.test`): the docstring is canonical and
+  Jaunt generates the implementation under `__generated__/`.
+- **Contract mode** (`@jaunt.contract`): the **committed code is canonical**. The
+  decorator is a runtime no-op marker; the docstring is the contract, and Jaunt
+  derives a committed pytest battery under `tests/contract/` instead of
+  generating the body.
+
+Use contract mode to pin the behavior of code you want to keep hand-written —
+adopted legacy functions, hot paths you've tuned, anything where the
+implementation should not be regenerated.
+
+It covers top-level functions (sync or async) and whole classes.
+
+## Writing A Contract
+
+```python
+import re
+
+import jaunt
+
+_NON_ALNUM = re.compile(r"[^a-z0-9]+")
+
+
+@jaunt.contract
+def slugify(title: str) -> str:
+    """
+    Convert a human title into a URL-safe slug.
+
+    Examples:
+    - "  Hello, World!  " -> "hello-world"
+    - "C++ > Java" -> "c-java"
+    - "already-slug" -> "already-slug"
+
+    Raises:
+    - "" raises ValueError
+    - "!!!" raises ValueError
+    """
+    cleaned = _NON_ALNUM.sub("-", title.strip().lower()).strip("-")
+    if not cleaned:
+        raise ValueError("title is empty after cleaning")
+    return cleaned
+```
+
+The `Examples:` and `Raises:` prose is what Jaunt derives test cases from
+(configurable via `[contract] derive = ["examples", "errors"]`). The battery is
+written to `tests/contract/` (configurable via `[contract] battery_dir`) and is
+**committed** — it's plain pytest that runs with or without Jaunt installed.
+
+## The Workflow
+
+```bash
+jaunt adopt my_app.slug:slugify   # add @jaunt.contract to existing code + derive its battery
+jaunt reconcile                   # derive/refresh committed batteries (calls the model)
+jaunt check                       # verify batteries deterministically (CI gate, no model, no API key)
+jaunt status                      # per-function drift state + strength score
+jaunt eject my_app.slug:slugify   # remove contract tracking; leave plain Python + plain pytest
+jaunt eject --all
+```
+
+`jaunt reconcile` is the **only** contract command that calls the model.
+`jaunt check` is fully deterministic and offline, which makes it the CI gate: it
+exits `4` on any blocking drift state (unbuilt / stale-prose / signature-drift /
+behavior-drift).
+
+Structured docstring prose (call-form `Examples:` like the one above) can often
+be derived deterministically too, so `reconcile` doesn't always need the model.
+
+## Async Functions
+
+Contract mode covers `async def` functions. The derived test functions are
+`async def` and `await` the contract function (with `pytest-asyncio` auto
+mode). See `examples/contract_async/` in the repo.
+
+## Whole Classes
+
+A class-level `@jaunt.contract` pins the class's public behavior: the derived
+battery exercises the declared methods against the docstring contracts.
+
+## Fixtures
+
+Derived cases may declare pytest fixtures in the docstring
+(`Fixtures: db`), resolved from `tests/contract/conftest.py`. That's the seam
+for contracts that need setup — a database handle, a temp dir, a fake clock —
+without giving up deterministic derivation.
+
+## Strength Scoring
+
+With `[contract] strength = true` (the default), `jaunt reconcile` runs
+mutation-based strength scoring: it estimates how well your pinned examples
+actually constrain the implementation. A function with one weak example gets a
+low score, and `jaunt status` shows the gap so you know which contracts need
+more pinned cases.
+
+## Configuration
+
+```toml
+[contract]
+battery_dir = "tests/contract"     # where derived batteries are written
+derive = ["examples", "errors"]    # case kinds derived from docstring prose
+strength = true                    # mutation-based strength scoring at reconcile
+```
+
+Next: [CLI Reference](/docs/reference/cli).

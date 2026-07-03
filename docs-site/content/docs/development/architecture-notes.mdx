@@ -3,17 +3,19 @@ title: Architecture Notes
 description: "High-level pointers to the design/implementation notes in this repo."
 ---
 
-This repo has additional design and implementation notes in the root:
+The repo keeps design and implementation notes under `docs/`:
 
-- `TASK-000-MVP-PLAN.md`
-- `TASK-010-RUNTIME-REGISTRY.md`
-- `TASK-020-CONFIG-HEADER-PATHS.md`
-- `TASK-030-DEPS-DIGESTS.md`
-- `TASK-040-GENERATION-BACKENDS.md`
-- `TASK-050-BUILD_TEST_ORCHESTRATION.md`
-- `TASK-060-CLI.md`
-- `TASK-070-SKILL-DOCS.md`
-- `jaunt_tdd_plan.md`
+- `docs/superpowers/specs/` — one design doc per feature (contract mode,
+  whole-class magic, the Codex engine, repo-context subsystem, default builder
+  skills, held-out tests, smart change detection, the background daemon,
+  contract adoption parity, agent-friendly progress).
+- `docs/superpowers/plans/` — the implementation plans that accompanied those
+  designs.
+- `docs/principles/2026-06-29-building-with-coding-agents.md` — the
+  coding-agent principles framework: six core laws plus named corollaries that
+  shape Jaunt's design (spec + verification carry the value, deterministic
+  verdicts, untrusted model inputs, and so on).
+- `docs/hooks.md` — the `jaunt guard` PreToolUse hook for coding agents.
 
 These are useful when changing behavior or extending features; the docs in this site focus on the user-facing surface area.
 

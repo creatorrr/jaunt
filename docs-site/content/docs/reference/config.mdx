@@ -50,6 +50,10 @@ ty_retry_attempts = 1
 async_runner = "asyncio"
 # Include targeted test-spec source in build prompts.
 include_target_tests = false
+# Validate that generated modules only import what their spec context allows.
+check_generated_imports = true
+# Extra import roots to allow in generated modules.
+generated_import_allowlist = []
 # Optional project-wide steering appended to build prompts.
 # instructions = ["Prefer small composable helpers."]
 
@@ -60,6 +64,8 @@ jobs = 4
 infer_deps = true
 # Passed through to pytest as repeated "--pytest-args" flags.
 pytest_args = ["-q"]
+# Auto-generate pytest coverage for whole-class @jaunt.magic specs.
+auto_class_tests = false
 
 [daemon]
 # Seconds between HEAD polls.
@@ -80,31 +86,87 @@ model = "gpt-5.5"
 reasoning_effort = "high"
 # Codex sandbox policy (`codex exec --sandbox`).
 sandbox = "workspace-write"
+# Include the installed codex CLI version in the freshness fingerprint.
+fingerprint_cli_version = true
 # Optional Codex feature flags.
 # features = []
 # Raw `-c key=value` passthrough to `codex exec` (advanced).
 # [codex.config]
 
+[skills]
+# Auto-generate PyPI helper skills for imported libraries during build.
+auto = true
+# Seed Jaunt's bundled builtin skills into the Codex workspace.
+builtin = true
+# The default builtin set (override to trim/extend).
+builtin_skills = [
+  "asyncpg", "dbos", "descope", "fastmcp", "openai", "pydantic", "pydantic-ai",
+  "pytest", "ruff", "spacy", "starlette", "ty", "uv",
+]
+# Retained for back-compat; unused by the Codex builder (skills are seeded,
+# not injected as prompt text).
+# max_chars_per_skill = 8000
+# inject_user_skills = []
+
+[context]
+# Maintain treedocs.yaml and inject a repo map into build prompts.
+repo_map = true
+repo_map_file = "treedocs.yaml"
+# Opt-in: LLM-enrich descriptions (else AST-only, offline).
+enrich = false
+# Cap the injected repo-map block.
+max_chars = 6000
+# Opt-in: model-written architecture overview injected into build prompts,
+# digest-cached to .jaunt/PROJECT_OVERVIEW.md.
+overview = false
+
+[context.search]
+# colgrep (LightOn next-plaid) semantic retrieval; requires `colgrep` on PATH.
+enabled = false
+# Jaunt queries `colgrep --json` and seeds _context/relevant_*.py.
+internal_retrieval = true
+max_hits = 8
+
+[contract]
+# Where derived contract batteries are written.
+battery_dir = "tests/contract"
+# Case kinds derived from docstring prose.
+derive = ["examples", "errors"]
+# Run mutation-based strength scoring at reconcile.
+strength = true
+
+[semantic_gate]
+# Gate behaviorally-equivalent docstring edits before a full rebuild.
+enabled = true
+# Small model that judges contract equivalence (must run via `codex exec`).
+model = "gpt-5.4-mini"
+reasoning_effort = "high"   # low | medium | high
+
 [prompts]
 # If set, these are treated as file paths and read at runtime by the engine.
 # Leave empty to use packaged defaults under src/jaunt/prompts/.
+build_preamble = ""         # the always-on Jaunt preamble (codex_preamble.md)
 build_system = ""
 build_module = ""
 test_system = ""
 test_module = ""
+project_overview_system = ""  # used when [context] overview = true
+project_overview_user = ""
 ```
 
 Notes:
 
 - `paths.source_roots`: the CLI picks the *first existing* source root as the output base for generated build modules.
 - `prompts.*` are treated as *file paths* and read at runtime by the engine.
-- Jaunt is batteries-included: `rich`, `watchfiles`, `pytest`, `pytest-asyncio`, and `anyio` ship as core dependencies. There is nothing to install for watch mode, tests, or rich output.
-- The only optional extra is `jaunt[mcp]` (for `jaunt mcp serve`).
+- Jaunt is batteries-included: `rich`, `watchfiles`, `pytest`, `pytest-asyncio`, and `anyio` ship as core dependencies. There is nothing to install for watch mode, tests, or rich output — and no optional extras.
 - Generation requires the external `codex` CLI on your `PATH`, authenticated
   via `codex login`. See [Codex Engine](/docs/reference/codex-engine).
 - `[llm]` is informational under the Codex engine. Codex handles its own
   authentication; `llm.api_key_env` is not used for generation.
-- There is no `[mcp]` config section; MCP is started explicitly via `jaunt mcp serve`.
 - `build.async_runner` controls the pytest marker selected for generated async tests.
+- `[context]` and `[context.search]` are covered in depth in [Repo Context](/docs/reference/repo-context).
+- `[semantic_gate]` is covered in [Change Detection](/docs/reference/change-detection).
+- `[contract]` is covered in the [Contract Mode guide](/docs/guides/contract-mode).
+- `[daemon]` is covered in the [Background Daemon guide](/docs/guides/daemon).
 
 Next: [Output Locations](/docs/reference/output).
