@@ -237,6 +237,12 @@ def build_spec_graph(
     - read from entry.decorator_kwargs["deps"]
     - normalize values to SpecRef; ignore unknown/missing deps (MVP)
 
+    Structural base edges:
+    - read from entry.base_deps (spec'd base classes named in a whole-class header)
+    - added unconditionally at the same rank as explicit deps; never gated by
+      inference (inheritance is a structural fact, not an inferred guess)
+    - unknown/self refs are ignored, exactly like explicit deps
+
     Inference (best-effort):
     - controlled by entry.decorator_kwargs["infer_deps"] override or infer_default
     - never raises for ordinary code; failures are treated as "no inferred deps"
@@ -255,6 +261,12 @@ def build_spec_graph(
             if dep_ref is None or dep_ref == spec_ref:
                 continue
             if dep_ref in specs:
+                deps_out.add(dep_ref)
+
+        # Structural base-class edges: never gated by inference — inheritance
+        # is a fact of the class header, not a guess (spec 2026-07-03).
+        for dep_ref in entry.base_deps:
+            if dep_ref != spec_ref and dep_ref in specs:
                 deps_out.add(dep_ref)
 
         infer_override = entry.decorator_kwargs.get("infer_deps")
