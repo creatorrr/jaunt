@@ -3,6 +3,15 @@
 All notable changes to jaunt. Generated from conventional commits by
 [git-cliff](https://git-cliff.org); one section per published PyPI release.
 
+## [1.0.0] - 2026-07-03
+
+### Chores
+
+- Update CHANGELOG.md for v1.0.0rc8 [skip ci]
+
+### Fixes
+
+- Mirror package sources into the ty sandbox + bump to 1.0.0 (#59)
 ## [1.0.0rc8] - 2026-07-02
 
 ### Features
