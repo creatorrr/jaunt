@@ -22,6 +22,33 @@ def is_preserve_decorator(dec: ast.expr) -> bool:
     return False
 
 
+def is_magic_decorator(dec: ast.expr) -> bool:
+    """True for ``@jaunt.magic``/``@magic`` and their called forms (local copy to keep
+    this module dependency-free)."""
+    target = dec.func if isinstance(dec, ast.Call) else dec
+    if isinstance(target, ast.Attribute):
+        return (
+            isinstance(target.value, ast.Name)
+            and target.value.id == "jaunt"
+            and target.attr == "magic"
+        )
+    if isinstance(target, ast.Name):
+        return target.id == "magic"
+    return False
+
+
+_is_magic_decorator = is_magic_decorator
+
+
+def _is_property_decorator(dec: ast.expr) -> bool:
+    target = dec.func if isinstance(dec, ast.Call) else dec
+    if isinstance(target, ast.Name):
+        return target.id == "property"
+    if isinstance(target, ast.Attribute):
+        return target.attr in {"setter", "getter", "deleter"}
+    return False
+
+
 def is_stub_body(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     """True if the body is only docstring / ``...`` / ``pass`` / ``raise NotImplementedError``."""
     for stmt in node.body:
@@ -50,6 +77,7 @@ def _is_not_implemented(node: ast.Raise) -> bool:
 @dataclass(frozen=True, slots=True)
 class MemberSplit:
     stubs: tuple[str, ...]
+    sealed: tuple[str, ...]
     preserved: tuple[str, ...]
     preserve_marked: tuple[str, ...]
 
@@ -61,12 +89,36 @@ def _iter_methods(
 
 
 def split_class_members(class_node: ast.ClassDef) -> MemberSplit:
+    from jaunt.errors import JauntError
+
     stubs: list[str] = []
+    sealed: list[str] = []
     preserved: list[str] = []
     preserve_marked: list[str] = []
     for fn in _iter_methods(class_node):
         marked = any(is_preserve_decorator(d) for d in fn.decorator_list)
-        if marked:
+        magic_marked = any(is_magic_decorator(d) for d in fn.decorator_list)
+        if magic_marked:
+            if marked:
+                raise JauntError(
+                    f"{class_node.name}.{fn.name}: @jaunt.magic and @jaunt.preserve are "
+                    "contradictory tiers; use exactly one."
+                )
+            if any(_is_property_decorator(d) for d in fn.decorator_list):
+                raise JauntError(
+                    f"{class_node.name}.{fn.name}: @property cannot be sealed with inner "
+                    "@jaunt.magic (v1); leave it as a guidepost stub or hand-write it "
+                    "with @jaunt.preserve."
+                )
+            if not is_stub_body(fn):
+                raise JauntError(
+                    f"{class_node.name}.{fn.name}: inner @jaunt.magic on a hand-written "
+                    "body; use @jaunt.preserve to keep it, or reduce it to a stub for "
+                    "Jaunt to implement."
+                )
+            sealed.append(fn.name)
+            stubs.append(fn.name)
+        elif marked:
             preserve_marked.append(fn.name)
             preserved.append(fn.name)
         elif is_stub_body(fn):
@@ -75,6 +127,7 @@ def split_class_members(class_node: ast.ClassDef) -> MemberSplit:
             preserved.append(fn.name)
     return MemberSplit(
         stubs=tuple(sorted(stubs)),
+        sealed=tuple(sorted(sealed)),
         preserved=tuple(sorted(preserved)),
         preserve_marked=tuple(sorted(preserve_marked)),
     )
@@ -141,21 +194,6 @@ def resolve_base_contract(cls_obj: type) -> BaseContract:
 _IMPLEMENT_SENTINEL = "# jaunt:implement"
 
 
-def _is_magic_decorator(dec: ast.expr) -> bool:
-    """True for ``@jaunt.magic``/``@magic`` and their called forms (local copy to keep
-    this module dependency-free)."""
-    target = dec.func if isinstance(dec, ast.Call) else dec
-    if isinstance(target, ast.Attribute):
-        return (
-            isinstance(target.value, ast.Name)
-            and target.value.id == "jaunt"
-            and target.attr == "magic"
-        )
-    if isinstance(target, ast.Name):
-        return target.id == "magic"
-    return False
-
-
 def collect_spec_module_imports(spec_source: str) -> list[str]:
     """Every top-level import / from-import in the spec module, unparsed, in order.
 
@@ -180,6 +218,7 @@ def _stub_node_with_sentinel(
 ) -> ast.FunctionDef | ast.AsyncFunctionDef:
     clone = ast.parse(ast.unparse(node)).body[0]
     assert isinstance(clone, (ast.FunctionDef, ast.AsyncFunctionDef))
+    clone.decorator_list = [d for d in clone.decorator_list if not is_magic_decorator(d)]
     body: list[ast.stmt] = []
     doc = ast.get_docstring(node, clean=False)
     if doc is not None:
@@ -224,7 +263,11 @@ def build_class_scaffold(class_segment: str) -> str:
     for name in split.preserved:
         clone = ast.parse(ast.unparse(methods[name])).body[0]
         assert isinstance(clone, (ast.FunctionDef, ast.AsyncFunctionDef))
-        clone.decorator_list = [d for d in clone.decorator_list if not is_preserve_decorator(d)]
+        clone.decorator_list = [
+            d
+            for d in clone.decorator_list
+            if not (is_preserve_decorator(d) or is_magic_decorator(d))
+        ]
         new_body.append(clone)
 
     for name in split.stubs:
