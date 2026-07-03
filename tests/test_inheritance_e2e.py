@@ -357,3 +357,132 @@ def test_child_restaled_by_base_api_change_not_body_change(tmp_path: Path) -> No
         "        return None\n",
     )
     assert "pkg.child" not in _child_stale(build, tmp_path)
+
+
+def test_child_base_api_digest_tracks_base_docstring_second_line(tmp_path: Path) -> None:
+    # A base public-API docstring is behavioral contract: a change confined to the
+    # SECOND line of a base method's docstring must still change the child's
+    # base_api_digest (regression for hashing only the first docstring line).
+    build = _run_cross_module_build(tmp_path)
+    assert not build.report.failed, build.report.failed
+
+    def digest_for(second_line: str) -> str:
+        _write_generated_module_source(
+            tmp_path,
+            "pkg.base",
+            "class A:\n"
+            '    """Base A."""\n'
+            "    def run(self) -> None:\n"
+            f'        """Run the job.\n\n        {second_line}\n        """\n'
+            "        return None\n",
+        )
+        return _whole_class_context(
+            [build.child_entry],
+            specs=build.specs,
+            package_dir=tmp_path,
+            generated_dir="__generated__",
+        ).base_api_digest
+
+    d1 = digest_for("Must reject negative inputs.")
+    d2 = digest_for("Must reject positive inputs.")
+    assert d1 and d2
+    assert d1 != d2
+
+
+def test_cross_module_runtime_base_excluded_from_context_digest(tmp_path: Path) -> None:
+    # The cross-module spec'd base's *runtime* MRO snapshot must not leak into the
+    # hashed context: the artifact-derived inherited API replaces it. Otherwise the
+    # digest flaps between the pre-build placeholder base and the post-build
+    # generated base that the @magic decorator substitutes at import time.
+    build = _run_cross_module_build(tmp_path)
+    assert not build.report.failed, build.report.failed
+
+    def child_with_base(base_members: dict) -> SpecEntry:
+        base = type("A", (), {**base_members, "__module__": "pkg.base", "__qualname__": "A"})
+        obj = type(
+            "B",
+            (base,),
+            {"go": lambda self: None, "__module__": "pkg.child", "__qualname__": "B"},
+        )
+        return _class_entry(
+            module="pkg.child",
+            qualname="B",
+            obj=obj,
+            source_file=Path(build.child_entry.source_file),
+            base_deps=(normalize_spec_ref("pkg.base:A"),),
+        )
+
+    def context_digest(entry: SpecEntry) -> str:
+        wcc = _whole_class_context(
+            [entry],
+            specs=build.specs,
+            package_dir=tmp_path,
+            generated_dir="__generated__",
+        )
+        # The runtime base members must never appear in the base-contract block.
+        assert "A.run" not in wcc.base_contract_block
+        expected, _ = _build_expected_names([entry])
+        return build_module_context_artifacts(
+            module_name="pkg.child",
+            entries=[entry],
+            expected_names=expected,
+            module_specs=build.module_specs,
+            module_dag=build.module_dag,
+            package_dir=tmp_path,
+            generated_dir="__generated__",
+            base_contract_block=wcc.base_contract_block,
+            whole_class_contract_block=wcc.whole_class_contract_block,
+            inherited_api_block=wcc.inherited_api_block,
+        ).digest
+
+    placeholder = child_with_base({})  # unbuilt: empty placeholder base
+    generated = child_with_base({"run": lambda self: None, "extra": lambda self: None})
+    assert context_digest(placeholder) == context_digest(generated)
+
+
+def test_corrupt_base_artifact_surfaces_error(tmp_path: Path) -> None:
+    # A present-but-corrupt base artifact must raise, not silently degrade to the
+    # `unbuilt` sentinel (which would hide the corruption behind stale context).
+    import pytest
+
+    from jaunt.errors import JauntError
+
+    build = _run_cross_module_build(tmp_path)
+    assert not build.report.failed, build.report.failed
+    _write_generated_module_source(tmp_path, "pkg.base", "class A(:\n    def run(self")
+
+    with pytest.raises(JauntError):
+        _whole_class_context(
+            [build.child_entry],
+            specs=build.specs,
+            package_dir=tmp_path,
+            generated_dir="__generated__",
+        )
+
+
+def test_missing_base_artifact_is_unbuilt_sentinel(tmp_path: Path) -> None:
+    # A base with a dependency edge but no artifact on disk is genuinely unbuilt:
+    # the fixed sentinel, not an error.
+    base_spec = _write_spec_file(tmp_path, "pkg.base", "import jaunt\n")
+    child_spec = _write_spec_file(
+        tmp_path,
+        "pkg.child",
+        "import jaunt\n\n"
+        "@jaunt.magic()\n"
+        "class B(A):\n"
+        '    """Child B."""\n'
+        "    def go(self) -> None: ...\n",
+    )
+    a_entry = _class_entry(module="pkg.base", qualname="A", obj=CrossA, source_file=base_spec)
+    child_entry = _class_entry(
+        module="pkg.child",
+        qualname="B",
+        obj=CrossB,
+        source_file=child_spec,
+        base_deps=(normalize_spec_ref("pkg.base:A"),),
+    )
+    specs = {a_entry.spec_ref: a_entry, child_entry.spec_ref: child_entry}
+    wcc = _whole_class_context(
+        [child_entry], specs=specs, package_dir=tmp_path, generated_dir="__generated__"
+    )
+    assert "unbuilt:pkg.base:A" in wcc.inherited_api_block

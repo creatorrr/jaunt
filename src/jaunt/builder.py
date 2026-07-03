@@ -42,7 +42,7 @@ from jaunt.digest import (
     prose_digest,
     structural_digest,
 )
-from jaunt.errors import JauntDependencyCycleError, JauntGenerationError
+from jaunt.errors import JauntDependencyCycleError, JauntError, JauntGenerationError
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
 from jaunt.generate.shared import fmt_kv_block
 from jaunt.header import (
@@ -717,7 +717,22 @@ def _whole_class_context(
     contract_blocks: list[str] = []
 
     for entry in whole.values():
-        base_block = resolve_base_contract(entry.obj).block  # type: ignore[arg-type]
+        # Cross-module spec'd bases are represented below by the artifact-derived
+        # inherited-API block, not the runtime MRO snapshot. Excluding them from the
+        # runtime base-contract block keeps the hashed context stable across a build
+        # and a later `jaunt status` re-import: the runtime base object reflects
+        # import-time build state (a placeholder before the base is built, the
+        # generated class after), which would otherwise flap the digest. External /
+        # non-spec bases and same-module co-generated bases keep runtime rendering.
+        cross_module_base_refs: set[str] = set()
+        for dep_ref in entry.base_deps:
+            base_spec = specs.get(dep_ref)
+            if base_spec is not None and base_spec.module != entry.module:
+                cross_module_base_refs.add(str(dep_ref))
+        base_block = resolve_base_contract(
+            entry.obj,  # type: ignore[arg-type]
+            exclude_refs=cross_module_base_refs,
+        ).block
         base_blocks.append(base_block)
 
         entry_inherited: list[str] = []
@@ -728,19 +743,37 @@ def _whole_class_context(
             gen_path = package_dir / _generated_relpath(dep.module, generated_dir=generated_dir)
             try:
                 gen_src = gen_path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                # Base genuinely not built yet -> fixed sentinel (design §5).
+                entry_inherited.append(f"unbuilt:{dep_ref!s}")
+                continue
+            try:
                 summary = build_generated_class_api_summary(
                     gen_src,
                     dep.qualname,
                     spec_docstring="",
                 )
-            except Exception:
-                entry_inherited.append(f"unbuilt:{dep_ref!s}")
-                continue
+            except Exception as exc:
+                # A present-but-corrupt base artifact (syntax error, missing class)
+                # must surface, not silently degrade to the `unbuilt` sentinel.
+                raise JauntError(
+                    f"Base generated artifact for {dep_ref!s} at {gen_path} could not be "
+                    f"summarized ({exc}); the base's generated code is missing its class "
+                    "or is not valid Python."
+                ) from exc
             for member in summary.members:
                 rendered_signature = _render_inherited_signature(member.signature, member.name)
                 entry_inherited.append(f"{dep.qualname}.{rendered_signature}")
                 if member.doc:
-                    entry_inherited.append(f"  doc: {member.doc.splitlines()[0]}")
+                    # Hash the full docstring, not just the first line: docstrings are
+                    # behavioral contract, so a second-line-only change to a base's
+                    # public API must restale the subclass (design §5).
+                    doc_lines = member.doc.splitlines()
+                    if len(doc_lines) == 1:
+                        entry_inherited.append(f"  doc: {doc_lines[0]}")
+                    else:
+                        entry_inherited.append("  doc:")
+                        entry_inherited.extend(f"    {line}" for line in doc_lines)
 
         inherited_lines.extend(entry_inherited)
         contract_blocks.append(

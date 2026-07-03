@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import inspect
 from dataclasses import dataclass
+from collections.abc import Collection
 from typing import Literal
 
 
@@ -74,6 +75,20 @@ def _is_not_implemented(node: ast.Raise) -> bool:
     return False
 
 
+def _descriptor_kind(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+    """Sealed descriptor kind: ``classmethod`` / ``staticmethod`` / ``plain``.
+
+    ``@abstractmethod`` and jaunt markers are intentionally ignored: a sealed
+    abstractmethod is implemented (drops ``@abstractmethod``) in the generated
+    class, so counting it would cause a false drift error.
+    """
+
+    for dec in node.decorator_list:
+        if isinstance(dec, ast.Name) and dec.id in ("classmethod", "staticmethod"):
+            return dec.id
+    return "plain"
+
+
 def canonical_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     """Formatting-insensitive signature identity for sealed-method comparison."""
 
@@ -88,14 +103,21 @@ def canonical_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
             ast.unparse(default) if default is not None else "",
         ]
 
+    def render_star(arg: ast.arg | None) -> list[str] | str:
+        # ``*args`` / ``**kwargs`` carry a name and (contractually) an annotation.
+        if arg is None:
+            return ""
+        return [arg.arg, ast.unparse(arg.annotation) if arg.annotation else ""]
+
     parts: list[object] = ["async" if isinstance(node, ast.AsyncFunctionDef) else "def"]
     ordered = [*a.posonlyargs, *a.args]
     parts.append([render(arg, d) for arg, d in zip(ordered, pos_defaults, strict=True)])
     parts.append(len(a.posonlyargs))
-    parts.append(a.vararg.arg if a.vararg else "")
+    parts.append(render_star(a.vararg))
     parts.append([render(arg, d) for arg, d in zip(a.kwonlyargs, a.kw_defaults, strict=True)])
-    parts.append(a.kwarg.arg if a.kwarg else "")
+    parts.append(render_star(a.kwarg))
     parts.append(ast.unparse(node.returns) if node.returns else "")
+    parts.append(_descriptor_kind(node))
     import json
 
     return json.dumps(parts, sort_keys=False, separators=(",", ":"))
@@ -179,7 +201,16 @@ class BaseContract:
     required_abstractmethods: tuple[str, ...]
 
 
-def resolve_base_contract(cls_obj: type) -> BaseContract:
+def resolve_base_contract(cls_obj: type, *, exclude_refs: Collection[str] = ()) -> BaseContract:
+    """Render the runtime base-class contract.
+
+    ``exclude_refs`` names bases (``module:qualname``) to drop from the rendered
+    ``block`` only. Cross-module spec'd bases are excluded by the builder because
+    their contract is injected from the generated artifact on disk instead of the
+    runtime MRO snapshot (which flaps between a placeholder and the generated class
+    depending on import-time build state). ``project_base_refs`` and
+    ``required_abstractmethods`` are unaffected by ``exclude_refs``.
+    """
     required = tuple(sorted(getattr(cls_obj, "__abstractmethods__", frozenset())))
 
     project_refs: list[str] = []
@@ -192,10 +223,15 @@ def resolve_base_contract(cls_obj: type) -> BaseContract:
         if mod and not mod.startswith(("builtins", "abc", "typing", "collections")):
             project_refs.append(f"{mod}:{qual}")
 
+    excluded = frozenset(exclude_refs)
     lines: list[str] = []
     seen: set[str] = set()
     for base in cls_obj.__mro__[1:]:
         if base is object:
+            continue
+        base_mod = getattr(base, "__module__", "")
+        base_qual = getattr(base, "__qualname__", getattr(base, "__name__", ""))
+        if f"{base_mod}:{base_qual}" in excluded:
             continue
         for name, member in sorted(vars(base).items()):
             if name.startswith("_") and not name.startswith("__"):
