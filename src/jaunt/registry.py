@@ -33,6 +33,8 @@ class SpecEntry:
     decorator_kwargs: dict[str, object]
     class_name: str | None = None
     auto_deps: tuple[SpecRef, ...] = ()
+    sealed_members: tuple[str, ...] = ()
+    base_deps: tuple[SpecRef, ...] = ()
     decorator_api_records: tuple[DecoratorApiRecord, ...] = ()
     effective_signature: str | None = None
     effective_signature_source: Literal["decorated", "original"] | None = None
@@ -60,6 +62,16 @@ def register_magic(entry: SpecEntry) -> None:
     """Register a magic spec entry (last write wins)."""
 
     _MAGIC_REGISTRY[entry.spec_ref] = entry
+
+
+def unregister_magic(spec_ref: SpecRef) -> SpecEntry | None:
+    """Remove and return a magic spec entry (``None`` if absent).
+
+    Used by whole-class absorption: inner ``@magic`` method specs are folded
+    into their class's spec at class-decoration time.
+    """
+
+    return _MAGIC_REGISTRY.pop(spec_ref, None)
 
 
 def register_test(entry: SpecEntry) -> None:

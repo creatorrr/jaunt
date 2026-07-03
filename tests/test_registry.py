@@ -12,8 +12,9 @@ from jaunt.registry import (
     get_test_registry,
     register_magic,
     register_test,
+    unregister_magic,
 )
-from jaunt.spec_ref import normalize_spec_ref
+from jaunt.spec_ref import SpecRef, normalize_spec_ref
 
 
 @pytest.fixture(autouse=True)
@@ -111,6 +112,34 @@ def test_get_specs_by_module_groups_and_sorts() -> None:
 
     # Sorted by qualname, then spec_ref as a tie-breaker.
     assert grouped["m.one"] == [e2, e4, e1]
+
+
+def _magic_entry(ref: str, *, class_name: str | None = None) -> SpecEntry:
+    return SpecEntry(
+        kind="magic",
+        spec_ref=SpecRef(ref),
+        module=ref.split(":", 1)[0],
+        qualname=ref.split(":", 1)[1],
+        source_file="x.py",
+        obj=object(),
+        decorator_kwargs={},
+        class_name=class_name,
+    )
+
+
+def test_unregister_magic_removes_and_returns_entry() -> None:
+    clear_registries()
+    entry = _magic_entry("m:C.f", class_name="C")
+    register_magic(entry)
+    assert unregister_magic(SpecRef("m:C.f")) is entry
+    assert SpecRef("m:C.f") not in get_magic_registry()
+    assert unregister_magic(SpecRef("m:C.f")) is None
+
+
+def test_spec_entry_new_fields_default_empty() -> None:
+    entry = _magic_entry("m:C")
+    assert entry.sealed_members == ()
+    assert entry.base_deps == ()
 
 
 def test_duplicate_registration_overwrites_decorator_kwargs() -> None:
