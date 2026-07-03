@@ -34,6 +34,14 @@ Use explicit `deps=` when:
 - you want deterministic ordering
 - inference is missing an edge or creating the wrong one
 
+## Base-Class Edges (Structural)
+
+When a whole-class `@jaunt.magic` spec inherits from another spec — `class Child(Base)` where both carry `@jaunt.magic` — the base is an **always-on dependency**. This edge is not inference: it is a structural fact read straight from the class header, so it holds even with `infer_deps` turned off (or `--no-infer-deps`). The base's module always builds before the subclass's.
+
+For a **cross-module** base (base and subclass live in different modules), the subclass's build context includes the base's *generated* public API — method signatures and docstrings read from the built artifact on disk — so the model builds on real inherited methods instead of a stale snapshot. A **same-module** base pair is co-generated as one component: both classes are designed together in a single shot, so there is no separate "base artifact first" step.
+
+A base-class cycle (two specs inheriting from each other across modules) is a real cycle and raises `JauntDependencyCycleError` (exit `2`).
+
 ## What Happens During Generation
 
 - Dependencies are generated first.
