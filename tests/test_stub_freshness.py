@@ -16,8 +16,13 @@ def _write(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def _make_fresh_built_module(tmp_path: Path, pkg: str, *, emit_stubs: bool) -> tuple[Path, Path]:
+def _make_fresh_built_module(
+    tmp_path: Path, pkg: str, *, emit_stubs: bool, extra_spec: str = ""
+) -> tuple[Path, Path]:
     """Create a project with one hand-built, digest-fresh generated module.
+
+    ``extra_spec`` is prepended handwritten source (e.g. a helper) — default "" keeps
+    the spec byte-identical for existing callers.
 
     Returns (spec_source_file, generated_source_content is written to disk).
     """
@@ -45,6 +50,7 @@ def _make_fresh_built_module(tmp_path: Path, pkg: str, *, emit_stubs: bool) -> t
     _write(
         spec_file,
         "import jaunt\n\n"
+        f"{extra_spec}"
         "@jaunt.magic()\n"
         "def greet(name: str) -> str:\n"
         '    """Say hello."""\n'
@@ -170,14 +176,14 @@ def test_stale_stub_marks_module_stale(tmp_path: Path, monkeypatch) -> None:
         spec_file, gen_file = _make_fresh_built_module(tmp_path, "stubpkg_stale", emit_stubs=True)
         gen_source = gen_file.read_text(encoding="utf-8")
         # Record a digest for content that no longer matches the generated module,
-        # so the stub is present but stale (recorded != current).
+        # so the stub is present but stale (recorded != current). The drift must be a
+        # real code change (not a comment), since the inputs digest is AST-normalized.
+        drifted = gen_source + "\n\ndef _drift() -> int:\n    return 0\n"
         header = format_stub_header(
             tool_version="0",
             source_module="stubpkg_stale.specs",
-            generated_digest=generated_content_digest(gen_source + "\n# drifted\n"),
-            inputs_digest=stub_inputs_digest(
-                spec_file.read_text(encoding="utf-8"), gen_source + "\n# drifted\n"
-            ),
+            generated_digest=generated_content_digest(drifted),
+            inputs_digest=stub_inputs_digest(spec_file.read_text(encoding="utf-8"), drifted),
         )
         stub = build_stub_source(spec_file.read_text(encoding="utf-8"), gen_source, set(), header)
         stub_path_for_source(spec_file).write_text(stub, encoding="utf-8")
@@ -192,10 +198,7 @@ def test_stale_stub_marks_module_stale(tmp_path: Path, monkeypatch) -> None:
                 del sys.modules[m]
 
 
-def test_spec_source_edit_marks_stub_stale(tmp_path: Path, monkeypatch) -> None:
-    """A spec-source-only edit (module still digest-fresh) makes `status` flag the
-    module stale via the stub, because stub content derives from the spec source too
-    (finding 6, PR #63)."""
+def _emit_matching_stub(spec_file: Path, gen_file: Path, source_module: str) -> None:
     from jaunt.header import format_stub_header
     from jaunt.stub_emitter import (
         build_stub_source,
@@ -204,30 +207,62 @@ def test_spec_source_edit_marks_stub_stale(tmp_path: Path, monkeypatch) -> None:
         stub_path_for_source,
     )
 
+    gen_source = gen_file.read_text(encoding="utf-8")
+    spec_source = spec_file.read_text(encoding="utf-8")
+    header = format_stub_header(
+        tool_version="0",
+        source_module=source_module,
+        generated_digest=generated_content_digest(gen_source),
+        inputs_digest=stub_inputs_digest(spec_source, gen_source),
+    )
+    stub_path_for_source(spec_file).write_text(
+        build_stub_source(spec_source, gen_source, set(), header), encoding="utf-8"
+    )
+
+
+def test_comment_only_spec_edit_keeps_module_fresh(tmp_path: Path, monkeypatch) -> None:
+    """A comment-only spec edit must NOT restale the stub (finding 4, PR #63): the
+    inputs digest is AST-normalized, preserving the Layer-A freshness guarantee."""
+    orig_path = list(sys.path)
+    before = set(sys.modules.keys())
+    try:
+        spec_file, gen_file = _make_fresh_built_module(tmp_path, "stubpkg_comment", emit_stubs=True)
+        _emit_matching_stub(spec_file, gen_file, "stubpkg_comment.specs")
+        assert "stubpkg_comment.specs" in _status(tmp_path).fresh
+
+        spec_file.write_text(
+            spec_file.read_text(encoding="utf-8") + "\n# a purely cosmetic note\n",
+            encoding="utf-8",
+        )
+        assert "stubpkg_comment.specs" in _status(tmp_path).fresh
+    finally:
+        sys.path[:] = orig_path
+        for m in list(sys.modules.keys()):
+            if m not in before:
+                del sys.modules[m]
+
+
+def test_handwritten_helper_edit_marks_module_stale(tmp_path: Path, monkeypatch) -> None:
+    """A real edit to the spec's handwritten source restales the module (finding 4/6,
+    PR #63) — the stub derives from spec source, not only the generated file."""
     orig_path = list(sys.path)
     before = set(sys.modules.keys())
     try:
         spec_file, gen_file = _make_fresh_built_module(
-            tmp_path, "stubpkg_specedit", emit_stubs=True
+            tmp_path,
+            "stubpkg_helper",
+            emit_stubs=True,
+            extra_spec="def _helper() -> int:\n    return 1\n\n\n",
         )
-        gen_source = gen_file.read_text(encoding="utf-8")
-        spec_source = spec_file.read_text(encoding="utf-8")
-        header = format_stub_header(
-            tool_version="0",
-            source_module="stubpkg_specedit.specs",
-            generated_digest=generated_content_digest(gen_source),
-            inputs_digest=stub_inputs_digest(spec_source, gen_source),
-        )
-        stub = build_stub_source(spec_source, gen_source, set(), header)
-        stub_path_for_source(spec_file).write_text(stub, encoding="utf-8")
-        assert "stubpkg_specedit.specs" in _status(tmp_path).fresh
+        _emit_matching_stub(spec_file, gen_file, "stubpkg_helper.specs")
+        assert "stubpkg_helper.specs" in _status(tmp_path).fresh
 
-        # Append a comment: the AST-normalized module digest is unchanged (module
-        # stays digest-fresh), but the raw stub inputs digest changes.
-        spec_file.write_text(spec_source + "\n# handwritten note\n", encoding="utf-8")
-        st = _status(tmp_path)
-        assert "stubpkg_specedit.specs" in st.stale
-        assert st.stale_changes.get("stubpkg_specedit.specs") == "stub"
+        # Change the handwritten helper's body (generated file untouched).
+        spec_file.write_text(
+            spec_file.read_text(encoding="utf-8").replace("return 1", "return 2"),
+            encoding="utf-8",
+        )
+        assert "stubpkg_helper.specs" in _status(tmp_path).stale
     finally:
         sys.path[:] = orig_path
         for m in list(sys.modules.keys()):

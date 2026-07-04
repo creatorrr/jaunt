@@ -203,27 +203,49 @@ def _validate_build_contract_only(
                     f"from {spec_module}; define it instead"
                 )
 
-    errors.extend(_spec_module_rebind_errors(mod, expected=expected, spec_module=spec_module))
+    errors.extend(
+        _spec_module_rebind_errors(
+            mod, expected=expected, spec_module=spec_module, generated_module=generated_module
+        )
+    )
     return errors
 
 
 def _spec_module_rebind_errors(
-    mod: ast.Module, *, expected: set[str], spec_module: str
+    mod: ast.Module,
+    *,
+    expected: set[str],
+    spec_module: str,
+    generated_module: str | None = None,
 ) -> list[str]:
     """Flag a plain-import rebinding of a spec symbol.
 
     ``from <spec_module> import X`` is caught above, but the same hazard also arises
-    from ``import <spec_module>`` (optionally ``as m``) followed by a module-level
-    rebind ``X = <alias>.X`` where ``X`` is one of the generated module's own spec
-    symbols. The alias may be the ``as`` name or the dotted spec-module path itself.
+    when the generated module binds the *spec module object* under a name and then
+    rebinds one of its own spec symbols off it — ``X = <alias>.X``. The spec module
+    can be bound by ``import <spec_module>`` (optionally ``as m``) or by importing it
+    from its parent package: ``from pkg import mod`` / ``from .. import mod`` (whose
+    relative form is resolved against the generated module).
     """
-    # Prefixes that reference the spec module object: `import <spec_module>` binds
-    # the dotted name, `import <spec_module> as m` binds `m`.
+    # Prefixes that reference the spec module object.
     alias_prefixes: set[str] = set()
     for node in mod.body:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name == spec_module:
+                    alias_prefixes.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            level = int(getattr(node, "level", 0) or 0)
+            if level == 0:
+                from_module = node.module
+            else:
+                from_module = _resolve_relative_import(generated_module, level, node.module)
+            if not from_module:
+                continue
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                if f"{from_module}.{alias.name}" == spec_module:
                     alias_prefixes.add(alias.asname or alias.name)
     if not alias_prefixes:
         return []

@@ -33,9 +33,31 @@ def stub_inputs_digest(spec_source: str, generated_source: str) -> str:
     plain signatures) *and* the generated implementation *and* the emitter format
     version. Comparing only the generated digest missed spec-only edits (a
     handwritten helper changing shape), so freshness keys on all three.
+
+    Both sources are AST-normalized before hashing so comment- and formatting-only
+    edits do not restale the stub — preserving the Layer-A ``jaunt status`` guarantee
+    that ruff/whitespace/comment churn is not drift.
     """
-    payload = "\x00".join((_STUB_FORMAT_VERSION, spec_source or "", generated_source or ""))
+    payload = "\x00".join(
+        (
+            _STUB_FORMAT_VERSION,
+            _normalize_source_for_digest(spec_source),
+            _normalize_source_for_digest(generated_source),
+        )
+    )
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _normalize_source_for_digest(source: str) -> str:
+    """Canonicalize Python source (strip comments/formatting) via parse+unparse.
+
+    Falls back to the raw text if the source does not parse, so an unexpected input
+    still produces a deterministic digest.
+    """
+    try:
+        return ast.unparse(ast.parse(source or ""))
+    except SyntaxError:
+        return source or ""
 
 
 def is_jaunt_stub(path: Path) -> bool:
@@ -51,6 +73,7 @@ def build_stub_source(
     generated_source: str,
     expected_names: set[str],
     header: str,
+    generated_module: str | None = None,
 ) -> str:
     spec_tree = ast.parse(spec_source)
     generated_tree = ast.parse(generated_source or "")
@@ -92,6 +115,7 @@ def build_stub_source(
         rendered_nodes=rendered_nodes,
         provided=_module_bound_names(spec_tree),
         generated_tree=generated_tree,
+        generated_module=generated_module,
     )
     chunks = prelude + chunks
 
@@ -129,20 +153,26 @@ def stub_staleness(*, source_file: str | Path, generated_source: str) -> str | N
     return None
 
 
+# Safety cap on the resolution fixpoint; deep transitive chains are exotic and a
+# bounded loop guards against a pathological cycle in generated definitions.
+_MAX_RESOLVE_ITERATIONS = 10
+
+
 def _resolve_stub_references(
     *,
     rendered_nodes: list[ast.AST],
     provided: set[str],
     generated_tree: ast.Module,
+    generated_module: str | None,
 ) -> list[str]:
     referenced: set[str] = set()
     for node in rendered_nodes:
         referenced |= _referenced_load_names(node)
-    missing = referenced - provided - _BUILTIN_NAMES
-    if not missing:
+    queue = sorted(referenced - provided - _BUILTIN_NAMES)
+    if not queue:
         return []
 
-    gen_imports = _import_bindings(generated_tree)
+    gen_imports = _import_bindings(generated_tree, generated_module=generated_module)
     gen_defs = {
         node.name: node
         for node in generated_tree.body
@@ -150,22 +180,39 @@ def _resolve_stub_references(
     }
     gen_assigns = _assign_bindings(generated_tree)
 
+    # Resolve to a fixpoint: a supporting definition may itself reference further
+    # generated-only names (e.g. `make() -> _Result` where `_Result.inner: _Inner`),
+    # so pulling one in can surface new missing names to resolve on the next pass.
+    resolved = set(provided) | _BUILTIN_NAMES
     import_lines: list[str] = []
     supporting: list[str] = []
     any_fallbacks: list[str] = []
-    for name in sorted(missing):
-        if name in gen_imports:
-            import_lines.append(gen_imports[name])
-        elif name in gen_defs:
-            node = gen_defs[name]
-            if isinstance(node, ast.ClassDef):
-                supporting.append(ast.unparse(_class_stub_clone(node)).strip())
+    for _ in range(_MAX_RESOLVE_ITERATIONS):
+        if not queue:
+            break
+        next_queue: set[str] = set()
+        for name in queue:
+            if name in resolved:
+                continue
+            resolved.add(name)
+            if name in gen_imports:
+                import_lines.append(gen_imports[name])
+            elif name in gen_defs:
+                node = gen_defs[name]
+                clone = (
+                    _class_stub_clone(node)
+                    if isinstance(node, ast.ClassDef)
+                    else _function_stub_clone(node)
+                )
+                supporting.append(ast.unparse(clone).strip())
+                next_queue |= _referenced_load_names(clone)
+            elif name in gen_assigns:
+                node = gen_assigns[name]
+                supporting.append(ast.unparse(copy.deepcopy(node)).strip())
+                next_queue |= _referenced_load_names(node)
             else:
-                supporting.append(ast.unparse(_function_stub_clone(node)).strip())
-        elif name in gen_assigns:
-            supporting.append(ast.unparse(copy.deepcopy(gen_assigns[name])).strip())
-        else:
-            any_fallbacks.append(name)
+                any_fallbacks.append(name)
+        queue = sorted(next_queue - resolved)
 
     prelude: list[str] = []
     if import_lines:
@@ -173,7 +220,7 @@ def _resolve_stub_references(
     if any_fallbacks:
         # Never emit an unresolved name: bind it to `Any` as a last resort.
         prelude.append("from typing import Any")
-        prelude.append("\n".join(f"{name} = Any" for name in any_fallbacks))
+        prelude.append("\n".join(f"{name} = Any" for name in dict.fromkeys(any_fallbacks)))
     prelude.extend(supporting)
     return prelude
 
@@ -198,32 +245,53 @@ def _module_bound_names(tree: ast.Module) -> set[str]:
     return names
 
 
-def _import_bindings(tree: ast.Module) -> dict[str, str]:
+def _import_bindings(tree: ast.Module, *, generated_module: str | None) -> dict[str, str]:
     """Map each name a top-level import binds to a single-import statement string."""
     out: dict[str, str] = {}
     for node in tree.body:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 bound = alias.asname or alias.name.split(".", 1)[0]
-                out.setdefault(bound, _single_import_stmt(node, alias))
+                out.setdefault(bound, _single_import_stmt(node, alias, generated_module))
         elif isinstance(node, ast.ImportFrom):
             for alias in node.names:
                 if alias.name == "*":
                     continue
                 bound = alias.asname or alias.name
-                out.setdefault(bound, _single_import_stmt(node, alias))
+                out.setdefault(bound, _single_import_stmt(node, alias, generated_module))
     return out
 
 
-def _single_import_stmt(node: ast.Import | ast.ImportFrom, alias: ast.alias) -> str:
+def _single_import_stmt(
+    node: ast.Import | ast.ImportFrom, alias: ast.alias, generated_module: str | None
+) -> str:
     if isinstance(node, ast.Import):
         return ast.unparse(ast.Import(names=[copy.deepcopy(alias)])).strip()
-    stmt = ast.ImportFrom(
-        module=node.module,
-        names=[copy.deepcopy(alias)],
-        level=int(getattr(node, "level", 0) or 0),
-    )
+    level = int(getattr(node, "level", 0) or 0)
+    module = node.module
+    # The stub lives at the spec module's location, not the generated module's, so a
+    # relative import copied verbatim would re-resolve to the wrong package. Rewrite
+    # it to the absolute module it targets from inside the generated module.
+    if level > 0:
+        absolute = _resolve_relative_generated_module(generated_module, level, module)
+        if absolute is not None:
+            module, level = absolute, 0
+    stmt = ast.ImportFrom(module=module, names=[copy.deepcopy(alias)], level=level)
     return ast.unparse(stmt).strip()
+
+
+def _resolve_relative_generated_module(
+    generated_module: str | None, level: int, module: str | None
+) -> str | None:
+    """Resolve a relative ``from`` import inside the generated module to an absolute name."""
+    if not generated_module or level <= 0:
+        return None
+    parts = generated_module.split(".")
+    anchor = parts[: len(parts) - level]
+    if not anchor:
+        return None
+    base = ".".join(anchor)
+    return f"{base}.{module}" if module else base
 
 
 def _assign_bindings(tree: ast.Module) -> dict[str, ast.stmt]:

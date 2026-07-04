@@ -333,6 +333,75 @@ def test_generated_only_helper_type_is_supported() -> None:
     assert _undefined_load_names(body) == set()
 
 
+def test_transitive_generated_reference_is_resolved() -> None:
+    """A two-level chain (make() -> _Result whose attribute references _Inner) resolves
+    to a fixpoint so no transitive name is left dangling (finding 2, PR #63)."""
+    spec_source = textwrap.dedent(
+        '''
+        import jaunt
+
+
+        @jaunt.magic()
+        def make():
+            """Make a result."""
+            ...
+        '''
+    )
+    generated_source = textwrap.dedent(
+        """
+        class _Inner:
+            x: int
+
+        class _Result:
+            inner: _Inner
+
+        def make() -> _Result:
+            return _Result()
+        """
+    )
+    stub = build_stub_source(spec_source, generated_source, {"make"}, _header())
+    assert "def make() -> _Result:" in stub
+    assert "class _Result:" in stub
+    assert "class _Inner:" in stub
+    body = stub[len(_header()) :]
+    assert _undefined_load_names(body) == set()
+
+
+def test_generated_relative_import_is_rewritten_absolute() -> None:
+    """A relative import in the generated module used by a signature is emitted in its
+    absolute form, since the stub sits at the spec module's location (finding 3)."""
+    spec_source = textwrap.dedent(
+        '''
+        import jaunt
+
+
+        @jaunt.magic()
+        def load():
+            """Load a result."""
+            ...
+        '''
+    )
+    generated_source = textwrap.dedent(
+        """
+        from .types import Result
+
+
+        def load() -> Result:
+            return Result()
+        """
+    )
+    stub = build_stub_source(
+        spec_source,
+        generated_source,
+        {"load"},
+        _header(),
+        generated_module="pkg.__generated__.svc",
+    )
+    assert "from pkg.__generated__.types import Result" in stub
+    assert "from .types" not in stub
+    assert "def load() -> Result:" in stub
+
+
 def test_stub_staleness_reacts_to_spec_source_change(tmp_path: Path) -> None:
     """Editing the spec module's handwritten source (generated unchanged) still marks
     the stub stale, because stub content derives from the spec too (finding 6, PR #63)."""

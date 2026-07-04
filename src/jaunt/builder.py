@@ -1713,6 +1713,9 @@ async def run_build(
                     gen_source,
                     set(expected),
                     stub_header,
+                    generated_module=paths.spec_module_to_generated_module(
+                        module_name, generated_dir=generated_dir
+                    ),
                 )
                 if not (stub_path.exists() and stub_path.read_text(encoding="utf-8") == new_stub):
                     stub_path.parent.mkdir(parents=True, exist_ok=True)

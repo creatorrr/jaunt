@@ -228,6 +228,51 @@ def test_rebind_from_unrelated_module_allowed() -> None:
     assert not any("rebind" in e for e in errs)
 
 
+def test_spec_symbol_rebind_via_relative_from_import_rejected() -> None:
+    # Inside pkg/__generated__/mod.py, `from .. import mod as _spec` binds the spec
+    # MODULE object; `Foo = _spec.Foo` then rebinds a spec symbol off it (PR #63 f1).
+    src = textwrap.dedent(
+        """
+        from .. import mod as _spec
+
+        class Foo:
+            pass
+
+        Foo = _spec.Foo
+        """
+    )
+    errs = validate_build_generated_source(
+        src,
+        ["Foo"],
+        spec_module="pkg.mod",
+        handwritten_names=(),
+        generated_module="pkg.__generated__.mod",
+    )
+    assert any("Foo" in e and "pkg.mod" in e and "rebind" in e for e in errs)
+
+
+def test_spec_symbol_rebind_via_absolute_from_import_rejected() -> None:
+    # The absolute form `from pkg import mod` binds the spec module too.
+    src = textwrap.dedent(
+        """
+        from pkg import mod
+
+        class Foo:
+            pass
+
+        Foo = mod.Foo
+        """
+    )
+    errs = validate_build_generated_source(
+        src,
+        ["Foo"],
+        spec_module="pkg.mod",
+        handwritten_names=(),
+        generated_module="pkg.__generated__.mod",
+    )
+    assert any("Foo" in e and "pkg.mod" in e and "rebind" in e for e in errs)
+
+
 def test_self_import_of_handwritten_symbol_allowed() -> None:
     # Reusing a genuinely handwritten symbol from the spec module is fine.
     src = textwrap.dedent(
