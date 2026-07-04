@@ -554,3 +554,39 @@ def test_prompts_build_preamble_default_and_override(tmp_path: Path) -> None:
     )
     cfg2 = load_config(root=override_root)
     assert cfg2.prompts.build_preamble == str((override_root / "my_preamble.md").resolve())
+
+
+def test_unknown_section_rejected(tmp_path: Path) -> None:
+    (tmp_path / "jaunt.toml").write_text(
+        'version = 1\n[gate]\nmodel = "gpt-5.4-mini"\n', encoding="utf-8"
+    )
+    (tmp_path / "src").mkdir()
+    with pytest.raises(JauntConfigError, match="semantic_gate"):
+        load_config(root=tmp_path)
+
+
+def test_unknown_key_rejected(tmp_path: Path) -> None:
+    (tmp_path / "jaunt.toml").write_text(
+        'version = 1\n[semantic_gate]\nreasoning-effort = "high"\n', encoding="utf-8"
+    )
+    (tmp_path / "src").mkdir()
+    with pytest.raises(JauntConfigError, match="reasoning_effort"):
+        load_config(root=tmp_path)
+
+
+def test_unknown_search_key_rejected(tmp_path: Path) -> None:
+    (tmp_path / "jaunt.toml").write_text(
+        "version = 1\n[context.search]\nmax-hits = 3\n", encoding="utf-8"
+    )
+    (tmp_path / "src").mkdir()
+    with pytest.raises(JauntConfigError, match="max_hits"):
+        load_config(root=tmp_path)
+
+
+def test_init_template_roundtrips(tmp_path: Path) -> None:
+    from jaunt.init_template import INIT_TEMPLATE
+
+    (tmp_path / "jaunt.toml").write_text(INIT_TEMPLATE, encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    cfg = load_config(root=tmp_path)
+    assert cfg.version == 1

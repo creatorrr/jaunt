@@ -218,3 +218,10 @@ def test_command_table_matches_real_subcommands() -> None:
     ns = jaunt.cli.parse_args(["jobs", "wait"])
     assert ns.command == "jobs"
     assert ns.jobs_command == "wait"
+
+
+def test_instructions_no_project_prints_schema() -> None:
+    text = instructions.render(project=None)
+    assert "## jaunt.toml schema" in text
+    assert "version = 1" in text
+    assert "[paths]" in text
