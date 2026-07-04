@@ -3,10 +3,10 @@ title: Dependencies
 description: "Ordering and incremental rebuild behavior."
 ---
 
-Jaunt builds a spec-level dependency graph that is used for:
+You want one spec to call another, and you want a change to the first to rebuild the second. Jaunt handles both from a spec-level dependency graph, which it uses for:
 
 - generation order (dependencies before dependents)
-- incremental rebuilds (a dependent becomes stale if a dependency's exported API changes)
+- incremental rebuilds (a dependent goes stale when a dependency's exported API changes)
 
 ## Explicit Deps (`deps=...`)
 

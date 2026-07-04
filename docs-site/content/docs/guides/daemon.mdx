@@ -3,10 +3,11 @@ title: Background Daemon
 description: "Commit-triggered background codegen with isolated jobs, a change journal, and an agent guard hook."
 ---
 
-`jaunt daemon` turns the build loop into a background service: you (or your
-coding agent) commit spec changes, and the daemon rebuilds what went stale in an
-isolated job. By default the daemon **parks the green result as a reviewable
-proposal** — you land it explicitly with `jaunt jobs land`. Opt into
+You want spec changes to rebuild themselves in the background while you keep
+working, and you want to review the result before it lands. `jaunt daemon` does
+that. You (or your coding agent) commit spec changes, and the daemon rebuilds
+what went stale in an isolated job. By default it **parks the green result as a
+reviewable proposal** — you land it explicitly with `jaunt jobs land`. Opt into
 auto-committing green jobs with `[daemon] auto_commit = true`.
 
 ## Start / Stop / Status
@@ -33,8 +34,8 @@ landed. `jaunt daemon status` reports the active landing mode
   newer proposal for the same module automatically supersedes an older pending
   one.
 - **Auto-commit (`auto_commit = true`).** A green job flows straight into a
-  provenance commit, exactly as before this mode existed. The jaunt repo's own
-  dogfooding daemon opts back into this.
+  provenance commit with no review step. Jaunt's own repo runs its dogfooding
+  daemon this way.
 
 ### Landing a proposal
 
@@ -137,8 +138,9 @@ notify_command = ""    # optional shell command run on landed/parked/failed jobs
 auto_commit = false    # false (default): park green jobs as proposals; true: auto-commit
 ```
 
-`auto_commit` defaults to `false` in 1.2.0 — green jobs are parked as proposals
-you land explicitly. Set it to `true` to restore auto-commit-on-green.
+`auto_commit` defaults to `false`: green jobs are parked as proposals you land
+explicitly. Set it to `true` to auto-commit on green. (If you're coming from an
+older setup, see [Upgrading](/docs/reference/upgrading) for the default change.)
 
 `notify_command` is the push-notification seam: point it at a script that pings
 Slack, `notify-send`, or your agent loop. It fires on proposed, landed, parked,
@@ -150,4 +152,4 @@ auto-commit is on. The `job-propose` and `job-discard` lines are appended
 uncommitted (union-merge-safe); a landing carries the standard build/refreeze
 journal line committed alongside its provenance commit.
 
-Next: [Agents & Automation](/docs/guides/coding-agents).
+Next: [Gating Generated Code in CI](/docs/guides/ci).

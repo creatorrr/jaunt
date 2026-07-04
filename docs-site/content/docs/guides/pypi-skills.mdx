@@ -3,9 +3,15 @@ title: Skills (Builtin + Auto-Generated PyPI)
 description: "Jaunt seeds library 'skills' into the Codex workspace so the builder knows your third-party libraries."
 ---
 
-This exists for one reason: **better generated code when your specs use third-party libraries**. Jaunt extracts real usage patterns from PyPI READMEs, turns them into short reference "skills", and makes them available to the builder.
+Your specs import a third-party library and the generated code uses its API in a
+way that's subtly wrong or out of date. Skills fix that. Jaunt extracts real
+usage patterns from PyPI READMEs, turns them into short reference "skills", and
+makes them available to the builder so it writes against the actual API.
 
-Jaunt adds a pre-build step to `jaunt build` that (best-effort) generates **skills** for the external libraries your project imports. Skills are not prompt text: Jaunt seeds them into the Codex workspace under `.agents/skills/`, where `codex exec` discovers them natively.
+`jaunt build` runs a best-effort pre-build step that generates a **skill** for
+each external library your project imports. Skills are not prompt text: Jaunt
+seeds them into the Codex workspace under `.agents/skills/`, where `codex exec`
+discovers them natively.
 
 There are two related skill workflows in Jaunt:
 

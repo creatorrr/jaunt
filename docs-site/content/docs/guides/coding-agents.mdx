@@ -3,14 +3,14 @@ title: For Coding Agents
 description: "Point Claude Code, Codex, Cursor, or CI at Jaunt with one command."
 ---
 
-Jaunt is built to be operated by coding agents as much as by humans. Everything
-an agent needs is exposed through the CLI — no plugin or server integration
-required.
+You want an agent — Claude Code, Codex, Cursor, or a CI bot — to drive Jaunt
+without a plugin or a server to install. Everything the agent needs is on the
+CLI: a primer to load into context, structured output on every command it
+drives, and exit codes it can branch on.
 
 ## The Primer: `jaunt instructions`
 
-Load a tight, project-aware briefing into the agent's context before it
-operates Jaunt:
+Load a project-aware briefing into the agent's context before it operates Jaunt:
 
 ```bash
 jaunt instructions          # framework rules + a live snapshot of this project
@@ -19,12 +19,15 @@ jaunt instructions --json   # {command, ok, text, project} for tooling
 
 The output covers the framework rules — the two authoring modes, the build/test
 loop, how to write a good spec, the command and exit-code reference — followed
-by a live snapshot of the current project: resolved `[paths]`, engine/model,
+by a live snapshot of the current project: resolved `[paths]`, engine and model,
 semantic-gate and repo-map settings, and which modules are stale. It ships with
-the package, so the briefing always matches the installed version.
+the package, so the briefing always matches the installed version. The `--json`
+form is what you feed to a harness: `text` holds the primer, `project` holds the
+snapshot.
 
 Run outside an initialized project it still succeeds (exit `0`), printing the
-framework rules plus a note to run `jaunt init`.
+framework rules plus a note to run `jaunt init`. That makes it safe to load
+unconditionally at the start of an agent session.
 
 ## Machine-Readable Output
 
@@ -39,9 +42,20 @@ jaunt status --json     # stale/fresh modules, contract drift, strength
 jaunt build --json      # {"command": "build", "ok": true, "generated": [...], "refrozen": [...], ...}
 ```
 
-Progress output is agent-aware too: `--progress {auto,rich,plain,none}` — `auto`
+Progress output is agent-aware too: `--progress {auto,rich,plain,none}`. `auto`
 is rich on a TTY and plain lines off-TTY, and an explicit `--progress plain`
 composes with `--json` (progress on stderr, JSON on stdout).
+
+## Reading The Docs As An Agent
+
+The canonical machine-readable briefing is `jaunt instructions`, not this site:
+it ships with the installed package, works offline, and always matches the
+version the agent is running. Prefer it over scraping documentation pages —
+scraped docs can describe a different release than the one on the machine.
+
+These guide and reference pages are authored as plain Markdown (MDX) under
+`docs-site/content/docs/` in the repo, so an agent that does want the prose can
+read the source files directly from GitHub rather than parsing rendered HTML.
 
 ## The Agent Loop
 
@@ -58,9 +72,27 @@ timeout. See the full table in the [CLI reference](/docs/reference/cli#exit-code
 
 ## Keeping Agents Out Of `__generated__/`
 
-Generated code is overwritten on every build, so agents must fix specs, not
-output. `jaunt guard` is a PreToolUse hook that warns on access — see
-[Background Daemon: Guarding Generated Code](/docs/guides/daemon#guarding-generated-code-jaunt-guard).
+Generated code is overwritten on every build, so an agent must fix specs, not
+output. `jaunt guard` is a PreToolUse hook: it reads the tool-call payload on
+stdin and, when the target sits under `__generated__/`, returns a decision that
+points the agent back at the owning spec. Wire it into Claude Code via
+`.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|MultiEdit|Write|Read|NotebookEdit",
+        "hooks": [{ "type": "command", "command": "jaunt guard" }]
+      }
+    ]
+  }
+}
+```
+
+For harnesses without hook support the barrier is advisory — `jaunt instructions`
+states the rule, and CI catches any drift with [`jaunt check`](/docs/guides/ci).
 
 ## The Principles Behind The Design
 
@@ -71,4 +103,4 @@ the model reads as untrusted; …). The full document lives in the repo at
 `docs/principles/2026-06-29-building-with-coding-agents.md`, and the build
 prompt preamble embeds the laws so the generator operates under the same rules.
 
-Next: [Contract Mode](/docs/guides/contract-mode).
+Next: [PyPI Skills](/docs/guides/pypi-skills).

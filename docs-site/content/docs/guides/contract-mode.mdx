@@ -3,20 +3,20 @@ title: Contract Mode
 description: "Pin the behavior of committed code with @jaunt.contract and a derived pytest battery."
 ---
 
-Jaunt has two first-class authoring modes, selected per symbol by decorator:
+You have code you want to keep hand-written — an adopted legacy function, a hot
+path you've tuned, anything the generator should not touch — but you still want
+its behavior pinned by a contract. That is contract mode.
+
+Jaunt picks a mode per symbol from the decorator:
 
 - **Magic mode** (`@jaunt.magic` / `@jaunt.test`): the docstring is canonical and
   Jaunt generates the implementation under `__generated__/`.
 - **Contract mode** (`@jaunt.contract`): the **committed code is canonical**. The
-  decorator is a runtime no-op marker; the docstring is the contract, and Jaunt
+  decorator is a runtime no-op marker, the docstring is the contract, and Jaunt
   derives a committed pytest battery under `tests/contract/` instead of
   generating the body.
 
-Use contract mode to pin the behavior of code you want to keep hand-written —
-adopted legacy functions, hot paths you've tuned, anything where the
-implementation should not be regenerated.
-
-It covers top-level functions (sync or async) and whole classes.
+Contract mode covers top-level functions (sync or async) and whole classes.
 
 ## Writing A Contract
 
@@ -107,4 +107,4 @@ derive = ["examples", "errors"]    # case kinds derived from docstring prose
 strength = true                    # mutation-based strength scoring at reconcile
 ```
 
-Next: [CLI Reference](/docs/reference/cli).
+Next: [Background Daemon](/docs/guides/daemon).

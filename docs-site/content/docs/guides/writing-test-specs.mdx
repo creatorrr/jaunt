@@ -3,13 +3,13 @@ title: "@jaunt.test Specs"
 description: "How to write test intent stubs that Jaunt turns into real pytest tests."
 ---
 
-`@jaunt.test` specs are not tests. They’re **descriptions of tests**. Jaunt generates real pytest tests under `tests/__generated__/`.
+You want pytest coverage for a magic spec, but you'd rather state what the tests should check than write the assertions by hand. `@jaunt.test` specs let you do that. They are not tests themselves; they are descriptions of tests. Jaunt generates the real pytest files under `tests/__generated__/`.
 
 ## Rules
 
-- Must be **top-level** functions.
-- Name them like pytest tests (`test_*`) so generated tests are collected.
-- The stub itself is marked `__test__ = False` so pytest won’t collect it.
+- Test specs must be **top-level** functions.
+- Name them like pytest tests (`test_*`) so the generated tests are collected.
+- The stub itself is marked `__test__ = False`, so pytest won't collect the stub.
 
 ## Annotated Example
 
@@ -27,7 +27,7 @@ def test_normalize_email__lowercases_and_strips() -> None:
     - lowercases
     - rejects invalid inputs like "no-at-sign" (ValueError)
 
-    Concrete assertions (write these out, don’t imply them):
+    Concrete assertions (write these out, don't imply them):
     - normalize_email("  A@B.COM  ") == "a@b.com"
     """
     raise AssertionError("spec stub (generated at test time)")
@@ -37,20 +37,20 @@ def test_normalize_email__lowercases_and_strips() -> None:
 
 - **Be explicit about assertions**: write `X == Y` in the docstring.
 - **Name edge cases**: empty strings, invalid formats, boundary values.
-- **Import the thing you’re testing** inside the docstring or stub body if needed. The generator tends to do better when it sees the intended import path.
+- **Show the import path**: mention it in the docstring or stub body. The generator does better when it sees where the thing under test lives.
 
-## Test Tiers & Held-Out Feedback
+## Test Tiers And Held-Out Feedback
 
-Generated tests are automatically tagged with a tier marker — you don’t write it yourself:
+Generated tests are tagged with a tier marker automatically — you don't write it yourself:
 
-- `@pytest.mark.jaunt_tier("example")` — a case anchored to a **canonical example** in the docstring (shared / public).
-- `@pytest.mark.jaunt_tier("derived")` — a case the generator **derived itself** (adversarial / edge cases). Held out.
+- `@pytest.mark.jaunt_tier("example")` — a case anchored to a **canonical example** in the docstring (shared, public).
+- `@pytest.mark.jaunt_tier("derived")` — a case the generator **derived itself** (adversarial, edge cases). Held out.
 
-This implements **implementer/tester independence**. When a generated test fails and Jaunt regenerates the implementation, the implementation generator only sees *derived* failures as an opaque id + exception class — never the expected value — so it can’t be written to the held-out answer key (an oracle the implementer can see is one it games). *Example* failures keep full detail, since they’re part of the shared contract.
+This is how Jaunt keeps the implementer and the tester independent. When a generated test fails and Jaunt regenerates the implementation, the implementation generator sees *derived* failures only as an opaque id plus an exception class — never the expected value — so it can't be written to the held-out answer key. An oracle the implementer can see is one it games. *Example* failures keep full detail, since they are part of the shared contract.
 
-Practical implication for your specs: put your **canonical, behavior-defining assertions in the docstring as examples** (they ground both the implementation and the tests), and trust the generator to derive the adversarial cases. Derived cases are given **opaque names** (`test_derived_01`) on purpose — even a descriptive name like `test_empty_list_returns_zero` leaks intent.
+For your specs, that means: put your **canonical, behavior-defining assertions in the docstring as examples**. They ground both the implementation and the tests. Trust the generator to derive the adversarial cases. Derived cases get **opaque names** (`test_derived_01`) on purpose — even a descriptive name like `test_empty_list_returns_zero` leaks intent.
 
-`jaunt test --no-redact-derived` disables the redaction (full detail for all tiers) — a **debugging escape hatch only**; it defeats the barrier and logs a warning.
+`jaunt test --no-redact-derived` turns off the redaction and gives full detail for all tiers. It is a debugging escape hatch: it defeats the barrier and logs a warning.
 
 ## Async Test Specs
 
@@ -81,7 +81,8 @@ async def test_fetch_user_profile__returns_payload() -> None:
 ## Running
 
 ```bash
-PYTHONPATH=src jaunt test
+jaunt test          # build if needed, generate tests, run pytest
+jaunt test --no-run # generate the tests without running them
 ```
 
 See: [Output Locations](/docs/reference/output-layout).

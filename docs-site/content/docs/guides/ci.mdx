@@ -1,0 +1,158 @@
+---
+title: Gating Generated Code in CI
+description: "Use jaunt check as a deterministic, model-free CI gate that fails when generated code drifts from its spec."
+---
+
+You want CI to fail when someone commits a spec change without rebuilding, or
+lets committed code drift from its contract. You don't want CI to call a model,
+and you don't want to store an API key on the runner. `jaunt check` is that gate.
+
+## `jaunt check` is the gate
+
+`jaunt check` verifies two things and never calls the model:
+
+- **Contract batteries** — the committed pytest batteries derived from
+  `@jaunt.contract` docstrings still pass against the committed code.
+- **Magic freshness** — every `@jaunt.magic` spec has a matching, up-to-date
+  build in `__generated__/`. A spec edited without a rebuild is stale; a spec
+  never built is unbuilt.
+
+It exits `4` on any blocking state and prints which module blocked and why:
+
+```console
+$ jaunt check
+Contract check: 0 contract function(s).
+Magic freshness: 1 unbuilt, 0 stale.
+[BLOCK] specs: unbuilt
+```
+
+Because the check is deterministic and offline, the runner needs no
+`CODEX_API_KEY` and no network. `reconcile` and `build` call the model; `check`
+reads digests and runs committed tests.
+
+## Exit codes
+
+`jaunt check` shares Jaunt's exit-code protocol, so a plain `jaunt check` step
+is enough — a non-zero exit fails the job.
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success — nothing stale, all batteries pass |
+| 2 | Config, discovery, or dependency-cycle error |
+| 3 | Code-generation error (not raised by `check`) |
+| 4 | A battery failed, or a magic spec is stale or unbuilt |
+| 5 | Timeout while waiting for daemon jobs (not raised by `check`) |
+
+## Gating one half at a time
+
+By default `check` gates both contracts and magic. Two mutually exclusive flags
+narrow it:
+
+```bash
+jaunt check --contracts-only   # only the committed contract batteries
+jaunt check --magic-only       # only @jaunt.magic freshness
+```
+
+On the same project as above, `--contracts-only` passes (there are no contracts
+to break) while `--magic-only` still catches the unbuilt spec:
+
+```console
+$ jaunt check --contracts-only
+Contract check: 0 contract function(s).      # exit 0
+
+$ jaunt check --magic-only
+Magic freshness: 1 unbuilt, 0 stale.
+[BLOCK] specs: unbuilt                        # exit 4
+```
+
+Split them across jobs when you want the failure annotated as "contract drift"
+versus "stale build" in your CI UI.
+
+## Machine-readable output for annotations
+
+`--json` emits the full state on stdout (errors stay on stderr), which is what
+you parse to post inline annotations or a PR comment:
+
+```console
+$ jaunt check --json
+{
+  "command": "check",
+  "ok": false,
+  "blocked": [],
+  "checked": [],
+  "magic": {
+    "fresh": [],
+    "stale": {},
+    "unbuilt": [
+      "specs"
+    ]
+  }
+}
+```
+
+The `magic` block splits modules into `fresh`, `stale` (with the reason), and
+`unbuilt`; `checked` and `blocked` cover the contract batteries. See the
+[JSON output reference](/docs/reference/json-output) for the full schema.
+
+## Also worth gating: the repo map
+
+If you maintain a `treedocs.yaml` repo map, `jaunt tree --check` fails when the
+tree drifts from the source (new files, removed files, edited descriptions). It
+exits `4` the same way `check` does:
+
+```console
+$ jaunt tree --check
+drift: +1 new, -0 removed, ~0 stale description(s). Run `jaunt tree`.
+```
+
+Add it as a second step when the repo map is part of your build context.
+
+## GitHub Actions
+
+A complete job. It installs `uv`, then runs `jaunt check` with `uvx` so nothing
+is added to the project's own dependencies:
+
+```yaml
+name: jaunt
+
+on: [push, pull_request]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Sync project
+        run: uv sync
+
+      - name: Gate generated code
+        run: uvx --from jaunt jaunt check
+```
+
+No secret is wired in, because `check` never reaches the network. If you also
+gate the repo map, add a `uvx --from jaunt jaunt tree --check` step.
+
+## Guarding agents locally: `jaunt guard`
+
+CI catches drift after the fact. In an agent-driven repo you also want to stop
+an agent from editing `__generated__/` in the first place, since those edits are
+overwritten on the next build. `jaunt guard` is a PreToolUse hook: it reads the
+tool-call payload on stdin and, when the target is under `__generated__/`, asks
+the agent to edit the spec instead.
+
+```console
+$ echo '{"tool_name":"Edit","tool_input":{"file_path":"__generated__/specs.py"}}' | jaunt guard
+{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask", "permissionDecisionReason": "__generated__/specs.py is machine-owned generated code (jaunt). Edit the spec instead: specs.py. Changes here are overwritten on the next build."}}
+```
+
+A tool call against a source path produces no output and is allowed through.
+Wire it into Claude Code via `.claude/settings.json` — see the
+[coding-agents guide](/docs/guides/coding-agents) for the full hook block.
+
+Next: [For Coding Agents](/docs/guides/coding-agents).

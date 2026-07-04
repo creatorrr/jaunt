@@ -3,11 +3,11 @@ title: "@jaunt.magic Specs"
 description: "How to write implementation specs that generate clean, boring, correct code."
 ---
 
-`@jaunt.magic` turns a top-level Python function or class stub into a **spec**. At build time, Jaunt generates the real implementation. At runtime, the decorator forwards your calls into `__generated__/`.
+You can describe what a function should do far more precisely than you want to hand-write it. That is the case `@jaunt.magic` is for. Decorate a top-level function or class stub with it and you have a **spec**: at build time Jaunt generates the real implementation into `__generated__/`, and at runtime the decorator forwards your calls there.
 
-## The Basics
+## The three parts of a spec
 
-A good magic spec has three parts:
+A magic spec carries its whole contract in three places:
 
 - **Signature**: type hints are part of the contract.
 - **Docstring**: this is the spec. Be precise about behavior, edge cases, and errors.
