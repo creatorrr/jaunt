@@ -25,6 +25,11 @@ myproj/
     specs_email.py     # your @jaunt.test specs
 ```
 
+You can also keep specs as **top-level modules** directly under a source root
+(e.g. `src/timing.py` with the root set to `src`). A top-level module `timing`
+generates to `__generated__/timing.py`; a package member `my_app.specs`
+generates to `src/my_app/__generated__/specs.py`.
+
 ## 1) Install
 
 Jaunt drives the OpenAI **Codex CLI** as its generation engine, so you need
@@ -67,6 +72,16 @@ source_roots = ["src"]
 test_roots = ["tests"]
 generated_dir = "__generated__"
 ```
+
+<Callout type="info">
+  **Choosing `source_roots`.** Point a root at the *parent* of your package
+  (e.g. `src`, so specs are `my_app.specs`), not at the package directory
+  itself. A root that is itself a package (contains `__init__.py`) yields
+  bare module names like `timing` that can shadow stdlib/PyPI names — Jaunt
+  warns when it detects this. Unknown keys or sections in `jaunt.toml` are
+  now rejected with an error (exit 2), so run `jaunt instructions` to print
+  the full annotated schema if you are unsure.
+</Callout>
 
 ## 3) Write Your First Spec (`@jaunt.magic`)
 

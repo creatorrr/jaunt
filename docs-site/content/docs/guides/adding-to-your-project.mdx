@@ -43,6 +43,16 @@ test_roots = ["tests"]
 generated_dir = "__generated__"
 ```
 
+<Callout type="info">
+  **Choosing `source_roots`.** Point a root at the *parent* of your package
+  (e.g. `src`, so specs are `my_app.specs`), not at the package directory
+  itself. A root that is itself a package (contains `__init__.py`) yields
+  bare module names like `timing` that can shadow stdlib/PyPI names — Jaunt
+  warns when it detects this. Unknown keys or sections in `jaunt.toml` are
+  now rejected with an error (exit 2), so run `jaunt instructions` to print
+  the full annotated schema if you are unsure.
+</Callout>
+
 ## 3) Pick A Good First Spec
 
 Best first targets:
@@ -71,6 +81,18 @@ jaunt build
 
 You import the spec module, not the generated module. The decorator forwards calls into `__generated__/`.
 
+## Coverage Gates
+
+Spec stub bodies are unreachable by design — the runtime forwards every call
+into `__generated__/`, so the `raise RuntimeError("spec stub …")` line in a
+`@jaunt.magic` stub never executes. Before wiring `--cov-fail-under` on a
+converted module, exclude the stub-raise line from coverage:
+
+```toml
+[tool.coverage.report]
+exclude_lines = ["raise RuntimeError\\(\"spec stub", "pragma: no cover"]
+```
+
 ## 7) Generated Code In Git: Commit Or Ignore?
 
 Two reasonable workflows:
@@ -89,5 +111,14 @@ Ignore generated code:
 - CI must run generation (so you need API keys in automation).
 
 Pick one and be consistent.
+
+## Migrating To 1.3.0
+
+If you adopted an earlier Jaunt and use **top-level** spec modules, run
+`jaunt clean && jaunt build` once — top-level modules now generate to
+`__generated__/<module>.py` instead of `<module>/__generated__/__init__.py`.
+Unknown `jaunt.toml` sections/keys now error (exit 2). `jaunt check` now gates
+`@jaunt.magic` freshness in addition to contract batteries, so it is the single
+CI command for both modes.
 
 Next: [CLI Reference](/docs/reference/cli).

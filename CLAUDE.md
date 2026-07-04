@@ -102,13 +102,14 @@ examples/           # Runnable example projects
   (Jaunt designs the API), stubs-only (Jaunt implements declared methods), or a
   mix. Each method sits in exactly one of three tiers: **preserved**
   (`@jaunt.preserve` — hand-written, emitted verbatim even if the body looks like
-  a stub), **sealed** (inner `@jaunt.magic` on a stub — Jaunt writes the body but
+  a stub), **sealed** (`@jaunt.sig` on a stub; inner `@jaunt.magic` is a supported
+  alias — Jaunt writes the body but
   the declared signature is enforced *exactly*: params, defaults, annotations, and
   return type may not drift, and drift is a hard build error), and **guidepost**
   (an unmarked stub — the model may adapt the signature, rename/add params, or
   split it into several methods as long as the documented behavior is delivered;
-  drift is warn-only). Inner `@jaunt.magic` on a whole-class spec takes no kwargs
-  and can't sit under `@property` (v1). A spec'd base class named in the class
+  drift is warn-only). `@jaunt.sig` (and the inner `@jaunt.magic` alias) takes no
+  kwargs and can't sit under `@property` (v1). A spec'd base class named in the class
   header is an **always-on dependency edge** (never gated by `infer_deps` —
   inheritance is a structural fact), and a cross-module base's *generated public
   API* (signatures and docstrings) participates in the subclass's staleness:
@@ -149,6 +150,7 @@ generated_dir = "__generated__"
 jobs = 8
 infer_deps = true
 async_runner = "asyncio"
+emit_stubs = true         # emit provenance-headed .pyi stubs next to each spec module (opt-out)
 
 [test]
 jobs = 4
@@ -214,6 +216,12 @@ project_overview_system = ""  # override for the overview system prompt
 project_overview_user = ""    # override for the overview user prompt ({{project_docs}}, {{repo_map}})
 ```
 
+**Strict config.** Unknown `jaunt.toml` sections and keys are rejected with a
+`JauntConfigError` (exit 2) and a "did you mean …" suggestion — a typo'd section
+like `[gate]` or key like `reasoning-effort` fails loudly instead of being
+silently ignored. `jaunt instructions` (run before a `jaunt.toml` exists) prints
+the full annotated config schema.
+
 Every build prompt opens with a static **Jaunt preamble** (`src/jaunt/prompts/codex_preamble.md`)
 that frames what Jaunt is and states the signature/docstring contract. It is always-on and
 adds no model call. Its content is part of the build freshness fingerprint (like
@@ -221,6 +229,12 @@ adds no model call. Its content is part of the build freshness fingerprint (like
 regenerates already-built modules. Replace it project-wide via
 `[prompts] build_preamble = "path/to/my_preamble.md"` (a relative path resolves against the
 project root).
+
+Repo-map *content* no longer participates in per-module staleness (1.3.0):
+adding or editing a sibling spec's repo-map entry never restales an unchanged
+module, and `jaunt build`/`jaunt check` ignore repo-map drift (`jaunt status` may
+still note it informationally). The `[context] repo_map` on/off toggle remains a
+fingerprint input.
 
 Skills are no longer injected as prompt text; Codex discovers them natively from a
 seeded `.agents/skills/` workspace. `max_chars_per_skill` and `inject_user_skills` are
@@ -274,7 +288,8 @@ jaunt build --no-repo-map     # Disable repo-map injection for one build
 
 jaunt adopt <module:func>     # Add @jaunt.contract to existing code and derive its battery
 jaunt reconcile               # Derive/refresh committed contract batteries (calls the model)
-jaunt check                   # Verify committed batteries deterministically (CI gate, no model)
+jaunt check                   # CI gate (no model): verifies contract batteries AND magic-mode freshness; exit 4 on drift
+jaunt check --contracts-only  # or --magic-only: scope the gate to one mode (mutually exclusive)
 jaunt eject <module:func>     # Remove contract tracking; leave plain Python + plain pytest
 
 jaunt daemon start            # Background codegen: commit-triggered isolated jobs; parks green jobs as proposals by default ([daemon] auto_commit = false)
@@ -293,8 +308,11 @@ jaunt watch --test            # Build + test on change
 Common flags: `--root`, `--config`, `--jobs N`, `--force`, `--target`,
 `--no-infer-deps`, `--progress {auto,rich,plain,none}`, `--no-progress`, `--json`.
 
-Note: `jaunt check` returns exit code `4` on any blocking drift state (unbuilt /
-stale-prose / signature-drift / behavior-drift).
+Note: `jaunt check` returns exit code `4` on any blocking drift state —
+contract drift (unbuilt / stale-prose / signature-drift / behavior-drift) or
+magic-mode drift (any unbuilt or stale `@jaunt.magic` module, including a
+missing/stale `.pyi` stub). A project with no magic specs and no contract drift
+exits 0.
 
 ## Exit Codes
 
