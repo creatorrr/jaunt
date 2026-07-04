@@ -4,7 +4,7 @@ Date: 2026-07-03
 Status: Approved
 Source: `FEEDBACK.md` (mem-mcp-b adoption campaign, 2026-07-03), findings 1–10
 verified against source by three independent read passes; addendum findings
-11–14 folded in same day (14 is positive-only, no action).
+11–17 folded in same day (17 is positive-only, no action).
 
 ## Decisions (user-confirmed)
 
@@ -38,6 +38,10 @@ verified against source by three independent read passes; addendum findings
    a module not listed in Dependency APIs, do not invent an import. Inline the
    minimal logic and mark the site:
    `# JAUNT-NEEDS-DEP: <module>:<name> — <one-line reason>`.
+4. **Sibling calls by bare name (finding 15).** Same-module sibling spec
+   symbols are called by bare name; never a module-level import of the spec
+   module (it is mid-import at load time). Baked into `build_module.md`
+   unconditionally so adopters stop rediscovering it via `prompt=` hints.
 
 ### Validation changes (`src/jaunt/validation.py`, hard errors)
 
@@ -167,7 +171,7 @@ warnings (per module, with the marker text) in the human report and under a
   coverage gates need the stub-raise line added to coverage `exclude_lines`;
   include the exact snippet.
 
-## Cluster 7 — `jaunt check` gates magic freshness (finding 11, HIGH)
+## Cluster 7 — CI-grade freshness: `check` gates magic drift, repo-map decoupled (findings 11 + 14, both HIGH)
 
 Today `check` verifies `@jaunt.contract` batteries only; on a magic-only
 project it prints "0 contract function(s)" and exits 0 regardless of
@@ -186,6 +190,35 @@ spec↔generated drift — while all adopter-facing framing sells `check` as
   command for both modes; the exit-code table stays as-is (4 = blocking
   drift).
 
+### Repo-map decoupling (finding 14)
+
+Adding one new spec module currently restales spec-unchanged siblings
+("structural", via repo-map coupling): a plain rebuild re-invokes the model on
+correct committed code, and the sibling sits permanently stale in `status` —
+which would make every new-spec PR fail the very CI gate above.
+
+- Repo-map **content** no longer participates in the per-module staleness
+  digest. A module is stale only for scoped, contract-relevant reasons: its
+  own spec digest, transitive dep spec digests, upstream exported-API digests,
+  base-class API digests, prompt-template/preamble fingerprints, and Cluster 4
+  stub staleness.
+- Repo-map drift is downgraded to **informational**: `status` may note
+  "context drift (repo map)" without marking the module stale; `build` does
+  not rebuild for it; `check` ignores it entirely.
+- The `[context] repo_map` on/off toggle (a deliberate, rare config change)
+  may remain a fingerprint input; day-to-day repo-map content churn must not.
+
+## Cluster 8 — Auto-skills noise on workspace-internal deps (finding 16)
+
+- Skill auto-generation currently attempts PyPI lookups for uv-workspace-
+  internal packages (404s) and emits repeated "Missing required heading"
+  warnings — exit 0 but noisy enough to bury real warnings.
+- Fix: detect that an imported distribution is not installed from PyPI
+  (workspace/editable/local install) and skip the PyPI lookup with a
+  debug-level note, not a warning; dedupe and downgrade the heading warnings
+  to one summary line per build (this also covers the known pydantic-skill
+  heading nit).
+
 ## Testing & release
 
 - Unit tests per cluster: validation checks (fallback ladder, self-import,
@@ -195,7 +228,9 @@ spec↔generated drift — while all adopter-facing framing sells `check` as
   new), stub emission/skip/clean/check integration, `needs_deps` and
   `context_stats` in `--json`, `check` magic-freshness gating (fresh → 0,
   stale/unbuilt → 4, scoping flags, JSON payload), package-root doctor
-  warning.
+  warning, repo-map decoupling (a new sibling spec does NOT restale an
+  unchanged module; repo-map drift is informational only), auto-skills quiet
+  path for workspace-internal packages.
 - Full `uv run pytest`, `uv run ruff check`, `uv run ty check` green.
 - Single PR → merge publishes **1.3.0** (automated changelog/tag/PyPI).
 - Implementation: multi-wave dynamic Workflow (opus@high driving Codex CLI at

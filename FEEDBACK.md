@@ -167,7 +167,33 @@ module. The working recipe: add the stub-raise line (e.g.
 with coverage gates will all need this; one paragraph in the adoption docs
 saves each of them the debugging session.
 
-**14. Semantic gate: works as advertised (positive).**
+**14. Repo-map coupling restales unrelated siblings — and poisons status-based CI gating (severity: high, compounds finding 11).**
+Adding the `json_utils` spec restaled the already-committed, spec-unchanged
+`timing` module ("structural", via repo-map coupling). Consequences: (a) a
+plain `jaunt build` would have re-invoked the LLM on a module whose spec
+didn't change — cost + possible byte churn in committed generated code —
+so our agent had to scope with `--target`; (b) `timing` now sits
+permanently "stale (structural)" in `jaunt status` despite being correct
+and green. This directly undermines the natural fix for finding 11: if CI
+gates on status freshness, repo-map cross-staleness makes every
+new-spec PR fail on its untouched siblings. Magic-mode CI gating needs a
+staleness signal that is (i) deterministic and (ii) scoped to
+actually-affected modules — e.g. spec-digest comparison only, with
+repo-map restaling downgraded to informational.
+
+**15. Self-import hazard needs a documented pattern (severity: low-medium).**
+Same-module sibling calls in generated code must be by bare name, never a
+module-level re-import of the spec module (which is mid-import at load
+time). We got there with `prompt=` hints on the stubs; it worked, but
+every adopter will rediscover this. Either bake the rule into
+`build_module.md` unconditionally or document the `prompt=` idiom.
+
+**16. Build noise on workspace-internal deps (severity: low).**
+Skill generation attempts PyPI lookups for uv-workspace-internal packages
+(404s) and warns "Missing required heading" for several dep skills. Exit 0,
+harmless, but noisy enough to obscure real warnings.
+
+**17. Semantic gate: works as advertised (positive).**
 A structural-only spec edit was re-frozen by the gate with no codegen call
 ("Built 0 module(s), skipped 1"), then reported Fresh. Cheap, correct, and
 exactly the promised behavior — this is the feature that makes docstring
