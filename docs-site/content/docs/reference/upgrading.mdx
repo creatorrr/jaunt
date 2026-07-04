@@ -7,9 +7,19 @@ The rest of the reference is versionless. This page collects what changes
 between releases and what you have to do about it. For the complete log, see the
 [GitHub releases](https://github.com/creatorrr/jaunt/releases).
 
+**Compatibility promise:** patch releases (1.3.0 → 1.3.1) never invalidate
+built modules — your generated code stays fresh across the upgrade. Anything
+that would restale built modules lands in a minor version and is called out on
+this page.
+
 ## 1.3.1
 
 Patch release from the second adoption-feedback wave.
+
+- **Migrating inner `@jaunt.magic` to `@jaunt.sig` rebuilds that module once.**
+  The alias keeps working, but the decorator's identity is part of the class's
+  structural contract, so the rename restales the spec. Budget one rebuild per
+  whole-class module when you adopt the new vocabulary.
 
 - **`[codex] fingerprint_cli_version` now defaults to `false`.** Embedding
   `codex --version` in the generation fingerprint coupled `jaunt check` to

@@ -148,7 +148,7 @@ Run the existing tests again. They never referenced `__generated__`; they call `
 4 passed in 0.01s
 ```
 
-Your own tests are the acceptance gate for the generated code. That is the point of converting a covered function first.
+Your own tests are the acceptance gate for the generated code, and they stay that way after the conversion — keep them in CI alongside `jaunt check`. Jaunt's validation proves the generated module is structurally sound (signatures, imports, no fallback ladders); it cannot prove semantics. A docstring that under-specifies an edge case produces generated code that honestly implements the under-specified contract — your characterization tests are what catch it, and the fix is a docstring edit plus a rebuild, not a hand-patch. That is the point of converting a covered function first.
 
 ## The .pyi stub
 

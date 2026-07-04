@@ -305,3 +305,39 @@ reuse {name} from {spec_module} instead" — for whole-class specs that
 advice can reintroduce the decorator-time circular import the other
 validator forbids; suggest the message point at call-time/lazy access
 instead.
+
+---
+
+## 2026-07-04 (later) — 1.3.1 verified in anger; wave-2 numbers
+
+Upgraded mid-wave (1.3.0 → 1.3.1) right after converting five more modules
+(formatting, chunking, compression_utils, deixis, mmr — memory-store-utils
+is now fully converted, 7/7). Verification against the release notes:
+
+- **Finding 21 fix confirmed**: default `fingerprint_cli_version = false`
+  produces fingerprints identical to our explicit-false workaround —
+  deleted the workaround line, headers stayed fresh, CI gate green.
+- **Finding 18 fix confirmed**: no local patch needed; local checkout
+  restored to upstream. (Under 1.3.0 we were hand-dropping the future
+  import from up to 5 stubs per build — glad this one's dead.)
+- **Upgrade cost: zero restales.** All 7 modules stayed fresh across the
+  1.3.0→1.3.1 bump. Patch upgrades not invalidating built modules is
+  exactly the right behavior — worth stating as a compatibility promise.
+- **`@jaunt.sig` adopted** in the pilot's two whole-class specs. Note: the
+  rename restales the module (decorator identity is structural), so alias
+  migration costs one rebuild per module — fine for us, but maybe worth a
+  release-note warning since the alias is advertised as "still works".
+
+Wave-2 numbers for the 1.4 context-budget work:
+- 5-module batch build: $8.27, 3.70M prompt tokens (3.30M cached), 9 calls.
+  Batch amortization works — vs $5.08 for a single-module rebuild the same
+  day. skills_workspace still 92–95% of every module's context.
+- One real contract bug caught by characterization tests, post-validation:
+  generated mmr treated negative cosine similarity as a diversity *bonus*
+  (raw `max(sims)`) where the human code floors the penalty at 0. The spec
+  docstring hadn't stated the floor; tests caught it, docstring fix +
+  rebuild resolved it. Data point for "validation can't check semantics —
+  keep characterization tests in the acceptance gate."
+- Double frontmatter (finding 20) recurred: `opentelemetry-api` skill, so
+  2 of ~27 generated skills now — less "one-off race" than finding 20
+  assumed. Merged by hand again.
