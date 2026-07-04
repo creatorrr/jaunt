@@ -68,16 +68,57 @@ use them, and a change to a dependency propagates staleness to its dependents.
 You declare edges with `deps=...`, and Jaunt infers the rest best-effort. See
 [Dependencies](/docs/guides/dependencies).
 
+## Parallel builds
+
+Jaunt does not build modules in level-synchronous waves. It runs a single ready
+queue over the dependency graph and keeps every worker busy.
+
+When a build starts, Jaunt takes the stale modules, computes each one's indegree
+(how many of its dependencies are also stale and still unbuilt), and assigns a
+priority equal to its critical-path length — the longest chain of dependents
+that has to wait on it. Modules with no unbuilt dependencies seed a ready heap,
+ordered longest-critical-path first, so the work that unblocks the most other
+work goes first.
+
+From there the loop is continuous. Jaunt starts modules off the ready heap until
+`[build] jobs` are in flight, then waits for the *first* one to finish rather
+than the whole batch. The moment a module completes, every dependent whose last
+dependency just landed drops onto the ready heap and can start immediately —
+there is no barrier between "levels." A module that **fails** marks only its
+dependents failed (recursively); the rest of the graph keeps building. You get
+the partial result plus a precise list of what was skipped and why.
+
 ## Runtime forwarding
 
-`@jaunt.magic` does not generate code when you call it. It forwards your call
+A spec module does not generate code when you call it. It forwards your call
 into the generated module under `__generated__/`. If that module exists, your
 call delegates to it. If it does not, you get `JauntNotBuiltError` and a nudge
-to run `jaunt build`.
+to run `jaunt build`. Either way you import the *spec* module in normal code:
+the spec module is the stable API surface, and the generated body behind it is
+free to change on every rebuild.
 
-This is why you import the spec module in normal code: the spec module is the
-stable API surface, and the generated body behind it is free to change on every
-rebuild.
+The `@jaunt.magic` decorator forwards per symbol — the decorated function or
+class is a wrapper that resolves the generated object on first call.
+`magic_module` forwards per module with a lighter touch. On the first attribute
+access to any governed spec name, Jaunt imports the generated counterpart,
+rebinds every spec name in the module to its generated object (functions and
+classes alike), and then swaps the module back to a plain module. After that
+first access the module is ordinary: attribute lookups hit the generated objects
+directly, at zero overhead. It intercepts once, rebinds, and vanishes.
+
+## Two-phase registration
+
+`magic_module` has to register its specs before the stubs below it exist as
+runtime objects, because the call runs while the module is still executing. It
+does this in two phases. At call time Jaunt parses the module source, classifies
+the top-level stubs, and registers each one from the AST alone — signature and
+docstring are enough to compute digests, so the spec object can be `None` for
+now. Once the module finishes importing, a finalize step backfills every entry
+with its real function or class and runs the same analysis a decorated spec
+gets. By the time the builder, tester, or `jaunt specs` looks at the registry, a
+module-governed spec is indistinguishable from a decorated one — same signature
+rendering, same digest inputs. Converting a decorated spec to module style is
+digest-neutral as long as you leave the stub body form alone.
 
 ## PyPI skills
 

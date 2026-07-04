@@ -12,6 +12,28 @@ built modules — your generated code stays fresh across the upgrade. Anything
 that would restale built modules lands in a minor version and is called out on
 this page.
 
+## 1.4.0
+
+`jaunt.magic_module(__name__)` — module-level magic — becomes the primary
+authoring style. Nothing about decorator mode changes; the new call is additive.
+
+- **Converting a decorated spec to `magic_module` is digest-neutral, as long as
+  the stub body form is unchanged.** The `@jaunt.magic` line never entered the
+  digest, and a module-governed spec renders its signature through the same path
+  a decorated one does, so dropping the decorator does not restale the module.
+- **Rewriting `raise RuntimeError("spec stub")` to `...` restales once.** That
+  older body is not a recognized stub form — in a governed module it would
+  classify as handwritten, not a spec — so its text is part of the current
+  digest. Standardizing on `...` during conversion costs one rebuild per module.
+- **Module-level kwargs restale their governed specs.** A `magic_module(prompt=…)`
+  default is part of every governed spec's contract, so adding or editing one
+  restales the file, as any contract change should.
+- **Eject, don't hand-strip, in a governed module.** Removing a `@jaunt.contract`
+  or `@jaunt.magic` marker by hand from a still-stub-shaped function inside a
+  `magic_module` file silently flips that function to module-magic governance —
+  the scan now picks it up. Use `jaunt eject`, which leaves committed real code
+  that classifies as handwritten, instead of deleting the marker yourself.
+
 ## 1.3.1
 
 Patch release from the second adoption-feedback wave.

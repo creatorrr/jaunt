@@ -1,54 +1,67 @@
 import Link from 'next/link';
 
-const SPEC_CODE = `from __future__ import annotations
+const SPEC_CODE = `import re
 
 import jaunt
 
+jaunt.magic_module(__name__, prompt="All parsers are RFC 5322 strict.")
 
-@jaunt.magic()
-def create_token(user_id: str, secret: str, ttl_seconds: int = 3600) -> str:
+ADDR_RE = re.compile(r"[^@\\s]+@[^@\\s]+")   # handwritten constant
+
+
+class Email:
+    """An email message with from_, to, subject, and body string fields.
+
+    Validate on construction: from_ and to must each look like an address.
     """
-    Create an HS256-signed JWT for a user.
 
-    Payload: {"sub": user_id, "iat": <now>, "exp": <now + ttl_seconds>}
-    - Sign with HMAC-SHA256 using \`secret\` as the key.
-    - base64url segments must omit "=" padding.
-    - Raise ValueError if user_id is empty.
-    """
-    ...`;
 
-const GENERATED_CODE = `def create_token(user_id: str, secret: str, ttl_seconds: int = 3600) -> str:
-    if user_id == "":
-        raise ValueError("user_id is empty")
+def parse_email(raw: str) -> Email:
+    """Parse a raw RFC 5322 payload into an Email. Read the From, To, and
+    Subject headers and the body after the first blank line. Raise ValueError
+    on malformed input."""
+    ...
 
-    now = int(time.time())
-    header_segment = _json_segment({"alg": "HS256", "typ": "JWT"})
-    payload_segment = _json_segment({"sub": user_id, "iat": now, "exp": now + ttl_seconds})
-    signing_input = f"{header_segment}.{payload_segment}"
-    signature = hmac.new(
-        secret.encode("utf-8"),
-        signing_input.encode("utf-8"),
-        hashlib.sha256,
-    ).digest()
-    signature_segment = _base64url_encode(signature)
-    return f"{signing_input}.{signature_segment}"`;
 
-const FEATURES: { title: string; body: string }[] = [
+def _render_debug(email: Email) -> str:      # real body → handwritten
+    return f"<{email.from_} -> {email.to}>"`;
+
+const GENERATED_CODE = `def parse_email(raw: str) -> Email:
+    raw_text = _require_string("raw", raw)
+    header_text, body = _split_headers_body(raw_text)
+    headers = _parse_headers(header_text)
+
+    from_ = _required_header(headers, "From", allow_empty=False)
+    to = _required_header(headers, "To", allow_empty=False)
+    subject = _required_header(headers, "Subject", allow_empty=True)
+
+    try:
+        return Email(from_, to, subject, body)
+    except ValueError as exc:
+        raise ValueError(f"Malformed email: {exc}") from exc`;
+
+type Feature = { title: string; body: string; href?: string };
+
+const FEATURES: Feature[] = [
   {
-    title: 'Incremental builds',
-    body: 'Jaunt hashes each spec with its dependencies and rebuilds only what actually changed. Reformatting or a comment edit rebuilds nothing.',
+    title: 'Parallel, DAG-scheduled builds',
+    body: 'Modules build over the dependency graph, critical path first. A module starts the instant its dependencies finish, up to `[build] jobs` at once, and a failure skips only its dependents. No wave barriers.',
+    href: '/docs/concepts/how-jaunt-works#parallel-builds',
+  },
+  {
+    title: 'Change detection that reads the contract',
+    body: 'Digests hash the AST-normalized contract, so reformatting and comment edits rebuild nothing. Staleness follows the graph, and a small judge re-freezes reworded docstrings instead of paying for a rebuild.',
+    href: '/docs/concepts/change-detection',
   },
   {
     title: 'Contract mode',
     body: 'Keep hand-written code canonical and let jaunt derive a committed pytest battery from its docstring. The inverse of magic, for code you already trust.',
-  },
-  {
-    title: 'A CI gate that needs no API key',
-    body: '`jaunt check` verifies generated code against its specs deterministically, so pull requests fail on drift without ever calling the model.',
+    href: '/docs/guides/contract-mode',
   },
   {
     title: 'Built for coding agents',
-    body: '`jaunt instructions` prints a project-aware primer, every command speaks `--json`, and a guard hook warns agents off editing generated files.',
+    body: '`jaunt instructions` prints a project-aware primer, every command speaks `--json`, `jaunt check` gates drift with no API key, and a guard hook warns agents off editing generated files.',
+    href: '/docs/guides/coding-agents',
   },
 ];
 
@@ -64,10 +77,11 @@ export default function HomePage() {
           Describe what you want. Jaunt writes the Python.
         </h1>
         <p className="mx-auto mt-5 max-w-2xl text-fd-muted-foreground">
-          Mark a function or class with <code>@jaunt.magic</code>, write the types and the
-          docstring, and jaunt generates a real, reviewable implementation into your repo. It
-          drives the OpenAI Codex CLI, the one supported engine, so you install Codex and run{' '}
-          <code>codex login</code> first. After that it rebuilds incrementally as the spec changes.
+          Call <code>jaunt.magic_module(__name__)</code> at the top of a file and every typed stub
+          below it becomes a spec. Jaunt reads the signatures and docstrings and generates real,
+          reviewable Python into your repo. Need per-symbol control? Decorate just that symbol with{' '}
+          <code>@jaunt.magic</code>. It drives the OpenAI Codex CLI, the one supported engine, so you
+          install Codex and run <code>codex login</code> first.
         </p>
         <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
           <Link
@@ -96,11 +110,14 @@ export default function HomePage() {
       {/* Wow gap */}
       <section className="px-6 pb-16">
         <div className="mx-auto max-w-5xl">
-          <h2 className="text-center text-xl font-semibold">Two docstrings in, working code out</h2>
+          <h2 className="text-center text-xl font-semibold">A module of intent in, working code out</h2>
           <p className="mx-auto mt-2 max-w-2xl text-center text-sm text-fd-muted-foreground">
-            The spec on the left is what you commit. On the right is the function jaunt generated
-            from it on a real run; it also wrote the small <code>_json_segment</code> and{' '}
-            <code>_base64url_encode</code> helpers this calls. None of it is hand-edited.
+            The module on the left is what you commit: one <code>magic_module</code> call, a
+            docstring-only <code>Email</code> class, a function stub, and a handwritten helper, all
+            in one file. On the right is the <code>parse_email</code> jaunt generated on a real run.
+            It also designed the <code>Email</code> class and the header-parsing helpers this calls,
+            and left <code>ADDR_RE</code> and <code>_render_debug</code> alone. None of it is
+            hand-edited.
           </p>
           <div className="mt-6 grid gap-4 md:grid-cols-2">
             <CodePanel label="Spec — you write this" code={SPEC_CODE} />
@@ -115,7 +132,12 @@ export default function HomePage() {
           {FEATURES.map((f) => (
             <div key={f.title} className="rounded-xl border border-fd-border bg-fd-card p-5">
               <h3 className="font-semibold">{f.title}</h3>
-              <p className="mt-2 text-sm text-fd-muted-foreground">{f.body}</p>
+              <p className="mt-2 text-sm text-fd-muted-foreground">{renderInlineCode(f.body)}</p>
+              {f.href ? (
+                <Link href={f.href} className="mt-3 inline-block text-sm font-medium underline">
+                  Learn more
+                </Link>
+              ) : null}
             </div>
           ))}
         </div>
@@ -141,6 +163,16 @@ export default function HomePage() {
         </div>
       </section>
     </main>
+  );
+}
+
+function renderInlineCode(text: string) {
+  return text.split('`').map((part, i) =>
+    i % 2 === 1 ? (
+      <code key={i}>{part}</code>
+    ) : (
+      <span key={i}>{part}</span>
+    ),
   );
 }
 

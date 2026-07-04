@@ -56,6 +56,45 @@ Skip it for one run with `jaunt build --no-semantic-gate` (or the same flag on
   rejects.
 </Callout>
 
+## Converting to module style
+
+Moving a spec from a `@jaunt.magic` decorator to `magic_module` governance is
+digest-neutral **as long as the stub body form does not change**. The decorator
+line never entered the digest, and Jaunt renders a module-governed spec's
+signature through the same path a decorated one uses, so the digest comes out
+byte-for-byte identical and the module stays fresh.
+
+Two conversions do move the digest, both correctly:
+
+- **Rewriting a `raise RuntimeError("spec stub")` body to `...`.** That older
+  body is not a recognized stub form, so its text is part of the current digest.
+  In a governed module it would not even classify as a spec. Rewriting it to
+  `...` restales the module once — a one-time cost you pay when you adopt the
+  convention.
+- **Adding or editing a `magic_module` kwarg.** Module defaults like `prompt=`
+  are part of every governed spec's contract, so editing one restales every spec
+  in the file. That is the same rule that restales a spec when you edit its own
+  `prompt=`.
+
+## Does this save tokens?
+
+Yes, potentially a lot — but it depends on when you adopted Jaunt and on the
+shape of your codebase.
+
+What is unconditional: an unchanged module skips the model entirely, formatting
+and comment churn never trigger a rebuild, and a reworded-but-equivalent
+docstring re-freezes through the small `[semantic_gate]` judge instead of paying
+for a full generation. Day to day, most edits touch a few modules and leave the
+rest cached.
+
+What it depends on:
+
+- **Adoption timing.** The first build after you adopt Jaunt regenerates
+  everything, so the savings start accruing from the *second* build onward.
+- **Dependency shape.** Staleness follows the graph. A change to a module's
+  exported API restales every dependent, so a hub with wide fan-out rebuilds a
+  lot when it moves; many small, independent modules amortize best.
+
 ## Inherited base API
 
 A whole-class spec that inherits from a spec'd base in **another module** also

@@ -51,18 +51,27 @@ jaunt init --force
 
 ### `jaunt specs`
 
-List `@jaunt.magic` specs and the dependency graph between them.
+List magic specs and the dependency graph between them.
 
 ```bash
 jaunt specs
 jaunt specs --module my_app.specs
 ```
 
+Specs registered by a `magic_module(__name__)` call are marked `[module]`;
+decorated specs carry no marker. When a spec's effective kwargs are non-empty
+(a per-symbol option, or a module default it inherited), they print after the
+marker:
+
+```text
+- mail:parse_email (mail.py) [module] kwargs={'prompt': 'All parsers are RFC 5322 strict.'}
+```
+
 | Flag | Effect |
 |------|--------|
 | `--module MODULE` | Restrict output to one module. |
 | `--no-infer-deps` | Explicit deps only. |
-| `--json` | Emits `specs` and `dependency_graph`. |
+| `--json` | Emits `specs` and `dependency_graph`. Each spec carries `"origin"` (`"module"` or `"decorator"`) and `"kwargs"` (the merged effective kwargs). |
 
 ### `jaunt instructions`
 

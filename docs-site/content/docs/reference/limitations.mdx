@@ -56,6 +56,35 @@ contrived and accepted. Work around it by keeping a plain `import jaunt` (or a
 `from jaunt import …`) somewhere in the file, or by naming the module explicitly
 with `--target`, which bypasses the prescreen and imports it unconditionally.
 
+## Module Magic (`magic_module`)
+
+`jaunt.magic_module(__name__)` governs a module by rebinding each spec name to
+its generated object on first access. That timing is the source of its sharp
+edges.
+
+- **Import-time capture.** Module-level code that runs *before* the rebind — a
+  top-level call of a governed spec, a class that subclasses one, an assignment
+  that instantiates one — captures the pre-rebind stub and keeps it. Rebinding
+  cannot fix a reference that was already stored (a base class, a dataclass
+  field default, a registry entry, a closure). Unlike decorator mode, a
+  pre-rebind stub *class* is silently constructible, since its `__init__` is
+  just a docstring, so the failure can be quiet. The scan emits a build-time
+  warning when it sees the trap; the rule is that module-level consumption of a
+  spec belongs inside a function. The escape hatch for a base class is an
+  explicit `@jaunt.magic` on it.
+- **Pickle.** An instance built from a pre-rebind stub class does not round-trip
+  through pickle: the module attribute now resolves to the generated class, and
+  the two identities disagree.
+- **Circular imports** that reach into a half-executed governed module bypass
+  resolution the same way they bypass everything else in Python. The names they
+  see are the pre-rebind stubs.
+- **Conditional and nested defs are out of scope.** A `def` or `class` under a
+  top-level `if`/`try` branch, or nested inside another function, is neither
+  governed nor guaranteed to appear as context. Only direct top-level statements
+  are scanned.
+- **`magic_module` in `__init__.py`** governing a whole package is not supported
+  yet; call it in the module that holds the stubs.
+
 ## Codex Authentication
 
 Jaunt delegates generation to the `codex` CLI. Authenticate that CLI with

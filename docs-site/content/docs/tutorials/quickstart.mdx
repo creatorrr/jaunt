@@ -3,12 +3,12 @@ title: Quickstart
 description: "Go from an empty directory to generated, tested code in about ten minutes."
 ---
 
-You will write a JWT helper as a spec: two function signatures and their docstrings, no bodies. Jaunt turns that into real Python, you call it like any other module, and then you let Jaunt write the test too.
+You will write a JWT helper as a spec module: one `magic_module` call and two function signatures with their docstrings, no bodies. Jaunt turns that into real Python, you call it like any other module, and then you let Jaunt write the test too.
 
-Every command and every block of output on this page comes from a real run against jaunt 1.3.0.
+Every command and every block of output on this page comes from a real run against jaunt 1.4.0.
 
 <Callout type="warning">
-  `jaunt build` drives the OpenAI Codex CLI (`codex exec`) and spends tokens. Install the `codex` CLI and run `codex login` before you start. The build on this page cost about 35 cents.
+  `jaunt build` drives the OpenAI Codex CLI (`codex exec`) and spends tokens. Install the `codex` CLI and run `codex login` before you start. The build on this page cost about 30 cents.
 </Callout>
 
 ## 1. Create a project
@@ -28,7 +28,24 @@ codex login          # one-time Codex authentication
 uv run jaunt init
 ```
 
-It prints nothing on success. It writes a `jaunt.toml`, a `JAUNT_LOG` journal, and a starter `src/specs.py` with a throwaway `slugify` spec. The default config points at a `src` layout:
+It prints nothing on success. It writes a `jaunt.toml`, a `JAUNT_LOG` journal, and a starter `src/specs.py`. The starter is already in module-magic style:
+
+```python
+# Starter spec: `jaunt build` implements this module into `__generated__/`.
+import jaunt
+
+jaunt.magic_module(__name__)
+
+
+def greet(name: str) -> str:
+    """Return a friendly greeting for `name`.
+
+    Includes the name verbatim and ends with an exclamation mark.
+    """
+    ...
+```
+
+The `jaunt.magic_module(__name__)` call at the top is the whole trick: every top-level stub in the file becomes a spec, no per-function decorator needed. The default config points at a `src` layout:
 
 ```toml
 version = 1
@@ -39,19 +56,18 @@ test_roots = ["tests"]
 generated_dir = "__generated__"
 ```
 
-`init` writes a fuller annotated config than this; the rest is covered in the [config reference](/docs/reference/config). Delete the starter spec's contents. You are going to replace them.
+`init` writes a fuller annotated config than this; the rest is covered in the [config reference](/docs/reference/config). Replace the starter `greet` spec with the two below.
 
 ## 3. Write the spec
 
-A spec is a normal function with a real signature and a docstring that states the contract. The body stays empty. Put this in `src/specs.py`:
+A spec is a normal function with a real signature and a docstring that states the contract. The body stays empty. Because `magic_module` governs the file, `create_token` is a spec on its own. `verify_token` carries a `@jaunt.magic` decorator only to declare a dependency; the decorator is the precision layer for a single symbol, and it still inherits whatever the module call set. Put this in `src/specs.py`:
 
 ```python
-from __future__ import annotations
-
 import jaunt
 
+jaunt.magic_module(__name__)
 
-@jaunt.magic()
+
 def create_token(user_id: str, secret: str, ttl_seconds: int = 3600) -> str:
     """
     Create an HS256-signed JWT for a user.
@@ -81,7 +97,7 @@ def verify_token(token: str, secret: str) -> dict:
     ...
 ```
 
-The type hints and the docstring are the contract. `deps=[create_token]` tells Jaunt that `verify_token` depends on `create_token`, so the two are built together and `verify_token` restales if `create_token`'s public shape changes.
+The type hints and the docstring are the contract. `deps=[create_token]` tells Jaunt that `verify_token` depends on `create_token`, so the two build together and `verify_token` restales if `create_token`'s public shape changes.
 
 ## 4. Build
 
@@ -91,19 +107,21 @@ uv run jaunt build --progress plain
 
 ```text
 [build] specs: generating
-[build] specs: attempt (1/2)
+[build] specs: attempt (1/3)
 [build] specs: done (attempt 1)
 [build] specs: validating
 [build] 1/1 ok=1 fail=0 specs
 [build] done 1/1 ok=1 fail=0
 Cost: 1 API call(s), 0 cache hit(s)
-  Tokens: 159,263 prompt + 4,957 completion = 164,220 total
-  Estimated cost: $0.3582
+  Tokens: 134,368 prompt + 4,950 completion = 139,318 total
+  Cached prompt tokens: 118,016
+  Estimated cost: $0.3083
 Emitted 1 .pyi stub(s).
+specs context: 3k chars (~765 tok) — preamble 91%, blueprint 5%, repo_map 3%, package_context 1%
 Built 1 module(s), skipped 0.
 ```
 
-Jaunt read the spec, drove `codex exec`, checked the result against your signatures, and wrote a real module to `src/__generated__/specs.py`. Two docstrings became 97 lines that do the tedious part right: canonical JSON, base64url without padding, a constant-time signature compare.
+Jaunt read the module, drove `codex exec`, checked the result against your signatures, and wrote a real module to `src/__generated__/specs.py`. Two docstrings became roughly a hundred lines that do the tedious part right: canonical JSON, base64url without padding, a constant-time signature compare.
 
 ```python
 def create_token(user_id: str, secret: str, ttl_seconds: int = 3600) -> str:
@@ -113,21 +131,15 @@ def create_token(user_id: str, secret: str, ttl_seconds: int = 3600) -> str:
     now = int(time.time())
     header_segment = _json_segment({"alg": "HS256", "typ": "JWT"})
     payload_segment = _json_segment({"sub": user_id, "iat": now, "exp": now + ttl_seconds})
-    signing_input = f"{header_segment}.{payload_segment}"
-    signature = hmac.new(
-        secret.encode("utf-8"),
-        signing_input.encode("utf-8"),
-        hashlib.sha256,
-    ).digest()
-    signature_segment = _base64url_encode(signature)
-    return f"{signing_input}.{signature_segment}"
+    signature_segment = _base64url_encode(_signed_bytes(header_segment, payload_segment, secret))
+    return f"{header_segment}.{payload_segment}.{signature_segment}"
 ```
 
 Jaunt also emitted `src/specs.pyi` next to the spec, so your editor sees the real signatures.
 
 ## 5. Call it
 
-Import the spec module, not the generated one. The decorator forwards each call into `__generated__/`.
+Import the spec module, not the generated one. The `magic_module` call rebinds each spec name to its generated implementation the first time you touch it.
 
 ```bash
 PYTHONPATH=src uv run python - <<'PY'
@@ -146,7 +158,7 @@ PY
 
 ```text
 token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpX ...
-claims: {'sub': 'user-42', 'iat': 1783188852, 'exp': 1783192452}
+claims: {'sub': 'user-42', 'iat': 1783199036, 'exp': 1783202636}
 rejected: invalid signature
 ```
 
@@ -158,7 +170,7 @@ JauntNotBuiltError: Spec specs:create_token has not been built yet. Run `jaunt b
 
 ## 6. Let Jaunt write the test
 
-A `@jaunt.test` spec describes what to check; Jaunt writes the pytest. Put this in `tests/specs_jwt.py`:
+A `@jaunt.test` spec describes what to check; Jaunt writes the pytest. Test specs are always explicit decorators, whichever style your source uses. Put this in `tests/specs_jwt.py`:
 
 ```python
 from __future__ import annotations
@@ -188,33 +200,42 @@ PYTHONPATH=src uv run jaunt test --progress plain
 
 ```text
 [test] tests.specs_jwt: generating
+[test] tests.specs_jwt: attempt (1/2)
 [test] tests.specs_jwt: done (attempt 1)
+[test] tests.specs_jwt: validating
 [test] 1/1 ok=1 fail=0 tests.specs_jwt
-.                                                                        [100%]
-1 passed in 0.01s
+[test] done 1/1 ok=1 fail=0
+Emitted 1 .pyi stub(s).
+Built 0 module(s), skipped 1.
+........                                                                 [100%]
+8 passed in 0.02s
 Generated 1 test module(s), skipped 0.
 ```
 
-The generated test lives at `tests/__generated__/specs_jwt.py` and exercises the cases you named:
+One test spec became eight cases. The generated file lives at `tests/__generated__/specs_jwt.py`; the example anchored to your docstring reads:
 
 ```python
+@pytest.mark.jaunt_tier("example")
 def test_roundtrip() -> None:
-    user_id = "user-123"
-    secret = "roundtrip-secret"
+    token = create_token("user-123", "shared-secret", ttl_seconds=60)
 
-    token = create_token(user_id, secret, ttl_seconds=3600)
-    payload = verify_token(token, secret)
-    assert payload["sub"] == user_id
+    payload = verify_token(token, "shared-secret")
 
-    header, body, signature = token.split(".")
-    tampered_token = ".".join((header, body, _tamper_segment(signature)))
-    with pytest.raises(ValueError, match=r"^invalid signature$"):
-        verify_token(tampered_token, secret)
+    assert payload["sub"] == "user-123"
 
-    expired_token = create_token(user_id, secret, ttl_seconds=0)
-    with pytest.raises(ValueError, match=r"^expired$"):
-        verify_token(expired_token, secret)
+    header_segment, payload_segment, signature_segment = token.split(".")
+    tampered_signature = signature_segment[:-1] + _different_char(signature_segment[-1])
+    tampered_token = ".".join((header_segment, payload_segment, tampered_signature))
+
+    with pytest.raises(ValueError, match="^invalid signature$"):
+        verify_token(tampered_token, "shared-secret")
+
+    expired_token = create_token("user-123", "shared-secret", ttl_seconds=-1)
+    with pytest.raises(ValueError, match="^expired$"):
+        verify_token(expired_token, "shared-secret")
 ```
+
+Jaunt derived five more cases beside it — header shape, signature recomputation, the empty-`user_id` guard, the wrong-secret path, and malformed tokens — each tagged `@pytest.mark.jaunt_tier("derived")`.
 
 That is the whole loop: write intent, build, call, test. From here you keep editing docstrings and signatures; `jaunt build` regenerates only what changed.
 
