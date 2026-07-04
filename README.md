@@ -16,22 +16,89 @@
 >
 > -- William Blake, via Alfred Bester's *The Stars My Destination*
 
-Jaunt is a small Python library + CLI for **spec-driven code generation**:
+Jaunt is a small Python library + CLI for **spec-driven code generation**. You
+write the intent — a signature and a docstring — and Jaunt writes the
+implementation under `__generated__/` using the OpenAI Codex CLI (`codex exec`).
 
-- Write implementation intent as normal Python stubs decorated with `@jaunt.magic(...)`.
-- Optionally write test intent as stubs decorated with `@jaunt.test(...)`.
-- Jaunt generates real modules under `__generated__/` using the OpenAI Codex CLI (`codex exec`) as its code-generation engine.
-- Async support is available for both implementation and test specs through `async def` plus the `build.async_runner` setting.
-- `@magic` works on individual class methods too — decorate instance methods, `@classmethod`, `@staticmethod`, or `@abstractmethod` stubs and Jaunt generates only those methods while preserving the rest of the class.
-- Incremental freshness tracks both module digests and exported dependency APIs, so signature changes, whole-class member changes, and contract docstring edits can invalidate dependents.
+Call `jaunt.magic_module(__name__)` once at the top of a file and every top-level
+stub below it becomes a spec, with no per-symbol decorators:
+
+```python
+import re
+import jaunt
+
+jaunt.magic_module(__name__, prompt="All parsers are RFC 5322 strict.")
+
+EMAIL_RE = re.compile(r"...")           # real body → handwritten, kept as-is
+
+class Email:
+    """Email with from_, to, subject, body. Validates on construction."""
+    # docstring-only class → Jaunt designs and writes the whole class
+
+def parse_email(raw: str) -> Email:
+    """Parse an RFC 5322 payload into an Email. Raise ValueError on malformed
+    input, naming the first offending header."""
+    ...
+
+def _debug(email: Email) -> str:        # real body → handwritten helper
+    return f"<{email.from_} -> {email.to}>"
+```
+
+`jaunt build` fills in `Email` and `parse_email` and leaves `EMAIL_RE` and
+`_debug` alone. The scan governs only top-level stubs — a `def` or `class` whose
+body is `...`, a bare docstring, `pass`, or `raise NotImplementedError`. Anything
+with a real body, or carrying a non-jaunt decorator like `@property` or
+`@dataclass`, is handwritten context the model reads but never regenerates.
+
+### The precision layer: `@jaunt.magic`
+
+Reach for the decorator when you want per-symbol control. `@jaunt.magic(deps=...,
+prompt=...)` overrides the module defaults for one symbol — the module defaults
+still merge in key by key, and the per-symbol value wins. The decorator is also
+how you opt a symbol in against the scan: a stub carrying `@property`, or an
+intentionally-empty function marked `@jaunt.preserve`, stays handwritten until
+you add `@jaunt.magic`.
+
+```python
+@jaunt.magic(deps=[parse_email], prompt="Reuse parse_email per line.")
+def parse_mbox(raw: str) -> list[Email]:
+    """Split an mbox payload on `From ` lines and parse each message."""
+    ...
+```
+
+## What you get
+
+- **Module-level magic** — `jaunt.magic_module(__name__)` turns every top-level
+  stub in a file into a spec. Mixed files (specs plus handwritten helpers) are
+  first-class. Decorate individual symbols with `@jaunt.magic` / `@jaunt.test`
+  when you want per-symbol overrides.
+- **Whole-class specs** — a class-level spec can be docstring-only (Jaunt designs
+  the API), stub methods only, or a mix. Each method sits in one of three tiers:
+  `@jaunt.preserve` keeps it verbatim, `@jaunt.sig` locks its signature while
+  Jaunt writes the body, and an unmarked guidepost stub lets the model adapt the
+  signature.
+- **Parallel, DAG-scheduled builds** — modules build over the dependency graph
+  with a critical-path-first ready queue. A module starts generating the instant
+  its dependencies finish, with no wave barriers, up to `[build] jobs` workers at
+  once. A failed module skips only its dependents; the rest of the graph keeps
+  building.
+- **Smart change detection** — freshness is a SHA-256 digest over the
+  AST-normalized contract, so reformatting, comment edits, and quote-style churn
+  never trigger a rebuild. Staleness is dependency-aware: changing a module's
+  exported API restales its dependents, while a body-only rebuild does not. A
+  behaviorally-equivalent docstring edit gets re-frozen by the semantic gate
+  instead of paying for a full rebuild.
+- **Async, tests, and contracts** — `async def` specs build and test through
+  `build.async_runner`, `@jaunt.test` specs generate pytest batteries, and
+  `@jaunt.contract` pins hand-written code with a derived, committed battery.
 
 ## Two Modes
 
-Jaunt supports two first-class authoring modes that coexist and are selected by
-decorator:
+Jaunt has two authoring modes that coexist in the same project:
 
-- **Magic mode** (`@jaunt.magic` / `@jaunt.test`): the docstring is canonical and
-  Jaunt generates implementations under `__generated__/`.
+- **Magic mode** (`jaunt.magic_module` / `@jaunt.magic` / `@jaunt.test`): the
+  docstring is canonical and Jaunt generates implementations under
+  `__generated__/`.
 - **Contract mode** (`@jaunt.contract`): committed code is canonical and Jaunt
   derives a committed pytest battery under `tests/contract/`. Covers top-level
   functions (sync or async) and whole classes; derived cases may use pytest
@@ -77,19 +144,20 @@ All examples live under `examples/`. See `examples/README.md` for the full list.
 
 ### Your First Spec
 
-`jaunt init` creates a starter `src/specs.py` like this:
+`jaunt init` scaffolds a starter `src/specs.py` in module-magic style — one stub
+Jaunt implements:
 
 ```python
 import jaunt
 
-@jaunt.magic()
-def slugify(text: str) -> str:
-    """Convert a string to a URL-safe slug: lowercase, collapse non-alphanumeric runs."""
-    ...
+jaunt.magic_module(__name__)
 
-@jaunt.test(targets=slugify)
-def test_slugify() -> str:
-    """Check words, punctuation, and surrounding spaces."""
+
+def greet(name: str) -> str:
+    """Return a friendly greeting for `name`.
+
+    Includes the name verbatim and ends with an exclamation mark.
+    """
     ...
 ```
 

@@ -1,25 +1,28 @@
 # Jaunt — agent primer
 
 Jaunt is a spec-driven code generation framework for Python. You write
-**intent** as decorator-marked stubs; Jaunt generates the **implementation** with
-the OpenAI Codex CLI (`codex exec`) and writes it under `__generated__/`.
+**intent** as Python stubs — a signature and a docstring. Jaunt generates the
+**implementation** with the OpenAI Codex CLI (`codex exec`) and writes it under
+`__generated__/`.
 
 ## Your role (read this first)
 
 You author and refine *specs*. You do **not** write the implementations.
 
-1. **Never hand-write the body of a `@jaunt.magic` symbol.** Its body stays a
-   stub (`raise RuntimeError("spec stub ...")`). The docstring is the contract;
-   Jaunt fills in the code.
+1. **Never hand-write the body of a spec.** Its body stays a stub: `...`, a bare
+   docstring, `pass`, or `raise NotImplementedError`. The docstring is the
+   contract; Jaunt fills in the code.
 2. **Never edit files under `__generated__/`.** They are overwritten on every
    build. Fix the spec and rebuild instead.
-3. **Pair every implementation spec with test intent.** A `@jaunt.magic` symbol
-   without `@jaunt.test` coverage is unfinished work.
+3. **Pair every implementation spec with test intent.** A magic spec without
+   `@jaunt.test` coverage is unfinished work.
 
 ## Mental model
 
-- A **spec** is a decorated stub describing *what* to build. The full, cleaned
-  docstring is the behavioral contract — later lines matter as much as the first.
+- A **spec** is a stub describing *what* to build — a top-level stub in a
+  `jaunt.magic_module` file, or a `@jaunt.magic`-decorated symbol. The full,
+  cleaned docstring is the behavioral contract; later lines matter as much as the
+  first.
 - `jaunt build` generates implementations into `__generated__/`; importing the
   symbol transparently resolves to the generated code.
 - Builds are **incremental**: Jaunt hashes each spec's normalized contract and its
@@ -30,9 +33,9 @@ You author and refine *specs*. You do **not** write the implementations.
 
 Both coexist and are selected per symbol by decorator.
 
-- **Magic mode** — `@jaunt.magic` / `@jaunt.test`. The docstring is canonical and
-  Jaunt generates the implementation (and tests) under `__generated__/`. Use this
-  when you want Jaunt to write the code.
+- **Magic mode** — `jaunt.magic_module` / `@jaunt.magic` / `@jaunt.test`. The
+  docstring is canonical and Jaunt generates the implementation (and tests) under
+  `__generated__/`. Use this when you want Jaunt to write the code.
 - **Contract mode** — `@jaunt.contract`. The *committed code* is canonical; the
   docstring is a contract; Jaunt derives a committed pytest battery under
   `tests/contract/` (it does not generate the implementation). Use this to pin
@@ -50,12 +53,17 @@ Both coexist and are selected per symbol by decorator.
    output.
 5. `jaunt status` shows what is stale and needs rebuilding.
 
-## Writing a good `@jaunt.magic` spec
+## Writing a good magic spec
+
+The primary style is module-level. Call `jaunt.magic_module(__name__)` once at the
+top of a file, then write stubs — every top-level stub below becomes a spec:
 
 ```python
 import jaunt
 
-@jaunt.magic()
+jaunt.magic_module(__name__)
+
+
 def slugify(title: str) -> str:
     """
     Convert a title to a URL-safe slug.
@@ -66,8 +74,22 @@ def slugify(title: str) -> str:
     - Remove characters that are not ASCII alphanumerics, "-", or "_".
     - Raise ValueError if the result is empty.
     """
-    raise RuntimeError("spec stub (generated at build time)")
+    ...
 ```
+
+The scan governs only top-level stubs (`...`, a bare docstring, `pass`, or
+`raise NotImplementedError`). A function with a real body, or one carrying a
+non-jaunt decorator like `@property`, stays handwritten: the model reads it as
+context but never regenerates it. `magic_module` takes the same kwargs as
+`@jaunt.magic` (`deps=`, `prompt=`, `infer_deps=`, `test=`) as module-wide
+defaults. Keep module-level code that calls, instantiates, or subclasses a
+governed spec inside a function — at module level it would see the pre-rebind
+stub.
+
+Drop to a decorator when you want per-symbol control. `@jaunt.magic(deps=[...],
+prompt="...")` overrides the module defaults for one symbol, and decorating a
+symbol is how you opt it in against the scan. `@jaunt.magic` also works on
+individual class methods and whole classes (see the method tiers below).
 
 Principles:
 
@@ -113,12 +135,12 @@ freshness.
 @jaunt.test()
 def test_slugify_basic() -> None:
     """Assert slugify("Hello World") == "hello-world" and "  A  B  " -> "a-b"."""
-    raise AssertionError("spec stub (generated at test time)")
+    ...
 
 @jaunt.test()
 def test_slugify_rejects_empty() -> None:
     """slugify("!!!") raises ValueError (nothing remains after filtering)."""
-    raise AssertionError("spec stub (generated at test time)")
+    ...
 ```
 
 Keep tests deterministic (no network/clock unless injected), small, and focused on
@@ -156,7 +178,8 @@ just `git commit … && jaunt jobs wait --timeout 1800`.
 ## Anti-patterns to avoid
 
 - Editing `__generated__/` by hand (it will be overwritten).
-- Writing real logic inside a `@jaunt.magic` body (the body must stay a stub).
+- Writing real logic inside a spec body (the body must stay a stub, or it is read
+  as a handwritten function and never regenerated).
 - Vague docstrings ("does X") with no semantics, edge cases, or error behavior.
 - Shipping a `@jaunt.magic` spec with no `@jaunt.test` coverage.
 - Over-constraining the implementation with details the contract does not require.

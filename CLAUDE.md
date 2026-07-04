@@ -16,6 +16,10 @@ code-generation engine (`codex exec`).
 ```bash
 # Requires the `codex` CLI installed and authenticated (`codex login`).
 
+# Primary authoring style: call jaunt.magic_module(__name__) at the top of a
+# module and every top-level stub below becomes a spec. Add @jaunt.magic to a
+# single symbol for per-symbol deps=/prompt= overrides.
+
 # Install
 uv sync --frozen
 
@@ -82,9 +86,30 @@ examples/           # Runnable example projects
 
 ## Key Concepts
 
-- **Spec**: A decorated Python function/class stub that describes *what* to
-  implement. Uses `@jaunt.magic` for implementations, `@jaunt.test` for tests.
-  The full cleaned docstring is part of the behavioral contract.
+- **Spec**: A Python function/class stub that describes *what* to implement —
+  either a top-level stub in a `jaunt.magic_module` file (the primary style) or a
+  `@jaunt.magic`-decorated symbol. `@jaunt.test` marks tests. The full cleaned
+  docstring is part of the behavioral contract.
+- **`magic_module`**: `jaunt.magic_module(__name__)` at a file's top governs every
+  top-level stub in it as a magic spec, no per-symbol decorator. Classification is
+  by body shape: a strict stub (`...`, a bare docstring, `pass`,
+  `raise NotImplementedError`, or a docstring-only / stub-method class) is a spec;
+  a real body is handwritten context the model reads but never regenerates; a
+  symbol carrying a non-jaunt decorator (`@property`, `@dataclass`,
+  `@typing.overload`) is never governed; a symbol carrying a jaunt decorator is
+  skipped by the scan and the decorator wins. `raise RuntimeError("spec stub")` is
+  NOT a stub form in module mode. Module kwargs (`deps=`/`prompt=`/`infer_deps=`/
+  `test=`) merge into every governed spec key by key, and a per-symbol
+  `@jaunt.magic` value wins per key. Registration is two-phase: `magic_module`
+  AST-registers each spec at call time (`obj=None`), then a post-import finalize
+  backfills the real object and runs the same analysis pipeline decorator specs
+  get, so module-origin entries are shape-identical and their digests match a
+  decorator spec byte-for-byte when the body form is unchanged. The one sharp edge
+  is import-time capture: module-level code that calls, instantiates, or
+  subclasses a governed spec sees the pre-rebind stub, so that consumption belongs
+  inside functions (the scan warns when it can spot it). Converting a decorator
+  spec to module style is digest-neutral iff the body form is unchanged; rewriting
+  a `raise RuntimeError` stub to `...` restales once.
 - **Contract mode**: Committed code is canonical; `@jaunt.contract` is a runtime
   no-op marker; the docstring is the contract. Jaunt derives a committed pytest
   battery in `tests/contract/`. `reconcile` is the only model-calling command,
