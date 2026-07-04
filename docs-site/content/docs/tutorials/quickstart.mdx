@@ -1,68 +1,34 @@
 ---
 title: Quickstart
-description: "Zero to generated code in 5 minutes (copy-pasteable)."
+description: "Go from an empty directory to generated, tested code in about ten minutes."
 ---
 
-This is the shortest path to an "aha": write one tiny spec, run `jaunt build`, and call real generated code like normal Python.
+You will write a JWT helper as a spec: two function signatures and their docstrings, no bodies. Jaunt turns that into real Python, you call it like any other module, and then you let Jaunt write the test too.
+
+Every command and every block of output on this page comes from a real run against jaunt 1.3.0.
 
 <Callout type="warning">
-  `jaunt build` drives the OpenAI **Codex CLI** (`codex exec`) and will spend tokens. Install the `codex` CLI and run `codex login` first.
+  `jaunt build` drives the OpenAI Codex CLI (`codex exec`) and spends tokens. Install the `codex` CLI and run `codex login` before you start. The build on this page cost about 35 cents.
 </Callout>
 
-## Project Layout
+## 1. Create a project
 
-Create a small "src layout" project. The `__init__.py` files can be empty:
-
-```text
-myproj/
-  jaunt.toml
-  src/
-    my_app/
-      __init__.py      # empty
-      specs.py          # your @jaunt.magic specs
-  tests/
-    __init__.py        # empty
-    specs_email.py     # your @jaunt.test specs
-```
-
-You can also keep specs as **top-level modules** directly under a source root
-(e.g. `src/timing.py` with the root set to `src`). A top-level module `timing`
-generates to `__generated__/timing.py`; a package member `my_app.specs`
-generates to `src/my_app/__generated__/specs.py`.
-
-## 1) Install
-
-Jaunt drives the OpenAI **Codex CLI** as its generation engine, so you need
-the `codex` CLI installed and authenticated. Install it (see the OpenAI Codex
-docs for your platform), then:
+Start from an empty `uv` project and add jaunt. The base install already carries pytest, anyio, rich, and watchfiles, so there is nothing else to pull in.
 
 ```bash
-codex login
-```
-
-Then install Jaunt from PyPI. The base install is batteries-included
-(pytest, pytest-asyncio, anyio, rich, and watchfiles):
-
-```bash
-pip install jaunt
-# or, in a uv-managed project (one with a pyproject.toml — run `uv init` first
-# if you don't have one):
+uv init jwt-quickstart
+cd jwt-quickstart
 uv add jaunt
+codex login          # one-time Codex authentication
 ```
 
-If you’re working from the Jaunt repo itself:
+## 2. Scaffold with `jaunt init`
 
 ```bash
-uv sync
-uv run jaunt --version
+uv run jaunt init
 ```
 
-Codex handles its own authentication (`codex login`, or the `CODEX_API_KEY`
-env var) — there is no provider SDK or API key for Jaunt itself to configure.
-
-## 2) Create `jaunt.toml`
-
-`myproj/jaunt.toml`:
+It prints nothing on success. It writes a `jaunt.toml`, a `JAUNT_LOG` journal, and a starter `src/specs.py` with a throwaway `slugify` spec. The default config points at a `src` layout:
 
 ```toml
 version = 1
@@ -73,19 +39,11 @@ test_roots = ["tests"]
 generated_dir = "__generated__"
 ```
 
-<Callout type="info">
-  **Choosing `source_roots`.** Point a root at the *parent* of your package
-  (e.g. `src`, so specs are `my_app.specs`), not at the package directory
-  itself. A root that is itself a package (contains `__init__.py`) yields
-  bare module names like `timing` that can shadow stdlib/PyPI names — Jaunt
-  warns when it detects this. Unknown keys or sections in `jaunt.toml` are
-  now rejected with an error (exit 2), so run `jaunt instructions` to print
-  the full annotated schema if you are unsure.
-</Callout>
+`init` writes a fuller annotated config than this; the rest is covered in the [config reference](/docs/reference/config). Delete the starter spec's contents. You are going to replace them.
 
-## 3) Write Your First Spec (`@jaunt.magic`)
+## 3. Write the spec
 
-`myproj/src/my_app/specs.py`:
+A spec is a normal function with a real signature and a docstring that states the contract. The body stays empty. Put this in `src/specs.py`:
 
 ```python
 from __future__ import annotations
@@ -94,114 +52,177 @@ import jaunt
 
 
 @jaunt.magic()
-def normalize_email(raw: str) -> str:
+def create_token(user_id: str, secret: str, ttl_seconds: int = 3600) -> str:
     """
-    Normalize an email address for stable comparisons.
+    Create an HS256-signed JWT for a user.
 
-    Rules:
-    - Strip surrounding whitespace.
-    - Lowercase the whole string.
-    - Must contain exactly one "@".
-    - Local-part and domain must both be non-empty after splitting.
+    Structure: base64url(header).base64url(payload).base64url(signature)
+    Header:  {"alg": "HS256", "typ": "JWT"}
+    Payload: {"sub": user_id, "iat": <now>, "exp": <now + ttl_seconds>}
 
-    Errors:
-    - Raise ValueError if `raw` is invalid by the rules above.
+    - Sign with HMAC-SHA256 using `secret` as the key.
+    - base64url segments must omit "=" padding.
+    - Raise ValueError if user_id is empty.
     """
-    raise RuntimeError("spec stub (generated at build time)")
+    ...
+
+
+@jaunt.magic(deps=[create_token])
+def verify_token(token: str, secret: str) -> dict:
+    """
+    Verify an HS256-signed JWT and return its decoded payload.
+
+    - Split on "." into exactly three parts, else raise ValueError("malformed").
+    - Recompute the HMAC over header.payload and compare in constant time;
+      raise ValueError("invalid signature") on mismatch.
+    - Raise ValueError("expired") if the "exp" claim is at or before now.
+    - Otherwise return the payload dict with "sub", "iat", and "exp".
+    """
+    ...
 ```
 
-This docstring is the contract. The type hints matter. The body is a placeholder.
+The type hints and the docstring are the contract. `deps=[create_token]` tells Jaunt that `verify_token` depends on `create_token`, so the two are built together and `verify_token` restales if `create_token`'s public shape changes.
 
-## 4) Generate Code
-
-From `myproj/`:
+## 4. Build
 
 ```bash
-jaunt build
+uv run jaunt build --progress plain
 ```
-
-Jaunt reads your spec, drives `codex exec` to generate the code, validates the output, and writes a real module to:
 
 ```text
-src/my_app/__generated__/specs.py
+[build] specs: generating
+[build] specs: attempt (1/2)
+[build] specs: done (attempt 1)
+[build] specs: validating
+[build] 1/1 ok=1 fail=0 specs
+[build] done 1/1 ok=1 fail=0
+Cost: 1 API call(s), 0 cache hit(s)
+  Tokens: 159,263 prompt + 4,957 completion = 164,220 total
+  Estimated cost: $0.3582
+Emitted 1 .pyi stub(s).
+Built 1 module(s), skipped 0.
 ```
 
-## 5) Use It (Runtime Forwarding)
+Jaunt read the spec, drove `codex exec`, checked the result against your signatures, and wrote a real module to `src/__generated__/specs.py`. Two docstrings became 97 lines that do the tedious part right: canonical JSON, base64url without padding, a constant-time signature compare.
 
-You import the spec module. The decorator forwards your call into `__generated__/`.
+```python
+def create_token(user_id: str, secret: str, ttl_seconds: int = 3600) -> str:
+    if user_id == "":
+        raise ValueError("user_id is empty")
+
+    now = int(time.time())
+    header_segment = _json_segment({"alg": "HS256", "typ": "JWT"})
+    payload_segment = _json_segment({"sub": user_id, "iat": now, "exp": now + ttl_seconds})
+    signing_input = f"{header_segment}.{payload_segment}"
+    signature = hmac.new(
+        secret.encode("utf-8"),
+        signing_input.encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
+    signature_segment = _base64url_encode(signature)
+    return f"{signing_input}.{signature_segment}"
+```
+
+Jaunt also emitted `src/specs.pyi` next to the spec, so your editor sees the real signatures.
+
+## 5. Call it
+
+Import the spec module, not the generated one. The decorator forwards each call into `__generated__/`.
 
 ```bash
-PYTHONPATH=src python - <<'PY'
-from my_app.specs import normalize_email
+PYTHONPATH=src uv run python - <<'PY'
+from specs import create_token, verify_token
 
-print(normalize_email("  A@B.COM  "))  # -> "a@b.com"
+token = create_token("user-42", "s3cr3t")
+print("token:", token[:32], "...")
+print("claims:", verify_token(token, "s3cr3t"))
+
+try:
+    verify_token(token, "wrong-secret")
+except ValueError as e:
+    print("rejected:", e)
 PY
 ```
 
-If you call it before building, you’ll get `jaunt.JauntNotBuiltError` with a hint to run `jaunt build`.
+```text
+token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpX ...
+claims: {'sub': 'user-42', 'iat': 1783188852, 'exp': 1783192452}
+rejected: invalid signature
+```
 
-## 6) Add A Test Spec (`@jaunt.test`)
+Call a spec before building it and you get a clear error instead of a mysterious `None`:
 
-`myproj/tests/specs_email.py`:
+```text
+JauntNotBuiltError: Spec specs:create_token has not been built yet. Run `jaunt build` and try again.
+```
+
+## 6. Let Jaunt write the test
+
+A `@jaunt.test` spec describes what to check; Jaunt writes the pytest. Put this in `tests/specs_jwt.py`:
 
 ```python
 from __future__ import annotations
 
 import jaunt
 
+from specs import create_token, verify_token
 
-@jaunt.test()
-def test_normalize_email__lowercases_and_strips() -> None:
-    """
-    Assert normalize_email:
-    - strips surrounding whitespace
-    - lowercases
-    - rejects invalid inputs like "no-at-sign" (ValueError)
 
-    Examples:
-    - normalize_email("  A@B.COM  ") == "a@b.com"
+@jaunt.test(targets=[create_token, verify_token])
+def test_roundtrip() -> None:
     """
-    raise AssertionError("spec stub (generated at test time)")
+    Cover the token lifecycle:
+    - A token from create_token verifies and returns a payload whose "sub"
+      matches the user id.
+    - verify_token raises ValueError on a tampered signature.
+    - verify_token raises ValueError("expired") for a token whose ttl has passed.
+    """
+    ...
 ```
 
-Now generate tests and run pytest:
+Generate the test and run pytest in one step:
 
 ```bash
-PYTHONPATH=src jaunt test
+PYTHONPATH=src uv run jaunt test --progress plain
 ```
 
-Jaunt writes generated tests under:
-
-- `tests/__generated__/specs_email.py`
-
-## 7) Optional: Tune The Codex Engine
-
-Codex is the only engine, but you can tune the model, reasoning effort, and
-sandbox in `jaunt.toml`:
-
-```toml
-[codex]
-model = "gpt-5.5"
-reasoning_effort = "high"   # low | medium | high
-sandbox = "workspace-write"
+```text
+[test] tests.specs_jwt: generating
+[test] tests.specs_jwt: done (attempt 1)
+[test] 1/1 ok=1 fail=0 tests.specs_jwt
+.                                                                        [100%]
+1 passed in 0.01s
+Generated 1 test module(s), skipped 0.
 ```
 
-The commands stay the same:
+The generated test lives at `tests/__generated__/specs_jwt.py` and exercises the cases you named:
 
-```bash
-jaunt build
-PYTHONPATH=src jaunt test
+```python
+def test_roundtrip() -> None:
+    user_id = "user-123"
+    secret = "roundtrip-secret"
+
+    token = create_token(user_id, secret, ttl_seconds=3600)
+    payload = verify_token(token, secret)
+    assert payload["sub"] == user_id
+
+    header, body, signature = token.split(".")
+    tampered_token = ".".join((header, body, _tamper_segment(signature)))
+    with pytest.raises(ValueError, match=r"^invalid signature$"):
+        verify_token(tampered_token, secret)
+
+    expired_token = create_token(user_id, secret, ttl_seconds=0)
+    with pytest.raises(ValueError, match=r"^expired$"):
+        verify_token(expired_token, secret)
 ```
 
-See the [Codex Engine](/docs/concepts/codex-engine) reference for details.
+That is the whole loop: write intent, build, call, test. From here you keep editing docstrings and signatures; `jaunt build` regenerates only what changed.
 
-## What Next
+## Where to next
 
 <Cards>
-  <Card title="How It Works" href="/docs/concepts/how-jaunt-works" />
-  <Card title="Writing Better Specs" href="/docs/guides/spec-tips" />
-  <Card title="Codex Engine" href="/docs/concepts/codex-engine" />
-  <Card title="JWT Walkthrough (Hero Demo)" href="/docs/tutorials/quickstart" />
+  <Card title="Adopt jaunt in an existing project" href="/docs/tutorials/adopt-existing" description="Convert one function in a real repo without touching the rest." />
+  <Card title="Whole-class specs and the daemon" href="/docs/tutorials/whole-class-daemon" description="Design a class from a docstring, then let a background daemon rebuild on commit." />
+  <Card title="How jaunt works" href="/docs/concepts/how-jaunt-works" description="What runtime forwarding and incremental builds actually do." />
+  <Card title="Writing better specs" href="/docs/guides/spec-tips" description="Get sharper generated code from sharper contracts." />
 </Cards>
-
-Next: [How It Works](/docs/concepts/how-jaunt-works).
