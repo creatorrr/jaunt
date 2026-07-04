@@ -408,7 +408,7 @@ def sig(obj: F | None = None, *args: object, **kwargs: object):
     writes the body but the declared signature is enforced exactly. Accepts
     ``@jaunt.sig`` and ``@jaunt.sig()`` and takes no arguments.
     """
-    if args or kwargs:
+    if args or kwargs or (obj is not None and not callable(obj)):
         raise TypeError("@jaunt.sig takes no arguments")
 
     def _decorate(fn: object):

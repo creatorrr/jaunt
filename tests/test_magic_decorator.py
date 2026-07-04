@@ -1106,6 +1106,24 @@ def test_sig_with_kwargs_rejected(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
         sys.modules.pop(module_name, None)
 
 
+def test_sig_with_positional_arg_rejected() -> None:
+    import jaunt
+
+    # A non-callable positional (misuse like `@jaunt.sig(123)`) must raise the same
+    # clear TypeError as kwargs, not a downstream AttributeError.
+    with pytest.raises(TypeError, match="no arguments"):
+        jaunt.sig(123)  # type: ignore[no-matching-overload]
+
+
+def test_sig_with_extra_positional_arg_rejected() -> None:
+    import jaunt
+
+    def fn() -> None: ...
+
+    with pytest.raises(TypeError, match="no arguments"):
+        jaunt.sig(fn, "extra")  # type: ignore[no-matching-overload]
+
+
 def test_sig_on_property_rejected(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         "jaunt.runtime.importlib.import_module",

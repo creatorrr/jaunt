@@ -54,6 +54,10 @@ include_target_tests = false
 check_generated_imports = true
 # Extra import roots to allow in generated modules.
 generated_import_allowlist = []
+# Emit provenance-headed .pyi stubs next to each built spec module so type
+# checkers and editors see the generated signatures. A missing or stale stub
+# marks the module stale for `jaunt status`/`jaunt check`.
+emit_stubs = true
 # Optional project-wide steering appended to build prompts.
 # instructions = ["Prefer small composable helpers."]
 

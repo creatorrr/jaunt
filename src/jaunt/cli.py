@@ -2800,6 +2800,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             builtin_skill_names=builtin_skill_names,
             skills_digest=build_skills_digest,
             emit_stubs=cfg.build.emit_stubs,
+            build_preamble_override=cfg.prompts.build_preamble or None,
         )
 
         if report.failed and not json_mode:

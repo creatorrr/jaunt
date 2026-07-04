@@ -256,6 +256,39 @@ def test_check_default_passes_with_fresh_magic(tmp_path: Path, monkeypatch, caps
     assert out["magic"]["unbuilt"] == []
 
 
+def test_check_default_gates_stale_magic_after_spec_edit(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """Build fresh provenance, then edit the spec signature; check must exit 4 and
+    report the module under magic.stale (not merely unbuilt)."""
+    pkg = "checkmagic_drift"
+    _magic_project(tmp_path, pkg=pkg)
+    monkeypatch.chdir(tmp_path)
+    sys.path.insert(0, str(tmp_path / "src"))
+    _build_fresh_magic(tmp_path, pkg=pkg)
+
+    # Edit the spec signature so the recomputed module digest diverges from the
+    # digest baked into the (still-present) generated module header.
+    _write(
+        tmp_path / "src" / pkg / "specs.py",
+        (
+            "import jaunt\n\n"
+            "@jaunt.magic()\n"
+            "def greet(name: str, greeting: str = 'Hello') -> str:\n"
+            '    """Say hello with a configurable greeting."""\n'
+            '    raise RuntimeError("stub")\n'
+        ),
+    )
+
+    rc = _run_check(["check", "--root", str(tmp_path), "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == cli.EXIT_PYTEST_FAILURE, out
+    assert out["ok"] is False
+    assert f"{pkg}.specs" in out["magic"]["stale"]
+    assert f"{pkg}.specs" not in out["magic"]["fresh"]
+    assert f"{pkg}.specs" not in out["magic"]["unbuilt"]
+
+
 def test_check_magic_free_project_exits_zero(tmp_path: Path, monkeypatch, capsys) -> None:
     """A contract-only, in-sync project stays exit 0 under the new default."""
     root = _project(tmp_path)

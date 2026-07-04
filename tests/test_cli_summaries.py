@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import jaunt.cli
+from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
 from test_regressions_review_fixes import (
     GoodBackend,
     _make_cli_test_project,
@@ -12,6 +13,22 @@ from test_regressions_review_fixes import (
     _write,
     _write_package_init,
 )
+
+
+class NeedsDepBackend(GeneratorBackend):
+    """Emits valid code that inlines undeclared logic behind a JAUNT-NEEDS-DEP marker."""
+
+    async def generate_module(
+        self, ctx: ModuleSpecContext, *, extra_error_context: list[str] | None = None
+    ) -> tuple[str, None]:
+        lines: list[str] = []
+        for name in ctx.expected_names:
+            lines.append(
+                f"def {name}() -> None:\n"
+                "    # JAUNT-NEEDS-DEP: util.hashing:stable_hash — inlined a copy\n"
+                "    assert True\n"
+            )
+        return "\n".join(lines).rstrip() + "\n", None
 
 
 def _make_cli_build_project(root: Path) -> tuple[Path, str]:
@@ -184,6 +201,49 @@ def test_cli_build_json_includes_context_stats(tmp_path: Path, monkeypatch, caps
         assert name in blocks, name
         assert set(blocks[name]) == {"chars", "est_tokens"}
         assert blocks[name]["est_tokens"] == blocks[name]["chars"] // 4
+
+
+def test_cli_build_json_includes_needs_deps(tmp_path: Path, monkeypatch, capsys) -> None:
+    project, prefix = _make_cli_build_project(tmp_path)
+    before = {
+        prefix: sys.modules.get(prefix),
+        f"{prefix}.specs": sys.modules.get(f"{prefix}.specs"),
+    }
+    orig_sys_path = list(sys.path)
+    monkeypatch.setattr(jaunt.cli, "_build_backend", lambda cfg: NeedsDepBackend())
+
+    try:
+        rc = jaunt.cli.main(["build", "--root", str(project), "--json"])
+    finally:
+        sys.path[:] = orig_sys_path
+        _restore_modules([prefix], before=before)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == jaunt.cli.EXIT_OK
+    assert "needs_deps" in payload
+    assert "app.specs" in payload["needs_deps"]
+    markers = payload["needs_deps"]["app.specs"]
+    assert any("util.hashing:stable_hash" in m for m in markers)
+
+
+def test_cli_build_json_omits_needs_deps_when_none(tmp_path: Path, monkeypatch, capsys) -> None:
+    project, prefix = _make_cli_build_project(tmp_path)
+    before = {
+        prefix: sys.modules.get(prefix),
+        f"{prefix}.specs": sys.modules.get(f"{prefix}.specs"),
+    }
+    orig_sys_path = list(sys.path)
+    monkeypatch.setattr(jaunt.cli, "_build_backend", lambda cfg: GoodBackend())
+
+    try:
+        rc = jaunt.cli.main(["build", "--root", str(project), "--json"])
+    finally:
+        sys.path[:] = orig_sys_path
+        _restore_modules([prefix], before=before)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == jaunt.cli.EXIT_OK
+    assert "needs_deps" not in payload
 
 
 def test_cli_build_non_json_prints_context_line(tmp_path: Path, monkeypatch, capsys) -> None:

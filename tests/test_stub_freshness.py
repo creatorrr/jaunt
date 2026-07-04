@@ -153,6 +153,39 @@ def test_matching_stub_keeps_module_fresh(tmp_path: Path, monkeypatch) -> None:
                 del sys.modules[m]
 
 
+def test_stale_stub_marks_module_stale(tmp_path: Path, monkeypatch) -> None:
+    from jaunt.header import format_stub_header
+    from jaunt.stub_emitter import (
+        build_stub_source,
+        generated_content_digest,
+        stub_path_for_source,
+    )
+
+    orig_path = list(sys.path)
+    before = set(sys.modules.keys())
+    try:
+        spec_file, gen_file = _make_fresh_built_module(tmp_path, "stubpkg_stale", emit_stubs=True)
+        gen_source = gen_file.read_text(encoding="utf-8")
+        # Record a digest for content that no longer matches the generated module,
+        # so the stub is present but stale (recorded != current).
+        header = format_stub_header(
+            tool_version="0",
+            source_module="stubpkg_stale.specs",
+            generated_digest=generated_content_digest(gen_source + "\n# drifted\n"),
+        )
+        stub = build_stub_source(spec_file.read_text(encoding="utf-8"), gen_source, set(), header)
+        stub_path_for_source(spec_file).write_text(stub, encoding="utf-8")
+
+        st = _status(tmp_path)
+        assert "stubpkg_stale.specs" in st.stale
+        assert st.stale_changes.get("stubpkg_stale.specs") == "stub"
+    finally:
+        sys.path[:] = orig_path
+        for m in list(sys.modules.keys()):
+            if m not in before:
+                del sys.modules[m]
+
+
 def test_missing_stub_ignored_when_emit_stubs_false(tmp_path: Path, monkeypatch) -> None:
     orig_path = list(sys.path)
     before = set(sys.modules.keys())

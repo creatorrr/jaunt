@@ -115,6 +115,7 @@ def validate_build_generated_source(
             expected_names=expected_names,
             spec_module=spec_module,
             handwritten_names=handwritten_names,
+            generated_module=generated_module,
         )
     )
     protected_modules = {spec_module, spec_module.split(".", 1)[0]}
@@ -145,6 +146,7 @@ def validate_build_contract_only(
     expected_names: list[str],
     spec_module: str,
     handwritten_names: Iterable[str],
+    generated_module: str | None = None,
 ) -> list[str]:
     try:
         mod = ast.parse(source or "")
@@ -155,6 +157,7 @@ def validate_build_contract_only(
         expected_names=expected_names,
         spec_module=spec_module,
         handwritten_names=handwritten_names,
+        generated_module=generated_module,
     )
 
 
@@ -164,6 +167,7 @@ def _validate_build_contract_only(
     expected_names: list[str],
     spec_module: str,
     handwritten_names: Iterable[str],
+    generated_module: str | None = None,
 ) -> list[str]:
     errors: list[str] = []
     expected = set(expected_names)
@@ -180,17 +184,47 @@ def _validate_build_contract_only(
     for node in ast.walk(mod):
         if not isinstance(node, ast.ImportFrom):
             continue
-        if int(getattr(node, "level", 0) or 0) != 0:
-            continue
-        if node.module != spec_module:
+        level = int(getattr(node, "level", 0) or 0)
+        if level == 0:
+            resolved = node.module
+        else:
+            resolved = _resolve_relative_import(generated_module, level, node.module)
+        if resolved != spec_module:
             continue
         for alias in node.names:
-            if alias.name in expected:
+            if alias.name == "*":
+                errors.append(
+                    f"generated module re-imports its own spec module {spec_module} via "
+                    "'from ... import *'; define its symbols instead"
+                )
+            elif alias.name in expected:
                 errors.append(
                     f"generated module re-imports its own spec symbol {alias.name!r} "
                     f"from {spec_module}; define it instead"
                 )
     return errors
+
+
+def _resolve_relative_import(
+    generated_module: str | None, level: int, module: str | None
+) -> str | None:
+    """Resolve a relative ``from`` import inside the generated module to an absolute name.
+
+    ``generated_module`` is the dotted name of the module the generated source lives in
+    (e.g. ``pkg.__generated__.mod``); ``level`` is the ImportFrom dot count. Returns the
+    absolute module the import targets, or ``None`` when it cannot be resolved (unknown
+    generated module or dots that walk past the top-level package).
+    """
+    if not generated_module or level <= 0:
+        return None
+    parts = generated_module.split(".")
+    anchor = parts[: len(parts) - level]
+    if not anchor:
+        return None
+    base = ".".join(anchor)
+    if module:
+        return f"{base}.{module}"
+    return base
 
 
 def validate_no_import_fallbacks(tree: ast.AST, protected_modules: set[str]) -> list[str]:

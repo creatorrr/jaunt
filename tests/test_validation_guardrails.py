@@ -68,6 +68,14 @@ def test_import_fallback_bare_except_counts() -> None:
     assert errs and "fallback" in errs[0]
 
 
+def test_import_fallback_true_bare_except_counts() -> None:
+    # A truly bare `except:` (no exception type) catches everything, so a guarded
+    # protected import under it is still a fallback hazard.
+    src = "try:\n    from timing import MockTimer\nexcept:\n    MockTimer = None\n"
+    errs = validate_no_import_fallbacks(ast.parse(src), {"timing"})
+    assert errs and "fallback" in errs[0]
+
+
 def test_import_fallback_no_try_is_clean() -> None:
     src = "from timing import MockTimer\n"
     assert validate_no_import_fallbacks(ast.parse(src), {"timing"}) == []
@@ -91,6 +99,66 @@ def test_self_import_of_spec_symbol_rejected() -> None:
         handwritten_names=(),
     )
     assert any("MockTimer" in e and "timing" in e for e in errs)
+
+
+def test_self_import_of_spec_symbol_via_relative_rejected() -> None:
+    # Generated source lives in `pkg.__generated__.mod`; a relative `from ..mod import Foo`
+    # resolves to the spec module `pkg.mod` and re-imports its own spec symbol.
+    src = textwrap.dedent(
+        """
+        class Foo:
+            pass
+
+        from ..mod import Foo as Foo
+        """
+    )
+    errs = validate_build_generated_source(
+        src,
+        ["Foo"],
+        spec_module="pkg.mod",
+        handwritten_names=(),
+        generated_module="pkg.__generated__.mod",
+    )
+    assert any("Foo" in e and "pkg.mod" in e for e in errs)
+
+
+def test_self_import_star_from_spec_module_rejected() -> None:
+    # `from <spec_module> import *` pulls the spec symbols back into the generated
+    # module (absolute form) and must be flagged.
+    src = textwrap.dedent(
+        """
+        def build() -> int:
+            return 1
+
+        from timing import *
+        """
+    )
+    errs = validate_build_generated_source(
+        src,
+        ["build"],
+        spec_module="timing",
+        handwritten_names=(),
+    )
+    assert any("import *" in e and "timing" in e for e in errs)
+
+
+def test_self_import_star_from_spec_module_via_relative_rejected() -> None:
+    src = textwrap.dedent(
+        """
+        def build() -> int:
+            return 1
+
+        from ..mod import *
+        """
+    )
+    errs = validate_build_generated_source(
+        src,
+        ["build"],
+        spec_module="pkg.mod",
+        handwritten_names=(),
+        generated_module="pkg.__generated__.mod",
+    )
+    assert any("import *" in e and "pkg.mod" in e for e in errs)
 
 
 def test_self_import_of_handwritten_symbol_allowed() -> None:

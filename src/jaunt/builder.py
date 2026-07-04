@@ -1596,6 +1596,7 @@ async def run_build(
     initial_error_context_by_module: dict[str, list[str]] | None = None,
     targeted_test_entries: dict[str, list[SpecEntry]] | None = None,
     emit_stubs: bool = False,
+    build_preamble_override: str | None = None,
 ) -> BuildReport:
     jobs = max(1, int(jobs))
     ty_attempts = max(0, int(ty_retry_attempts)) if ty_retry_attempts is not None else None
@@ -1760,7 +1761,7 @@ async def run_build(
     module_context_stats: dict[str, dict[str, dict[str, int]]] = {}
     from jaunt.generate.shared import load_prompt as _load_prompt
 
-    _preamble_chars = len(_load_prompt("codex_preamble.md", None))
+    _preamble_chars = len(_load_prompt("codex_preamble.md", build_preamble_override or None))
     _skills_ws_chars = _skills_workspace_chars(project_root)
     failed: dict[str, list[str]] = dict(skipped_failures)
     completed: set[str] = set()
@@ -2074,6 +2075,7 @@ async def run_build(
                     expected_names=component_expected,
                     spec_module=module_name,
                     handwritten_names=handwritten_names,
+                    generated_module=generated_module,
                 )
                 if errs:
                     return errs
