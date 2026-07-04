@@ -153,3 +153,28 @@ def test_fresh_scaffold_builds_with_mocked_backend(tmp_path, monkeypatch, capsys
     assert rc == jaunt.cli.EXIT_OK
     assert data["ok"] is True
     assert data["generated"] == ["specs"]
+
+
+def test_fresh_stub_bytes_never_rewritten_across_environments(tmp_path, monkeypatch):
+    """A digest-fresh stub is left byte-for-byte alone on later builds, even when
+    this environment would render it differently (ruff present vs absent) —
+    committed stubs must not churn across machines. (1.4.2 codex review.)"""
+    project = _governed_project(tmp_path)
+    orig_path = list(sys.path)
+    monkeypatch.setattr(jaunt.cli, "_build_backend", lambda cfg: _EchoBackend())
+    try:
+        assert jaunt.cli.main(["build", "--root", str(project)]) == jaunt.cli.EXIT_OK
+        stub = project / "src" / "gm_mod.pyi"
+        assert stub.exists()
+
+        # Simulate a different environment's rendering: cosmetic byte change,
+        # header (and therefore inputs digest) untouched.
+        mangled = stub.read_text(encoding="utf-8") + "\n\n"
+        stub.write_text(mangled, encoding="utf-8")
+
+        _purge(["gm_mod"])
+        assert jaunt.cli.main(["build", "--root", str(project)]) == jaunt.cli.EXIT_OK
+        assert stub.read_text(encoding="utf-8") == mangled  # untouched
+    finally:
+        sys.path[:] = orig_path
+        _purge(["gm_mod"])

@@ -519,3 +519,128 @@ def test_future_import_referenced_by_name_is_filtered() -> None:
     import ast
 
     ast.parse(stub)
+
+
+def test_jaunt_imports_never_emitted_in_stub() -> None:
+    """`import jaunt` / `from jaunt import ...` are decorator plumbing: every
+    jaunt marker is stripped from stub clones, so copying the import is a
+    guaranteed unused-import (F401). (mem-mcp-b feedback, wave 4.)"""
+    spec_source = textwrap.dedent(
+        '''
+        import jaunt
+        import os
+        from jaunt import magic
+
+        jaunt.magic_module(__name__)
+
+
+        def load(path: str) -> str:
+            """Load."""
+            raise NotImplementedError
+        '''
+    )
+    generated_source = "def load(path: str) -> str:\n    return path\n"
+    stub = build_stub_source(spec_source, generated_source, {"load"}, _header())
+    assert "import jaunt" not in stub
+    assert "from jaunt" not in stub
+    assert "import os" in stub
+
+
+def test_string_annotation_names_resolve_or_any_bind() -> None:
+    """Names inside quoted annotations ("X | None") must resolve like plain
+    ones: from the generated module's imports (incl. TYPE_CHECKING blocks) or
+    the Any fallback — never left undefined (F821). (wave 4 feedback.)"""
+    spec_source = textwrap.dedent(
+        '''
+        import jaunt
+
+        jaunt.magic_module(__name__)
+
+
+        def chunker(name: str) -> "RecursiveChunker | None":
+            """Get a chunker."""
+            raise NotImplementedError
+
+
+        def frame() -> "Frame":
+            """Get a frame."""
+            raise NotImplementedError
+        '''
+    )
+    generated_source = textwrap.dedent(
+        """
+        from typing import TYPE_CHECKING
+
+        if TYPE_CHECKING:
+            from frames.core import Frame
+
+        try:
+            from chonkie import RecursiveChunker
+        except ImportError:
+            RecursiveChunker = None
+
+
+        def chunker(name: str) -> "RecursiveChunker | None":
+            return None
+
+
+        def frame() -> "Frame":
+            ...
+        """
+    )
+    stub = build_stub_source(spec_source, generated_source, {"chunker", "frame"}, _header())
+    # TYPE_CHECKING-guarded import in the generated module resolves for real.
+    assert "from frames.core import Frame" in stub
+    # try/except-guarded optional dep falls back to a safe Any binding.
+    assert "RecursiveChunker = Any" in stub
+    import ast as _ast
+
+    _ast.parse(stub)
+
+
+def test_format_stub_best_effort_formats_when_ruff_available() -> None:
+    from jaunt.stub_emitter import format_stub_best_effort
+
+    ugly = "__all__ = ['a',   'b']\n\n\n\n\ndef a() -> int: ...\n"
+    formatted = format_stub_best_effort(ugly)
+    # jaunt's own dev env has ruff; formatted output uses double quotes and
+    # stub-file blank-line rules. In a ruff-less env this degrades to identity.
+    import shutil
+
+    if shutil.which("ruff"):
+        assert '"a"' in formatted
+    else:
+        assert formatted == ugly
+
+
+def test_jaunt_public_names_in_annotations_still_resolve() -> None:
+    """Stripping jaunt imports must not orphan a legitimate annotation that
+    references a jaunt public name — it resolves from the generated module's
+    imports or Any-binds, never F821. (1.4.2 codex review.)"""
+    spec_source = textwrap.dedent(
+        '''
+        import jaunt
+        from jaunt import JauntError
+
+        jaunt.magic_module(__name__)
+
+
+        def failing(path: str) -> JauntError:
+            """Return the error a load would raise."""
+            raise NotImplementedError
+        '''
+    )
+    generated_source = textwrap.dedent(
+        """
+        from jaunt import JauntError
+
+
+        def failing(path: str) -> JauntError:
+            return JauntError("nope")
+        """
+    )
+    stub = build_stub_source(spec_source, generated_source, {"failing"}, _header())
+    assert "from jaunt import JauntError" in stub
+    import ast as _ast
+
+    _ast.parse(stub)

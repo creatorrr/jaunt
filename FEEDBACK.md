@@ -341,3 +341,91 @@ Wave-2 numbers for the 1.4 context-budget work:
 - Double frontmatter (finding 20) recurred: `opentelemetry-api` skill, so
   2 of ~27 generated skills now — less "one-off race" than finding 20
   assumed. Merged by hand again.
+
+---
+
+## 2026-07-04 (evening) — 1.4.0/1.4.1 magic_module adoption report
+
+Migrated all of memory-store-utils to module style same-day: 6 of 7 modules
+now run `jaunt.magic_module(__name__)` + bare stubs; timing.py reverted to
+decorator style (finding 23). Upgrades 1.3.1→1.4.0→1.4.1 both cost **zero
+restales** — that's four releases honoring the compat promise now.
+
+### Corrections to my earlier reports
+
+- **`@jaunt.sig` alias migration does NOT cost a rebuild.** My wave-2 report
+  said it "costs one rebuild per module" — wrong. `status` shows stale
+  (structural) but `build` resolves it via the re-stamp path, free. 1.3.1's
+  release-note framing was accurate; retract that ask.
+- **The re-stamp path writes an empty `tool_version=`.** Our committed
+  `__generated__/timing.py` carries `# jaunt:tool_version=` (blank) from the
+  1.3.1 re-stamp. Cosmetic, but it erases provenance the header exists to
+  provide, and it makes "which tool built this" archaeology impossible later.
+
+### 23. `importlib.reload()` breaks magic_module modules (severity: high)
+
+`reload(mod)` re-executes the module body, which re-calls
+`jaunt.magic_module(__name__)`, which raises
+`JauntError: magic_module() was already called for module '...'`. Reload is
+a standard test idiom for modules with env-derived module-level state (our
+`test_get_timer_respects_mock_flag` does `monkeypatch.setenv(...)` +
+`reload`). Decorator mode survives reload fine and always has. Not fixed in
+1.4.1 (not claimed to be). We reverted timing.py to decorator style — the
+escape hatch's third trigger after "decorated symbol" and "import-time
+consumption": *reload-dependent modules*. Suggested fix: when the governing
+call arrives for an already-registered module with the same `source_file`,
+treat it as a reload and re-register (replace) instead of raising.
+
+### 24. Type checkers reject `...` stub bodies on annotated specs (severity: medium)
+
+The REPLY's example and `jaunt init` scaffold `...` bodies, but ty (and
+Pyright) flag a `...`-bodied function with a concrete return annotation:
+`invalid-return-type` (implicit `None` return vs `-> Tuple[str, bool]`) plus
+"Only functions in stub files ... are permitted to have empty bodies". Our
+`poe typecheck` gate failed on 9 diagnostics across the migrated modules.
+`raise NotImplementedError` bodies avoid both (a raise never returns), are a
+recognized module-mode stub form, and are digest-identical to `...` (both
+normalize to empty) — we switched all specs to that form, zero restale.
+Suggest docs/init lead with `raise NotImplementedError` for any spec with a
+non-`None`/non-`Any` return annotation.
+
+### 25. Decorator→module migration is a paid rebuild in practice (severity: low; expectation-setting)
+
+The REPLY correctly warned `raise RuntimeError("spec stub")` bodies restale
+once — but the restale is a **full rebuild**, not a gate refreeze, because
+the old body was never stub-normalized so the per-spec structural digest
+moves. Cost for us: $0.56 (formatting pilot) + $16.63 (6-module batch, 18
+calls, 7.65M tokens — retries included). All regenerated bodies came back
+semantically equivalent; tests unchanged and green. Contrast: an
+import-reorder-only edit to mmr.py was **refrozen at $0** — the gate's cheap
+path works exactly when spec digests are unchanged. If more 1.2/1.3-era
+adopters exist, a `jaunt migrate` that rewrites legacy stub bodies and
+re-stamps headers (bodies are digest-equal after normalization) would make
+the conversion actually free, matching how the REPLY reads.
+
+### 26. Module-scan governance is opt-out by shape — no "newly governed" warning (severity: medium; design)
+
+In decorator mode, governance was explicit opt-in. Under `magic_module`, an
+undecorated docstring-only class is silently governed — we only dodged this
+because our handwritten `SummaryGenerationError` happens to have a real
+`__init__`; a bare `class FooError(RuntimeError): """..."""` added to a
+governed module later becomes a codex-generated spec with no signal beyond
+a new `__generated__` symbol in the build diff. The scan already warns on
+import-time *consumption*; suggest a parallel warning (build/check/specs)
+when a scan governs a symbol that has no prior generated body — that's the
+exact moment accidental governance is cheap to catch.
+
+### Numbers for the finding-19 file
+
+- formatting pilot rebuild: $0.56, 264k prompt (234k cached), 1 call.
+  `skills_workspace` 219,124 chars / ~54,781 est tokens of a ~57,721-token
+  context — still ~95% of everything the model reads.
+- 6-module batch: $16.63, 18 calls, 7.65M tokens. Bigger than wave 2's
+  $8.27/5-module because compression_utils + mmr are the two largest specs
+  and retries landed there.
+- 1.4.x stub emitter: output is unformatted (double blank lines,
+  single-quoted `__all__`, `...` on its own line) and still carries the
+  unused `import jaunt` (ruff F401) and the dropped-guarded-import string
+  annotation (F821 on `"RecursiveChunker | None"`); our scoped per-file
+  lint exemptions from the 1.3.1 wave remain in place. Fold into finding 20's
+  emitter-hygiene bucket.

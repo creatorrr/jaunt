@@ -12,6 +12,34 @@ built modules — your generated code stays fresh across the upgrade. Anything
 that would restale built modules lands in a minor version and is called out on
 this page.
 
+## 1.4.2
+
+Patch release from the fourth adoption-feedback wave. No built module is
+invalidated and re-emitting stubs makes no model calls — but note the CI
+caveat: the stub format version changed, so `jaunt check` reports committed
+stubs stale (exit 4) until you run `jaunt build` once and commit the
+re-emitted `.pyi` files.
+
+- **`importlib.reload()` works on governed modules.** Re-executing the same
+  `magic_module(__name__)` call (same file, same line) is now treated as a
+  reload: the prior registration is replaced instead of raising "already
+  called". Reload-dependent test idioms (`monkeypatch.setenv` + `reload`) no
+  longer force a module back to decorator style. A second call at a different
+  line in the same module is still an error.
+- **Scaffold and docs lead with `raise NotImplementedError`.** Strict type
+  checkers (ty, Pyright) reject a `...` body under a concrete return
+  annotation outside stub files. All stub forms digest identically, so
+  switching your existing `...` bodies over is free.
+- **Emitted `.pyi` stubs are lint-clean.** The unused `import jaunt` is no
+  longer copied from the spec; names inside string annotations
+  (`"Chunker | None"`) resolve like plain ones (from the generated module's
+  imports, including `if TYPE_CHECKING:` blocks, with an `Any` fallback for
+  optional-dependency guards); and when `ruff` is on PATH the emitted stub is
+  formatted with it. You can drop per-file lint exemptions for jaunt stubs.
+- **Refreeze no longer blanks `tool_version`.** Re-stamped generated headers
+  (the free path that resolves digest-scheme migrations and gate-equivalent
+  edits) now record the jaunt version that wrote them, preserving provenance.
+
 ## 1.4.1
 
 Patch release: three post-merge review fixes for `magic_module`. No built
@@ -60,10 +88,11 @@ authoring style. Nothing about decorator mode changes; the new call is additive.
 
 Patch release from the second adoption-feedback wave.
 
-- **Migrating inner `@jaunt.magic` to `@jaunt.sig` rebuilds that module once.**
-  The alias keeps working, but the decorator's identity is part of the class's
-  structural contract, so the rename restales the spec. Budget one rebuild per
-  whole-class module when you adopt the new vocabulary.
+- **Migrating inner `@jaunt.magic` to `@jaunt.sig` is free.** (Corrected in
+  1.4.2 — this note originally said to budget one rebuild; adopter reports
+  showed the rename resolves through the re-stamp path with zero model calls.
+  `jaunt status` may label the module stale until the next `jaunt build`
+  re-stamps it.)
 
 - **`[codex] fingerprint_cli_version` now defaults to `false`.** Embedding
   `codex --version` in the generation fingerprint coupled `jaunt check` to

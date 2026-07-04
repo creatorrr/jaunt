@@ -38,7 +38,7 @@ class Email:
 def parse_email(raw: str) -> Email:
     """Parse an RFC 5322 payload into an Email. Raise ValueError on malformed
     input, naming the first offending header."""
-    ...
+    raise NotImplementedError
 
 def _debug(email: Email) -> str:        # real body → handwritten helper
     return f"<{email.from_} -> {email.to}>"
@@ -46,7 +46,10 @@ def _debug(email: Email) -> str:        # real body → handwritten helper
 
 `jaunt build` fills in `Email` and `parse_email` and leaves `EMAIL_RE` and
 `_debug` alone. The scan governs only top-level stubs — a `def` or `class` whose
-body is `...`, a bare docstring, `pass`, or `raise NotImplementedError`. Anything
+body is `...`, a bare docstring, `pass`, or `raise NotImplementedError`. The
+examples use `raise NotImplementedError` because strict type checkers (ty,
+Pyright) reject an empty body under a concrete return annotation outside stub
+files; the forms digest identically, so switching between them is free. Anything
 with a real body, or carrying a non-jaunt decorator like `@property` or
 `@dataclass`, is handwritten context the model reads but never regenerates.
 
@@ -63,7 +66,7 @@ you add `@jaunt.magic`.
 @jaunt.magic(deps=[parse_email], prompt="Reuse parse_email per line.")
 def parse_mbox(raw: str) -> list[Email]:
     """Split an mbox payload on `From ` lines and parse each message."""
-    ...
+    raise NotImplementedError
 ```
 
 ## What you get
@@ -158,7 +161,7 @@ def greet(name: str) -> str:
 
     Includes the name verbatim and ends with an exclamation mark.
     """
-    ...
+    raise NotImplementedError
 ```
 
 ```bash
