@@ -11,6 +11,7 @@ from jaunt.errors import (
     JauntNotBuiltError,
 )
 from jaunt.runtime import contract, magic, preserve, sig, test
+from jaunt.module_magic import magic_module
 
 
 def _package_version() -> str:
@@ -26,6 +27,7 @@ __version__ = _package_version()
 __all__ = [
     "__version__",
     "magic",
+    "magic_module",
     "sig",
     "contract",
     "preserve",
