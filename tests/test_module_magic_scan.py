@@ -124,3 +124,25 @@ def test_capture_warnings_for_toplevel_subclass_and_call():
     assert len(scan.warnings) == 2
     assert "Signed" in scan.warnings[0] and "Email" in scan.warnings[0]
     assert "parse" in scan.warnings[1]
+
+
+def test_later_real_definition_cancels_earlier_stub():
+    scan = _scan("""
+        def f():
+            ...
+
+        def f(x):
+            return x + 1
+    """)
+    assert scan.candidates == ()
+
+
+def test_later_stub_redefinition_wins_over_earlier_real_body():
+    scan = _scan("""
+        def f(x):
+            return x + 1
+
+        def f():
+            \"\"\"stub\"\"\"
+    """)
+    assert scan.candidates == (ModuleSpecCandidate(name="f", is_class=False),)

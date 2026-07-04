@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import importlib
 import sys
+import textwrap
 from pathlib import Path
 
+import pytest
+
 from jaunt import discovery, registry
+from jaunt.errors import JauntDiscoveryError
 from jaunt.module_magic import finalize_module_magic
 from jaunt.spec_ref import normalize_spec_ref
 
@@ -71,7 +75,7 @@ IMPORTER_MOD = """
 import gm_mod
 """
 
-_FIXTURE_MODULES = {"gm_mod", "base_mod", "sig_gov_mod", "importer_mod"}
+_FIXTURE_MODULES = {"gm_mod", "base_mod", "sig_gov_mod", "importer_mod", "meta_gov_mod"}
 
 
 def _purge() -> None:
@@ -159,4 +163,29 @@ def test_finalize_is_noop_for_ungoverned_or_unimported_module():
     # Ungoverned / never registered — must not raise.
     finalize_module_magic("no_such_module_xyz")
     assert registry.get_magic_registry() == {}
+    _purge()
+
+
+def test_finalize_error_is_wrapped_as_discovery_error(tmp_path, monkeypatch):
+    _purge()
+    _write(
+        tmp_path / "meta_gov_mod.py",
+        textwrap.dedent('''
+            import jaunt
+
+            jaunt.magic_module(__name__)
+
+
+            class Meta(type):
+                def __new__(mcs, name, bases, ns):
+                    return super().__new__(mcs, name, bases, ns)
+
+
+            class Model(metaclass=Meta):
+                """Spec with a custom metaclass."""
+        '''),
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    with pytest.raises(JauntDiscoveryError, match="finalize magic module 'meta_gov_mod'"):
+        discovery.import_and_collect(["meta_gov_mod"], kind="magic")
     _purge()

@@ -161,9 +161,17 @@ def _called_spec_names(value: ast.expr, spec_names: frozenset[str]) -> tuple[str
 def scan_module_source(tree: ast.Module, *, module: str) -> ModuleScan:
     module_aliases, member_aliases = _jaunt_decorator_aliases(tree)
     preserve_aliases = _preserve_aliases(tree)
-    candidates: list[ModuleSpecCandidate] = []
 
+    # Python's last top-level binding wins at runtime, so classification must
+    # look at the LAST def/class per name: an early stub shadowed by a later
+    # real definition is handwritten, not a spec.
+    last_binding: dict[str, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef] = {}
     for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            last_binding[node.name] = node
+
+    candidates: list[ModuleSpecCandidate] = []
+    for node in sorted(last_binding.values(), key=lambda n: n.lineno):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if any(
                 _matches_jaunt_decorator(dec, module_aliases, member_aliases)
@@ -239,19 +247,24 @@ class _MagicModule(types.ModuleType):
     def __getattribute__(self, attr: str) -> object:
         d = object.__getattribute__(self, "__dict__")
         state = d.get("__jaunt_magic_module__")
-        if state is None or attr not in state.spec_names:
+        # Resolve on first access to ANY non-dunder attribute, not just spec
+        # names: a handwritten helper reached first would otherwise call the raw
+        # stubs through the module globals (which bypass this hook) and silently
+        # return stub results. Dunders stay fast-pathed so importlib's own
+        # bookkeeping (__spec__, __loader__, ...) never triggers resolution.
+        if state is None or (attr.startswith("__") and attr.endswith("__")):
             return types.ModuleType.__getattribute__(self, attr)
         if any(name not in d for name in state.spec_names):
-            # Module still executing / circular import: bypass resolution.
-            #
-            # KNOWN LIMITATION: this heuristic only detects a partial module body
-            # by the absence of governed spec names from __dict__. Once every
-            # governed stub is defined but code below them is still executing (e.g.
-            # a trailing circular import), the guard passes and resolution eagerly
-            # imports the generated counterpart. This is more aggressive than the
-            # decorator path (which stays lazy until a wrapper is *called*), so a
-            # circular import that touches a governed attribute — rather than
-            # calling it — can pull generated code in before the module finishes.
+            # Module body has not defined every governed stub yet (partial
+            # execution or a module built without importlib): bypass resolution.
+            return types.ModuleType.__getattribute__(self, attr)
+        spec = d.get("__spec__")
+        if spec is not None and getattr(spec, "_initializing", False):
+            # Module body still executing (importlib flips _initializing to
+            # False only after exec_module returns). A circular importer that
+            # probes ANY attribute mid-execution — including trailing code
+            # after the last stub — must see plain stubs, matching Python's
+            # normal circular-import semantics, not trigger eager resolution.
             return types.ModuleType.__getattribute__(self, attr)
         _resolve_module(self, state, d)
         return types.ModuleType.__getattribute__(self, attr)
