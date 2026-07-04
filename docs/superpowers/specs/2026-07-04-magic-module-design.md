@@ -1,0 +1,215 @@
+# `jaunt.magic_module` — Module-Level Magic (Design)
+
+Date: 2026-07-04
+Status: Approved (pending codex review)
+Target: jaunt 1.4 headline feature (alongside skills context budget)
+Origin: user proposal + FEEDBACK finding 22 (module-level shared-constraint
+channel); seams verified against 1.3.1 source by a dedicated read pass.
+
+## Decisions (user-confirmed)
+
+- **Positioning: new primary style.** Docs and tutorials lead with
+  `magic_module` for module-at-a-time work; per-symbol decorators remain fully
+  supported as the override/precision mechanism. Mixed modules are first-class.
+- **Name:** `jaunt.magic_module`. Exported from `jaunt/__init__.py`.
+- **Kwargs: full `@magic` parity** — `deps=`, `prompt=`, `infer_deps=`,
+  `test=` as module-level defaults; per-symbol decorators override.
+- **Tests story:** `magic_module(__name__, test=True)` applies the existing
+  implicit-test opt-in to every governed spec. `@jaunt.test` files unchanged;
+  no `test_module` in v1.
+- **Runtime forwarding: Approach A** — intercept-once-then-vanish
+  (`__class__` swap; rebind on first access; swap back).
+- **Spec classification: strict stub forms** via the existing
+  `class_analysis.is_stub_body` predicate.
+
+## 1. User-facing semantics
+
+```python
+import jaunt
+
+jaunt.magic_module(__name__, prompt="All parsers are RFC 5322 strict.")
+
+EMAIL_RE = re.compile(...)          # handwritten constant — untouched
+
+class Email:
+    """Email object: from_, to, subject, body. Validates on construction."""
+    # docstring-only body → whole-class spec (jaunt designs the API)
+
+def parse_email(raw: str) -> Email:
+    """Parse a raw RFC 5322 payload into Email. Raise ValueError with a
+    descriptive message on malformed input."""
+    ...
+
+def _render_debug(email: Email) -> str:   # real body → handwritten helper
+    return f"<{email.from_} -> {email.to}>"
+```
+
+Classification of each **top-level** `def` / `async def` / `class`:
+
+| Shape | Classification |
+|---|---|
+| Function body passes `is_stub_body` (docstring-only, `...`, `pass`, `raise NotImplementedError`) | **spec** (same semantics as `@jaunt.magic` today) |
+| Class with docstring-only body, or with ≥1 stub method | **whole-class spec**; members keep today's three-tier semantics (`@jaunt.preserve` / `@jaunt.sig` / guidepost) |
+| Real body (function) / all-real-method class | **handwritten** — reusable context, never regenerated |
+| Carries any jaunt decorator (`@magic`, `@preserve`, `@test`, `@contract`) | **skipped by the module scan** — the decorator governs it (decorator wins) |
+
+Non-def/class statements (constants, `if TYPE_CHECKING:` blocks, imports) are
+never scanned. `@jaunt.preserve` on a stub-bodied def is the opt-out for an
+intentionally-empty handwritten function. Nested defs/classes are out of scope
+(module scan is top-level only, mirroring discovery today).
+
+Note the docs convention change this blesses: module-mode stubs use `...` or
+`raise NotImplementedError`; the older `raise RuntimeError("spec stub")`
+convention does NOT classify as a stub and stays a decorator-mode idiom. Docs
+standardize on `...` everywhere.
+
+## 2. Registration (import-time, AST-based)
+
+Constraint (verified): the registry is populated purely as an import side
+effect — `import_and_collect` imports and reads; there is no post-import scan.
+`magic_module(__name__)` therefore registers synchronously, at module-body
+execution time, before the stubs below it exist as runtime objects:
+
+1. Resolve the caller's module + source file (same frame discipline as
+   `_resolve_magic_identity_from_callsite`, but expecting a bare call at
+   module scope, not a decorator).
+2. Parse the on-disk source (via the existing parse cache), scan top-level
+   defs/classes, classify per §1.
+3. For each spec, construct a `SpecEntry(kind="magic", ...)` and
+   `register_magic(entry)` — with `entry.obj = None` (the object does not
+   exist yet). `extract_source_segment` already locates segments by qualname,
+   so digests need no object.
+4. Record the module in a new module-magic registry
+   (`registry.py`): `{module_name: ModuleMagicDefaults(deps, prompt,
+   infer_deps, test)}` — consumed by the runtime hook (§3), `jaunt specs`,
+   and diagnostics.
+
+**Obj-less entries — required audit.** `SpecEntry.obj` consumers must
+tolerate `None` for module-magic entries. Known touchpoints:
+`analyze_magic_decorators` (skipped — no decorators to analyze; its outputs
+`auto_deps`/`decorator_api_records`/`effective_signature` derive from AST or
+default to empty), and any `inspect`-based signature use. The implementation
+plan must grep every `entry.obj` use and handle `None`.
+
+**Duplicate-registration guard.** Because the module scan skips
+jaunt-decorated defs (visible in AST), a decorated symbol registers exactly
+once — via its decorator, later in module execution. `register_magic` is
+keyed by spec_ref, so accidental overlap is idempotent rather than fatal;
+implementation asserts the skip rule with a test.
+
+**Kwarg merge.** Rule: module defaults apply to EVERY spec in a governed
+module — module-scan-registered and decorator-registered alike — merged
+key-by-key into `SpecEntry.decorator_kwargs` at construction, with per-symbol
+values winning per key (a decorated `@magic(deps=[...])` symbol still inherits
+the module `prompt=`). Merging into `decorator_kwargs` means dependency resolution
+(`deps.py`), prompt threading (`builder.py` decorator_prompts), and the
+structural digest (`_stable_decorator_kwargs`) all react to module-default
+changes with zero downstream modification — editing the module `prompt=`
+restales every governed spec, which is correct (it is part of their contract).
+
+For decorator-registered entries the merge happens inside `_decorate` by
+consulting the module-magic registry (the `magic_module` call precedes the
+defs, so defaults are always registered first; a decorator finding no
+module entry behaves exactly as today).
+
+## 3. Runtime forwarding (Approach A: intercept-once-then-vanish)
+
+At call time, `magic_module`:
+
+1. Builds the spec-name set (from §2's scan).
+2. Swaps `sys.modules[__name__].__class__` to `_MagicModule`
+   (a `types.ModuleType` subclass; direct precedent:
+   `contract/__init__.py:27-40`).
+
+`_MagicModule.__getattribute__` fast-paths everything except first access to
+a governed spec name. On that first access it **resolves the module**:
+
+- Import the generated counterpart (`spec_module_to_generated_module` +
+  `importlib.import_module` — the existing lazy path).
+- **Built:** rebind every spec name in the module `__dict__` to its generated
+  object; stamp classes with `__jaunt_spec_ref__` (parity with the decorator's
+  built path).
+- **Not built:** rebind every spec function to a raiser with the decorator
+  path's `_not_built_error` (actionable "run jaunt build" message, not a bare
+  `NotImplementedError`), and every spec class to the existing
+  `__new__`-raiser placeholder.
+- Swap `__class__` back to `types.ModuleType`. Steady-state overhead: zero.
+
+Properties:
+- **External access** (`mod.parse_email`, `from mod import parse_email`
+  after import) → generated code. `from mod import parse_email` at the top of
+  ANOTHER module is an attribute access on `mod` → triggers resolution.
+- **Sibling calls** (handwritten helper calls `parse_email(...)`) → late
+  global binding; by the time any external caller reaches the module, globals
+  are rebound. Works.
+- **Documented limitation:** code that CALLS a governed spec during the spec
+  module's own import (module-level execution below the defs) sees the stub.
+  Rare, detectable (the stub body raises immediately), documented.
+- **Build-freshness parity with decorators:** both modes resolve the
+  generated module once per process (`sys.modules` caching); a rebuild during
+  a live process requires re-import in both. No regression.
+- Pickling/`inspect` parity: after resolution, module attributes ARE the
+  generated objects (better than decorator mode's wrappers for functions).
+
+## 4. Discovery, config, and tooling integration
+
+- **AST prescreen** (`discovery._has_jaunt_markers`): already passes on the
+  `import jaunt` branch; additionally recognize a top-level
+  `ast.Expr(Call(...))` whose func name/attr is `magic_module` for
+  belt-and-braces (and add it to the marker name set).
+- **`module_contract`:** governed spec names flow into
+  `expected_names`/`generated` via the registry exactly as decorator specs do
+  — handwritten classification stays name-driven and correct.
+- **`jaunt specs`:** module-magic entries display with an origin marker
+  (`module` vs `decorator`) and the effective merged kwargs; `--json` gains
+  `"origin": "magic_module"`.
+- **Validation, .pyi emission, semantic gate, `check`/`status`, daemon,
+  guard:** unchanged — all operate on registry entries, digests, and
+  generated artifacts, which are shape-identical. (The .pyi emitter already
+  handles undecorated stubs — module mode makes its output cleaner, no
+  wrapper types at all.)
+- **`jaunt init`:** scaffold switches to magic_module style (INIT_TEMPLATE +
+  starter spec). FULL_SCHEMA_TEMPLATE unchanged (no new config keys — the
+  feature is code-level, not config-level).
+- **Docs (same release):** writing-magic-specs guide leads with module style;
+  quickstart converts; primer.md + CLAUDE.md vocabulary; upgrading.mdx notes
+  (converting decorator→module style does NOT restale — the decorator line
+  never entered the digest; adding module-level kwargs DOES restale, as any
+  contract change should).
+
+## 5. Error handling
+
+- `magic_module(__name__)` called anywhere but module top-level scope →
+  `JauntError` with the fix.
+- Called twice in one module → `JauntError` (one governing call per module).
+- Called with a name not in `sys.modules` (e.g. passed a wrong string) →
+  `JauntError` naming what was received.
+- A governed module with ZERO classified specs → warning (probably a
+  mis-placed call or all-real bodies), not an error — legal during gradual
+  conversion.
+- `@jaunt.sig` on a top-level function in a governed module → same error as
+  today outside whole-class specs (function signatures are already part of
+  the contract; sealing is a method-tier concept).
+
+## 6. Testing strategy
+
+- Unit: classification table (§1) over a fixture module — every row asserted,
+  including the `raise RuntimeError` non-stub, `@preserve` opt-out, mixed
+  class, decorated-symbol skip.
+- Registration: registry state after importing a governed module — entries,
+  merged kwargs, obj=None tolerated end-to-end through digest computation.
+- Runtime: built path (external access, `from`-import, sibling call,
+  class instantiation + isinstance), not-built path (actionable error), swap-
+  back verified (`type(mod) is types.ModuleType` after first access).
+- Digest: decorator→module-style conversion of the same module is
+  digest-neutral (no restale); module `prompt=` edit restales all governed
+  specs; per-symbol override wins.
+- Build e2e (mocked backend): governed module builds, validates,
+  emits .pyi, `check` green; mixed module builds.
+- Prescreen: call-form detection without an importable jaunt alias.
+
+## 7. Out of scope (recorded, not designed)
+
+- `test_module()` counterpart; nested-def governance; `magic_module` in
+  `__init__.py` governing a package; per-symbol kwarg *subtraction*
+  (`prompt=None` to opt out of a module default); sealed top-level functions.
