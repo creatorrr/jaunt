@@ -3,90 +3,65 @@ title: Codex Engine
 description: "How Jaunt drives the OpenAI Codex CLI (`codex exec`) to generate code."
 ---
 
-Codex is Jaunt's **sole** generation engine. Every generation command —
-`jaunt build`, `jaunt test`, `jaunt skill build`, and `jaunt skill refresh` —
-drives the OpenAI **Codex CLI** (`codex exec`) under the hood. Jaunt still owns
-discovery, dependency ordering, freshness, validation, repair retries, and
-writing the final files into your project tree.
+Codex is Jaunt's only generation engine. Every command that writes code —
+`jaunt build`, `jaunt test`, `jaunt skill build`, `jaunt skill refresh` — drives
+the OpenAI **Codex CLI** (`codex exec`) underneath. Jaunt keeps everything else
+for itself: discovery, dependency ordering, freshness, validation, repair
+retries, and writing the final files into your tree.
 
 <Callout type="info">
-  The older `legacy` (direct provider SDK) and `aider` engines have been
-  removed. `agent.engine` must be `"codex"`; any other value is a config error
-  (exit code `2`).
+  The older `legacy` (direct provider SDK) and `aider` engines are gone.
+  `agent.engine` must be `"codex"`; any other value is a config error (exit
+  code `2`).
 </Callout>
 
 ## Prerequisites
 
-Codex runs as an external CLI, so install and authenticate it once before
-running Jaunt:
+Codex is an external CLI, so install and authenticate it once before you run
+Jaunt:
 
 ```bash
 # Install the Codex CLI (see the OpenAI Codex docs for your platform), then:
 codex login
 ```
 
-Jaunt shells out to whatever `codex` is on your `PATH`. Authentication is
-handled entirely by Codex (`codex login`, or the `CODEX_API_KEY` env var) —
-Jaunt does **not** read `llm.api_key_env` for generation.
+Jaunt shells out to whatever `codex` is on your `PATH`. Authentication belongs
+entirely to Codex — `codex login`, or the `CODEX_API_KEY` env var. Jaunt does
+not read `llm.api_key_env` for generation. The `[codex]` keys that pick the
+model, reasoning effort, and sandbox policy live in the
+[configuration reference](/docs/reference/config).
 
-## Configure It
+## How a generation call works
 
-`jaunt init` writes a Codex config by default:
+For each module Jaunt needs to build:
 
-```toml
-[agent]
-engine = "codex"
-
-[codex]
-model = "gpt-5.5"
-reasoning_effort = "high"   # low | medium | high
-sandbox = "workspace-write"
-# features = []
-# [codex.config]            # raw `-c key=value` passthrough to `codex exec`
-```
-
-- `model` — passed to `codex exec --model`.
-- `reasoning_effort` — sent as `-c model_reasoning_effort=...`.
-- `sandbox` — the Codex sandbox policy (`codex exec --sandbox`). Generation
-  uses your configured value; Jaunt pins internal read-only steps to
-  `read-only`.
-- `features` / `[codex.config]` — advanced raw passthrough to the Codex CLI.
-
-## How A Generation Call Works
-
-For each module Jaunt needs to generate:
-
-1. Jaunt renders the prompt (Jaunt preamble + system template + your spec's
-   source segment + optional per-spec extras and the repo map) and seeds
-   builtin/project skills into the workspace at `.agents/skills/` for Codex to
-   discover natively.
+1. Jaunt renders the prompt — preamble, system template, your spec's source
+   segment, any per-spec extras, and the repo map — and seeds builtin and
+   project skills into the workspace at `.agents/skills/` for Codex to find.
 2. It spawns one `codex exec --json` subprocess and passes the prompt on stdin.
-3. Codex edits inside the configured sandbox; Jaunt parses the JSONL event
-   stream for the final result.
-4. Jaunt validates the generated module (AST + type checks) and, on failure,
-   runs bounded repair retries before writing the file into `__generated__/`.
+3. Codex edits inside the configured sandbox; Jaunt reads the JSONL event stream
+   for the final result.
+4. Jaunt validates the module with AST and type checks and, on failure, runs
+   bounded repair retries before writing the file into `__generated__/`.
 
-Each call is its own subprocess, so generation is naturally task-local and
-parallel-safe — there are no shared credentials and no process-wide locks.
+Each call is its own subprocess. There are no shared credentials and no
+process-wide locks, so generation is task-local and parallel-safe by
+construction — Jaunt just runs several `codex exec` processes at once.
 
 ## Freshness
 
-Jaunt fingerprints the Codex runtime as part of artifact freshness. Changing
-any of these marks generated files stale, so they regenerate without `--force`:
+The Codex runtime is part of what Jaunt fingerprints for freshness: switch the
+model, the sandbox, the reasoning effort, or the prompt templates, and the
+affected modules regenerate without `--force`. The full list of what counts as a
+change is in [Change Detection](/docs/concepts/change-detection).
 
-- `agent.engine`
-- `codex.model`
-- `codex.sandbox`
-- `codex.reasoning_effort`
-- the rendered prompt template content
+## Test generation
 
-## Test Generation Style
-
-Generated pytest modules must satisfy the literal test specs you wrote. By
-default Jaunt tests through the **public module contract**, not generated or
-wrapper internals, unless a spec explicitly opts out. Spell out every required
-behavior in the spec rather than relying on the engine to infer a broad,
-unstated test matrix.
+Generated pytest modules have to satisfy the literal test specs you wrote. By
+default Jaunt tests through the **public module contract**, not the generated
+internals, unless a spec opts out. Spell out every behavior you want covered in
+the spec rather than trusting the engine to guess at a broad, unstated matrix —
+the model writes what you specify, not what you meant.
 
 See also: [Configuration](/docs/reference/config) and
 [Limitations](/docs/reference/limitations).

@@ -1,4 +1,4 @@
 {
   "title": "Concepts",
-  "pages": ["how-jaunt-works", "change-detection", "repo-context", "codex-engine"]
+  "pages": ["how-jaunt-works", "design-philosophy", "change-detection", "repo-context", "codex-engine"]
 }

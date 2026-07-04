@@ -1,0 +1,118 @@
+---
+title: Design Philosophy
+description: "Why spec-driven generation beats raw prompting, where the determinism boundary sits, and when not to use Jaunt."
+---
+
+Jaunt makes one bet: when generating code is cheap and non-deterministic, the
+durable things are the **specification** of what you want and the
+**verification** that you got it. The code in between is disposable. Everything
+in the tool follows from treating the spec as the asset and the generated body
+as a build artifact.
+
+## Why not just prompt an LLM directly?
+
+You can paste a stub into a chat window and get back a working function. For a
+one-off, that is faster than any framework. The problem starts on the second
+day, when you want to change it, or the tenth function, or the first time a
+teammate asks where a behavior is defined.
+
+Jaunt exists for the difference between those two situations:
+
+- **Specs are versioned.** A spec is real Python in your repo — signature,
+  types, docstring — not a chat transcript you'll lose. The intent lives next to
+  the code and moves through review and history like anything else.
+- **Rebuilds are incremental.** Jaunt hashes each spec's contract and
+  regenerates only what changed. Prompting by hand has no memory of what it
+  produced last time, so every edit is a fresh, full re-generation you have to
+  re-read end to end.
+- **Dependencies are ordered.** Specs can depend on other specs. Jaunt builds a
+  DAG, generates in the right order, and propagates staleness downstream. A chat
+  window has no idea your helper changed.
+- **The call site stays plain.** You import the spec module and call it like
+  normal Python; `@jaunt.magic` forwards the call into the generated body. The
+  API you depend on doesn't move when the implementation does.
+
+None of that is magic the model provides. It's the bookkeeping around the model
+that makes generated code something you can live with.
+
+## The docstring is the contract
+
+The signature is the API Jaunt has to match exactly — names, types, return type,
+`async` or not. The docstring is the behavioral spec: the rules, the edge cases,
+the errors. Together they are the contract, and the generated body is judged
+against them and nothing else.
+
+This has a sharp consequence: if a behavior isn't in the docstring, the model
+shouldn't invent it, and you shouldn't rely on it. Behavior that lives only in
+the generated code is behavior that will vanish on the next rebuild. When you
+find yourself wanting to edit `__generated__/`, that's the signal to edit the
+spec instead — otherwise your change isn't versioned, and it won't survive.
+
+## What's deterministic, what isn't
+
+Generation is the non-deterministic part. Ask for the same spec twice and you
+can get two different correct implementations. Jaunt doesn't try to make the
+model deterministic; it draws a hard boundary around the part that is, so the
+non-determinism can't leak into your workflow.
+
+Deterministic, no model involved:
+
+- **Change detection.** The AST-normalized digest decides what's stale from the
+  contract text, the same way every time.
+- **Validation.** Every generated module passes AST and type checks before it's
+  written; a body that doesn't parse or typecheck never lands.
+- **`jaunt check`.** The CI gate verifies committed artifacts against their
+  contracts with no API key and no model call. It gives the same verdict on your
+  machine and in CI.
+
+Non-deterministic, model involved:
+
+- **Generation itself**, and the optional semantic gate that judges whether a
+  reworded docstring changed the contract.
+
+The upshot: the model proposes, and a deterministic layer decides whether to
+keep the result. An artifact stays frozen until one of its inputs changes, so
+what you review is what ships until you change the spec.
+
+## When not to use Jaunt
+
+Jaunt earns its keep on glue and boring-but-correct code: parsers, validators,
+formatters, adapters, the utilities every project accumulates. It's the wrong
+tool when:
+
+- **The code is smaller than its spec.** For a throwaway script or a three-line
+  helper, writing the contract costs more than writing the function. Just write
+  the function.
+- **You need to hand-tune performance.** On a hot path where you care about the
+  exact allocations and the exact loop, you want to be the author, not the
+  reviewer.
+- **The invariants are too tight to write down.** Complex stateful systems whose
+  correctness lives in cross-cutting invariants are hard to pin in a docstring,
+  and what you can't specify, the model can't reliably hit.
+- **You depend on fragile runtime behavior.** Code that leans on an exact
+  library version or an undocumented quirk is a poor fit for a tool that
+  regenerates freely.
+- **Nobody will read the diffs.** A person owns the merge. If generated code
+  lands without review, you've automated writing code that no one understands —
+  which is worse than writing it by hand.
+
+The honest version: Jaunt moves your effort from typing implementations to
+writing specs and reading diffs. If that trade doesn't help for a given piece of
+code, don't force it. See [Limitations](/docs/reference/limitations) for the
+specific sharp edges.
+
+## What it costs
+
+Each stale module is one `codex exec` call, plus optional calls for PyPI skills
+and the project overview if you enabled them. Incremental builds mean you pay
+for what changed, not for the whole tree, and the semantic gate turns an
+equivalent docstring edit into one cheap judge call instead of a full rebuild.
+
+`jaunt build` prints a cost summary per run, and `jaunt build --json` reports
+`context_stats` — how much context each module's prompt actually pulled in,
+broken down by block. That's the number to watch if a build costs more than you
+expect; it tells you whether the repo map, skills, or retrieval is inflating your
+prompts. The [JSON output reference](/docs/reference/json-output) documents the
+shape.
+
+Next: [How It Works](/docs/concepts/how-jaunt-works).

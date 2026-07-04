@@ -3,80 +3,86 @@ title: Change Detection
 description: "Two-layer freshness: AST-normalized digests plus a semantic gate that re-freezes equivalent edits."
 ---
 
-Jaunt decides what to rebuild in two layers, so cosmetic edits cost nothing and
-behaviorally-equivalent prose edits cost one cheap model call instead of a full
-rebuild.
+Jaunt decides what to rebuild in two layers. The first is deterministic and
+free; the second spends one cheap model call to avoid a full rebuild when an
+edit changed the wording of a spec but not its meaning. Between them, cosmetic
+edits cost nothing and clarifying edits rarely cost a rebuild.
 
-## Layer A: AST-Normalized Contract Digests
+## Layer A: AST-normalized digests
 
-Spec freshness is computed from an **AST-normalized contract digest**, not the
-raw file bytes. Ruff reformatting, comment edits, whitespace, and quote-style
-changes do not change the digest, so they no longer mark a module stale. This
+Spec freshness comes from an **AST-normalized contract digest**, not the raw
+file bytes. Ruff reformatting, comment edits, whitespace, and quote-style
+changes leave the digest untouched, so they never mark a module stale. This
 layer is deterministic, applies to both build and test freshness, and cannot be
-disabled.
+turned off.
 
-What *does* change the digest:
+What does move the digest is anything that changes the contract:
 
-- signature changes (parameters, annotations, return type)
-- edits anywhere in the cleaned docstring contract
-- decorator kwargs (`deps=`, `prompt=`, …)
-- for whole-class specs: adding/removing/changing declared members or method
-  signatures
-- transitive dependency API changes
+- the signature — parameters, annotations, return type
+- the cleaned docstring, anywhere in it
+- decorator kwargs such as `deps=` or `prompt=`
+- for a whole-class spec, adding, removing, or re-signing a declared member
+- a change to a dependency's exported API
 
-Repo-map **content** does not (1.3.0): adding or editing a sibling spec's
-repo-map entry never restales an unchanged module. `jaunt build` and
-`jaunt check` ignore repo-map drift entirely; `jaunt status` may surface it as
-an informational note only. The `[context] repo_map` on/off toggle remains a
-fingerprint input, but day-to-day repo-map churn does not.
+Repo-map **content** does not. Adding or editing a sibling spec's repo-map entry
+never restales an unchanged module — `jaunt build` and `jaunt check` ignore
+repo-map drift, and `jaunt status` surfaces it as an informational note at most.
+Turning the repo map on or off is a different matter; that toggle is a
+fingerprint input.
 
-## Layer B: The Semantic Gate
+## Layer B: the semantic gate
 
-When a spec's docstring genuinely changed but its signature/structure did not,
-a small `[semantic_gate]` model judges whether the edit is **behaviorally
-meaningful**:
+When a spec's docstring genuinely changed but its signature and structure did
+not, a small judge model decides whether the edit is **behaviorally meaningful**:
 
-- **Equivalent** (a typo fix, rewording, clarifying comment-level prose): Jaunt
-  **re-freezes** the module — it rewrites the header digests over the
-  validated, unchanged generated body instead of paying for a full rebuild
-  with the main model. `--json` reports these under `"refrozen"`.
-- **Meaningful**: the module rebuilds normally.
+- **Equivalent** — a typo fix, a reword, a clearer sentence that says the same
+  thing. Jaunt **re-freezes** the module: it rewrites the header digests over
+  the validated, unchanged generated body instead of paying for a full rebuild
+  with the main model. `--json` lists these under `"refrozen"`.
+- **Meaningful** — the module rebuilds normally.
 
-Structural changes, validation failures, and any gate error **fail safe to a
-rebuild** — the gate can only save work, never skip a real change.
+Structural changes, validation failures, and any error from the gate itself
+**fail safe to a rebuild**. The gate can only save work; it can never skip a
+real change.
 
-```toml
-[semantic_gate]
-enabled = true              # gate behaviorally-equivalent edits before a full rebuild
-model = "gpt-5.4-mini"      # small judge model (must be runnable via `codex exec`)
-reasoning_effort = "high"   # low | medium | high
-```
-
-Skip the gate for one run with `jaunt build --no-semantic-gate` (or
-`jaunt test --no-semantic-gate`): every normalized-digest change then rebuilds.
-Layer A still applies.
+Skip it for one run with `jaunt build --no-semantic-gate` (or the same flag on
+`jaunt test`), and every digest change rebuilds. Layer A still applies. The
+`[semantic_gate]` keys — which judge model, what reasoning effort — live in the
+[configuration reference](/docs/reference/config).
 
 <Callout type="info">
-  The gate model must be runnable via `codex exec` (e.g. `gpt-5.4-mini`);
-  `gpt-5.4-nano` is not — `codex exec` attaches a `tool_search` tool nano
+  The gate model has to run through `codex exec` (`gpt-5.4-mini` works).
+  `gpt-5.4-nano` does not: `codex exec` attaches a `tool_search` tool that nano
   rejects.
 </Callout>
 
-## Inherited Base API (`base_api_digest`)
+## Inherited base API
 
-A whole-class spec that inherits from a **cross-module** spec'd base also tracks that base's *generated public API*. Jaunt hashes the rendered inherited-API block — method signatures **and** docstrings, read from the base's built artifact — into the subclass's context digest and records it in the generated header as `base_api_digest`.
+A whole-class spec that inherits from a spec'd base in **another module** also
+tracks that base's generated public API. Jaunt hashes the rendered inherited-API
+block — method signatures **and** docstrings, read from the base's built
+artifact — into the subclass's digest and records it in the header as
+`base_api_digest`.
 
-- Change the base's public API — a signature **or a docstring** on any generated public method — and the subclass restales, even if you never touched the subclass's own spec.
-- A **body-only** rebuild of the base (same signatures, same docstrings) leaves the block unchanged, so the subclass stays fresh.
-- The header always stores the post-dependency (fresh) value, so a later `jaunt status` recomputes the same digest from the same artifacts — no flapping.
+- Change the base's public API — a signature or a docstring on any generated
+  public method — and the subclass restales, even if you never touched the
+  subclass's own spec.
+- A body-only rebuild of the base, with the same signatures and docstrings,
+  leaves the block unchanged, so the subclass stays fresh.
+- The header stores the post-dependency value, so a later `jaunt status`
+  recomputes the same digest from the same artifacts and nothing flaps.
 
-Because a moved base API can mean the subclass body genuinely needs to change, the Layer B re-freeze path (above) is **refused** when a base's API digest has moved: Jaunt falls back to a full rebuild rather than re-freezing over a possibly-stale body.
+A moved base API can mean the subclass body genuinely needs to change, so the
+Layer B re-freeze is **refused** when the base's API digest moved. Jaunt falls
+back to a full rebuild rather than re-freeze over a body that may now be wrong.
 
-## What Else Participates In Freshness
+## What else counts as a change
 
-Beyond the spec contract itself, Jaunt fingerprints the generation runtime:
-`agent.engine`, `codex.model` / `sandbox` / `reasoning_effort`, prompt template
-content (including the preamble), and each module's exported dependency API.
-`jaunt status` shows the resulting stale set, including upstream API fallout.
+Beyond the spec contract, Jaunt fingerprints the machinery that produced the
+code: the generation engine and its model settings, the prompt templates
+(including the preamble), and each module's exported dependency API. Change any
+of those and the affected modules go stale without `--force`. `jaunt status`
+shows the resulting stale set, upstream fallout included, and the
+[configuration reference](/docs/reference/config) lists the exact keys.
 
 Next: [Repo Context](/docs/concepts/repo-context).

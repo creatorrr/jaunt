@@ -3,7 +3,9 @@ title: How It Works
 description: "The mental model: discovery, DAG builds, prompts, digests, and runtime forwarding."
 ---
 
-Jaunt works when you can picture the loop: specs in, generated modules out, and a tight edit-regenerate-review cycle. What the hammer? what the chain? -- specs enter the furnace, implementations emerge on the other side.
+Jaunt has one loop: you write specs, Jaunt generates modules, you review, you
+tighten the spec, you rebuild. Once you can picture that loop, the rest of the
+tool follows from it.
 
 ## The Flow
 
@@ -12,88 +14,93 @@ You write specs
   -> Jaunt discovers them (source_roots / test_roots)
   -> builds a dependency graph (explicit deps + best-effort inference)
   -> for each module:
-       - build prompt = system template + your spec source segment (+ extras)
+       - build prompt = preamble + system template + your spec source (+ extras)
        - Jaunt drives `codex exec` to generate Python
        - Jaunt validates + writes to __generated__/
   -> at runtime, @jaunt.magic forwards calls into __generated__/
 ```
 
-## What The LLM Sees
+## What the model sees
 
-At build time, Jaunt sends the backend a prompt composed of:
+At build time Jaunt sends the model a prompt built from a few pieces:
 
-- A static Jaunt preamble that frames the framework and the signature/docstring contract.
+- A static Jaunt preamble that frames the framework and the
+  signature/docstring contract.
 - A system template (packaged under `src/jaunt/prompts/`).
-- Your spec’s **source segment**: signature, docstring, type hints, decorator options.
-- Optional per-spec extra context (e.g., `prompt="..."`).
-- A repo map rendered from `treedocs.yaml` (on by default; see [Repo Context](/docs/concepts/repo-context)).
+- Your spec's **source segment**: signature, docstring, type hints, decorator
+  options.
+- Optional per-spec context, such as `prompt="..."`.
+- A repo map rendered from `treedocs.yaml`, on by default (see
+  [Repo Context](/docs/concepts/repo-context)).
 
-Library and tooling **skills** are not prompt text: Jaunt seeds them into the
-Codex workspace under `.agents/skills/`, where Codex discovers them natively
-(see guide below).
+Library and tooling **skills** are not prompt text. Jaunt seeds them into the
+Codex workspace under `.agents/skills/`, where Codex discovers them on its own.
 
-The job is simple: implement the contract implied by your spec.
+The job the model is handed is narrow: implement the contract the spec implies,
+nothing more.
 
-## The Codex Engine
+## The Codex engine
 
-Jaunt has a single generation engine: the OpenAI **Codex CLI**. For each
-module, Jaunt spawns one `codex exec` subprocess, passes it the rendered
-prompt, lets Codex edit inside a sandbox, then validates the result before
-writing it into `__generated__/`.
+Jaunt has a single generation engine, the OpenAI **Codex CLI**. For each module
+Jaunt spawns one `codex exec` subprocess, hands it the rendered prompt, lets
+Codex edit inside a sandbox, then validates the result before writing it into
+`__generated__/`.
 
-Everything around that step — discovery, staleness, validators, generated file
-locations, and the runtime forwarding model — is owned by Jaunt.
+Everything around that step — discovery, staleness, validation, file locations,
+and the runtime forwarding model — belongs to Jaunt, not to Codex. See
+[Codex Engine](/docs/concepts/codex-engine).
 
-See: [Codex Engine](/docs/concepts/codex-engine).
-
-## Incremental Rebuilds (Digests)
+## Incremental rebuilds
 
 Jaunt hashes the spec source for each module and writes the digest into the
-generated file header. On the next run, Jaunt skips modules whose digest still
-matches.
+generated file's header. On the next run it skips modules whose digest still
+matches. Change a spec and only what depends on it regenerates.
 
-You change a spec, Jaunt regenerates just what’s stale.
+The digest covers more than the spec text. Jaunt also fingerprints the
+generation runtime and the prompt templates, so switching models or editing the
+preamble can mark files stale too. [Change Detection](/docs/concepts/change-detection)
+covers exactly what counts as a change and what does not.
 
-Jaunt also fingerprints the Codex runtime. Changing `codex.model`,
-`codex.sandbox`, `codex.reasoning_effort`, or the prompt template content can
-also mark generated files stale.
+## Dependency ordering
 
-See: [Output Locations](/docs/reference/output-layout).
+Jaunt builds a spec-level DAG, so dependencies generate before the specs that
+use them, and a change to a dependency propagates staleness to its dependents.
+You declare edges with `deps=...`, and Jaunt infers the rest best-effort. See
+[Dependencies](/docs/guides/dependencies).
 
-## Dependency Ordering (DAG)
+## Runtime forwarding
 
-Jaunt builds a spec-level DAG so:
+`@jaunt.magic` does not generate code when you call it. It forwards your call
+into the generated module under `__generated__/`. If that module exists, your
+call delegates to it. If it does not, you get `JauntNotBuiltError` and a nudge
+to run `jaunt build`.
 
-- dependencies generate first
-- changes to dependencies propagate staleness to dependents
+This is why you import the spec module in normal code: the spec module is the
+stable API surface, and the generated body behind it is free to change on every
+rebuild.
 
-You can declare deps explicitly with `deps=...`, and Jaunt can also infer edges best-effort.
+## PyPI skills
 
-See: [Dependencies](/docs/guides/dependencies).
+On `jaunt build`, Jaunt can generate "skills" from PyPI READMEs for the external
+libraries you import, best-effort. Those skills, plus Jaunt's bundled builtins,
+land in the Codex workspace at `.agents/skills/` for Codex to read. It tends to
+improve correctness on unfamiliar libraries without bloating your prompt. See
+[Auto-Generated PyPI Skills](/docs/guides/pypi-skills).
 
-## Runtime Forwarding
-
-`@jaunt.magic` doesn't "generate on call." It forwards your call into the generated module under `__generated__/`.
-
-- If the generated module exists: your call delegates to it.
-- If it doesn’t: you get `JauntNotBuiltError` (run `jaunt build`).
-
-This is why you import your spec module in normal code: it’s the stable API surface.
-
-## PyPI Skills (Optional)
-
-On `jaunt build`, Jaunt can (best-effort) generate "skills" from PyPI READMEs for the external libraries you import. Together with Jaunt's bundled builtin skills, they are seeded into the Codex workspace under `.agents/skills/`, where Codex discovers them natively — they are not concatenated into the prompt.
-
-This tends to improve correctness for unfamiliar libraries without you writing a giant prompt.
-
-Guide: [Auto-Generated PyPI Skills](/docs/guides/pypi-skills).
-
-## Where To Go Deeper
+## Where to go deeper
 
 <Cards>
+  <Card title="Design Philosophy" href="/docs/concepts/design-philosophy" />
   <Card title="Writing Specs" href="/docs/guides/writing-magic-specs" />
   <Card title="CLI Reference" href="/docs/reference/cli" />
-  <Card title="Limitations (Read This)" href="/docs/reference/limitations" />
+  <Card title="Limitations (read this)" href="/docs/reference/limitations" />
 </Cards>
 
-Next: [Writing Specs](/docs/guides/writing-magic-specs).
+## Internals
+
+The design that sits under all of this lives in the repository, not on this
+site. The [principles framework](https://github.com/creatorrr/jaunt/blob/main/docs/principles/2026-06-29-building-with-coding-agents.md)
+states the laws the generator is judged against, and the
+[`docs/superpowers/`](https://github.com/creatorrr/jaunt/tree/main/docs/superpowers)
+tree holds the specs and plans behind Jaunt's own features. Read those if you
+want to know why Jaunt draws the lines where it does.
