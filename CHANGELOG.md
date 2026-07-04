@@ -3,6 +3,25 @@
 All notable changes to jaunt. Generated from conventional commits by
 [git-cliff](https://git-cliff.org); one section per published PyPI release.
 
+## [1.3.1] - 2026-07-04
+
+### Chores
+
+- Update CHANGELOG.md for v1.3.0 [skip ci]
+
+### Docs
+
+- Jaunt.ing overhaul — Diátaxis-lite IA, executed tutorials, landing page (#64)
+- Jaunt.ing overhaul implementation plan
+- Jaunt.ing overhaul design spec (Diátaxis-lite)
+
+### Fixes
+
+- 1.3.1 — adoption feedback wave 2 (findings 18, 21, 22 polish) (#65)
+
+### Other
+
+- Auto-fix ruff lint and format
 ## [1.3.0] - 2026-07-04
 
 ### Chores
