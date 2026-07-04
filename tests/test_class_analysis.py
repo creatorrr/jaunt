@@ -188,6 +188,60 @@ def test_scaffold_strips_inner_magic() -> None:
     assert "# jaunt:implement" in out
 
 
+def test_sig_decorator_seals_method_both_forms() -> None:
+    cls = _cls(
+        "class C:\n"
+        "    @jaunt.sig\n"
+        "    def locked(self, x: int) -> int: ...\n"
+        "    @sig()\n"
+        "    def locked2(self, y: int) -> int: ...\n"
+        "    def sketch(self): ...\n"
+        "    def real(self):\n        return 1\n"
+    )
+    split = split_class_members(cls)
+    assert split.sealed == ("locked", "locked2")
+    assert set(split.sealed) <= set(split.stubs)
+    assert split.preserved == ("real",)
+
+
+def test_sig_and_inner_magic_seal_equivalently() -> None:
+    via_sig = split_class_members(
+        _cls("class C:\n    @jaunt.sig\n    def m(self, x: int) -> int: ...\n")
+    )
+    via_magic = split_class_members(
+        _cls("class C:\n    @jaunt.magic\n    def m(self, x: int) -> int: ...\n")
+    )
+    assert via_sig == via_magic
+    assert via_sig.sealed == ("m",)
+
+
+def test_sig_on_non_stub_body_raises() -> None:
+    cls = _cls("class C:\n    @jaunt.sig\n    def m(self):\n        return 1\n")
+    with pytest.raises(JauntError):
+        split_class_members(cls)
+
+
+def test_sig_on_property_raises() -> None:
+    cls = _cls("class C:\n    @property\n    @jaunt.sig\n    def m(self) -> int: ...\n")
+    with pytest.raises(JauntError, match="property"):
+        split_class_members(cls)
+
+
+def test_scaffold_strips_sig() -> None:
+    seg = (
+        "@jaunt.magic()\n"
+        "class C:\n"
+        '    """doc"""\n'
+        "    @jaunt.sig\n"
+        "    def locked(self, x: int) -> int: ...\n"
+    )
+    out = build_class_scaffold(seg)
+    assert "@jaunt.sig" not in out
+    assert "@sig" not in out
+    assert "def locked(self, x: int) -> int:" in out
+    assert "# jaunt:implement" in out
+
+
 def test_contract_renders_three_tiers_and_composition() -> None:
     seg = (
         "@jaunt.magic()\n"

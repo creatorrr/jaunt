@@ -76,14 +76,20 @@ pytest battery in sync (see the [Contract Mode guide](/docs/guides/contract-mode
 ```bash
 uv run jaunt adopt my_app.slug:slugify   # add @jaunt.contract + derive its battery
 uv run jaunt reconcile                   # derive/refresh committed batteries (calls the model)
-uv run jaunt check                       # verify batteries deterministically (CI gate, no model)
+uv run jaunt check                       # CI gate (no model): contract batteries + magic-mode freshness
 uv run jaunt eject my_app.slug:slugify   # remove contract tracking; leave plain pytest
 uv run jaunt eject --all
 ```
 
 `jaunt reconcile` is the only contract command that calls the model. `jaunt check`
-is deterministic and exits `4` on any blocking drift state (unbuilt /
-stale-prose / signature-drift / behavior-drift), which makes it the CI gate.
+is deterministic (no model, no API key) and is the single required CI gate for
+BOTH modes: it verifies committed contract batteries AND `@jaunt.magic`
+freshness, exiting `4` on any blocking drift — contract drift (unbuilt /
+stale-prose / signature-drift / behavior-drift) or a magic module that is
+unbuilt or stale (including a missing/stale `.pyi` stub). Scope it with
+`--contracts-only` or `--magic-only` (mutually exclusive). `--json` reports a
+`magic` block: `{"magic": {"fresh": [...], "stale": {"<module>": "<reason>"},
+"unbuilt": [...]}}`. A project with no magic specs and no contract drift exits 0.
 
 ## Eval
 

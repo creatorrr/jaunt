@@ -36,9 +36,11 @@ def _write(path: Path, content: str) -> None:
 
 
 def _make_spec_project(tmp_path: Path, *, pkg: str = "statuspkg") -> None:
+    # These fixtures hand-write generated files without going through stub
+    # emission, so they opt out of `.pyi` freshness (covered in test_stub_freshness).
     _write(
         tmp_path / "jaunt.toml",
-        'version = 1\n\n[paths]\nsource_roots = ["src"]\n',
+        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[build]\nemit_stubs = false\n',
     )
     _write(tmp_path / "src" / pkg / "__init__.py", "")
     _write(
@@ -509,6 +511,111 @@ def test_cmd_status_marks_engine_switch_as_stale(tmp_path: Path, monkeypatch, ca
         data = json.loads(captured.out)
         assert f"{pkg}.specs" in data["stale"]
         assert data["fresh"] == []
+    finally:
+        clear_registries()
+        sys.path[:] = orig_path
+        for mod_name in list(sys.modules.keys()):
+            if mod_name not in before_modules:
+                del sys.modules[mod_name]
+
+
+def test_adding_sibling_spec_keeps_built_module_fresh(tmp_path: Path, monkeypatch, capsys) -> None:
+    """Finding 14: a new sibling spec must not restale an already-built module.
+
+    Build module A (generated file digested while A is the only spec), then add a
+    brand-new sibling spec module B. A must stay Fresh (only B is stale/unbuilt).
+    """
+    from jaunt.builder import write_generated_module
+    from jaunt.deps import build_spec_graph
+    from jaunt.digest import module_digest
+    from jaunt.discovery import discover_modules, import_and_collect
+    from jaunt.registry import clear_registries, get_magic_registry, get_specs_by_module
+
+    pkg = "statuspkg_sibling"
+    _write(
+        tmp_path / "jaunt.toml",
+        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[build]\nemit_stubs = false\n',
+    )
+    _write(tmp_path / "src" / pkg / "__init__.py", "")
+    _write(
+        tmp_path / "src" / pkg / "a_specs.py",
+        (
+            "import jaunt\n\n"
+            "@jaunt.magic()\n"
+            "def alpha(name: str) -> str:\n"
+            '    """Alpha."""\n'
+            '    raise RuntimeError("stub")\n'
+        ),
+    )
+
+    monkeypatch.chdir(tmp_path)
+    orig_path = list(sys.path)
+    before_modules = set(sys.modules.keys())
+
+    try:
+        sys.path.insert(0, str(tmp_path / "src"))
+        clear_registries()
+
+        # Build A while it is the only spec module in the package.
+        mods = discover_modules(roots=[tmp_path / "src"], exclude=[], generated_dir="__generated__")
+        import_and_collect(mods, kind="magic")
+        specs = dict(get_magic_registry())
+        spec_graph = build_spec_graph(specs, infer_default=False)
+        module_specs = get_specs_by_module("magic")
+        entries = module_specs[f"{pkg}.a_specs"]
+        digest = module_digest(f"{pkg}.a_specs", entries, specs, spec_graph)
+        fingerprint = _build_generation_fingerprint(tmp_path)
+        module_context_digest = _build_module_context_digest(
+            module_name=f"{pkg}.a_specs",
+            entries=entries,
+            module_specs=module_specs,
+            module_dag=collapse_to_module_dag(spec_graph),
+            package_dir=tmp_path / "src",
+        )
+        module_api_digest = _build_module_api_digest(entries)
+
+        write_generated_module(
+            package_dir=tmp_path / "src",
+            generated_dir="__generated__",
+            module_name=f"{pkg}.a_specs",
+            source="def alpha(name: str) -> str:\n    return name\n",
+            header_fields={
+                "tool_version": "0",
+                "kind": "build",
+                "source_module": f"{pkg}.a_specs",
+                "module_digest": digest,
+                "generation_fingerprint": fingerprint,
+                "module_context_digest": module_context_digest,
+                "module_api_digest": module_api_digest,
+                "spec_refs": [str(e.spec_ref) for e in entries],
+            },
+        )
+
+        # Now a new sibling spec module lands in the same package.
+        _write(
+            tmp_path / "src" / pkg / "b_specs.py",
+            (
+                "import jaunt\n\n"
+                "@jaunt.magic()\n"
+                "def beta(name: str) -> str:\n"
+                '    """Beta."""\n'
+                '    raise RuntimeError("stub")\n'
+            ),
+        )
+
+        clear_registries()
+        for mod_name in list(sys.modules.keys()):
+            if mod_name not in before_modules:
+                del sys.modules[mod_name]
+
+        ns = jaunt.cli.parse_args(["status", "--json"])
+        rc = jaunt.cli.cmd_status(ns)
+        assert rc == 0
+
+        data = json.loads(capsys.readouterr().out)
+        assert f"{pkg}.a_specs" in data["fresh"]
+        assert f"{pkg}.a_specs" not in data["stale"]
+        assert f"{pkg}.b_specs" in data["stale"]
     finally:
         clear_registries()
         sys.path[:] = orig_path

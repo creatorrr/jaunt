@@ -10,11 +10,69 @@ from __future__ import annotations
 import ast
 import fnmatch
 import importlib
+import importlib.metadata
 import sys
+import warnings
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
 
 from jaunt.errors import JauntDiscoveryError
+
+_EMITTED_LAYOUT_WARNINGS: set[str] = set()
+_PACKAGES_DISTRIBUTIONS: Mapping[str, list[str]] | None = None
+
+
+def reset_discovery_warnings() -> None:
+    """Clear process-local discovery warning deduplication state."""
+
+    _EMITTED_LAYOUT_WARNINGS.clear()
+
+
+def _warn_layout_once(message: str) -> None:
+    if message in _EMITTED_LAYOUT_WARNINGS:
+        return
+    _EMITTED_LAYOUT_WARNINGS.add(message)
+    warnings.warn(message, UserWarning, stacklevel=3)
+
+
+def _packages_distributions() -> Mapping[str, list[str]]:
+    global _PACKAGES_DISTRIBUTIONS
+    packages = _PACKAGES_DISTRIBUTIONS
+    if packages is None:
+        packages = importlib.metadata.packages_distributions()
+        _PACKAGES_DISTRIBUTIONS = packages
+    return packages
+
+
+def _warn_if_package_source_root(root: Path) -> None:
+    if not (root / "__init__.py").is_file():
+        return
+
+    root_name = root.name or str(root)
+    _warn_layout_once(
+        "Configured source root is a package directory; discovered module names will be "
+        f"bare (for example, 'timing' not '{root_name}.timing'). source_roots usually "
+        "should point at the package parent."
+    )
+
+
+def _warn_if_top_level_shadow(module_name: str) -> None:
+    if "." in module_name:
+        return
+
+    shadows_stdlib = module_name in getattr(sys, "stdlib_module_names", frozenset())
+    distributions = _packages_distributions().get(module_name, [])
+    if not shadows_stdlib and not distributions:
+        return
+
+    shadowed = "stdlib module" if shadows_stdlib else "installed distribution"
+    if shadows_stdlib and distributions:
+        shadowed = "stdlib module / installed distribution"
+    _warn_layout_once(
+        f"Derived top-level module name '{module_name}' may shadow a {shadowed}; "
+        "point source_roots at the package parent so discovered names are qualified."
+    )
 
 
 def _is_excluded(rel_posix: str, *, exclude: list[str]) -> bool:
@@ -200,6 +258,9 @@ def discover_module_files(
 
     discovered: dict[str, Path] = {}
     for root in roots:
+        if prefix is None:
+            _warn_if_package_source_root(root)
+
         for py_file in root.rglob("*.py"):
             if not py_file.is_file():
                 continue
@@ -223,6 +284,8 @@ def discover_module_files(
             module_name = _module_name_for_file(root=root, py_file=py_file, module_prefix=prefix)
             if module_name is None:
                 continue
+            if prefix is None:
+                _warn_if_top_level_shadow(module_name)
             discovered[module_name] = py_file
 
     return sorted(discovered.items(), key=lambda item: item[0])

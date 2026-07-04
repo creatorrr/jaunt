@@ -135,10 +135,12 @@ Inside a whole-class spec you can steer how much freedom the generator has per m
 | Tier | Marker | Body | The generator may |
 |------|--------|------|-------------------|
 | **Preserved** | `@jaunt.preserve` | hand-written | nothing — the method is emitted verbatim |
-| **Sealed** | inner `@jaunt.magic` | stub | implement the body only; the signature (params, defaults, annotations, return type) is enforced **exactly** |
+| **Sealed** | `@jaunt.sig` (or inner `@jaunt.magic`) | stub | implement the body only; the signature (params, defaults, annotations, return type) is enforced **exactly** |
 | **Guidepost** | none (default) | stub | adapt the signature, rename/add parameters, split into several methods, or add public methods — the docstring is the contract |
 
-`@jaunt.magic` on a method *inside* a `@jaunt.magic()` class means exactly what it means everywhere else — "Jaunt implements this, as declared" — so the declared signature becomes a lock:
+`@jaunt.sig` on a method *inside* a `@jaunt.magic()` class seals it — Jaunt
+writes the body but the declared signature becomes a lock (the inner bare
+`@jaunt.magic` form is a supported alias):
 
 ```python
 import jaunt
@@ -148,7 +150,7 @@ import jaunt
 class TokenBucket:
     """A token-bucket rate limiter. Design the storage and refill internals."""
 
-    @jaunt.magic
+    @jaunt.sig
     def allow(self, cost: int = 1) -> bool: ...  # sealed: signature is the contract
 
     def describe(self) -> str: ...               # guidepost: adapt freely
@@ -158,7 +160,7 @@ class TokenBucket:
         self._tokens = self.capacity
 ```
 
-Sealed-signature drift is a hard build error; guidepost drift is only a warning. Inner `@jaunt.magic` inside a whole-class spec takes no kwargs and cannot sit under `@property` (v1) — use a guidepost stub or `@jaunt.preserve` instead.
+Sealed-signature drift is a hard build error; guidepost drift is only a warning. `@jaunt.sig` (and the inner `@jaunt.magic` alias) inside a whole-class spec takes no kwargs and cannot sit under `@property` (v1) — use a guidepost stub or `@jaunt.preserve` instead.
 
 For dependency freshness, the exported API of a whole-class spec includes the class signature plus declared members and method signatures. Adding, removing, or changing those members is a downstream contract change.
 

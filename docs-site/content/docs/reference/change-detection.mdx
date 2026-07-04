@@ -24,6 +24,12 @@ What *does* change the digest:
   signatures
 - transitive dependency API changes
 
+Repo-map **content** does not (1.3.0): adding or editing a sibling spec's
+repo-map entry never restales an unchanged module. `jaunt build` and
+`jaunt check` ignore repo-map drift entirely; `jaunt status` may surface it as
+an informational note only. The `[context] repo_map` on/off toggle remains a
+fingerprint input, but day-to-day repo-map churn does not.
+
 ## Layer B: The Semantic Gate
 
 When a spec's docstring genuinely changed but its signature/structure did not,

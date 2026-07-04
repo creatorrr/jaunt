@@ -554,3 +554,90 @@ def test_prompts_build_preamble_default_and_override(tmp_path: Path) -> None:
     )
     cfg2 = load_config(root=override_root)
     assert cfg2.prompts.build_preamble == str((override_root / "my_preamble.md").resolve())
+
+
+def test_unknown_section_rejected(tmp_path: Path) -> None:
+    (tmp_path / "jaunt.toml").write_text(
+        'version = 1\n[gate]\nmodel = "gpt-5.4-mini"\n', encoding="utf-8"
+    )
+    (tmp_path / "src").mkdir()
+    with pytest.raises(JauntConfigError, match="semantic_gate"):
+        load_config(root=tmp_path)
+
+
+def test_unknown_key_rejected(tmp_path: Path) -> None:
+    (tmp_path / "jaunt.toml").write_text(
+        'version = 1\n[semantic_gate]\nreasoning-effort = "high"\n', encoding="utf-8"
+    )
+    (tmp_path / "src").mkdir()
+    with pytest.raises(JauntConfigError, match="reasoning_effort"):
+        load_config(root=tmp_path)
+
+
+def test_unknown_search_key_rejected(tmp_path: Path) -> None:
+    (tmp_path / "jaunt.toml").write_text(
+        "version = 1\n[context.search]\nmax-hits = 3\n", encoding="utf-8"
+    )
+    (tmp_path / "src").mkdir()
+    with pytest.raises(JauntConfigError, match="max_hits"):
+        load_config(root=tmp_path)
+
+
+def test_init_template_roundtrips(tmp_path: Path) -> None:
+    from jaunt.init_template import INIT_TEMPLATE
+
+    (tmp_path / "jaunt.toml").write_text(INIT_TEMPLATE, encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    cfg = load_config(root=tmp_path)
+    assert cfg.version == 1
+
+
+def test_full_schema_template_roundtrips(tmp_path: Path) -> None:
+    from jaunt.init_template import FULL_SCHEMA_TEMPLATE
+
+    (tmp_path / "jaunt.toml").write_text(FULL_SCHEMA_TEMPLATE, encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    cfg = load_config(root=tmp_path)
+    assert cfg.version == 1
+
+
+def test_full_schema_template_covers_all_allowlists() -> None:
+    """The pre-init schema shown by `jaunt instructions` must stay a superset of the
+    config allowlists so a documented section/key can never be silently rejected
+    (finding 3, PR #63)."""
+    import tomllib
+
+    from jaunt import config as cfg_mod
+    from jaunt.init_template import FULL_SCHEMA_TEMPLATE
+
+    data = tomllib.loads(FULL_SCHEMA_TEMPLATE)
+
+    assert "version" in data
+    section_allowlists = {
+        "paths": cfg_mod._PATHS_KEYS,
+        "llm": cfg_mod._LLM_KEYS,
+        "build": cfg_mod._BUILD_KEYS,
+        "test": cfg_mod._TEST_KEYS,
+        "prompts": cfg_mod._PROMPTS_KEYS,
+        "agent": cfg_mod._AGENT_KEYS,
+        "codex": cfg_mod._CODEX_KEYS,
+        "daemon": cfg_mod._DAEMON_KEYS,
+        "skills": cfg_mod._SKILLS_KEYS,
+        "contract": cfg_mod._CONTRACT_KEYS,
+        "semantic_gate": cfg_mod._SEMANTIC_GATE_KEYS,
+        "context": cfg_mod._CONTEXT_KEYS,
+    }
+    # Every allowlisted top-level section must be present.
+    for section in cfg_mod._ALLOWED_SECTIONS - {"version"}:
+        assert section in data, f"section [{section}] missing from FULL_SCHEMA_TEMPLATE"
+
+    # Every key in each section allowlist must appear (nested sub-tables count as keys).
+    for section, keys in section_allowlists.items():
+        present = set(data.get(section, {}))
+        missing = set(keys) - present
+        assert not missing, f"[{section}] missing keys in FULL_SCHEMA_TEMPLATE: {sorted(missing)}"
+
+    # Nested [context.search] must cover its own allowlist.
+    search = data["context"]["search"]
+    missing_search = set(cfg_mod._CONTEXT_SEARCH_KEYS) - set(search)
+    assert not missing_search, f"[context.search] missing keys: {sorted(missing_search)}"

@@ -85,9 +85,10 @@ Principles:
 Inside a class-level `@jaunt.magic`, each method is in exactly one of three tiers:
 
 - **Preserved** (`@jaunt.preserve`): hand-written; kept verbatim.
-- **Sealed** (inner `@jaunt.magic` on a stub): Jaunt writes the body, but the
-  declared signature is locked — do not change params, defaults, annotations, or
-  the return type. Signature drift is a hard build error.
+- **Sealed** (`@jaunt.sig` on a stub; inner `@jaunt.magic` is a supported alias):
+  Jaunt writes the body, but the declared signature is locked — do not change
+  params, defaults, annotations, or the return type. Signature drift is a hard
+  build error.
 - **Guidepost** (an unmarked stub): a sketch of intent; the model may adapt the
   signature or split it into several methods as long as the docstring behavior is
   delivered.
@@ -97,11 +98,11 @@ Inside a class-level `@jaunt.magic`, each method is in exactly one of three tier
 class Cache:
     """A tiny key/value cache. Design the internals."""
 
-    @jaunt.magic
+    @jaunt.sig
     def get(self, key: str) -> str | None: ...  # sealed: this signature is locked
 ```
 
-Inner `@jaunt.magic` here takes no kwargs and cannot sit under `@property` (v1). A
+`@jaunt.sig` here takes no arguments and cannot sit under `@property` (v1). A
 spec'd base class in the class header is an always-on dependency (not gated by
 `infer_deps`), and a cross-module base's generated public API feeds the subclass's
 freshness.

@@ -290,6 +290,237 @@ def test_run_build_accepts_first_party_import_from_second_source_root(tmp_path: 
     assert report.generated == {"pkg.specs"}
 
 
+def test_needs_dep_marker_surfaces_as_build_warning(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    spec_path = tmp_path / "specs.py"
+    _write(spec_path, "def Play():\n    return 1\n")
+    entry = _entry(module="pkg.specs", qualname="Play", source_file=str(spec_path))
+    specs = {entry.spec_ref: entry}
+    spec_graph = build_spec_graph(specs, infer_default=False)
+    module_specs = {"pkg.specs": [entry]}
+    module_dag = {"pkg.specs": set()}
+
+    source = (
+        "def Play():\n"
+        "    # JAUNT-NEEDS-DEP: util.hashing:stable_hash — inlined a copy\n"
+        "    return 1\n"
+    )
+    report = asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"pkg.specs"},
+            backend=SourceBackend(source),
+            jobs=1,
+        )
+    )
+
+    assert report.generated == {"pkg.specs"}
+    assert "pkg.specs" in report.needs_deps
+    markers = report.needs_deps["pkg.specs"]
+    assert any("util.hashing:stable_hash" in m for m in markers)
+
+
+def test_no_needs_dep_marker_leaves_needs_deps_empty(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    spec_path = tmp_path / "specs.py"
+    _write(spec_path, "def Play():\n    return 1\n")
+    entry = _entry(module="pkg.specs", qualname="Play", source_file=str(spec_path))
+    specs = {entry.spec_ref: entry}
+    spec_graph = build_spec_graph(specs, infer_default=False)
+    module_specs = {"pkg.specs": [entry]}
+    module_dag = {"pkg.specs": set()}
+
+    report = asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"pkg.specs"},
+            backend=SourceBackend("def Play():\n    return 1\n"),
+            jobs=1,
+        )
+    )
+
+    assert report.generated == {"pkg.specs"}
+    assert report.needs_deps == {}
+
+
+_CONTEXT_BLOCKS = (
+    "preamble",
+    "system",
+    "module_contract",
+    "deps",
+    "package_context",
+    "repo_map",
+    "blueprint",
+    "skills_workspace",
+)
+
+
+def test_context_stats_populated_for_built_module(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    spec_path = tmp_path / "specs.py"
+    _write(spec_path, "def Play():\n    return 1\n")
+    entry = _entry(module="pkg.specs", qualname="Play", source_file=str(spec_path))
+    specs = {entry.spec_ref: entry}
+    spec_graph = build_spec_graph(specs, infer_default=False)
+    module_specs = {"pkg.specs": [entry]}
+    module_dag = {"pkg.specs": set()}
+
+    report = asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"pkg.specs"},
+            backend=SourceBackend("def Play():\n    return 1\n"),
+            repo_map_block="R" * 40,
+            jobs=1,
+        )
+    )
+
+    assert report.generated == {"pkg.specs"}
+    stats = report.context_stats
+    assert "pkg.specs" in stats
+    blocks = stats["pkg.specs"]
+    for name in _CONTEXT_BLOCKS:
+        assert name in blocks, name
+        assert set(blocks[name]) == {"chars", "est_tokens"}
+        assert blocks[name]["chars"] >= 0
+        assert blocks[name]["est_tokens"] == blocks[name]["chars"] // 4
+    # The injected repo map (40 chars, no project overview) is accounted verbatim.
+    assert blocks["repo_map"]["chars"] == 40
+    # The preamble is a non-empty static block.
+    assert blocks["preamble"]["chars"] > 0
+
+
+def test_context_stats_only_for_generated_modules(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    a_path = tmp_path / "a.py"
+    b_path = tmp_path / "b.py"
+    _write(a_path, "def A():\n    return 1\n")
+    _write(b_path, "def B():\n    return 1\n")
+    ea = _entry(module="pkg.a", qualname="A", source_file=str(a_path))
+    eb = _entry(module="pkg.b", qualname="B", source_file=str(b_path))
+    specs = {ea.spec_ref: ea, eb.spec_ref: eb}
+    spec_graph = build_spec_graph(specs, infer_default=False)
+    module_specs = {"pkg.a": [ea], "pkg.b": [eb]}
+    module_dag = {"pkg.a": set(), "pkg.b": set()}
+
+    report = asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"pkg.a"},
+            backend=SourceBackend("def A():\n    return 1\n"),
+            jobs=1,
+        )
+    )
+
+    assert report.generated == {"pkg.a"}
+    assert "pkg.b" in report.skipped
+    # Skipped (non-rebuilt) modules get no context accounting.
+    assert set(report.context_stats) == {"pkg.a"}
+
+
+def _single_spec_project(tmp_path: Path):
+    src = tmp_path / "src"
+    spec_path = tmp_path / "specs.py"
+    _write(spec_path, "import jaunt\n\n\n@jaunt.magic()\ndef Play(x: int) -> int:\n    ...\n")
+    entry = _entry(module="pkg.specs", qualname="Play", source_file=str(spec_path))
+    specs = {entry.spec_ref: entry}
+    spec_graph = build_spec_graph(specs, infer_default=False)
+    module_specs = {"pkg.specs": [entry]}
+    module_dag = {"pkg.specs": set()}
+    return src, spec_path, specs, spec_graph, module_specs, module_dag
+
+
+def test_run_build_emits_pyi_stub(tmp_path: Path) -> None:
+    from jaunt.stub_emitter import is_jaunt_stub
+
+    src, spec_path, specs, spec_graph, module_specs, module_dag = _single_spec_project(tmp_path)
+    report = asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"pkg.specs"},
+            backend=SourceBackend("def Play(x: int) -> int:\n    return x * 2\n"),
+            jobs=1,
+            emit_stubs=True,
+        )
+    )
+    assert report.generated == {"pkg.specs"}
+    stub_path = spec_path.with_suffix(".pyi")
+    assert stub_path.exists()
+    assert is_jaunt_stub(stub_path)
+    text = stub_path.read_text(encoding="utf-8")
+    assert "def Play(x: int) -> int:" in text
+    assert "return x * 2" not in text
+    assert report.emitted_stubs.get("pkg.specs") == str(stub_path)
+
+
+def test_run_build_no_stub_when_emit_stubs_disabled(tmp_path: Path) -> None:
+    src, spec_path, specs, spec_graph, module_specs, module_dag = _single_spec_project(tmp_path)
+    asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"pkg.specs"},
+            backend=SourceBackend("def Play(x: int) -> int:\n    return x\n"),
+            jobs=1,
+        )
+    )
+    assert not spec_path.with_suffix(".pyi").exists()
+
+
+def test_run_build_never_overwrites_hand_authored_stub(tmp_path: Path) -> None:
+    src, spec_path, specs, spec_graph, module_specs, module_dag = _single_spec_project(tmp_path)
+    stub_path = spec_path.with_suffix(".pyi")
+    stub_path.write_text("# hand written\ndef Play(x: int) -> int: ...\n", encoding="utf-8")
+
+    report = asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"pkg.specs"},
+            backend=SourceBackend("def Play(x: int) -> int:\n    return x\n"),
+            jobs=1,
+            emit_stubs=True,
+        )
+    )
+    # The hand-authored stub is preserved verbatim.
+    assert stub_path.read_text(encoding="utf-8") == "# hand written\ndef Play(x: int) -> int: ...\n"
+    assert "pkg.specs" not in report.emitted_stubs
+    assert any("pkg.specs" in w for w in report.stub_warnings)
+
+
 def test_run_build_revalidates_fresh_generated_import_policy(tmp_path: Path) -> None:
     src = tmp_path / "src"
     spec_path = tmp_path / "specs.py"

@@ -14,7 +14,7 @@ import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from types import ModuleType
-from typing import Any, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, TypeVar, cast, overload
 
 from jaunt.decorator_analysis import analyze_magic_decorators, resolve_qualname_for_line
 from jaunt.errors import JauntError, JauntNotBuiltError
@@ -170,23 +170,83 @@ def _not_built_error(spec_ref: SpecRef) -> JauntNotBuiltError:
     )
 
 
-@overload
-def magic() -> Callable[[F], Any]: ...
+if TYPE_CHECKING:
+    from typing import ParamSpec, Protocol
 
+    # Signature-preserving views for type checkers (Pyright/ty). See FEEDBACK
+    # finding 3: decorated symbols must keep their wrapped signature at call sites
+    # and remain usable in type positions. Classes map to ``type[T]`` (identity),
+    # so a decorated class name stays usable both as a constructor and in a type
+    # position; functions map to a wrapper protocol that preserves the call
+    # signature while exposing the ``functools.wraps`` attributes tests rely on.
+    # The runtime bodies below are plain functions; the checker uses these
+    # overloads as the authoritative signatures and ignores the implementations.
+    P = ParamSpec("P")
+    R = TypeVar("R")
+    T = TypeVar("T")
 
-@overload
-def magic(obj: F) -> F: ...
+    class _JauntWrappedCallable(Protocol[P, R]):
+        __wrapped__: Callable[P, R]
+        __name__: str
+        __qualname__: str
+        __isabstractmethod__: bool
 
+        def __call__(self, *args: P.args, **kwargs: P.kwargs) -> R: ...
 
-@overload
-def magic(
-    obj: None = ...,
-    *,
-    deps: object | None = ...,
-    prompt: object | None = ...,
-    infer_deps: object | None = ...,
-    test: object | None = ...,
-) -> Callable[[F], F]: ...
+    class _JauntDecorator(Protocol):
+        @overload
+        def __call__(self, obj: type[T]) -> type[T]: ...
+
+        @overload
+        def __call__(self, obj: Callable[P, R]) -> _JauntWrappedCallable[P, R]: ...
+
+    @overload
+    def magic(obj: type[T]) -> type[T]: ...
+
+    @overload
+    def magic(obj: Callable[P, R]) -> _JauntWrappedCallable[P, R]: ...
+
+    @overload
+    def magic(
+        obj: None = ...,
+        *,
+        deps: object | None = ...,
+        prompt: object | None = ...,
+        infer_deps: object | None = ...,
+        test: object | None = ...,
+    ) -> _JauntDecorator: ...
+
+    @overload
+    def sig(obj: Callable[P, R]) -> _JauntWrappedCallable[P, R]: ...
+
+    @overload
+    def sig(obj: None = ...) -> _JauntDecorator: ...
+
+    @overload
+    def test(obj: F) -> F: ...
+
+    @overload
+    def test(
+        obj: None = ...,
+        *,
+        deps: object | None = ...,
+        targets: object | None = ...,
+        prompt: object | None = ...,
+        infer_deps: object | None = ...,
+        public_api_only: object | None = ...,
+    ) -> Callable[[F], F]: ...
+
+    @overload
+    def contract(obj: F) -> F: ...
+
+    @overload
+    def contract(obj: None = ..., *, deps: object | None = ...) -> Callable[[F], F]: ...
+
+    @overload
+    def preserve(fn: F) -> F: ...
+
+    @overload
+    def preserve(fn: None = ...) -> Callable[[F], F]: ...
 
 
 def magic(
@@ -341,6 +401,36 @@ def magic(
     return _decorate
 
 
+def sig(obj: F | None = None, *args: object, **kwargs: object):
+    """Canonical marker for a sealed method inside a whole-class ``@jaunt.magic`` spec.
+
+    Equivalent to an inner bare ``@jaunt.magic`` on the method (sealed tier): Jaunt
+    writes the body but the declared signature is enforced exactly. Accepts
+    ``@jaunt.sig`` and ``@jaunt.sig()`` and takes no arguments.
+    """
+    if args or kwargs or (obj is not None and not callable(obj)):
+        raise TypeError("@jaunt.sig takes no arguments")
+
+    def _decorate(fn: object):
+        # Same wrong-order guard as @magic (must be innermost, below @classmethod/@staticmethod).
+        if isinstance(fn, (classmethod, staticmethod)):
+            raise JauntError(
+                "@jaunt.sig must be the innermost decorator (closest to `def`). "
+                "Place @classmethod/@staticmethod above @jaunt.sig."
+            )
+        ident = _resolve_magic_identity(fn)
+        if ident.class_name is None:
+            raise JauntError(
+                "@jaunt.sig marks a sealed method inside a whole-class @jaunt.magic "
+                "spec; for a top-level function or class use @jaunt.magic instead."
+            )
+        return cast(Any, magic)(fn)
+
+    if obj is not None:
+        return _decorate(obj)
+    return _decorate
+
+
 def preserve(fn: F | None = None) -> F | Callable[[F], F]:
     """Mark a method inside a whole-class ``@magic`` as preserved-verbatim.
 
@@ -459,22 +549,6 @@ def _make_method_wrapper(
     return _method_wrapper
 
 
-@overload
-def test(obj: F) -> F: ...
-
-
-@overload
-def test(
-    obj: None = ...,
-    *,
-    deps: object | None = ...,
-    targets: object | None = ...,
-    prompt: object | None = ...,
-    infer_deps: object | None = ...,
-    public_api_only: object | None = ...,
-) -> Callable[[F], F]: ...
-
-
 def test(
     obj: F | None = None,
     *,
@@ -535,14 +609,6 @@ def test(
     if obj is not None:
         return _decorate(obj)
     return _decorate
-
-
-@overload
-def contract(obj: F) -> F: ...
-
-
-@overload
-def contract(obj: None = ..., *, deps: object | None = ...) -> Callable[[F], F]: ...
 
 
 def contract(obj: F | None = None, *, deps: object | None = None) -> F | Callable[[F], F]:

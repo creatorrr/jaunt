@@ -29,6 +29,7 @@ from jaunt.errors import (
     JauntDiscoveryError,
     JauntGenerationError,
 )
+from jaunt.init_template import INIT_SPEC_TEMPLATE, INIT_TEMPLATE
 from jaunt.progress import ProgressBar
 from jaunt.status_core import (
     compute_magic_status,
@@ -392,6 +393,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "check", help="Verify committed contract batteries (deterministic, no model)."
     )
     _add_common_flags(check_p)
+    check_scope = check_p.add_mutually_exclusive_group()
+    check_scope.add_argument(
+        "--contracts-only",
+        action="store_true",
+        dest="contracts_only",
+        help="Gate only contract batteries.",
+    )
+    check_scope.add_argument(
+        "--magic-only",
+        action="store_true",
+        dest="magic_only",
+        help="Gate only @jaunt.magic freshness.",
+    )
 
     reconcile_p = subparsers.add_parser(
         "reconcile", help="Derive/refresh committed contract batteries (calls the model)."
@@ -1661,86 +1675,6 @@ def _maybe_load_dotenv(root: Path) -> None:
     load_dotenv_into_environ(root / ".env")
 
 
-_INIT_TEMPLATE = """\
-version = 1
-
-[paths]
-source_roots = ["src"]
-test_roots = ["tests"]
-generated_dir = "__generated__"
-
-[llm]
-# Informational under the Codex engine: the model is set in [codex] below, and
-# Codex authenticates via `codex login` / CODEX_API_KEY (not an api_key_env here).
-provider = "openai"
-model = "gpt-5.5"
-# max_cost_per_build = 5.0
-
-[build]
-jobs = 8
-infer_deps = true
-ty_retry_attempts = 1
-async_runner = "asyncio"
-# Keep target test source out of build prompts by default.
-include_target_tests = false
-# Deterministically reject generated imports that are not stdlib, declared
-# dependencies, first-party modules, or explicitly allowed extras.
-check_generated_imports = true
-# generated_import_allowlist = ["intentional_extra"]
-# Add persistent extra instructions that apply to build generation.
-# instructions = [
-#   "Prefer small composable helpers over monolithic functions.",
-# ]
-
-[test]
-jobs = 4
-infer_deps = true
-pytest_args = ["-q"]
-
-[prompts]
-# Override packaged prompt templates with project-local files if needed.
-# build_system = ""
-# build_module = ""
-# test_system = ""
-# test_module = ""
-
-[agent]
-engine = "codex"
-
-[codex]
-model = "gpt-5.5"
-reasoning_effort = "high"
-sandbox = "workspace-write"
-# Include `codex --version` in build/test freshness fingerprints.
-# fingerprint_cli_version = true
-# features = []
-# Raw passthrough to `codex` (advanced):
-# [codex.config]
-"""
-
-
-_INIT_SPEC_TEMPLATE = '''\
-# Starter spec: `jaunt build` implements this module into `__generated__/`.
-import jaunt
-
-
-@jaunt.magic()
-def slugify(text: str) -> str:
-    """
-    Convert a string to a URL-safe slug: lowercase, spaces and runs of
-    non-alphanumeric chars collapsed to single hyphens, leading/trailing
-    hyphens stripped.
-    """
-    ...
-
-
-@jaunt.test(targets=slugify)
-def test_slugify() -> str:
-    """Generate pytest coverage for words, punctuation runs, and surrounding spaces."""
-    ...
-'''
-
-
 def cmd_init(args: argparse.Namespace) -> int:
     from jaunt import journal as _journal
 
@@ -1759,11 +1693,11 @@ def cmd_init(args: argparse.Namespace) -> int:
     (root / "src").mkdir(parents=True, exist_ok=True)
     (root / "tests").mkdir(parents=True, exist_ok=True)
 
-    toml_path.write_text(_INIT_TEMPLATE, encoding="utf-8")
+    toml_path.write_text(INIT_TEMPLATE, encoding="utf-8")
     spec_path = root / "src" / "specs.py"
     spec_created = False
     if not spec_path.exists():
-        spec_path.write_text(_INIT_SPEC_TEMPLATE, encoding="utf-8")
+        spec_path.write_text(INIT_SPEC_TEMPLATE, encoding="utf-8")
         spec_created = True
 
     (root / _journal.JOURNAL_FILE).touch(exist_ok=True)
@@ -1793,6 +1727,24 @@ def _find_generated_dirs(roots: Sequence[Path], generated_dir: str) -> list[Path
             if Path(dirpath).name == generated_dir:
                 found.add(Path(dirpath))
                 dirnames.clear()  # Don't recurse into the generated dir itself
+    return sorted(found)
+
+
+def _find_jaunt_stubs(roots: Sequence[Path], generated_dir: str) -> list[Path]:
+    from jaunt import stub_emitter
+
+    found: set[Path] = set()
+    for root in roots:
+        if not root.exists():
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [name for name in dirnames if name != generated_dir]
+            for filename in filenames:
+                if not filename.endswith(".pyi"):
+                    continue
+                path = Path(dirpath) / filename
+                if stub_emitter.is_jaunt_stub(path):
+                    found.add(path)
     return sorted(found)
 
 
@@ -1875,6 +1827,7 @@ def cmd_clean(args: argparse.Namespace) -> int:
         root / tr for tr in cfg.paths.test_roots
     ]
     found = _find_generated_dirs(scan_roots, generated_dir)
+    stubs = _find_jaunt_stubs(scan_roots, generated_dir)
     dry_run = getattr(args, "dry_run", False)
 
     if dry_run:
@@ -1884,20 +1837,25 @@ def cmd_clean(args: argparse.Namespace) -> int:
                     "command": "clean",
                     "ok": True,
                     "dry_run": True,
-                    "would_remove": [str(p) for p in found],
+                    "would_remove": [str(p) for p in [*found, *stubs]],
                 }
             )
         return EXIT_OK
 
     for d in found:
         shutil.rmtree(d)
+    for stub in stubs:
+        try:
+            stub.unlink()
+        except FileNotFoundError:
+            pass
 
     if json_mode:
         _emit_json(
             {
                 "command": "clean",
                 "ok": True,
-                "removed": [str(p) for p in found],
+                "removed": [str(p) for p in [*found, *stubs]],
             }
         )
 
@@ -1911,49 +1869,130 @@ def cmd_check(args: argparse.Namespace) -> int:
         from jaunt.contract import runner
         from jaunt.contract.drift import BLOCKING_MESSAGE, is_blocking
 
-        specs = _discover_contract_specs(root=root, cfg=cfg)
-        if not specs:
-            if json_mode:
-                _emit_json({"command": "check", "ok": True, "blocked": [], "checked": []})
-            else:
-                print("Contract check: 0 contract function(s).")
-            return EXIT_OK
+        contracts_only = bool(getattr(args, "contracts_only", False))
+        magic_only = bool(getattr(args, "magic_only", False))
+        run_contracts = not magic_only
+        run_magic = not contracts_only
 
-        def _run(path: Path) -> bool:
-            return runner.run_battery_file(path, root=root, source_roots=cfg.paths.source_roots)
+        contract_results = []
+        contract_blocked_results = []
+        contract_checked: list[dict[str, str]] = []
+        contract_blocked: list[dict[str, str]] = []
+        specs = {}
 
-        results = [
-            runner.evaluate_entry(
-                root,
-                cfg.contract.battery_dir,
-                cfg.contract.derive,
-                entry,
-                run_battery=_run,
+        if run_contracts:
+            specs = _discover_contract_specs(root=root, cfg=cfg)
+
+            if specs:
+
+                def _run(path: Path) -> bool:
+                    return runner.run_battery_file(
+                        path, root=root, source_roots=cfg.paths.source_roots
+                    )
+
+                contract_results = [
+                    runner.evaluate_entry(
+                        root,
+                        cfg.contract.battery_dir,
+                        cfg.contract.derive,
+                        entry,
+                        run_battery=_run,
+                    )
+                    for entry in sorted(specs.values(), key=lambda e: str(e.spec_ref))
+                ]
+                contract_blocked_results = [r for r in contract_results if is_blocking(r.state)]
+                contract_checked = [
+                    {"ref": str(r.spec_ref), "state": r.state.value} for r in contract_results
+                ]
+                contract_blocked = [
+                    {"ref": str(r.spec_ref), "state": r.state.value}
+                    for r in contract_blocked_results
+                ]
+
+        magic_fresh: list[str] = []
+        magic_stale: dict[str, str] = {}
+        magic_unbuilt: list[str] = []
+        if run_magic:
+            from jaunt import builder
+
+            source_dirs = [root / sr for sr in cfg.paths.source_roots]
+            _prepend_sys_path([*source_dirs, root])
+            include_target_tests = _effective_include_target_tests(cfg, args)
+            build_instructions = _effective_build_instructions(cfg, args)
+            infer_default = bool(cfg.build.infer_deps) and (not bool(args.no_infer_deps))
+            mstatus = compute_magic_status(
+                root=root,
+                cfg=cfg,
+                source_dirs=source_dirs,
+                build_instructions=build_instructions,
+                include_target_tests=include_target_tests,
+                infer_deps=infer_default,
+                force=bool(args.force),
+                target=args.target,
             )
-            for entry in sorted(specs.values(), key=lambda e: str(e.spec_ref))
-        ]
-        blocked = [r for r in results if is_blocking(r.state)]
+
+            if mstatus.total:
+                package_dir = next((d for d in source_dirs if d.exists()), None)
+                for module_name in sorted(mstatus.stale):
+                    generated_missing = (
+                        package_dir is None
+                        or builder._read_generated(
+                            package_dir, cfg.paths.generated_dir, module_name
+                        )
+                        is None
+                    )
+                    if generated_missing:
+                        magic_unbuilt.append(module_name)
+                    else:
+                        magic_stale[module_name] = mstatus.stale_changes.get(
+                            module_name, "structural"
+                        )
+                magic_fresh = sorted(mstatus.fresh)
+
+        magic_blocked = bool(magic_stale or magic_unbuilt)
+        blocked = bool(contract_blocked) or magic_blocked
 
         if json_mode:
-            _emit_json(
-                {
-                    "command": "check",
-                    "ok": not blocked,
-                    "blocked": [{"ref": r.spec_ref, "state": r.state.value} for r in blocked],
-                    "checked": [{"ref": r.spec_ref, "state": r.state.value} for r in results],
+            payload: dict[str, object] = {"command": "check", "ok": not blocked}
+            if run_contracts:
+                payload["blocked"] = contract_blocked
+                payload["checked"] = contract_checked
+            if run_magic:
+                payload["magic"] = {
+                    "fresh": magic_fresh,
+                    "stale": magic_stale,
+                    "unbuilt": sorted(magic_unbuilt),
                 }
-            )
+            _emit_json(payload)
         else:
-            for r in results:
-                mark = "BLOCK" if is_blocking(r.state) else "ok"
-                line = f"[{mark}] {r.spec_ref}: {r.state.value}"
-                if is_blocking(r.state):
-                    line += f" — {BLOCKING_MESSAGE.get(r.state, '')}"
-                print(line)
-            print(f"Contract check: {len(results)} checked, {len(blocked)} blocked.")
+            if run_contracts:
+                if specs:
+                    for r in contract_results:
+                        mark = "BLOCK" if is_blocking(r.state) else "ok"
+                        line = f"[{mark}] {r.spec_ref}: {r.state.value}"
+                        if is_blocking(r.state):
+                            line += f" — {BLOCKING_MESSAGE.get(r.state, '')}"
+                        print(line)
+                    print(
+                        f"Contract check: {len(contract_results)} checked, "
+                        f"{len(contract_blocked_results)} blocked."
+                    )
+                else:
+                    print("Contract check: 0 contract function(s).")
+            if run_magic:
+                if magic_unbuilt or magic_stale:
+                    print(
+                        f"Magic freshness: {len(magic_unbuilt)} unbuilt, {len(magic_stale)} stale."
+                    )
+                    for module_name in sorted(magic_unbuilt):
+                        print(f"[BLOCK] {module_name}: unbuilt")
+                    for module_name, reason in sorted(magic_stale.items()):
+                        print(f"[BLOCK] {module_name}: stale ({reason})")
+                else:
+                    print("Magic freshness: all modules fresh.")
 
         return EXIT_PYTEST_FAILURE if blocked else EXIT_OK
-    except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError) as e:
+    except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError, KeyError) as e:
         _print_error(e)
         if json_mode:
             _emit_json({"command": "check", "ok": False, "error": str(e)})
@@ -2417,6 +2456,36 @@ def cmd_status(args: argparse.Namespace) -> int:
         return EXIT_CONFIG_OR_DISCOVERY
 
 
+def _fmt_count(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n // 1000}k"
+    return str(n)
+
+
+def _context_stats_summary_line(module: str, blocks: dict[str, dict[str, int]]) -> str:
+    total_chars = sum(b["chars"] for b in blocks.values())
+    total_tokens = sum(b["est_tokens"] for b in blocks.values())
+    parts: list[str] = []
+    if total_chars > 0:
+        ranked = sorted(blocks.items(), key=lambda kv: kv[1]["chars"], reverse=True)
+        for name, b in ranked:
+            if b["chars"] <= 0:
+                continue
+            pct = round(100 * b["chars"] / total_chars)
+            if pct <= 0:
+                continue
+            parts.append(f"{name} {pct}%")
+            if len(parts) >= 4:
+                break
+    breakdown = ", ".join(parts) if parts else "empty"
+    return (
+        f"{module} context: {_fmt_count(total_chars)} chars "
+        f"(~{_fmt_count(total_tokens)} tok) — {breakdown}"
+    )
+
+
 async def _cmd_build_async(args: argparse.Namespace) -> int:
     json_mode = _is_json_mode(args)
     try:
@@ -2730,10 +2799,28 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             project_root=root,
             builtin_skill_names=builtin_skill_names,
             skills_digest=build_skills_digest,
+            emit_stubs=cfg.build.emit_stubs,
+            build_preamble_override=cfg.prompts.build_preamble or None,
         )
 
         if report.failed and not json_mode:
             _eprint(format_build_failures(report.failed))
+
+        if report.needs_deps and not json_mode:
+            for mod, markers in sorted(report.needs_deps.items()):
+                _eprint(
+                    f"warning: {mod} inlined logic for undeclared dependencies "
+                    f"({len(markers)}); declare the dep(s) to reuse them:"
+                )
+                for marker in markers:
+                    _eprint(f"  {marker}")
+
+        if report.stub_warnings and not json_mode:
+            for warning in report.stub_warnings:
+                _eprint(warning)
+
+        if report.emitted_stubs and not json_mode:
+            print(f"Emitted {len(report.emitted_stubs)} .pyi stub(s).")
 
         from jaunt import journal as _journal
 
@@ -2755,24 +2842,36 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             _eprint(cost_tracker.format_summary())
 
         if not json_mode:
+            for mod in sorted(report.generated):
+                blocks = report.context_stats.get(mod)
+                if blocks:
+                    print(_context_stats_summary_line(mod, blocks))
             summary = f"Built {len(report.generated)} module(s), skipped {len(report.skipped)}"
             if report.failed:
                 summary += f", {len(report.failed)} failed"
             print(f"{summary}.")
 
         if json_mode:
-            _emit_json(
-                {
-                    "command": "build",
-                    "ok": not report.failed,
-                    "generated": sorted(report.generated),
-                    "skipped": sorted(report.skipped),
-                    "refrozen": sorted(refrozen_modules),
-                    "failed": {k: v for k, v in sorted(report.failed.items())},
-                    "cost": cost_tracker.summary_dict(),
-                    "cache": {"hits": response_cache.hits, "misses": response_cache.misses},
+            build_payload: dict[str, object] = {
+                "command": "build",
+                "ok": not report.failed,
+                "generated": sorted(report.generated),
+                "skipped": sorted(report.skipped),
+                "refrozen": sorted(refrozen_modules),
+                "failed": {k: v for k, v in sorted(report.failed.items())},
+                "cost": cost_tracker.summary_dict(),
+                "cache": {"hits": response_cache.hits, "misses": response_cache.misses},
+                "context_stats": {k: v for k, v in sorted(report.context_stats.items())},
+            }
+            if report.needs_deps:
+                build_payload["needs_deps"] = {k: v for k, v in sorted(report.needs_deps.items())}
+            if report.emitted_stubs:
+                build_payload["emitted_stubs"] = {
+                    k: v for k, v in sorted(report.emitted_stubs.items())
                 }
-            )
+            if report.stub_warnings:
+                build_payload["stub_warnings"] = report.stub_warnings
+            _emit_json(build_payload)
 
         if report.failed:
             return EXIT_GENERATION_ERROR

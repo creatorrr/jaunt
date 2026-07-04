@@ -34,6 +34,7 @@ How to use dependencies:
 - Only import dependencies listed above — do not guess or fabricate module paths.
 - Decorator Dependency APIs are extra typing/behavior context; do not import those keys directly.
 - If a spec includes `effective_signature[...]`, treat that as the strongest signature guidance.
+- If the contract implies behavior from a module NOT listed in Dependency APIs, do not invent an import. Inline the minimal logic and mark the site with a comment: `# JAUNT-NEEDS-DEP: <module>:<name> — <one-line reason>`.
 
 Previously generated dependency modules (for reference only):
 {{deps_generated_block}}
@@ -60,6 +61,8 @@ Rules:
 - Do not generate tests.
 - Do not edit user files; only output generated module source code.
 - Reuse handwritten symbols from `{{spec_module}}` when they already exist there; do not redefine them.
+- The generated module must define every spec symbol itself; never import a spec symbol back from `{{spec_module}}`. Call same-module sibling spec symbols by bare name — never via a module-level import of `{{spec_module}}` (it is mid-import at load time).
+- Never wrap imports in try/except to provide fallbacks — import failures must raise, and there must never be a second, divergent implementation of a contract symbol.
 - Treat the blueprint as reference-only structure guidance; do not copy handwritten symbols from it.
 - Treat attached test specs as additional behavioral guidance, not as production code to inline.
 - Treat additional build instructions as extra user intent layered on top of the spec docstrings.

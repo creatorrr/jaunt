@@ -6,6 +6,7 @@ and performs light validation/existence checks.
 
 from __future__ import annotations
 
+import difflib
 import keyword
 import tomllib
 from dataclasses import dataclass, field
@@ -38,6 +39,75 @@ _VALID_ASYNC_RUNNERS = ("asyncio", "anyio")
 _VALID_AGENT_ENGINES = ("codex",)
 _VALID_DERIVE = ("examples", "errors")
 _VALID_REASONING_EFFORTS = ("low", "medium", "high")
+_ALLOWED_SECTIONS = frozenset(
+    {
+        "version",
+        "paths",
+        "llm",
+        "build",
+        "test",
+        "prompts",
+        "agent",
+        "codex",
+        "daemon",
+        "skills",
+        "contract",
+        "semantic_gate",
+        "context",
+    }
+)
+_PATHS_KEYS = frozenset({"source_roots", "test_roots", "generated_dir"})
+_LLM_KEYS = frozenset(
+    {
+        "provider",
+        "model",
+        "api_key_env",
+        "max_cost_per_build",
+        "reasoning_effort",
+        "anthropic_thinking_budget_tokens",
+        "prompt_cache",
+        "prompt_cache_key",
+    }
+)
+_BUILD_KEYS = frozenset(
+    {
+        "jobs",
+        "infer_deps",
+        "ty_retry_attempts",
+        "async_runner",
+        "include_target_tests",
+        "check_generated_imports",
+        "generated_import_allowlist",
+        "instructions",
+        "emit_stubs",
+    }
+)
+_TEST_KEYS = frozenset({"jobs", "infer_deps", "pytest_args", "auto_class_tests"})
+_PROMPTS_KEYS = frozenset(
+    {
+        "build_system",
+        "build_preamble",
+        "build_module",
+        "test_system",
+        "test_module",
+        "project_overview_system",
+        "project_overview_user",
+    }
+)
+_AGENT_KEYS = frozenset({"engine"})
+_CODEX_KEYS = frozenset(
+    {"model", "reasoning_effort", "sandbox", "fingerprint_cli_version", "features", "config"}
+)
+_DAEMON_KEYS = frozenset({"poll_interval", "max_jobs", "notify_command", "auto_commit"})
+_SKILLS_KEYS = frozenset(
+    {"auto", "max_chars_per_skill", "inject_user_skills", "builtin", "builtin_skills"}
+)
+_CONTRACT_KEYS = frozenset({"battery_dir", "derive", "strength"})
+_SEMANTIC_GATE_KEYS = frozenset({"enabled", "model", "reasoning_effort"})
+_CONTEXT_KEYS = frozenset(
+    {"repo_map", "repo_map_file", "enrich", "max_chars", "overview", "search"}
+)
+_CONTEXT_SEARCH_KEYS = frozenset({"enabled", "internal_retrieval", "max_hits"})
 
 
 def _default_builtin_skills() -> tuple[str, ...]:
@@ -56,6 +126,7 @@ class BuildConfig:
     check_generated_imports: bool = True
     generated_import_allowlist: list[str] = field(default_factory=list)
     instructions: list[str] = field(default_factory=list)
+    emit_stubs: bool = True
 
 
 @dataclass(frozen=True)
@@ -190,6 +261,24 @@ def _as_table(value: Any, *, name: str) -> dict[str, Any]:
     return value
 
 
+def _reject_unknown(tbl: dict[str, Any], allowed: frozenset[str], where: str) -> None:
+    """Raise JauntConfigError for any key in `tbl` not present in `allowed`.
+
+    Adds a difflib suggestion when a close match exists. `where` is a human label
+    for the table (e.g. "jaunt.toml" for the top level or "[semantic_gate]").
+    """
+    for key in tbl:
+        if key in allowed:
+            continue
+        matches = difflib.get_close_matches(key, sorted(allowed), n=1)
+        if not matches:
+            matches = [candidate for candidate in sorted(allowed) if key in candidate.split("_")][
+                :1
+            ]
+        hint = f" — did you mean {matches[0]!r}?" if matches else ""
+        raise JauntConfigError(f"unknown key {key!r} in {where}{hint}")
+
+
 def _as_str_list(value: Any, *, name: str) -> list[str]:
     if not isinstance(value, list) or any(not isinstance(x, str) for x in value):
         raise JauntConfigError(f"Expected {name} to be a list of strings.")
@@ -269,17 +358,30 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     if version_i != 1:
         raise JauntConfigError(f"Unsupported config version: {version_i} (expected 1).")
 
+    _reject_unknown(data, _ALLOWED_SECTIONS, "jaunt.toml")
+
     paths_tbl = _as_table(data.get("paths"), name="paths")
+    _reject_unknown(paths_tbl, _PATHS_KEYS, "[paths]")
     llm_tbl = _as_table(data.get("llm"), name="llm")
+    _reject_unknown(llm_tbl, _LLM_KEYS, "[llm]")
     build_tbl = _as_table(data.get("build"), name="build")
+    _reject_unknown(build_tbl, _BUILD_KEYS, "[build]")
     test_tbl = _as_table(data.get("test"), name="test")
+    _reject_unknown(test_tbl, _TEST_KEYS, "[test]")
     prompts_tbl = _as_table(data.get("prompts"), name="prompts")
+    _reject_unknown(prompts_tbl, _PROMPTS_KEYS, "[prompts]")
     agent_tbl = _as_table(data.get("agent"), name="agent")
+    _reject_unknown(agent_tbl, _AGENT_KEYS, "[agent]")
     codex_tbl = _as_table(data.get("codex"), name="codex")
+    _reject_unknown(codex_tbl, _CODEX_KEYS, "[codex]")
     daemon_tbl = _as_table(data.get("daemon"), name="daemon")
+    _reject_unknown(daemon_tbl, _DAEMON_KEYS, "[daemon]")
     skills_tbl = _as_table(data.get("skills"), name="skills")
+    _reject_unknown(skills_tbl, _SKILLS_KEYS, "[skills]")
     contract_tbl = _as_table(data.get("contract"), name="contract")
+    _reject_unknown(contract_tbl, _CONTRACT_KEYS, "[contract]")
     semantic_gate_tbl = _as_table(data.get("semantic_gate"), name="semantic_gate")
+    _reject_unknown(semantic_gate_tbl, _SEMANTIC_GATE_KEYS, "[semantic_gate]")
 
     if "source_roots" in paths_tbl:
         source_roots = _as_str_list(paths_tbl["source_roots"], name="paths.source_roots")
@@ -388,6 +490,11 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
         build_instructions = _as_str_list(build_tbl["instructions"], name="build.instructions")
     else:
         build_instructions = []
+
+    if "emit_stubs" in build_tbl:
+        emit_stubs = _as_bool(build_tbl["emit_stubs"], name="build.emit_stubs")
+    else:
+        emit_stubs = True
 
     if "jobs" in test_tbl:
         test_jobs = _as_int(test_tbl["jobs"], name="test.jobs")
@@ -578,6 +685,7 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
         contract_strength = True
 
     context_tbl = _as_table(data.get("context", {}), name="context")
+    _reject_unknown(context_tbl, _CONTEXT_KEYS, "[context]")
     if "repo_map" in context_tbl:
         context_repo_map = _as_bool(context_tbl["repo_map"], name="context.repo_map")
     else:
@@ -601,6 +709,7 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
         context_overview = False
 
     search_tbl = _as_table(context_tbl.get("search", {}), name="context.search")
+    _reject_unknown(search_tbl, _CONTEXT_SEARCH_KEYS, "[context.search]")
     if "enabled" in search_tbl:
         search_enabled = _as_bool(search_tbl["enabled"], name="context.search.enabled")
     else:
@@ -696,6 +805,7 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             check_generated_imports=check_generated_imports,
             generated_import_allowlist=generated_import_allowlist,
             instructions=build_instructions,
+            emit_stubs=emit_stubs,
         ),
         test=TestConfig(
             jobs=test_jobs,

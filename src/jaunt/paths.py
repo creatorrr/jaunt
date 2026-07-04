@@ -7,8 +7,10 @@ from pathlib import Path
 
 def spec_module_to_generated_module(module: str, generated_dir: str = "__generated__") -> str:
     parts = module.split(".")
+    if parts and parts[0] == generated_dir:
+        return module
     if len(parts) == 1:
-        return f"{parts[0]}.{generated_dir}"
+        return f"{generated_dir}.{parts[0]}"
     if len(parts) >= 2 and parts[1] == generated_dir:
         return module
     return ".".join([parts[0], generated_dir, *parts[1:]])
@@ -24,6 +26,8 @@ def module_to_relpath(module: str) -> Path:
 
 def generated_module_to_relpath(module: str, *, generated_dir: str = "__generated__") -> Path:
     parts = module.split(".")
+    if len(parts) >= 2 and parts[0] == generated_dir:
+        return Path(generated_dir) / Path(*parts[1:-1]) / f"{parts[-1]}.py"
     if parts and parts[-1] == generated_dir:
         return Path(*parts) / "__init__.py"
     return module_to_relpath(module)

@@ -38,6 +38,20 @@ def is_magic_decorator(dec: ast.expr) -> bool:
     return False
 
 
+def is_sig_decorator(dec: ast.expr) -> bool:
+    """True for ``@jaunt.sig``/``@sig`` and their called forms."""
+    target = dec.func if isinstance(dec, ast.Call) else dec
+    if isinstance(target, ast.Attribute):
+        return (
+            isinstance(target.value, ast.Name)
+            and target.value.id == "jaunt"
+            and target.attr == "sig"
+        )
+    if isinstance(target, ast.Name):
+        return target.id == "sig"
+    return False
+
+
 _is_magic_decorator = is_magic_decorator
 
 
@@ -146,7 +160,7 @@ def split_class_members(class_node: ast.ClassDef) -> MemberSplit:
     preserve_marked: list[str] = []
     for fn in _iter_methods(class_node):
         marked = any(is_preserve_decorator(d) for d in fn.decorator_list)
-        magic_marked = any(is_magic_decorator(d) for d in fn.decorator_list)
+        magic_marked = any(is_magic_decorator(d) or is_sig_decorator(d) for d in fn.decorator_list)
         if magic_marked:
             if marked:
                 raise JauntError(
@@ -281,7 +295,9 @@ def _stub_node_with_sentinel(
 ) -> ast.FunctionDef | ast.AsyncFunctionDef:
     clone = ast.parse(ast.unparse(node)).body[0]
     assert isinstance(clone, (ast.FunctionDef, ast.AsyncFunctionDef))
-    clone.decorator_list = [d for d in clone.decorator_list if not is_magic_decorator(d)]
+    clone.decorator_list = [
+        d for d in clone.decorator_list if not (is_magic_decorator(d) or is_sig_decorator(d))
+    ]
     body: list[ast.stmt] = []
     doc = ast.get_docstring(node, clean=False)
     if doc is not None:

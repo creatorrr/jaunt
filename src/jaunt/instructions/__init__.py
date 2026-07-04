@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from jaunt.generate.shared import render_template
+from jaunt.init_template import FULL_SCHEMA_TEMPLATE
 
 if TYPE_CHECKING:
     from jaunt.config import JauntConfig
@@ -88,6 +89,14 @@ def _project_block(project: dict | None, note: str | None) -> str:
     lines = ["## Your project right now", ""]
     if project is None:
         lines.append(f"> {note or 'No jaunt.toml found — run `jaunt init` to start.'}")
+        lines += [
+            "",
+            "## jaunt.toml schema",
+            "",
+            "```toml",
+            FULL_SCHEMA_TEMPLATE.rstrip("\n"),
+            "```",
+        ]
         return "\n".join(lines)
 
     paths = project["paths"]

@@ -18,7 +18,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
@@ -68,6 +68,37 @@ from jaunt.validation import (
 )
 
 _TY_CHECK_TIMEOUT_S = 20.0
+NEEDS_DEP_MARKER = "JAUNT-NEEDS-DEP:"
+
+
+def _scan_needs_dep_markers(source: str) -> list[str]:
+    markers: list[str] = []
+    for line in source.splitlines():
+        idx = line.find(NEEDS_DEP_MARKER)
+        if idx != -1:
+            markers.append(line[idx:].strip())
+    return markers
+
+
+def _block_size(text: str) -> dict[str, int]:
+    chars = len(text or "")
+    return {"chars": chars, "est_tokens": chars // 4}
+
+
+def _skills_workspace_chars(project_root: Path | None) -> int:
+    """Total chars of SKILL.md files seeded under <project_root>/.agents/skills/."""
+    if project_root is None:
+        return 0
+    skills_root = project_root / ".agents" / "skills"
+    if not skills_root.is_dir():
+        return 0
+    total = 0
+    for path in skills_root.rglob("SKILL.md"):
+        try:
+            total += len(path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+    return total
 
 
 def _tool_version() -> str:
@@ -100,15 +131,23 @@ def _read_generated(package_dir: Path, generated_dir: str, module_name: str) -> 
         return None
 
 
-def _ensure_init_files(package_dir: Path, relpath: Path) -> None:
+def _ensure_init_files(package_dir: Path, relpath: Path, *, generated_dir: str) -> None:
     # Ensure all parent package dirs contain __init__.py so imports work.
     parts = list(relpath.parts)
     if not parts:
         return
     dir_parts = parts[:-1]
     for i in range(1, len(dir_parts) + 1):
-        d = package_dir / Path(*dir_parts[:i])
+        segment = dir_parts[:i]
+        d = package_dir / Path(*segment)
         d.mkdir(parents=True, exist_ok=True)
+        # The root-level generated dir (a single top-level `__generated__/`) is left
+        # as a PEP 420 namespace package: two installed distributions each shipping a
+        # top-level `__generated__` then merge instead of shadowing each other (first
+        # on sys.path wins). Package-nested generated dirs (`pkg/__generated__/`) keep
+        # their `__init__.py`.
+        if segment == [generated_dir]:
+            continue
         init = d / "__init__.py"
         if not init.exists():
             init.write_text("", encoding="utf-8")
@@ -133,7 +172,7 @@ def write_generated_module(
         raise ValueError("Refusing to write outside package_dir.")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    _ensure_init_files(package_dir, relpath)
+    _ensure_init_files(package_dir, relpath, generated_dir=generated_dir)
 
     # Place AGENTS.md (+ CLAUDE.md symlink) in the __generated__/ root so
     # coding agents know not to touch the contents.
@@ -568,6 +607,10 @@ class BuildReport:
     generated: set[str]
     skipped: set[str]
     failed: dict[str, list[str]]
+    needs_deps: dict[str, list[str]] = field(default_factory=dict)
+    context_stats: dict[str, dict[str, dict[str, int]]] = field(default_factory=dict)
+    emitted_stubs: dict[str, str] = field(default_factory=dict)
+    stub_warnings: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -586,6 +629,49 @@ class BuildModuleContextArtifacts:
     package_context_block: str
     handwritten_names: tuple[str, ...]
     digest: str
+
+
+def _module_context_stats(
+    *,
+    artifacts: BuildModuleContextArtifacts,
+    whole_class_contract_block: str,
+    dep_apis: dict[SpecRef, str],
+    dep_gen: dict[str, str],
+    repo_map_block: str,
+    project_overview_block: str,
+    preamble_chars: int,
+    skills_workspace_chars: int,
+) -> dict[str, dict[str, int]]:
+    """Per-block char / estimated-token accounting for one built module.
+
+    est_tokens is a coarse chars // 4 estimate. Blocks mirror what the build prompt
+    assembles: the static preamble, system/build directives, the module contract,
+    dependency APIs + generated dep sources, package grounding, the repo map (plus any
+    project overview), the blueprint source, and the seeded skills workspace.
+    """
+    deps_text = "".join(dep_apis.values()) + "".join(dep_gen.values())
+    module_contract_text = "".join(
+        [
+            artifacts.module_contract_block,
+            artifacts.base_contract_block,
+            whole_class_contract_block,
+        ]
+    )
+    system_text = artifacts.build_instructions_block + artifacts.attached_test_specs_block
+    repo_map_text = repo_map_block + project_overview_block
+    return {
+        "preamble": {"chars": preamble_chars, "est_tokens": preamble_chars // 4},
+        "system": _block_size(system_text),
+        "module_contract": _block_size(module_contract_text),
+        "deps": _block_size(deps_text),
+        "package_context": _block_size(artifacts.package_context_block),
+        "repo_map": _block_size(repo_map_text),
+        "blueprint": _block_size(artifacts.blueprint_source),
+        "skills_workspace": {
+            "chars": skills_workspace_chars,
+            "est_tokens": skills_workspace_chars // 4,
+        },
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -839,7 +925,6 @@ def build_module_context_artifacts(
         blueprint_source=blueprint_source,
         build_instructions_block=build_instructions_block,
         attached_test_specs_block=attached_test_specs_block,
-        package_context_block=package_context_block,
         base_contract_block=base_contract_block,
         whole_class_contract_block=whole_class_contract_block,
         inherited_api_block=inherited_api_block,
@@ -862,7 +947,6 @@ def _build_context_digest(
     blueprint_source: str,
     build_instructions_block: str,
     attached_test_specs_block: str,
-    package_context_block: str,
     base_contract_block: str,
     whole_class_contract_block: str = "",
     inherited_api_block: str = "",
@@ -874,7 +958,6 @@ def _build_context_digest(
         blueprint_source,
         build_instructions_block,
         attached_test_specs_block,
-        package_context_block,
     ):
         h.update((block or "").encode("utf-8"))
         h.update(b"\x00")
@@ -1265,7 +1348,7 @@ def _ty_error_context(
         tmp_root = Path(tmp)
         tmp_path = tmp_root / relpath
         tmp_path.parent.mkdir(parents=True, exist_ok=True)
-        _ensure_init_files(tmp_root, relpath)
+        _ensure_init_files(tmp_root, relpath, generated_dir=generated_dir)
         # Mirror the candidate's package subtree into the sandbox. The sandbox
         # root shadows package_dir in ty's search path, so without the mirror a
         # bare `<pkg>/` containing only the candidate hides the real source
@@ -1520,6 +1603,8 @@ async def run_build(
     generated_import_allowlist: Sequence[str] | None = None,
     initial_error_context_by_module: dict[str, list[str]] | None = None,
     targeted_test_entries: dict[str, list[SpecEntry]] | None = None,
+    emit_stubs: bool = False,
+    build_preamble_override: str | None = None,
 ) -> BuildReport:
     jobs = max(1, int(jobs))
     ty_attempts = max(0, int(ty_retry_attempts)) if ty_retry_attempts is not None else None
@@ -1584,8 +1669,87 @@ async def run_build(
     skipped_failures = _validate_skipped_generated_modules(skipped_to_validate)
     skipped -= set(skipped_failures)
 
+    def _emit_stubs(
+        generated_modules: set[str],
+        skipped_modules: set[str],
+    ) -> tuple[dict[str, str], list[str]]:
+        if not emit_stubs:
+            return {}, []
+        from jaunt import stub_emitter
+
+        emitted_stubs: dict[str, str] = {}
+        stub_warnings: list[str] = []
+        stub_targets = (generated_modules | skipped_modules) & set(module_specs.keys())
+        # For a targeted build (`jaunt build --target X`), `skipped` spans the whole
+        # project; restrict stub emission to the requested closure so we never rewrite
+        # or create `.pyi` files for modules outside the target.
+        if allowed_modules is not None:
+            stub_targets &= set(allowed_modules)
+        for module_name in sorted(stub_targets):
+            entries = module_specs.get(module_name, [])
+            if not entries:
+                continue
+            source_file = entries[0].source_file
+            gen_source = _read_generated(package_dir, generated_dir, module_name)
+            if gen_source is None:
+                continue
+            expected, _ = _build_expected_names(entries)
+            try:
+                spec_source = Path(source_file).read_text(encoding="utf-8")
+                stub_path = stub_emitter.stub_path_for_source(source_file)
+                if stub_path.exists() and not stub_emitter.is_jaunt_stub(stub_path):
+                    stub_warnings.append(
+                        f"{module_name}: existing hand-authored {stub_path.name} not overwritten"
+                    )
+                    continue
+                stub_header = header.format_stub_header(
+                    tool_version=_tool_version(),
+                    source_module=module_name,
+                    generated_digest=stub_emitter.generated_content_digest(gen_source),
+                    inputs_digest=stub_emitter.stub_inputs_digest(spec_source, gen_source),
+                )
+                new_stub = stub_emitter.build_stub_source(
+                    spec_source,
+                    gen_source,
+                    set(expected),
+                    stub_header,
+                    generated_module=paths.spec_module_to_generated_module(
+                        module_name, generated_dir=generated_dir
+                    ),
+                )
+                if not (stub_path.exists() and stub_path.read_text(encoding="utf-8") == new_stub):
+                    stub_path.parent.mkdir(parents=True, exist_ok=True)
+                    fd, tmp = tempfile.mkstemp(
+                        dir=str(stub_path.parent),
+                        prefix=".jaunt-stub-tmp-",
+                        suffix=".pyi",
+                        text=True,
+                    )
+                    try:
+                        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+                            f.write(new_stub)
+                            f.flush()
+                            os.fsync(f.fileno())
+                        os.replace(tmp, stub_path)
+                    finally:
+                        try:
+                            os.unlink(tmp)
+                        except FileNotFoundError:
+                            pass
+                emitted_stubs[module_name] = str(stub_path)
+            except Exception as e:
+                stub_warnings.append(f"{module_name}: failed to emit stub: {e!r}")
+        return emitted_stubs, stub_warnings
+
     if not stale:
-        return BuildReport(generated=set(), skipped=skipped, failed=skipped_failures)
+        emitted_stubs, stub_warnings = _emit_stubs(set(), skipped)
+        return BuildReport(
+            generated=set(),
+            skipped=skipped,
+            failed=skipped_failures,
+            emitted_stubs=emitted_stubs,
+            stub_warnings=stub_warnings,
+        )
 
     # Induce a subgraph over stale modules.
     deps_in_stale: dict[str, set[str]] = {}
@@ -1611,6 +1775,12 @@ async def run_build(
     generated: set[str] = set()
     # Track generated source for dependency context injection.
     generated_sources: dict[str, str] = {}
+    module_needs_deps: dict[str, list[str]] = {}
+    module_context_stats: dict[str, dict[str, dict[str, int]]] = {}
+    from jaunt.generate.shared import load_prompt as _load_prompt
+
+    _preamble_chars = len(_load_prompt("codex_preamble.md", build_preamble_override or None))
+    _skills_ws_chars = _skills_workspace_chars(project_root)
     failed: dict[str, list[str]] = dict(skipped_failures)
     completed: set[str] = set()
     ty_cmd = _resolve_ty_cmd() if ty_attempts is not None else None
@@ -1923,6 +2093,7 @@ async def run_build(
                     expected_names=component_expected,
                     spec_module=module_name,
                     handwritten_names=handwritten_names,
+                    generated_module=generated_module,
                 )
                 if errs:
                     return errs
@@ -2075,6 +2246,19 @@ async def run_build(
                 _phase(module_name, "warning", warning)
 
         generated_sources[module_name] = result_source
+        markers = _scan_needs_dep_markers(result_source)
+        if markers:
+            module_needs_deps[module_name] = markers
+        module_context_stats[module_name] = _module_context_stats(
+            artifacts=module_contract,
+            whole_class_contract_block=wcc_module.whole_class_contract_block,
+            dep_apis=dep_apis,
+            dep_gen=dep_gen,
+            repo_map_block=repo_map_block,
+            project_overview_block=project_overview_block,
+            preamble_chars=_preamble_chars,
+            skills_workspace_chars=_skills_ws_chars,
+        )
 
         digest = module_digest(module_name, entries, specs, spec_graph)
         header_fields = {
@@ -2189,4 +2373,13 @@ async def run_build(
         except Exception:
             pass
 
-    return BuildReport(generated=generated, skipped=skipped, failed=failed)
+    emitted_stubs, stub_warnings = _emit_stubs(generated, skipped)
+    return BuildReport(
+        generated=generated,
+        skipped=skipped,
+        failed=failed,
+        needs_deps=module_needs_deps,
+        context_stats=module_context_stats,
+        emitted_stubs=emitted_stubs,
+        stub_warnings=stub_warnings,
+    )

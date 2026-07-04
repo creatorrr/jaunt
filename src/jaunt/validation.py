@@ -115,8 +115,17 @@ def validate_build_generated_source(
             expected_names=expected_names,
             spec_module=spec_module,
             handwritten_names=handwritten_names,
+            generated_module=generated_module,
         )
     )
+    protected_modules = {spec_module, spec_module.split(".", 1)[0]}
+    protected_modules |= set(first_party_modules)
+    protected_modules |= _first_party_top_levels(
+        project_dir=project_dir or Path.cwd(),
+        source_roots=source_roots or (),
+        configured=first_party_modules,
+    )
+    errors.extend(validate_no_import_fallbacks(mod, protected_modules))
     if check_imports:
         errors.extend(
             _validate_generated_import_provenance(
@@ -137,6 +146,7 @@ def validate_build_contract_only(
     expected_names: list[str],
     spec_module: str,
     handwritten_names: Iterable[str],
+    generated_module: str | None = None,
 ) -> list[str]:
     try:
         mod = ast.parse(source or "")
@@ -147,6 +157,7 @@ def validate_build_contract_only(
         expected_names=expected_names,
         spec_module=spec_module,
         handwritten_names=handwritten_names,
+        generated_module=generated_module,
     )
 
 
@@ -156,19 +167,218 @@ def _validate_build_contract_only(
     expected_names: list[str],
     spec_module: str,
     handwritten_names: Iterable[str],
+    generated_module: str | None = None,
 ) -> list[str]:
     errors: list[str] = []
+    expected = set(expected_names)
     forbidden = set(handwritten_names) - set(expected_names)
-    if not forbidden:
-        return errors
 
-    for name in _defined_top_level_names(mod):
-        if name in forbidden:
+    if forbidden:
+        for name in _defined_top_level_names(mod):
+            if name in forbidden:
+                errors.append(
+                    "Generated source must not redefine handwritten source-module symbol "
+                    f"{name!r}. Import or reuse {name!r} from {spec_module!r} instead."
+                )
+
+    for node in ast.walk(mod):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        level = int(getattr(node, "level", 0) or 0)
+        if level == 0:
+            resolved = node.module
+        else:
+            resolved = _resolve_relative_import(generated_module, level, node.module)
+        if resolved != spec_module:
+            continue
+        for alias in node.names:
+            if alias.name == "*":
+                errors.append(
+                    f"generated module re-imports its own spec module {spec_module} via "
+                    "'from ... import *'; define its symbols instead"
+                )
+            elif alias.name in expected:
+                errors.append(
+                    f"generated module re-imports its own spec symbol {alias.name!r} "
+                    f"from {spec_module}; define it instead"
+                )
+
+    errors.extend(
+        _spec_module_rebind_errors(
+            mod, expected=expected, spec_module=spec_module, generated_module=generated_module
+        )
+    )
+    return errors
+
+
+def _spec_module_rebind_errors(
+    mod: ast.Module,
+    *,
+    expected: set[str],
+    spec_module: str,
+    generated_module: str | None = None,
+) -> list[str]:
+    """Flag a plain-import rebinding of a spec symbol.
+
+    ``from <spec_module> import X`` is caught above, but the same hazard also arises
+    when the generated module binds the *spec module object* under a name and then
+    rebinds one of its own spec symbols off it — ``X = <alias>.X``. The spec module
+    can be bound by ``import <spec_module>`` (optionally ``as m``) or by importing it
+    from its parent package: ``from pkg import mod`` / ``from .. import mod`` (whose
+    relative form is resolved against the generated module).
+    """
+    # Prefixes that reference the spec module object.
+    alias_prefixes: set[str] = set()
+    for node in mod.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == spec_module:
+                    alias_prefixes.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            level = int(getattr(node, "level", 0) or 0)
+            if level == 0:
+                from_module = node.module
+            else:
+                from_module = _resolve_relative_import(generated_module, level, node.module)
+            if not from_module:
+                continue
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                if f"{from_module}.{alias.name}" == spec_module:
+                    alias_prefixes.add(alias.asname or alias.name)
+    if not alias_prefixes:
+        return []
+
+    errors: list[str] = []
+    for node in mod.body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+            value: ast.expr | None = node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+            value = node.value
+        else:
+            continue
+        if not isinstance(value, ast.Attribute):
+            continue
+        if ast.unparse(value.value) not in alias_prefixes:
+            continue
+        for tgt in targets:
+            if isinstance(tgt, ast.Name) and tgt.id in expected:
+                errors.append(
+                    f"generated module re-imports its own spec symbol {tgt.id!r} "
+                    f"from {spec_module} via a module-level rebind; define it instead"
+                )
+    return errors
+
+
+def _resolve_relative_import(
+    generated_module: str | None, level: int, module: str | None
+) -> str | None:
+    """Resolve a relative ``from`` import inside the generated module to an absolute name.
+
+    ``generated_module`` is the dotted name of the module the generated source lives in
+    (e.g. ``pkg.__generated__.mod``); ``level`` is the ImportFrom dot count. Returns the
+    absolute module the import targets, or ``None`` when it cannot be resolved (unknown
+    generated module or dots that walk past the top-level package).
+    """
+    if not generated_module or level <= 0:
+        return None
+    parts = generated_module.split(".")
+    anchor = parts[: len(parts) - level]
+    if not anchor:
+        return None
+    base = ".".join(anchor)
+    if module:
+        return f"{base}.{module}"
+    return base
+
+
+def validate_no_import_fallbacks(tree: ast.AST, protected_modules: set[str]) -> list[str]:
+    protected_top = {m.split(".", 1)[0] for m in protected_modules if m}
+    errors: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        if not any(_handler_catches_import_error(handler) for handler in node.handlers):
+            continue
+        for import_node, name in _protected_imports_in_try_body(
+            node,
+            protected_modules,
+            protected_top,
+        ):
+            lineno = getattr(import_node, "lineno", "?")
             errors.append(
-                "Generated source must not redefine handwritten source-module symbol "
-                f"{name!r}. Import or reuse {name!r} from {spec_module!r} instead."
+                f"generated module wraps a guarded import of {name!r} (line {lineno}) "
+                "in try/except — no import fallbacks: import failures must raise, never "
+                "provide a divergent fallback implementation."
             )
     return errors
+
+
+def _handler_catches_import_error(handler: ast.ExceptHandler) -> bool:
+    if handler.type is None:
+        return True
+    return any(
+        name in {"ImportError", "ModuleNotFoundError", "Exception", "BaseException"}
+        for name in _caught_type_names(handler.type)
+    )
+
+
+def _caught_type_names(node: ast.AST) -> set[str]:
+    if isinstance(node, ast.Name):
+        return {node.id}
+    if isinstance(node, ast.Attribute):
+        return {node.attr}
+    if isinstance(node, ast.Tuple):
+        names: set[str] = set()
+        for elt in node.elts:
+            names.update(_caught_type_names(elt))
+        return names
+    return set()
+
+
+def _protected_imports_in_try_body(
+    node: ast.Try,
+    protected_modules: set[str],
+    protected_top: set[str],
+) -> list[tuple[ast.Import | ast.ImportFrom, str]]:
+    found: list[tuple[ast.Import | ast.ImportFrom, str]] = []
+    stack: list[ast.AST] = list(node.body)
+    while stack:
+        current = stack.pop()
+        if isinstance(current, ast.Import):
+            for alias in current.names:
+                top = alias.name.split(".", 1)[0]
+                if top in protected_top:
+                    found.append((current, alias.name))
+            continue
+        if isinstance(current, ast.ImportFrom):
+            level = int(getattr(current, "level", 0) or 0)
+            if level > 0:
+                found.append((current, _import_from_name(current)))
+                continue
+            module = current.module or ""
+            top = module.split(".", 1)[0]
+            if module in protected_modules or top in protected_top:
+                found.append((current, _import_from_name(current)))
+            continue
+        if isinstance(current, ast.Try):
+            stack.extend(reversed(current.body))
+            continue
+        stack.extend(reversed(list(ast.iter_child_nodes(current))))
+    return found
+
+
+def _import_from_name(node: ast.ImportFrom) -> str:
+    module = "." * int(getattr(node, "level", 0) or 0) + (node.module or "")
+    names = ", ".join(alias.name for alias in node.names)
+    if not module:
+        return names
+    if names:
+        return f"{module}.{names}"
+    return module
 
 
 def validate_generated_import_provenance(
