@@ -8,6 +8,7 @@ touching registries, importing user modules, or doing file-system work.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import inspect
 import sys
 import types
@@ -21,6 +22,7 @@ from jaunt.errors import JauntError
 from jaunt.registry import (
     ModuleMagicDefaults,
     SpecEntry,
+    get_magic_registry,
     get_module_magic_defaults,
     register_magic,
     register_module_magic,
@@ -389,3 +391,70 @@ def magic_module(
         class_names=frozenset(class_names),
     )
     mod.__class__ = _MagicModule
+
+
+def finalize_module_magic(module_name: str) -> None:
+    """Hear the final stubs speak.
+
+    Fill module-origin registry entries with their real pre-rebind objects after import.
+    """
+    if get_module_magic_defaults(module_name) is None:
+        return
+    mod = sys.modules.get(module_name)
+    if mod is None:
+        return
+
+    module_dict = mod.__dict__
+    snapshot = module_dict.get("__jaunt_original_stubs__", {})
+
+    for entry in list(get_magic_registry().values()):
+        if entry.origin != "module" or entry.module != module_name:
+            continue
+        if entry.obj is not None:
+            continue
+
+        name = entry.qualname
+        obj = snapshot[name] if name in snapshot else module_dict.get(name)
+        if obj is None:
+            continue
+
+        is_class = isinstance(obj, type)
+        sealed_members = entry.sealed_members
+        base_deps = entry.base_deps
+        if is_class:
+            from jaunt.runtime import _absorb_method_specs
+
+            sealed_members = _absorb_method_specs(obj, module=module_name, class_name=name)
+
+            from jaunt.class_analysis import resolve_base_contract
+
+            refs: list[SpecRef] = []
+            for ref_str in resolve_base_contract(obj).project_base_refs:
+                try:
+                    refs.append(normalize_spec_ref(ref_str))
+                except Exception:
+                    continue
+            base_deps = tuple(sorted(set(refs), key=lambda ref: str(ref)))
+
+        from jaunt.decorator_analysis import analyze_magic_decorators
+
+        analysis = analyze_magic_decorators(
+            module=module_name,
+            qualname=name,
+            source_file=entry.source_file,
+            decorated_obj=obj,
+        )
+
+        register_magic(
+            dataclasses.replace(
+                entry,
+                obj=obj,
+                auto_deps=analysis.auto_deps,
+                sealed_members=sealed_members,
+                base_deps=base_deps,
+                decorator_api_records=analysis.records,
+                effective_signature=analysis.effective_signature,
+                effective_signature_source=analysis.effective_signature_source,
+                decorator_warnings=analysis.warnings,
+            )
+        )

@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from jaunt.discovery import discover_modules, evict_modules_for_import, import_and_collect
+from jaunt.discovery import (
+    _has_jaunt_markers,
+    discover_modules,
+    evict_modules_for_import,
+    import_and_collect,
+)
 from jaunt.errors import JauntDiscoveryError
 
 
@@ -156,6 +161,17 @@ def test_prescreen_passes_bare_decorator_form(tmp_path: Path) -> None:
     )
     names = discover_modules(roots=[root], exclude=[], generated_dir="__generated__")
     assert "bare_mod" in names
+
+
+def test_prescreen_recognizes_magic_module_call() -> None:
+    src = "import jaunt\njaunt.magic_module(__name__)\n"
+    assert _has_jaunt_markers(src)
+
+
+def test_prescreen_recognizes_bare_magic_module_call_without_import() -> None:
+    # belt-and-braces branch: call form alone, no importable jaunt alias
+    src = "from spam import magic_module\nmagic_module(__name__)\n"
+    assert _has_jaunt_markers(src)
 
 
 def test_prescreen_skips_syntax_error_file_quietly(tmp_path: Path) -> None:
