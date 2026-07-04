@@ -3,7 +3,7 @@ title: CLI
 description: "Commands, flags, and exit codes."
 ---
 
-For a guided, end-to-end introduction, start with [Quickstart](/docs/quickstart).
+For a guided, end-to-end introduction, start with [Quickstart](/docs/tutorials/quickstart).
 
 Entry point: `jaunt = "jaunt.cli:main"` (see `pyproject.toml` in the repo root).
 
@@ -43,8 +43,8 @@ Generation-shaping flags (also accepted by `jaunt test` and `jaunt watch`):
 - `--include-target-tests` / `--no-include-target-tests`: include targeted test-spec source in build prompts (default: off, or `[build] include_target_tests`).
 - `--no-auto-skills`: skip auto-generated PyPI skills for this run.
 - `--no-builtin-skills`: don't seed Jaunt's bundled builtin skills into the Codex workspace.
-- `--no-repo-map` (build only): disable repo-map injection for this build. See [Repo Context](/docs/reference/repo-context).
-- `--no-semantic-gate` (build/test): force every normalized-digest change to rebuild, skipping the Layer B semantic gate (Layer A linter-resistance still applies). See [Change Detection](/docs/reference/change-detection).
+- `--no-repo-map` (build only): disable repo-map injection for this build. See [Repo Context](/docs/concepts/repo-context).
+- `--no-semantic-gate` (build/test): force every normalized-digest change to rebuild, skipping the Layer B semantic gate (Layer A linter-resistance still applies). See [Change Detection](/docs/concepts/change-detection).
 
 ## Test
 
@@ -154,7 +154,7 @@ framework rules plus a note to run `jaunt init`. `--json` emits
 ## Tree
 
 Maintain `treedocs.yaml`, the one-line-per-path repo map injected into build
-prompts (see [Repo Context](/docs/reference/repo-context)):
+prompts (see [Repo Context](/docs/concepts/repo-context)):
 
 ```bash
 uv run jaunt tree             # sync the tree (AST-only descriptions by default)

@@ -168,12 +168,12 @@ Notes:
 - `prompts.*` are treated as *file paths* and read at runtime by the engine.
 - Jaunt is batteries-included: `rich`, `watchfiles`, `pytest`, `pytest-asyncio`, and `anyio` ship as core dependencies. There is nothing to install for watch mode, tests, or rich output — and no optional extras.
 - Generation requires the external `codex` CLI on your `PATH`, authenticated
-  via `codex login`. See [Codex Engine](/docs/reference/codex-engine).
+  via `codex login`. See [Codex Engine](/docs/concepts/codex-engine).
 - `[llm]` is informational under the Codex engine. Codex handles its own
   authentication; `llm.api_key_env` is not used for generation.
 - `build.async_runner` controls the pytest marker selected for generated async tests.
-- `[context]` and `[context.search]` are covered in depth in [Repo Context](/docs/reference/repo-context).
-- `[semantic_gate]` is covered in [Change Detection](/docs/reference/change-detection).
+- `[context]` and `[context.search]` are covered in depth in [Repo Context](/docs/concepts/repo-context).
+- `[semantic_gate]` is covered in [Change Detection](/docs/concepts/change-detection).
 - `[contract]` is covered in the [Contract Mode guide](/docs/guides/contract-mode).
 - `[daemon]` is covered in the [Background Daemon guide](/docs/guides/daemon).
 - **Changelog (1.2.0):** `[daemon] auto_commit` now defaults to `false` — the
@@ -181,4 +181,4 @@ Notes:
   This is the one behavior change existing daemon users feel; set
   `auto_commit = true` to keep auto-commit-on-green.
 
-Next: [Output Locations](/docs/reference/output).
+Next: [Output Locations](/docs/reference/output-layout).

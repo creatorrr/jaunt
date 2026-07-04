@@ -1,32 +1,6 @@
 ---
-title: Developing Jaunt
-description: "Dev commands for this repository."
+title: Moved
 ---
+import { Moved } from '@/components/moved';
 
-From the repo root:
-
-```bash
-uv sync
-uv run ruff check --fix .
-uv run ruff format .
-uv run ty check
-uv run pytest
-```
-
-## Pre-commit Hooks
-
-Enable repository hooks once from the root:
-
-```bash
-git config core.hooksPath .githooks
-```
-
-The hook runs:
-
-- `ruff check --fix .`
-- `ruff format .`
-- `ty check`
-
-If Ruff rewrites files, the hook stops so you can review and re-stage them.
-
-Next: [Architecture Notes](/docs/development/architecture-notes).
+<Moved to="https://github.com/creatorrr/jaunt" />

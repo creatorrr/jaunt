@@ -1,52 +1,27 @@
 # Jaunt docs-site
 
-This is a Next.js application generated with
-[Create Fumadocs](https://github.com/fuma-nama/fumadocs).
+The source for [jaunt.ing](https://jaunt.ing), the documentation site for the
+Jaunt spec-driven codegen framework. Built with [Fumadocs](https://fumadocs.dev)
+on Next.js, static-exported to GitHub Pages. Pages live in `content/docs/`
+(MDX) and follow a Diátaxis-lite layout: `tutorials/`, `guides/`, `concepts/`,
+`reference/`.
 
-Run development server:
+## Develop
 
 ```bash
-npm run dev
+npm install
+npm run dev      # http://localhost:3000
 ```
 
-Open http://localhost:3000 with your browser to see the result.
+## Build
 
-## Repo Links
+```bash
+npm run build    # static export to out/
+```
 
-The docs UI links back to the Jaunt repository:
+`out/` is gitignored; the build must pass before you commit content changes.
 
-- https://github.com/creatorrr/jaunt
+## Deploy
 
-Optional env vars:
-
-- `NEXT_PUBLIC_SITE_URL` (for correct OpenGraph URLs in production)
-- `NEXT_PUBLIC_GITHUB_REPO` / `NEXT_PUBLIC_GITHUB_BRANCH` (override GitHub links)
-
-## Explore
-
-In the project, you can see:
-
-- `lib/source.ts`: Code for content source adapter, [`loader()`](https://fumadocs.dev/docs/headless/source-api) provides the interface to access your content.
-- `lib/layout.shared.tsx`: Shared options for layouts, optional but preferred to keep.
-
-| Route                     | Description                                            |
-| ------------------------- | ------------------------------------------------------ |
-| `app/(home)`              | The route group for your landing page and other pages. |
-| `app/docs`                | The documentation layout and pages.                    |
-| `app/api/search/route.ts` | The Route Handler for search.                          |
-
-### Fumadocs MDX
-
-A `source.config.ts` config file has been included, you can customise different options like frontmatter schema.
-
-Read the [Introduction](https://fumadocs.dev/docs/mdx) for further details.
-
-## Learn More
-
-To learn more about Next.js and Fumadocs, take a look at the following
-resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js
-  features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-- [Fumadocs](https://fumadocs.dev) - learn about Fumadocs
+Merging to `main` triggers `.github/workflows/docs-pages.yml`, which runs the
+static export and publishes to GitHub Pages. No manual deploy step.
