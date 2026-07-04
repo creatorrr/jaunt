@@ -3,6 +3,23 @@
 All notable changes to jaunt. Generated from conventional commits by
 [git-cliff](https://git-cliff.org); one section per published PyPI release.
 
+## [1.4.0] - 2026-07-04
+
+### Chores
+
+- Update CHANGELOG.md for v1.3.1 [skip ci]
+
+### Docs
+
+- Plan amendment — highlight parallel DAG builds + change detection (Tasks 8-9), token-savings FAQ framing
+- Magic_module implementation plan (1.4.0)
+- Magic_module spec — fold in codex@high design review (2 P1, 4 P2, 2 P3)
+- Magic_module design spec (module-level magic, 1.4)
+- Wave-3 adoption feedback — patch-compat promise, @sig migration restale note, characterization-tests gate
+
+### Features
+
+- 1.4.0 — jaunt.magic_module, module-level magic as the primary style (#66)
 ## [1.3.1] - 2026-07-04
 
 ### Chores
