@@ -6,6 +6,11 @@ as test stubs (`@jaunt.test`). Jaunt generates real implementations and pytest
 tests into `__generated__/` directories using the OpenAI **Codex** CLI as its
 code-generation engine (`codex exec`).
 
+> **Codex model policy:** strictly use `gpt-5.5` for EVERY Codex invocation
+> (`codex exec`, `codex mcp-server`, `codex app-server`) — never `gpt-5.2`,
+> `gpt-5.2-codex`, or any other variant. The only deliberate exception is the
+> small `[semantic_gate]` judge model (`gpt-5.4-mini`).
+
 ## Quick Reference
 
 ```bash
