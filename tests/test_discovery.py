@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import sys
 from pathlib import Path
 
@@ -19,7 +20,12 @@ def test_discover_modules_finds_pkg_modules(tmp_path: Path) -> None:
     _write(tmp_path / "pkg" / "foo.py", "X = 1\n")
     _write(tmp_path / "pkg" / "bar.py", "Y = 2\n")
 
-    mods = discover_modules(roots=[tmp_path], exclude=[], generated_dir="__generated__")
+    mods = discover_modules(
+        roots=[tmp_path],
+        exclude=[],
+        generated_dir="__generated__",
+        spec_prescreen=False,  # markerless fixtures: path→name, not spec filtering
+    )
 
     assert "pkg.foo" in mods
     assert "pkg.bar" in mods
@@ -31,7 +37,12 @@ def test_discover_modules_excludes_generated_dir(tmp_path: Path) -> None:
     _write(tmp_path / "pkg" / "__generated__" / "gen.py", "Z = 3\n")
     _write(tmp_path / "pkg" / "ok.py", "OK = True\n")
 
-    mods = discover_modules(roots=[tmp_path], exclude=[], generated_dir="__generated__")
+    mods = discover_modules(
+        roots=[tmp_path],
+        exclude=[],
+        generated_dir="__generated__",
+        spec_prescreen=False,  # markerless fixtures: path→name, not spec filtering
+    )
 
     assert "pkg.__generated__.gen" not in mods
     assert "pkg.ok" in mods
@@ -46,6 +57,7 @@ def test_discover_modules_honors_exclude_globs(tmp_path: Path) -> None:
         roots=[tmp_path],
         exclude=["**/.venv/**"],
         generated_dir="__generated__",
+        spec_prescreen=False,  # markerless fixtures: path→name, not spec filtering
     )
 
     assert "pkg.ok" in mods
@@ -61,6 +73,7 @@ def test_discover_modules_with_module_prefix(tmp_path: Path) -> None:
         exclude=[],
         generated_dir="__generated__",
         module_prefix="tests",
+        spec_prescreen=False,  # markerless fixtures: path→name, not spec filtering
     )
 
     assert "tests" in mods
@@ -124,6 +137,68 @@ def test_discover_modules_with_target_modules_skips_scan(tmp_path: Path) -> None
     assert "pkg.foo" in mods
     assert "pkg.bar" in mods
     assert "pkg.baz" not in mods
+
+
+def test_prescreen_skips_markerless_module(tmp_path: Path) -> None:
+    root = tmp_path / "src"
+    root.mkdir()
+    (root / "boobytrap.py").write_text("raise RuntimeError('imported!')\n")
+    (root / "spec_mod.py").write_text("import jaunt\n@jaunt.magic()\ndef f() -> int:\n    ...\n")
+    names = discover_modules(roots=[root], exclude=[], generated_dir="__generated__")
+    assert names == ["spec_mod"]
+
+
+def test_prescreen_passes_bare_decorator_form(tmp_path: Path) -> None:
+    root = tmp_path / "src"
+    root.mkdir()
+    (root / "bare_mod.py").write_text(
+        "from jaunt import magic\n@magic()\ndef f() -> int:\n    ...\n"
+    )
+    names = discover_modules(roots=[root], exclude=[], generated_dir="__generated__")
+    assert "bare_mod" in names
+
+
+def test_prescreen_skips_syntax_error_file_quietly(tmp_path: Path) -> None:
+    root = tmp_path / "src"
+    root.mkdir()
+    # Contains the substring 'jaunt' so it passes the textual prefilter, but does
+    # not parse — must be skipped silently (no raise).
+    (root / "broken.py").write_text("import jaunt\ndef oops(:\n    pass\n")
+    names = discover_modules(roots=[root], exclude=[], generated_dir="__generated__")
+    assert names == []
+
+
+def test_target_fast_path_bypasses_prescreen(tmp_path: Path) -> None:
+    root = tmp_path / "src"
+    root.mkdir()
+    (root / "boobytrap.py").write_text("raise RuntimeError('imported!')\n")
+    names = discover_modules(
+        roots=[root],
+        exclude=[],
+        generated_dir="__generated__",
+        target_modules={"boobytrap"},
+    )
+    assert names == ["boobytrap"]
+
+
+def test_textual_prefilter_short_circuits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "src"
+    root.mkdir()
+    (root / "plain.py").write_text("X = 1\n")  # no 'jaunt' substring
+    import jaunt.discovery as discovery_mod
+
+    called = False
+    real_parse = ast.parse
+
+    def _spy_parse(*args, **kwargs):  # noqa: ANN002, ANN003
+        nonlocal called
+        called = True
+        return real_parse(*args, **kwargs)
+
+    monkeypatch.setattr(discovery_mod.ast, "parse", _spy_parse)
+    names = discover_modules(roots=[root], exclude=[], generated_dir="__generated__")
+    assert names == []
+    assert called is False
 
 
 def test_import_and_collect_imports_modules(
