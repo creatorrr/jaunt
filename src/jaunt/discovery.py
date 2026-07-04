@@ -347,4 +347,10 @@ def import_and_collect(
 
         for governed_module in list(get_module_magic_registry()):
             if governed_module in sys.modules:
-                finalize_module_magic(governed_module)
+                try:
+                    finalize_module_magic(governed_module)
+                except Exception as e:  # noqa: BLE001 - caller needs a single error type
+                    raise JauntDiscoveryError(
+                        f"Failed to finalize magic module '{governed_module}': "
+                        f"{type(e).__name__}: {e}"
+                    ) from e

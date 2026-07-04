@@ -252,3 +252,15 @@ def test_toplevel_sig_in_governed_module_still_errors(tmp_path, monkeypatch):
     monkeypatch.syspath_prepend(str(tmp_path))
     with pytest.raises(JauntError, match="whole-class"):
         importlib.import_module("sig_mod")
+
+
+def test_helper_first_access_resolves_specs_before_helper_runs(tmp_path, monkeypatch):
+    _write_governed(tmp_path)
+    _write_generated(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    mod = importlib.import_module("gm_mod")
+    # The FIRST external access is the handwritten helper, not a spec name.
+    # Its global lookup of parse_email bypasses __getattribute__, so resolution
+    # must fire on the helper access itself or the raw stub runs silently.
+    assert mod.helper("x") == "x"
+    assert type(mod) is types.ModuleType  # resolution fired and swapped back
