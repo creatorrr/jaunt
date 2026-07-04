@@ -611,3 +611,36 @@ def test_format_stub_best_effort_formats_when_ruff_available() -> None:
         assert '"a"' in formatted
     else:
         assert formatted == ugly
+
+
+def test_jaunt_public_names_in_annotations_still_resolve() -> None:
+    """Stripping jaunt imports must not orphan a legitimate annotation that
+    references a jaunt public name — it resolves from the generated module's
+    imports or Any-binds, never F821. (1.4.2 codex review.)"""
+    spec_source = textwrap.dedent(
+        '''
+        import jaunt
+        from jaunt import JauntError
+
+        jaunt.magic_module(__name__)
+
+
+        def failing(path: str) -> JauntError:
+            """Return the error a load would raise."""
+            raise NotImplementedError
+        '''
+    )
+    generated_source = textwrap.dedent(
+        """
+        from jaunt import JauntError
+
+
+        def failing(path: str) -> JauntError:
+            return JauntError("nope")
+        """
+    )
+    stub = build_stub_source(spec_source, generated_source, {"failing"}, _header())
+    assert "from jaunt import JauntError" in stub
+    import ast as _ast
+
+    _ast.parse(stub)

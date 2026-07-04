@@ -15,7 +15,10 @@ this page.
 ## 1.4.2
 
 Patch release from the fourth adoption-feedback wave. No built module is
-invalidated; emitted `.pyi` stubs re-emit once on the next build.
+invalidated and re-emitting stubs makes no model calls — but note the CI
+caveat: the stub format version changed, so `jaunt check` reports committed
+stubs stale (exit 4) until you run `jaunt build` once and commit the
+re-emitted `.pyi` files.
 
 - **`importlib.reload()` works on governed modules.** Re-executing the same
   `magic_module(__name__)` call (same file, same line) is now treated as a

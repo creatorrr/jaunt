@@ -378,6 +378,8 @@ def magic_module(
             # registration wholesale — reload is a standard test idiom and
             # decorator mode has always survived it. A second call at a
             # different line is a genuine double-governing error below.
+            # (Known edge: two calls on ONE line — `magic_module(n); magic_module(n)` —
+            # read as a reload and re-register idempotently instead of raising.)
             _unregister_module_origin_entries(name)
             mod.__dict__.pop("__jaunt_original_stubs__", None)
             mod.__dict__.pop("__jaunt_magic_module__", None)

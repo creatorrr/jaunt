@@ -158,10 +158,12 @@ def build_stub_source(
     # A stub's signatures come from the *generated* module, but its imports were
     # copied only from the spec module — so a generated-only import used in a
     # signature (e.g. `-> pd.DataFrame`) would leave `pd` undefined. Resolve any
-    # such referenced-but-unprovided names from the generated module.
+    # such referenced-but-unprovided names from the generated module. Names bound
+    # only by jaunt imports are NOT provided — those imports were skipped above,
+    # so a legitimate reference (`-> JauntError`) must resolve like any other.
     prelude = _resolve_stub_references(
         rendered_nodes=rendered_nodes,
-        provided=_module_bound_names(spec_tree),
+        provided=_module_bound_names(spec_tree) - _jaunt_import_bound_names(spec_tree),
         generated_tree=generated_tree,
         generated_module=generated_module,
     )
@@ -274,6 +276,23 @@ def _resolve_stub_references(
         prelude.append("\n".join(f"{name} = Any" for name in dict.fromkeys(any_fallbacks)))
     prelude.extend(supporting)
     return prelude
+
+
+def _jaunt_import_bound_names(tree: ast.Module) -> set[str]:
+    """Names bound at top level ONLY by jaunt imports (which stubs never copy)."""
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "jaunt" or alias.name.startswith("jaunt."):
+                    names.add(alias.asname or alias.name.split(".", 1)[0])
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if module == "jaunt" or module.startswith("jaunt."):
+                for alias in node.names:
+                    if alias.name != "*":
+                        names.add(alias.asname or alias.name)
+    return names
 
 
 def _module_bound_names(tree: ast.Module) -> set[str]:

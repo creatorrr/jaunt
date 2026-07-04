@@ -1702,6 +1702,19 @@ async def run_build(
                         f"{module_name}: existing hand-authored {stub_path.name} not overwritten"
                     )
                     continue
+                # Freshness is keyed on the inputs digest, never rendered bytes:
+                # a digest-fresh stub is left untouched even if this environment
+                # would render it differently (e.g. ruff present vs absent), so
+                # builds never churn committed stubs across environments.
+                if (
+                    stub_emitter.stub_staleness(
+                        source_file=source_file, generated_source=gen_source
+                    )
+                    is None
+                    and stub_path.exists()
+                ):
+                    emitted_stubs[module_name] = str(stub_path)
+                    continue
                 stub_header = header.format_stub_header(
                     tool_version=_tool_version(),
                     source_module=module_name,
