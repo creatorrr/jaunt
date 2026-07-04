@@ -66,7 +66,8 @@ export default function HomePage() {
         <p className="mx-auto mt-5 max-w-2xl text-fd-muted-foreground">
           Mark a function or class with <code>@jaunt.magic</code>, write the types and the
           docstring, and jaunt generates a real, reviewable implementation into your repo. It
-          drives the OpenAI Codex CLI, then rebuilds incrementally as the spec changes.
+          drives the OpenAI Codex CLI, the one supported engine, so you install Codex and run{' '}
+          <code>codex login</code> first. After that it rebuilds incrementally as the spec changes.
         </p>
         <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
           <Link
@@ -97,8 +98,9 @@ export default function HomePage() {
         <div className="mx-auto max-w-5xl">
           <h2 className="text-center text-xl font-semibold">Two docstrings in, working code out</h2>
           <p className="mx-auto mt-2 max-w-2xl text-center text-sm text-fd-muted-foreground">
-            The spec on the left is what you commit. The code on the right is what jaunt generated
-            from it, verbatim, on a real run.
+            The spec on the left is what you commit. On the right is the function jaunt generated
+            from it on a real run; it also wrote the small <code>_json_segment</code> and{' '}
+            <code>_base64url_encode</code> helpers this calls. None of it is hand-edited.
           </p>
           <div className="mt-6 grid gap-4 md:grid-cols-2">
             <CodePanel label="Spec — you write this" code={SPEC_CODE} />

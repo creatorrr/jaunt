@@ -11,7 +11,7 @@ A magic spec carries its whole contract in three places:
 
 - **Signature**: type hints are part of the contract.
 - **Docstring**: this is the spec. Be precise about behavior, edge cases, and errors.
-- **Body**: placeholder only (convention: raise).
+- **Body**: a placeholder Jaunt never runs. A bare `...` or a `raise` both work.
 
 ```python
 from __future__ import annotations
@@ -62,6 +62,11 @@ The body is not used. Keep it obvious:
 ```python
 raise RuntimeError("spec stub (generated at build time)")
 ```
+
+A bare `...` works just as well, which is what the [quickstart](/docs/tutorials/quickstart)
+uses. Pick whichever reads better to you; Jaunt never runs the stub body either way.
+The examples on this page use the `raise` form so a stub that slips past a build
+fails loudly instead of silently returning `None`.
 
 ## Dependencies (`deps=...`)
 

@@ -33,8 +33,10 @@ test_roots = ["tests"]        # dirs scanned for @jaunt.test specs
 generated_dir = "__generated__"  # output dir for generated code
 
 [llm]
-# Informational under the Codex engine (the model is set in [codex]); Codex
-# authenticates via `codex login` / CODEX_API_KEY, not api_key_env.
+# Retained for back-compat and ignored by the Codex engine. The model is set in
+# [codex], and Codex authenticates via `codex login` / CODEX_API_KEY, not
+# api_key_env. The provider and anthropic_* keys below are pre-Codex leftovers
+# with no effect today; they stay in the schema so old configs still validate.
 provider = "openai"
 model = "gpt-5.2"
 api_key_env = "OPENAI_API_KEY"
