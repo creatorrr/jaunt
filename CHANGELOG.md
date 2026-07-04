@@ -3,6 +3,15 @@
 All notable changes to jaunt. Generated from conventional commits by
 [git-cliff](https://git-cliff.org); one section per published PyPI release.
 
+## [1.2.0] - 2026-07-04
+
+### Chores
+
+- Update CHANGELOG.md for v1.1.0 [skip ci]
+
+### Features
+
+- Propose-only daemon landing (new default) + discovery AST prescreen (#62)
 ## [1.1.0] - 2026-07-03
 
 ### Chores
