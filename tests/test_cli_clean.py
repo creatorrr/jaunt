@@ -168,6 +168,7 @@ def test_cmd_clean_removes_only_jaunt_stubs(tmp_path: Path, monkeypatch) -> None
         tool_version="0",
         source_module="pkg.timing",
         generated_digest=generated_content_digest("x = 1\n"),
+        inputs_digest=generated_content_digest("x = 1\n"),
     )
     jaunt_stub = tmp_path / "src" / "pkg" / "timing.pyi"
     jaunt_stub.write_text(build_stub_source("x: int = 1\n", "", set(), header), encoding="utf-8")
@@ -194,6 +195,7 @@ def test_cmd_clean_json_lists_removed_stubs(tmp_path: Path, monkeypatch, capsys)
         tool_version="0",
         source_module="pkg.timing",
         generated_digest=generated_content_digest("x = 1\n"),
+        inputs_digest=generated_content_digest("x = 1\n"),
     )
     jaunt_stub = tmp_path / "src" / "pkg" / "timing.pyi"
     jaunt_stub.write_text(build_stub_source("x: int = 1\n", "", set(), header), encoding="utf-8")

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from jaunt.generate.shared import render_template
-from jaunt.init_template import INIT_TEMPLATE
+from jaunt.init_template import FULL_SCHEMA_TEMPLATE
 
 if TYPE_CHECKING:
     from jaunt.config import JauntConfig
@@ -94,7 +94,7 @@ def _project_block(project: dict | None, note: str | None) -> str:
             "## jaunt.toml schema",
             "",
             "```toml",
-            INIT_TEMPLATE.rstrip("\n"),
+            FULL_SCHEMA_TEMPLATE.rstrip("\n"),
             "```",
         ]
         return "\n".join(lines)

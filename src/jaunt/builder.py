@@ -131,15 +131,23 @@ def _read_generated(package_dir: Path, generated_dir: str, module_name: str) -> 
         return None
 
 
-def _ensure_init_files(package_dir: Path, relpath: Path) -> None:
+def _ensure_init_files(package_dir: Path, relpath: Path, *, generated_dir: str) -> None:
     # Ensure all parent package dirs contain __init__.py so imports work.
     parts = list(relpath.parts)
     if not parts:
         return
     dir_parts = parts[:-1]
     for i in range(1, len(dir_parts) + 1):
-        d = package_dir / Path(*dir_parts[:i])
+        segment = dir_parts[:i]
+        d = package_dir / Path(*segment)
         d.mkdir(parents=True, exist_ok=True)
+        # The root-level generated dir (a single top-level `__generated__/`) is left
+        # as a PEP 420 namespace package: two installed distributions each shipping a
+        # top-level `__generated__` then merge instead of shadowing each other (first
+        # on sys.path wins). Package-nested generated dirs (`pkg/__generated__/`) keep
+        # their `__init__.py`.
+        if segment == [generated_dir]:
+            continue
         init = d / "__init__.py"
         if not init.exists():
             init.write_text("", encoding="utf-8")
@@ -164,7 +172,7 @@ def write_generated_module(
         raise ValueError("Refusing to write outside package_dir.")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    _ensure_init_files(package_dir, relpath)
+    _ensure_init_files(package_dir, relpath, generated_dir=generated_dir)
 
     # Place AGENTS.md (+ CLAUDE.md symlink) in the __generated__/ root so
     # coding agents know not to touch the contents.
@@ -1340,7 +1348,7 @@ def _ty_error_context(
         tmp_root = Path(tmp)
         tmp_path = tmp_root / relpath
         tmp_path.parent.mkdir(parents=True, exist_ok=True)
-        _ensure_init_files(tmp_root, relpath)
+        _ensure_init_files(tmp_root, relpath, generated_dir=generated_dir)
         # Mirror the candidate's package subtree into the sandbox. The sandbox
         # root shadows package_dir in ty's search path, so without the mirror a
         # bare `<pkg>/` containing only the candidate hides the real source
@@ -1671,7 +1679,13 @@ async def run_build(
 
         emitted_stubs: dict[str, str] = {}
         stub_warnings: list[str] = []
-        for module_name in sorted((generated_modules | skipped_modules) & set(module_specs.keys())):
+        stub_targets = (generated_modules | skipped_modules) & set(module_specs.keys())
+        # For a targeted build (`jaunt build --target X`), `skipped` spans the whole
+        # project; restrict stub emission to the requested closure so we never rewrite
+        # or create `.pyi` files for modules outside the target.
+        if allowed_modules is not None:
+            stub_targets &= set(allowed_modules)
+        for module_name in sorted(stub_targets):
             entries = module_specs.get(module_name, [])
             if not entries:
                 continue
@@ -1692,6 +1706,7 @@ async def run_build(
                     tool_version=_tool_version(),
                     source_module=module_name,
                     generated_digest=stub_emitter.generated_content_digest(gen_source),
+                    inputs_digest=stub_emitter.stub_inputs_digest(spec_source, gen_source),
                 )
                 new_stub = stub_emitter.build_stub_source(
                     spec_source,

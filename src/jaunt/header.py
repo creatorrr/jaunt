@@ -132,16 +132,20 @@ def format_header(
     return "\n".join(lines) + "\n"
 
 
-def format_stub_header(*, tool_version: str, source_module: str, generated_digest: str) -> str:
+def format_stub_header(
+    *, tool_version: str, source_module: str, generated_digest: str, inputs_digest: str
+) -> str:
     digest = (
         generated_digest if generated_digest.startswith("sha256:") else f"sha256:{generated_digest}"
     )
+    inputs = inputs_digest if inputs_digest.startswith("sha256:") else f"sha256:{inputs_digest}"
     lines = [
         STUB_HEADER_MARKER,
         f"# jaunt:tool_version={tool_version}",
         "# jaunt:kind=stub",
         f"# jaunt:source_module={source_module}",
         f"# jaunt:generated_digest={digest}",
+        f"# jaunt:inputs_digest={inputs}",
     ]
     return "\n".join(lines) + "\n"
 

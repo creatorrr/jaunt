@@ -161,6 +161,73 @@ def test_self_import_star_from_spec_module_via_relative_rejected() -> None:
     assert any("import *" in e and "pkg.mod" in e for e in errs)
 
 
+def test_spec_symbol_rebind_via_plain_import_rejected() -> None:
+    # `import <spec_module>` (aliased) + a module-level rebind `X = m.X` re-pulls the
+    # spec module's wrapped stub — the plain-import twin of the `from ... import X`
+    # hazard, and must be flagged too (finding 1, PR #63).
+    src = textwrap.dedent(
+        """
+        import timing as _t
+
+        class MockTimer:
+            pass
+
+        MockTimer = _t.MockTimer
+        """
+    )
+    errs = validate_build_generated_source(
+        src,
+        ["MockTimer"],
+        spec_module="timing",
+        handwritten_names=(),
+    )
+    assert any("MockTimer" in e and "timing" in e and "rebind" in e for e in errs)
+
+
+def test_spec_symbol_rebind_via_dotted_plain_import_rejected() -> None:
+    # The un-aliased dotted form `import pkg.mod` + `Foo = pkg.mod.Foo`.
+    src = textwrap.dedent(
+        """
+        import pkg.mod
+
+        class Foo:
+            pass
+
+        Foo = pkg.mod.Foo
+        """
+    )
+    errs = validate_build_generated_source(
+        src,
+        ["Foo"],
+        spec_module="pkg.mod",
+        handwritten_names=(),
+        generated_module="pkg.__generated__.mod",
+    )
+    assert any("Foo" in e and "pkg.mod" in e and "rebind" in e for e in errs)
+
+
+def test_rebind_from_unrelated_module_allowed() -> None:
+    # Rebinding from a genuinely unrelated module is not a self-import; this check
+    # must not flag it.
+    src = textwrap.dedent(
+        """
+        import other
+
+        def build() -> int:
+            return 1
+
+        build = other.build
+        """
+    )
+    errs = validate_build_generated_source(
+        src,
+        ["build"],
+        spec_module="timing",
+        handwritten_names=(),
+    )
+    assert not any("rebind" in e for e in errs)
+
+
 def test_self_import_of_handwritten_symbol_allowed() -> None:
     # Reusing a genuinely handwritten symbol from the spec module is fine.
     src = textwrap.dedent(

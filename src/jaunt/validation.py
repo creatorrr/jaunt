@@ -202,6 +202,52 @@ def _validate_build_contract_only(
                     f"generated module re-imports its own spec symbol {alias.name!r} "
                     f"from {spec_module}; define it instead"
                 )
+
+    errors.extend(_spec_module_rebind_errors(mod, expected=expected, spec_module=spec_module))
+    return errors
+
+
+def _spec_module_rebind_errors(
+    mod: ast.Module, *, expected: set[str], spec_module: str
+) -> list[str]:
+    """Flag a plain-import rebinding of a spec symbol.
+
+    ``from <spec_module> import X`` is caught above, but the same hazard also arises
+    from ``import <spec_module>`` (optionally ``as m``) followed by a module-level
+    rebind ``X = <alias>.X`` where ``X`` is one of the generated module's own spec
+    symbols. The alias may be the ``as`` name or the dotted spec-module path itself.
+    """
+    # Prefixes that reference the spec module object: `import <spec_module>` binds
+    # the dotted name, `import <spec_module> as m` binds `m`.
+    alias_prefixes: set[str] = set()
+    for node in mod.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == spec_module:
+                    alias_prefixes.add(alias.asname or alias.name)
+    if not alias_prefixes:
+        return []
+
+    errors: list[str] = []
+    for node in mod.body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+            value: ast.expr | None = node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+            value = node.value
+        else:
+            continue
+        if not isinstance(value, ast.Attribute):
+            continue
+        if ast.unparse(value.value) not in alias_prefixes:
+            continue
+        for tgt in targets:
+            if isinstance(tgt, ast.Name) and tgt.id in expected:
+                errors.append(
+                    f"generated module re-imports its own spec symbol {tgt.id!r} "
+                    f"from {spec_module} via a module-level rebind; define it instead"
+                )
     return errors
 
 
