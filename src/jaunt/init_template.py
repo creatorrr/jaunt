@@ -178,5 +178,5 @@ def greet(name: str) -> str:
 
     Includes the name verbatim and ends with an exclamation mark.
     """
-    ...
+    raise NotImplementedError
 '''

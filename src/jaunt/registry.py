@@ -48,6 +48,7 @@ class ModuleMagicDefaults:
     module: str
     source_file: str
     decorator_kwargs: dict[str, object]
+    call_lineno: int = 0
 
 
 _MAGIC_REGISTRY: dict[SpecRef, SpecEntry] = {}

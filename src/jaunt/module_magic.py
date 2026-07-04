@@ -26,6 +26,7 @@ from jaunt.registry import (
     get_module_magic_defaults,
     register_magic,
     register_module_magic,
+    unregister_magic,
 )
 from jaunt.spec_ref import SpecRef, normalize_spec_ref
 
@@ -350,10 +351,6 @@ def magic_module(
             f"magic_module({name!r}): no such module in sys.modules; "
             "pass __name__ from the module being governed."
         )
-    if get_module_magic_defaults(name) is not None:
-        raise JauntError(
-            f"magic_module() was already called for module {name!r}; one governing call per module."
-        )
 
     decorator_kwargs: dict[str, object] = {}
     if deps is not None:
@@ -372,11 +369,34 @@ def magic_module(
     if not isinstance(source_file, str) or not source_file:
         raise JauntError(f"magic_module({name!r}): module has no source file on disk to scan.")
 
+    call_lineno = caller.f_lineno
+    existing = get_module_magic_defaults(name)
+    if existing is not None:
+        if existing.source_file == source_file and existing.call_lineno == call_lineno:
+            # importlib.reload(): the module body is re-executing the SAME
+            # governing call (same file, same line). Replace the prior
+            # registration wholesale — reload is a standard test idiom and
+            # decorator mode has always survived it. A second call at a
+            # different line is a genuine double-governing error below.
+            _unregister_module_origin_entries(name)
+            mod.__dict__.pop("__jaunt_original_stubs__", None)
+            mod.__dict__.pop("__jaunt_magic_module__", None)
+        else:
+            raise JauntError(
+                f"magic_module() was already called for module {name!r}; "
+                "one governing call per module."
+            )
+
     tree = ast.parse(Path(source_file).read_text(encoding="utf-8"))
     scan = scan_module_source(tree, module=name)
 
     register_module_magic(
-        ModuleMagicDefaults(module=name, source_file=source_file, decorator_kwargs=decorator_kwargs)
+        ModuleMagicDefaults(
+            module=name,
+            source_file=source_file,
+            decorator_kwargs=decorator_kwargs,
+            call_lineno=call_lineno,
+        )
     )
 
     if not scan.candidates:
@@ -418,6 +438,13 @@ def magic_module(
         class_names=frozenset(class_names),
     )
     mod.__class__ = _MagicModule
+
+
+def _unregister_module_origin_entries(module_name: str) -> None:
+    """Drop module-origin entries for a module ahead of a reload re-registration."""
+    for ref, entry in list(get_magic_registry().items()):
+        if entry.module == module_name and entry.origin == "module":
+            unregister_magic(ref)
 
 
 def finalize_module_magic(module_name: str) -> None:

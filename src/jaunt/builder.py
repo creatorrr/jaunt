@@ -1717,6 +1717,7 @@ async def run_build(
                         module_name, generated_dir=generated_dir
                     ),
                 )
+                new_stub = stub_emitter.format_stub_best_effort(new_stub)
                 if not (stub_path.exists() and stub_path.read_text(encoding="utf-8") == new_stub):
                     stub_path.parent.mkdir(parents=True, exist_ok=True)
                     fd, tmp = tempfile.mkstemp(

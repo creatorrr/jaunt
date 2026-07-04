@@ -20,7 +20,7 @@ def parse_email(raw: str) -> Email:
     """Parse a raw RFC 5322 payload into an Email. Read the From, To, and
     Subject headers and the body after the first blank line. Raise ValueError
     on malformed input."""
-    ...
+    raise NotImplementedError
 
 
 def _render_debug(email: Email) -> str:      # real body → handwritten

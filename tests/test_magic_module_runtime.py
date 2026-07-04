@@ -308,3 +308,28 @@ def test_circular_probe_mid_execution_does_not_resolve(tmp_path, monkeypatch):
     # Post-import, first external access resolves to generated code as usual.
     assert mod.parse_email("x").subject == "x"
     sys.modules.pop("circ_probe_mod", None)
+
+
+def test_importlib_reload_of_governed_module(tmp_path, monkeypatch):
+    _write_governed(tmp_path)
+    _write_generated(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    mod = importlib.import_module("gm_mod")
+    assert mod.parse_email("x").subject == "x"  # resolution fires pre-reload
+
+    mod = importlib.reload(mod)  # must not raise "already called"
+
+    entries = [e for e in registry.get_magic_registry().values() if e.module == "gm_mod"]
+    assert {e.qualname for e in entries} == {"Email", "parse_email"}
+    assert all(e.origin == "module" for e in entries)
+    assert mod.parse_email("y").subject == "y"  # hook reinstalled, resolves again
+
+
+def test_double_governing_call_still_raises_after_reload_support(tmp_path, monkeypatch):
+    _write(
+        tmp_path / "twice_mod.py",
+        "import jaunt\n\njaunt.magic_module(__name__)\njaunt.magic_module(__name__)\n",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    with pytest.raises(Exception, match="already called"):
+        importlib.import_module("twice_mod")

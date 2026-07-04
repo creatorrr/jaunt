@@ -13,7 +13,7 @@ from jaunt.header import parse_stub_header
 _JAUNT_DECORATORS = {"magic", "sig", "test", "contract", "preserve"}
 
 # Bump when the stub rendering logic changes so already-emitted stubs re-emit.
-_STUB_FORMAT_VERSION = "1"
+_STUB_FORMAT_VERSION = "2"
 
 _BUILTIN_NAMES = frozenset(dir(builtins))
 
@@ -60,6 +60,36 @@ def _normalize_source_for_digest(source: str) -> str:
         return source or ""
 
 
+def format_stub_best_effort(stub_source: str) -> str:
+    """Run the emitted stub through ``ruff format`` when ruff is on PATH.
+
+    Projects that gate on ``ruff format --check`` have ruff by definition, so
+    formatting with the user's own tool removes the need for per-file lint
+    exemptions on emitted stubs. Environments without ruff get the unformatted
+    text — freshness is keyed on the inputs digest, never the rendered bytes,
+    so the two environments agree on staleness.
+    """
+    import shutil
+    import subprocess
+
+    ruff = shutil.which("ruff")
+    if ruff is None:
+        return stub_source
+    try:
+        proc = subprocess.run(
+            [ruff, "format", "--stdin-filename", "stub.pyi", "-"],
+            input=stub_source,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return stub_source
+    if proc.returncode != 0 or not proc.stdout:
+        return stub_source
+    return proc.stdout
+
+
 def is_jaunt_stub(path: Path) -> bool:
     try:
         text = path.read_text(encoding="utf-8")
@@ -92,6 +122,19 @@ def build_stub_source(
             # where they are a syntax error — never copy them from the spec.
             if isinstance(node, ast.ImportFrom) and node.module == "__future__":
                 continue
+            # jaunt imports exist only for the decorators/magic_module call,
+            # both stripped from stubs — copying them is a guaranteed F401.
+            if isinstance(node, ast.ImportFrom) and (
+                node.module == "jaunt" or (node.module or "").startswith("jaunt.")
+            ):
+                continue
+            if isinstance(node, ast.Import):
+                kept = [
+                    a for a in node.names if not (a.name == "jaunt" or a.name.startswith("jaunt."))
+                ]
+                if not kept:
+                    continue
+                node = ast.Import(names=kept)
             chunks.append(ast.unparse(copy.deepcopy(node)).strip())
             continue
 
@@ -254,20 +297,37 @@ def _module_bound_names(tree: ast.Module) -> set[str]:
 
 
 def _import_bindings(tree: ast.Module, *, generated_module: str | None) -> dict[str, str]:
-    """Map each name a top-level import binds to a single-import statement string."""
+    """Map each name a top-level import binds to a single-import statement string.
+
+    Also descends into top-level ``if TYPE_CHECKING:`` blocks — those imports are
+    checker-only by design, which is exactly the context a ``.pyi`` stub lives in,
+    so they are always safe to emit plainly.
+    """
     out: dict[str, str] = {}
-    for node in tree.body:
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                bound = alias.asname or alias.name.split(".", 1)[0]
-                out.setdefault(bound, _single_import_stmt(node, alias, generated_module))
-        elif isinstance(node, ast.ImportFrom):
-            for alias in node.names:
-                if alias.name == "*":
-                    continue
-                bound = alias.asname or alias.name
-                out.setdefault(bound, _single_import_stmt(node, alias, generated_module))
+
+    def visit(body: list[ast.stmt]) -> None:
+        for node in body:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    bound = alias.asname or alias.name.split(".", 1)[0]
+                    out.setdefault(bound, _single_import_stmt(node, alias, generated_module))
+            elif isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    if alias.name == "*":
+                        continue
+                    bound = alias.asname or alias.name
+                    out.setdefault(bound, _single_import_stmt(node, alias, generated_module))
+            elif isinstance(node, ast.If) and _is_type_checking_test(node.test):
+                visit(node.body)
+
+    visit(tree.body)
     return out
+
+
+def _is_type_checking_test(test: ast.expr) -> bool:
+    if isinstance(test, ast.Name):
+        return test.id == "TYPE_CHECKING"
+    return isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
 
 
 def _single_import_stmt(
@@ -319,6 +379,37 @@ def _referenced_load_names(node: ast.AST) -> set[str]:
     for child in ast.walk(node):
         if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load):
             names.add(child.id)
+        elif isinstance(child, ast.arg):
+            names |= _string_annotation_names(child.annotation)
+        elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            names |= _string_annotation_names(child.returns)
+        elif isinstance(child, ast.AnnAssign):
+            names |= _string_annotation_names(child.annotation)
+    return names
+
+
+def _string_annotation_names(annotation: ast.expr | None) -> set[str]:
+    """Names referenced inside string annotation fragments.
+
+    A quoted annotation (``"RecursiveChunker | None"``, ``Optional["X"]``) is an
+    ``ast.Constant`` — invisible to the generic ``Name`` walk — but ruff/type
+    checkers still resolve the names inside it, so an unbound one is an F821 in
+    the emitted stub. Parse each string fragment and surface its names so the
+    resolution pass can import or ``Any``-bind them.
+    """
+    names: set[str] = set()
+    if annotation is None:
+        return names
+    for child in ast.walk(annotation):
+        if not (isinstance(child, ast.Constant) and isinstance(child.value, str)):
+            continue
+        try:
+            parsed = ast.parse(child.value, mode="eval")
+        except SyntaxError:
+            continue
+        for sub in ast.walk(parsed):
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):
+                names.add(sub.id)
     return names
 
 

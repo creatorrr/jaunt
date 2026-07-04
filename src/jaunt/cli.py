@@ -2730,7 +2730,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                 if entries is None:
                     continue
                 header_fields_by_module[module_name] = {
-                    "tool_version": "",
+                    "tool_version": builder._tool_version(),
                     "kind": "build",
                     "source_module": module_name,
                     "module_digest": module_digest_fn(module_name, entries, specs, spec_graph),
@@ -3159,7 +3159,7 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
                 if entries is None:
                     continue
                 test_header_fields_by_module[module_name] = {
-                    "tool_version": "",
+                    "tool_version": builder._tool_version(),
                     "kind": "test",
                     "source_module": module_name,
                     "module_digest": tester._test_module_digest(

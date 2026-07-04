@@ -42,7 +42,7 @@ def greet(name: str) -> str:
 
     Includes the name verbatim and ends with an exclamation mark.
     """
-    ...
+    raise NotImplementedError
 ```
 
 The `jaunt.magic_module(__name__)` call at the top is the whole trick: every top-level stub in the file becomes a spec, no per-function decorator needed. The default config points at a `src` layout:
@@ -60,7 +60,7 @@ generated_dir = "__generated__"
 
 ## 3. Write the spec
 
-A spec is a normal function with a real signature and a docstring that states the contract. The body stays empty. Because `magic_module` governs the file, `create_token` is a spec on its own. `verify_token` carries a `@jaunt.magic` decorator only to declare a dependency; the decorator is the precision layer for a single symbol, and it still inherits whatever the module call set. Put this in `src/specs.py`:
+A spec is a normal function with a real signature and a docstring that states the contract. The body is a placeholder — we use `raise NotImplementedError` so strict type checkers accept the empty body under a concrete return annotation (`...` also works and digests identically). Because `magic_module` governs the file, `create_token` is a spec on its own. `verify_token` carries a `@jaunt.magic` decorator only to declare a dependency; the decorator is the precision layer for a single symbol, and it still inherits whatever the module call set. Put this in `src/specs.py`:
 
 ```python
 import jaunt
@@ -80,7 +80,7 @@ def create_token(user_id: str, secret: str, ttl_seconds: int = 3600) -> str:
     - base64url segments must omit "=" padding.
     - Raise ValueError if user_id is empty.
     """
-    ...
+    raise NotImplementedError
 
 
 @jaunt.magic(deps=[create_token])
@@ -94,7 +94,7 @@ def verify_token(token: str, secret: str) -> dict:
     - Raise ValueError("expired") if the "exp" claim is at or before now.
     - Otherwise return the payload dict with "sub", "iat", and "exp".
     """
-    ...
+    raise NotImplementedError
 ```
 
 The type hints and the docstring are the contract. `deps=[create_token]` tells Jaunt that `verify_token` depends on `create_token`, so the two build together and `verify_token` restales if `create_token`'s public shape changes.
@@ -189,7 +189,7 @@ def test_roundtrip() -> None:
     - verify_token raises ValueError on a tampered signature.
     - verify_token raises ValueError("expired") for a token whose ttl has passed.
     """
-    ...
+    raise NotImplementedError
 ```
 
 Generate the test and run pytest in one step:
