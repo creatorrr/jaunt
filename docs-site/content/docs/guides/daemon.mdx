@@ -5,20 +5,58 @@ description: "Commit-triggered background codegen with isolated jobs, a change j
 
 `jaunt daemon` turns the build loop into a background service: you (or your
 coding agent) commit spec changes, and the daemon rebuilds what went stale in an
-isolated job, auto-committing the regenerated modules when everything is green.
+isolated job. By default the daemon **parks the green result as a reviewable
+proposal** — you land it explicitly with `jaunt jobs land`. Opt into
+auto-committing green jobs with `[daemon] auto_commit = true`.
 
 ## Start / Stop / Status
 
 ```bash
 jaunt daemon start    # run the daemon (foreground; Ctrl-C to stop)
-jaunt daemon status   # is it running? what is it doing?
+jaunt daemon status   # is it running? what is it doing? which landing mode?
 jaunt daemon stop
 ```
 
 The daemon polls the repository `HEAD` (every `[daemon] poll_interval` seconds).
 When a commit changes specs, it launches an isolated worktree job that rebuilds
-the stale modules, runs validation, and — if green — commits the regenerated
-output. Failed or conflicted jobs are **parked** instead of landed.
+the stale modules and runs validation. On green, what happens next depends on the
+landing mode (see below). Failed or conflicted jobs are **parked** instead of
+landed. `jaunt daemon status` reports the active landing mode
+(`landing: propose-only` or `landing: auto-commit`).
+
+## Landing modes
+
+- **Propose-only (default, `auto_commit = false`).** A green job ends in the
+  `PROPOSED` state: its diff is captured as a patch artifact under
+  `.jaunt/jobs/<id>.patch` alongside the recorded spec digest and provenance
+  commit message. No commit is created — you review and land it explicitly. A
+  newer proposal for the same module automatically supersedes an older pending
+  one.
+- **Auto-commit (`auto_commit = true`).** A green job flows straight into a
+  provenance commit, exactly as before this mode existed. The jaunt repo's own
+  dogfooding daemon opts back into this.
+
+### Landing a proposal
+
+```bash
+jaunt jobs land <id>    # land one parked proposal as a provenance commit
+jaunt jobs land --all   # land every fresh proposal, in job-creation order
+jaunt jobs discard <id> # drop a proposal you don't want
+```
+
+`jaunt jobs land` re-validates before committing: it recomputes the module's spec
+digest at `HEAD` and refuses (marking the proposal `SUPERSEDED`) if the spec moved
+since generation — the daemon will propose a fresh build. It also refuses if the
+current branch differs from the job's branch, if the patch's target paths are
+dirty in your working tree, or if the patch no longer applies cleanly (a 3-way
+conflict supersedes the proposal). There is no `--force`: regeneration is the
+honest resolution for any land-time doubt. On success it creates the same
+provenance commit auto-commit mode would have, marks the job `LANDED` with the
+commit sha, and appends the journal line.
+
+`jaunt jobs land --all` lands every still-fresh `PROPOSED` job in job-creation
+order (the daemon queues jobs in dependency order), prints a per-job outcome, and
+exits `0` only when every attempted land succeeded (else `4`).
 
 ## Jobs
 
@@ -26,6 +64,9 @@ output. Failed or conflicted jobs are **parked** instead of landed.
 jaunt jobs                    # job records + would-rebuild preview + heartbeat
 jaunt jobs show <id> --full   # one record, with the full local detail log
 jaunt jobs retry <id>         # retry landing a parked job (--force if the spec moved on)
+jaunt jobs land <id>          # land a parked proposal as a provenance commit
+jaunt jobs land --all         # land every fresh proposal (job-creation order)
+jaunt jobs discard <id>       # discard a parked proposal
 jaunt jobs wait --timeout 1800
 jaunt jobs wait <id> --timeout 1800 --json --progress plain
 ```
@@ -33,9 +74,19 @@ jaunt jobs wait <id> --timeout 1800 --json --progress plain
 `jaunt jobs wait` blocks until a target job finishes — or, without an id, until
 the daemon is idle. `--settle N` controls the idle race-guard window (default:
 2 × `poll_interval`). Exit codes make it loopable: `0` green, `4` a job failed
-or parked, `5` timeout.
+or parked, `5` timeout. A parked proposal (`PROPOSED`) counts as terminal-green,
+so `jaunt jobs wait` returns `0` on it — a proposal is a successful build
+awaiting your landing decision.
 
-The canonical agent loop:
+The canonical agent loop under the default propose-only mode is wait-then-land:
+
+```bash
+git commit -m "feat: tighten slugify contract" && \
+  jaunt jobs wait --timeout 1800 && jaunt jobs land --all
+```
+
+With `auto_commit = true` the daemon commits green jobs itself, so the loop is
+just the wait:
 
 ```bash
 git commit -m "feat: tighten slugify contract" && jaunt jobs wait --timeout 1800
@@ -83,9 +134,20 @@ For harnesses without hook support, the barrier is advisory:
 poll_interval = 2.0    # seconds between HEAD polls
 max_jobs = 0           # 0 -> build.jobs
 notify_command = ""    # optional shell command run on landed/parked/failed jobs
+auto_commit = false    # false (default): park green jobs as proposals; true: auto-commit
 ```
 
+`auto_commit` defaults to `false` in 1.2.0 — green jobs are parked as proposals
+you land explicitly. Set it to `true` to restore auto-commit-on-green.
+
 `notify_command` is the push-notification seam: point it at a script that pings
-Slack, `notify-send`, or your agent loop.
+Slack, `notify-send`, or your agent loop. It fires on proposed, landed, parked,
+and failed jobs.
+
+Build, propose, land, discard, and supersede events are all recorded in the
+`JAUNT_LOG` journal, so it stays a complete audit trail whether or not
+auto-commit is on. The `job-propose` and `job-discard` lines are appended
+uncommitted (union-merge-safe); a landing carries the standard build/refreeze
+journal line committed alongside its provenance commit.
 
 Next: [Agents & Automation](/docs/guides/coding-agents).

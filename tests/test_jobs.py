@@ -82,3 +82,35 @@ def test_terminal_mark_clears_phase(tmp_path: Path):
     loaded = jobs.load_job(tmp_path, job.id)
     assert loaded is not None
     assert loaded.phase == ""
+
+
+def test_proposed_not_active_and_phase_clearing(tmp_path: Path):
+    job = _mk(tmp_path, module="m")
+    updated = jobs.mark(tmp_path, job, jobs.PROPOSED, cause="spec change", refrozen="")
+    assert updated.state == jobs.PROPOSED
+    assert jobs.PROPOSED not in jobs.ACTIVE_STATES
+    assert jobs.DISCARDED not in jobs.ACTIVE_STATES
+    assert jobs.PROPOSED in jobs.PHASE_CLEAR_STATES
+    assert jobs.DISCARDED in jobs.PHASE_CLEAR_STATES
+    assert updated.cause == "spec change"
+    assert updated.refrozen == ""
+    found = jobs.proposed_for_module(tmp_path, "m")
+    assert found is not None
+    assert found.id == job.id
+
+
+def test_proposed_for_module_none_when_absent(tmp_path: Path):
+    _mk(tmp_path, module="m")
+    assert jobs.proposed_for_module(tmp_path, "m") is None
+    assert jobs.proposed_for_module(tmp_path, "other") is None
+
+
+def test_old_job_records_load_without_new_fields(tmp_path: Path):
+    job = _mk(tmp_path, module="m")
+    raw = json.loads((jobs.jobs_dir(tmp_path) / f"{job.id}.json").read_text(encoding="utf-8"))
+    del raw["cause"], raw["refrozen"]
+    (jobs.jobs_dir(tmp_path) / f"{job.id}.json").write_text(json.dumps(raw), encoding="utf-8")
+    loaded = jobs.load_job(tmp_path, job.id)
+    assert loaded is not None
+    assert loaded.cause == ""
+    assert loaded.refrozen == ""

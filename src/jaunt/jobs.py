@@ -15,9 +15,11 @@ LANDED = "landed"
 PARKED = "parked"
 FAILED = "failed"
 SUPERSEDED = "superseded"
+PROPOSED = "proposed"
+DISCARDED = "discarded"
 
 ACTIVE_STATES = frozenset({QUEUED, RUNNING, GREEN})
-PHASE_CLEAR_STATES = frozenset({GREEN, LANDED, PARKED, FAILED, SUPERSEDED})
+PHASE_CLEAR_STATES = frozenset({GREEN, LANDED, PARKED, FAILED, SUPERSEDED, PROPOSED, DISCARDED})
 
 
 def new_job_id(module: str, spec_digest: str, base_commit: str) -> str:
@@ -41,6 +43,8 @@ class JobRecord:
     error: str = ""
     detail_log: str = ""
     patch_paths: str = ""  # JSON-encoded list; set when a job parks so retry can re-land
+    cause: str = ""  # human cause recorded at green time; reused for the landing commit
+    refrozen: str = ""  # "1" when the green result was a re-freeze (journal action "refreeze")
 
     @classmethod
     def new(cls, *, module: str, spec_digest: str, base_commit: str, branch: str) -> JobRecord:
@@ -104,6 +108,13 @@ def active_for_module(root: Path, module: str) -> JobRecord | None:
 
 def parked_for_module(root: Path, module: str) -> JobRecord | None:
     for job in list_jobs(root, states={PARKED}):
+        if job.module == module:
+            return job
+    return None
+
+
+def proposed_for_module(root: Path, module: str) -> JobRecord | None:
+    for job in list_jobs(root, states={PROPOSED}):
         if job.module == module:
             return job
     return None

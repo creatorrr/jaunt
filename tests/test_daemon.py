@@ -35,7 +35,7 @@ def repo(tmp_path: Path) -> Path:
     (r / "src" / "app.py").write_text('"""spec v1"""\n', encoding="utf-8")
     (r / ".gitignore").write_text(".jaunt/\n", encoding="utf-8")
     (r / "jaunt.toml").write_text(
-        'version = 1\n\n[paths]\nsource_roots = ["src"]\n',
+        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = true\n',
         encoding="utf-8",
     )
     _git(r, "add", "-A")
@@ -61,6 +61,7 @@ def jaunt_cfg_with_notify(repo: Path, tmp_path: Path) -> JauntConfig:
                 'source_roots = ["src"]',
                 "",
                 "[daemon]",
+                "auto_commit = true",
                 f"notify_command = '{notify_command}'",
                 "",
             ]
@@ -341,6 +342,74 @@ def test_run_once_full_cycle_lands_and_journals(repo: Path, jaunt_cfg: JauntConf
         "build" in line and "app" in line and "3/3" in line for line in journal.read_lines(repo)
     )
     assert (repo / "src" / "__generated__" / "app.py").exists()
+
+
+def test_green_job_proposes_when_auto_commit_false(repo: Path) -> None:
+    (repo / "jaunt.toml").write_text(
+        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = false\n',
+        encoding="utf-8",
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "propose mode")
+    cfg = load_config(root=repo)
+    runner = FakeRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        _spec_commit(repo)
+        _cycle(repo, cfg, state, runner, pool)
+
+    proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
+    assert len(proposed) == 1
+    job = proposed[0]
+    assert job.module == "app"
+    assert (jobs.jobs_dir(repo) / f"{job.id}.patch").read_text(encoding="utf-8")
+    assert json.loads(job.patch_paths)
+    assert job.cause == "spec change"
+    assert job.battery == "3/3"
+    assert not jobs.list_jobs(repo, states={jobs.LANDED})
+    assert "regen" not in _git(repo, "log", "-1", "--format=%s")
+
+
+def test_newer_proposal_supersedes_older(repo: Path) -> None:
+    (repo / "jaunt.toml").write_text(
+        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = false\n',
+        encoding="utf-8",
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "propose mode")
+    cfg = load_config(root=repo)
+    runner = FakeRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        _spec_commit(repo)
+        _cycle(repo, cfg, state, runner, pool)
+
+        older = jobs.list_jobs(repo, states={jobs.PROPOSED})[0]
+        runner.digest = "digest-v2"
+        runner.built = []
+        _spec_commit(repo, '"""spec v3"""\n')
+        _cycle(repo, cfg, state, runner, pool)
+
+    proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
+    assert len(proposed) == 1
+    assert proposed[0].id != older.id
+    assert proposed[0].spec_digest == "digest-v2"
+    superseded = jobs.list_jobs(repo, states={jobs.SUPERSEDED})
+    assert len(superseded) == 1
+    assert superseded[0].id == older.id
+
+
+def test_auto_commit_true_lands_exactly_as_before(repo: Path, jaunt_cfg: JauntConfig) -> None:
+    _opt_into_journal(repo)
+    runner = FakeRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        _spec_commit(repo)
+        _cycle(repo, jaunt_cfg, state, runner, pool)
+    landed = jobs.list_jobs(repo, states={jobs.LANDED})
+    assert len(landed) == 1 and landed[0].module == "app"
+    assert "regen(app)" in _git(repo, "log", "-1", "--format=%s")
+    assert not jobs.list_jobs(repo, states={jobs.PROPOSED})
 
 
 def test_run_once_spawn_false_leaves_queued_job_unsubmitted(

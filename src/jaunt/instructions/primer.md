@@ -133,7 +133,13 @@ For exact flags on any command, run `jaunt <cmd> --help`. Common flags:
 Progress: `--progress {auto,rich,plain,none}` (`auto` = rich on TTY, plain lines
 off-TTY; explicit `plain` works with `--json`).
 
-Agent loop: `git commit … && jaunt jobs wait --timeout 1800`.
+Agent loop (default propose-only daemon): `git commit … && jaunt jobs wait
+--timeout 1800 && jaunt jobs land --all`. The daemon parks each green job as a
+reviewable proposal (`[daemon] auto_commit = false`, the default); `jaunt jobs
+wait` treats a proposal as terminal-green, and `jaunt jobs land --all` lands the
+fresh proposals as provenance commits (`jaunt jobs discard <id>` drops one). With
+`[daemon] auto_commit = true` the daemon commits green jobs itself, so the loop is
+just `git commit … && jaunt jobs wait --timeout 1800`.
 
 ## Exit codes
 

@@ -39,6 +39,23 @@ The skills system adds extra network calls (to PyPI for README fetches) and extr
 
 This means build output can vary based on your environment, network connectivity, and what's installed in the active venv. If reproducibility matters, commit the generated `.agents/skills/` directory.
 
+## Discovery Prescreen and Aliased `jaunt`
+
+To avoid importing side-effectful modules in large repos, discovery imports
+**only** modules that show evidence of jaunt specs. During the directory scan
+(not the `--target` fast-path), each candidate file must contain the substring
+`jaunt` and then pass an AST check for an `import jaunt` / `from jaunt import …`
+statement or a `magic` / `test` / `contract` / `preserve` decorator. Files
+without the textual `jaunt` are never parsed; files that fail to parse are skipped
+quietly.
+
+Documented limitation: a module that reaches jaunt only through an alias with no
+textual `jaunt` anywhere in the file (for example
+`import jaunt as j; @j.magic(...)`) is **not** discovered by a scan. This is
+contrived and accepted. Work around it by keeping a plain `import jaunt` (or a
+`from jaunt import …`) somewhere in the file, or by naming the module explicitly
+with `--target`, which bypasses the prescreen and imports it unconditionally.
+
 ## Codex Authentication
 
 Jaunt delegates generation to the `codex` CLI. Authenticate that CLI with

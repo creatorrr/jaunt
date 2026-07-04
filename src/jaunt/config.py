@@ -99,6 +99,7 @@ class DaemonConfig:
     poll_interval: float = 2.0
     max_jobs: int = 0
     notify_command: str = ""
+    auto_commit: bool = False
 
 
 @dataclass(frozen=True)
@@ -519,6 +520,11 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     else:
         daemon_notify_command = ""
 
+    if "auto_commit" in daemon_tbl:
+        daemon_auto_commit = _as_bool(daemon_tbl["auto_commit"], name="daemon.auto_commit")
+    else:
+        daemon_auto_commit = False
+
     if "auto" in skills_tbl:
         skills_auto = _as_bool(skills_tbl["auto"], name="skills.auto")
     else:
@@ -719,6 +725,7 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             poll_interval=daemon_poll_interval,
             max_jobs=daemon_max_jobs,
             notify_command=daemon_notify_command,
+            auto_commit=daemon_auto_commit,
         ),
         skills=SkillsConfig(
             auto=skills_auto,

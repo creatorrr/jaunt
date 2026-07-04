@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import jaunt.cli
-from jaunt import jobs
+from jaunt import jobs, landing
 from jaunt.cli import main
 from test_regressions_review_fixes import _restore_modules, _write, _write_package_init
 
@@ -73,6 +73,37 @@ def _park_job(
     patch_file.parent.mkdir(parents=True, exist_ok=True)
     patch_file.write_text(patch, encoding="utf-8")
     return jobs.mark(root, job, jobs.PARKED, patch_paths=json.dumps(paths))
+
+
+def _propose_job(
+    root: Path,
+    patch: str,
+    paths: list[str],
+    *,
+    module: str = "app",
+    spec_digest: str = "d",
+    cause: str = "spec change",
+    battery: str = "-",
+    refrozen: str = "",
+) -> jobs.JobRecord:
+    job = jobs.JobRecord.new(
+        module=module,
+        spec_digest=spec_digest,
+        base_commit=_git(root, "rev-parse", "HEAD"),
+        branch="main",
+    )
+    patch_file = jobs.jobs_dir(root) / f"{job.id}.patch"
+    patch_file.parent.mkdir(parents=True, exist_ok=True)
+    patch_file.write_text(patch, encoding="utf-8")
+    return jobs.mark(
+        root,
+        job,
+        jobs.PROPOSED,
+        patch_paths=json.dumps(paths),
+        cause=cause,
+        battery=battery,
+        refrozen=refrozen,
+    )
 
 
 def _make_magic_project(root: Path, *, package: str = "retry_app") -> tuple[Path, str]:
@@ -331,3 +362,433 @@ def test_jobs_retry_refuses_stale_spec_digest_then_force_lands(
     assert reloaded is not None
     assert reloaded.state == jobs.LANDED
     assert (root / "src" / "__generated__" / "app.py").read_text(encoding="utf-8") == "y = 3\n"
+
+
+def test_jobs_land_happy_path_creates_provenance_commit(
+    capsys, monkeypatch, tmp_path: Path
+) -> None:
+    project, module = _make_magic_project(tmp_path)
+    digest = _status_digest(project, module, capsys)
+    patch, _, paths = _patch_for(project, "src/__generated__/specs.py", "generated = True\n")
+    job = _propose_job(project, patch, paths, module=module, spec_digest=digest)
+
+    monkeypatch.chdir(project)
+    rc = main(["jobs", "land", job.id, "--root", str(project)])
+
+    assert rc == 0
+    sha = capsys.readouterr().out.strip()
+    assert sha == _git(project, "rev-parse", "HEAD")
+    reloaded = jobs.load_job(project, job.id)
+    assert reloaded is not None
+    assert reloaded.state == jobs.LANDED
+    assert reloaded.landed_commit == sha
+    assert (
+        _git(project, "log", "-1", "--pretty=%B")
+        == landing.build_commit_message(module, "spec change", job.id, digest).strip()
+    )
+    assert "src/__generated__/specs.py" in _git(project, "show", "--name-only", "--pretty=", "HEAD")
+    assert (project / "src" / "__generated__" / "specs.py").read_text(encoding="utf-8") == (
+        "generated = True\n"
+    )
+
+
+def test_jobs_land_commits_journal_line(capsys, monkeypatch, tmp_path: Path) -> None:
+    project, module = _make_magic_project(tmp_path)
+    (project / "JAUNT_LOG").write_text("", encoding="utf-8")
+    _git(project, "add", "JAUNT_LOG")
+    _git(project, "commit", "-m", "opt into journal")
+    digest = _status_digest(project, module, capsys)
+    patch, _, paths = _patch_for(project, "src/__generated__/specs.py", "generated = True\n")
+    job = _propose_job(project, patch, paths, module=module, spec_digest=digest)
+
+    monkeypatch.chdir(project)
+    rc = main(["jobs", "land", job.id, "--root", str(project)])
+
+    assert rc == 0
+    capsys.readouterr()
+    journal = (project / "JAUNT_LOG").read_text(encoding="utf-8")
+    assert "build" in journal
+    assert module in journal
+    assert job.id in journal
+    assert "JAUNT_LOG" in _git(project, "show", "--name-only", "--pretty=", "HEAD")
+
+
+def test_jobs_land_stale_digest_supersedes(capsys, monkeypatch, tmp_path: Path) -> None:
+    project, module = _make_magic_project(tmp_path)
+    patch, _, paths = _patch_for(project, "src/__generated__/specs.py", "generated = True\n")
+    job = _propose_job(project, patch, paths, module=module, spec_digest="stale")
+    head = _git(project, "rev-parse", "HEAD")
+
+    monkeypatch.chdir(project)
+    rc = main(["jobs", "land", job.id, "--root", str(project)])
+    captured = capsys.readouterr()
+
+    assert rc == 4
+    assert "superseded" in captured.err
+    assert "spec moved since generation" in captured.err
+    reloaded = jobs.load_job(project, job.id)
+    assert reloaded is not None
+    assert reloaded.state == jobs.SUPERSEDED
+    assert _git(project, "rev-parse", "HEAD") == head
+
+
+def test_jobs_land_dirty_paths_refuses_without_superseding(
+    capsys, monkeypatch, scaffolded_project: Path
+) -> None:
+    root = scaffolded_project
+    patch, _, paths = _patch_for(root, "src/__generated__/app.py", "y = 4\n")
+    job = _propose_job(root, patch, paths)
+    monkeypatch.setattr(
+        jaunt.cli, "_module_current_digest", lambda root, args, module: job.spec_digest
+    )
+    dirty_path = root / "src" / "__generated__" / "app.py"
+    dirty_path.parent.mkdir(parents=True, exist_ok=True)
+    dirty_path.write_text("dirty\n", encoding="utf-8")
+
+    monkeypatch.chdir(root)
+    rc = main(["jobs", "land", job.id])
+    captured = capsys.readouterr()
+
+    assert rc == 4
+    assert "src/__generated__/app.py" in captured.err
+    reloaded = jobs.load_job(root, job.id)
+    assert reloaded is not None
+    assert reloaded.state == jobs.PROPOSED
+
+
+def test_jobs_land_conflict_supersedes_and_truncates_journal(
+    capsys, monkeypatch, scaffolded_project: Path
+) -> None:
+    root = scaffolded_project
+    (root / "JAUNT_LOG").write_text("existing\n", encoding="utf-8")
+    _git(root, "add", "JAUNT_LOG")
+    _git(root, "commit", "-m", "opt into journal")
+    patch, _, paths = _patch_for(root, "src/__generated__/app.py", "y = 6\n")
+    job = _propose_job(root, patch, paths)
+    monkeypatch.setattr(
+        jaunt.cli, "_module_current_digest", lambda root, args, module: job.spec_digest
+    )
+    (root / "src" / "__generated__").mkdir(exist_ok=True)
+    (root / "src" / "__generated__" / "app.py").write_text(
+        "conflicting committed content\n",
+        encoding="utf-8",
+    )
+    _git(root, "add", "-A")
+    _git(root, "commit", "-m", "conflicting")
+    journal_before = (root / "JAUNT_LOG").read_text(encoding="utf-8")
+
+    monkeypatch.chdir(root)
+    rc = main(["jobs", "land", job.id])
+    captured = capsys.readouterr()
+
+    assert rc == 4
+    assert "conflict" in captured.err
+    reloaded = jobs.load_job(root, job.id)
+    assert reloaded is not None
+    assert reloaded.state == jobs.SUPERSEDED
+    assert (root / "JAUNT_LOG").read_text(encoding="utf-8") == journal_before
+
+
+def test_jobs_land_wrong_state_exits_2(capsys, monkeypatch, scaffolded_project: Path) -> None:
+    root = scaffolded_project
+    patch, _, paths = _patch_for(root, "src/__generated__/app.py", "y = 2\n")
+    job = _park_job(root, patch, paths)
+
+    monkeypatch.chdir(root)
+    rc = main(["jobs", "land", job.id])
+
+    assert rc == 2
+    assert "only proposed jobs can be landed" in capsys.readouterr().err
+
+
+def test_jobs_land_job_not_found_exits_2(capsys, monkeypatch, scaffolded_project: Path) -> None:
+    monkeypatch.chdir(scaffolded_project)
+    rc = main(["jobs", "land", "nonexistent"])
+
+    assert rc == 2
+    assert "error: job not found: nonexistent" in capsys.readouterr().err
+
+
+def test_jobs_discard_marks_and_removes_patch(
+    capsys, monkeypatch, scaffolded_project: Path
+) -> None:
+    root = scaffolded_project
+    patch, _, paths = _patch_for(root, "src/__generated__/app.py", "y = 2\n")
+    job = _propose_job(root, patch, paths)
+    patch_file = jobs.jobs_dir(root) / f"{job.id}.patch"
+
+    monkeypatch.chdir(root)
+    rc = main(["jobs", "discard", job.id])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert captured.out.strip() == f"discarded {job.id}"
+    reloaded = jobs.load_job(root, job.id)
+    assert reloaded is not None
+    assert reloaded.state == jobs.DISCARDED
+    assert not patch_file.exists()
+
+
+def test_jobs_discard_wrong_state_exits_2(capsys, monkeypatch, scaffolded_project: Path) -> None:
+    root = scaffolded_project
+    patch, _, paths = _patch_for(root, "src/__generated__/app.py", "y = 2\n")
+    job = _park_job(root, patch, paths)
+
+    monkeypatch.chdir(root)
+    rc = main(["jobs", "discard", job.id])
+
+    assert rc == 2
+    assert "only proposed jobs can be discarded" in capsys.readouterr().err
+
+
+def test_jobs_land_all_no_proposals_exits_0(capsys, monkeypatch, scaffolded_project: Path) -> None:
+    root = scaffolded_project
+    monkeypatch.chdir(root)
+
+    rc = main(["jobs", "land", "--all", "--root", str(root)])
+
+    assert rc == 0
+
+
+def test_jobs_land_all_lands_in_created_order_and_reports(
+    capsys, monkeypatch, scaffolded_project: Path
+) -> None:
+    root = scaffolded_project
+    patch_a, _, paths_a = _patch_for(root, "src/__generated__/a.py", "a = 1\n")
+    job_a = _propose_job(root, patch_a, paths_a, module="a", spec_digest="da")
+    patch_b, _, paths_b = _patch_for(root, "src/__generated__/b.py", "b = 1\n")
+    job_b = _propose_job(root, patch_b, paths_b, module="b", spec_digest="db")
+    digests = {"a": "da", "b": "db"}
+    monkeypatch.setattr(
+        jaunt.cli, "_module_current_digest", lambda root, args, module: digests[module]
+    )
+    expected = [(job.id, job.module) for job in jobs.list_jobs(root, states={jobs.PROPOSED})]
+
+    monkeypatch.chdir(root)
+    rc = main(["jobs", "land", "--all", "--root", str(root)])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    # One sha per landed proposal on stdout.
+    assert len([line for line in out.splitlines() if line.strip()]) == 2
+    for job in (job_a, job_b):
+        reloaded = jobs.load_job(root, job.id)
+        assert reloaded is not None
+        assert reloaded.state == jobs.LANDED
+    # Two provenance commits, applied in created order (oldest of the two first).
+    subjects = _git(root, "log", "--pretty=%s").splitlines()[:2][::-1]
+    assert subjects[0] == f"regen({expected[0][1]}): spec change"
+    assert subjects[1] == f"regen({expected[1][1]}): spec change"
+
+
+def test_jobs_land_all_mixed_fresh_stale(capsys, monkeypatch, scaffolded_project: Path) -> None:
+    root = scaffolded_project
+    patch_a, _, paths_a = _patch_for(root, "src/__generated__/a.py", "a = 1\n")
+    job_fresh = _propose_job(root, patch_a, paths_a, module="a", spec_digest="da")
+    patch_b, _, paths_b = _patch_for(root, "src/__generated__/b.py", "b = 1\n")
+    job_stale = _propose_job(root, patch_b, paths_b, module="b", spec_digest="db")
+    # module "a" digest matches; module "b" has moved since generation.
+    digests = {"a": "da", "b": "moved"}
+    monkeypatch.setattr(
+        jaunt.cli, "_module_current_digest", lambda root, args, module: digests[module]
+    )
+
+    monkeypatch.chdir(root)
+    rc = main(["jobs", "land", "--all", "--root", str(root)])
+    captured = capsys.readouterr()
+
+    assert rc == 4
+    fresh = jobs.load_job(root, job_fresh.id)
+    stale = jobs.load_job(root, job_stale.id)
+    assert fresh is not None and fresh.state == jobs.LANDED
+    assert stale is not None and stale.state == jobs.SUPERSEDED
+    # Both outcomes reported: the fresh sha on stdout, the stale supersede on stderr.
+    assert fresh.landed_commit in captured.out
+    assert "superseded" in captured.err
+    assert "b" in captured.err
+
+
+def test_jobs_land_refuses_user_dirty_journal(capsys, monkeypatch, tmp_path: Path) -> None:
+    # A user's uncommitted JAUNT_LOG edit must never be swept into a provenance commit.
+    project, module = _make_magic_project(tmp_path)
+    (project / "JAUNT_LOG").write_text("", encoding="utf-8")
+    _git(project, "add", "JAUNT_LOG")
+    _git(project, "commit", "-m", "opt into journal")
+    digest = _status_digest(project, module, capsys)
+    patch, _, paths = _patch_for(project, "src/__generated__/specs.py", "generated = True\n")
+    job = _propose_job(project, patch, paths, module=module, spec_digest=digest)
+
+    # Simulate an unrelated manual edit to the committed journal.
+    (project / "JAUNT_LOG").write_text("manual user journal line\n", encoding="utf-8")
+    head_before = _git(project, "rev-parse", "HEAD")
+
+    monkeypatch.chdir(project)
+    rc = main(["jobs", "land", job.id, "--root", str(project)])
+    captured = capsys.readouterr()
+
+    assert rc == 4
+    assert "JAUNT_LOG" in captured.err
+    # No commit was created; the job stays landable once the user resolves their edit.
+    assert _git(project, "rev-parse", "HEAD") == head_before
+    reloaded = jobs.load_job(project, job.id)
+    assert reloaded is not None
+    assert reloaded.state == jobs.PROPOSED
+    # The manual edit is left untouched (not committed, not clobbered by our journal line).
+    assert (project / "JAUNT_LOG").read_text(encoding="utf-8") == "manual user journal line\n"
+
+
+def test_jobs_land_allows_pending_daemon_journal_additions(
+    capsys, monkeypatch, tmp_path: Path
+) -> None:
+    # A pending daemon-authored journal line (e.g. job-propose) must not block landing.
+    project, module = _make_magic_project(tmp_path)
+    (project / "JAUNT_LOG").write_text("", encoding="utf-8")
+    _git(project, "add", "JAUNT_LOG")
+    _git(project, "commit", "-m", "opt into journal")
+    digest = _status_digest(project, module, capsys)
+    patch, _, paths = _patch_for(project, "src/__generated__/specs.py", "generated = True\n")
+    job = _propose_job(project, patch, paths, module=module, spec_digest=digest)
+
+    from jaunt import journal as journal_mod
+
+    journal_mod.append_events(
+        project,
+        [journal_mod.JournalEvent("job-propose", module, "spec change; battery -", job.id)],
+    )
+
+    monkeypatch.chdir(project)
+    rc = main(["jobs", "land", job.id, "--root", str(project)])
+
+    assert rc == 0
+    sha = capsys.readouterr().out.strip()
+    assert sha == _git(project, "rev-parse", "HEAD")
+    journal = (project / "JAUNT_LOG").read_text(encoding="utf-8")
+    assert "job-propose" in journal
+    assert "build" in journal
+    assert "JAUNT_LOG" in _git(project, "show", "--name-only", "--pretty=", "HEAD")
+
+
+def test_jobs_land_json_success(capsys, monkeypatch, tmp_path: Path) -> None:
+    project, module = _make_magic_project(tmp_path)
+    digest = _status_digest(project, module, capsys)
+    patch, _, paths = _patch_for(project, "src/__generated__/specs.py", "generated = True\n")
+    job = _propose_job(project, patch, paths, module=module, spec_digest=digest)
+
+    monkeypatch.chdir(project)
+    rc = main(["jobs", "land", job.id, "--json", "--root", str(project)])
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["command"] == "jobs"
+    assert payload["action"] == "land"
+    assert payload["ok"] is True
+    assert payload["job_id"] == job.id
+    assert payload["state"] == jobs.LANDED
+    assert payload["sha"] == _git(project, "rev-parse", "HEAD")
+    assert payload["error"] is None
+
+
+def test_jobs_land_json_before_subcommand(capsys, monkeypatch, tmp_path: Path) -> None:
+    # `jaunt jobs --json land <id>` must behave identically to the trailing flag.
+    project, module = _make_magic_project(tmp_path)
+    digest = _status_digest(project, module, capsys)
+    patch, _, paths = _patch_for(project, "src/__generated__/specs.py", "generated = True\n")
+    job = _propose_job(project, patch, paths, module=module, spec_digest=digest)
+
+    monkeypatch.chdir(project)
+    rc = main(["jobs", "--json", "land", job.id, "--root", str(project)])
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["job_id"] == job.id
+
+
+def test_jobs_land_json_error_not_found(capsys, monkeypatch, scaffolded_project: Path) -> None:
+    root = scaffolded_project
+    monkeypatch.chdir(root)
+
+    rc = main(["jobs", "land", "nonexistent", "--json"])
+
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["command"] == "jobs"
+    assert payload["action"] == "land"
+    assert payload["ok"] is False
+    assert payload["job_id"] == "nonexistent"
+    assert "not found" in payload["error"]
+
+
+def test_jobs_land_all_json(capsys, monkeypatch, scaffolded_project: Path) -> None:
+    root = scaffolded_project
+    patch_a, _, paths_a = _patch_for(root, "src/__generated__/a.py", "a = 1\n")
+    job_a = _propose_job(root, patch_a, paths_a, module="a", spec_digest="da")
+    digests = {"a": "da"}
+    monkeypatch.setattr(
+        jaunt.cli, "_module_current_digest", lambda root, args, module: digests[module]
+    )
+
+    monkeypatch.chdir(root)
+    rc = main(["jobs", "land", "--all", "--json", "--root", str(root)])
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["command"] == "jobs"
+    assert payload["action"] == "land"
+    assert payload["ok"] is True
+    assert len(payload["landed"]) == 1
+    assert len(payload["results"]) == 1
+    assert payload["results"][0]["job_id"] == job_a.id
+    assert payload["results"][0]["ok"] is True
+
+
+def test_jobs_discard_json(capsys, monkeypatch, scaffolded_project: Path) -> None:
+    root = scaffolded_project
+    patch, _, paths = _patch_for(root, "src/__generated__/app.py", "y = 2\n")
+    job = _propose_job(root, patch, paths)
+    patch_file = jobs.jobs_dir(root) / f"{job.id}.patch"
+
+    monkeypatch.chdir(root)
+    rc = main(["jobs", "discard", job.id, "--json"])
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["command"] == "jobs"
+    assert payload["action"] == "discard"
+    assert payload["ok"] is True
+    assert payload["job_id"] == job.id
+    assert payload["state"] == jobs.DISCARDED
+    reloaded = jobs.load_job(root, job.id)
+    assert reloaded is not None and reloaded.state == jobs.DISCARDED
+    assert not patch_file.exists()
+
+
+def test_jobs_discard_json_error(capsys, monkeypatch, scaffolded_project: Path) -> None:
+    root = scaffolded_project
+    monkeypatch.chdir(root)
+
+    rc = main(["jobs", "--json", "discard", "nonexistent"])
+
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["action"] == "discard"
+    assert payload["ok"] is False
+    assert "not found" in payload["error"]
+
+
+def test_jobs_discard_journals_line(capsys, monkeypatch, scaffolded_project: Path) -> None:
+    root = scaffolded_project
+    (root / "JAUNT_LOG").write_text("", encoding="utf-8")
+    _git(root, "add", "JAUNT_LOG")
+    _git(root, "commit", "-m", "opt into journal")
+    patch, _, paths = _patch_for(root, "src/__generated__/app.py", "y = 2\n")
+    job = _propose_job(root, patch, paths)
+
+    monkeypatch.chdir(root)
+    rc = main(["jobs", "discard", job.id])
+
+    assert rc == 0
+    capsys.readouterr()
+    journal = (root / "JAUNT_LOG").read_text(encoding="utf-8")
+    assert "job-discard" in journal
+    assert job.id in journal

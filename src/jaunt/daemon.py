@@ -528,48 +528,8 @@ def _truncate_journal(path: Path, size: int) -> None:
         f.truncate(size)
 
 
-def _is_daemon_journal_addition(line: str) -> bool:
-    if line.startswith("+++"):
-        return False
-    if not line.startswith("+"):
-        return False
-    parts = line[1:].split(maxsplit=3)
-    if len(parts) < 4:
-        return False
-    date, timestamp, action, _rest = parts
-    if len(date) != 10 or date[4] != "-" or date[7] != "-":
-        return False
-    if len(timestamp) != 6 or timestamp[2] != ":" or timestamp[-1] != "Z":
-        return False
-    return action in {
-        "build",
-        "refreeze",
-        "job-fail",
-        "job-park",
-        "job-supersede",
-        "probe-fail",
-    }
-
-
 def _journal_user_dirty(root: Path) -> bool:
-    status = landing.git_out(root, "status", "--porcelain", "--", journal_mod.JOURNAL_FILE).strip()
-    if not status:
-        return False
-    if status.startswith("??"):
-        return True
-
-    has_daemon_addition = False
-    for args in (("diff", "--unified=0"), ("diff", "--cached", "--unified=0")):
-        diff = landing.git_out(root, *args, "--", journal_mod.JOURNAL_FILE)
-        for line in diff.splitlines():
-            if line.startswith(("diff --git", "index ", "@@ ", "--- ", "+++ ")):
-                continue
-            if _is_daemon_journal_addition(line):
-                has_daemon_addition = True
-                continue
-            if line.startswith(("+", "-")):
-                return True
-    return not has_daemon_addition
+    return journal_mod.user_dirty(root)
 
 
 def _land_pending(root: Path, cfg: JauntConfig, state: DaemonState) -> None:
@@ -592,6 +552,40 @@ def _land_pending(root: Path, cfg: JauntConfig, state: DaemonState) -> None:
         action = "refreeze" if result.build.refrozen else "build"
         battery = result.gate.battery if result.gate else "-"
         message = landing.build_commit_message(job.module, cause, job.id, job.spec_digest)
+        if not cfg.daemon.auto_commit:
+            (jobs_mod.jobs_dir(root) / f"{job.id}.patch").write_text(result.patch, encoding="utf-8")
+            prev = jobs_mod.proposed_for_module(root, job.module)
+            if prev is not None and prev.id != job.id:
+                jobs_mod.mark(root, prev, jobs_mod.SUPERSEDED)
+                journal_mod.append_events(
+                    root,
+                    [
+                        journal_mod.JournalEvent(
+                            "job-supersede", prev.module, "newer proposal", prev.id
+                        )
+                    ],
+                )
+            updated = jobs_mod.mark(
+                root,
+                job,
+                jobs_mod.PROPOSED,
+                patch_paths=_json.dumps(list(result.patch_paths)),
+                cause=cause,
+                refrozen="1" if result.build.refrozen else "",
+                battery=battery,
+                phase="",
+            )
+            journal_mod.append_events(
+                root,
+                [
+                    journal_mod.JournalEvent(
+                        "job-propose", job.module, f"{cause}; battery {battery}", job.id
+                    )
+                ],
+            )
+            _notify(cfg, updated)
+            del state.pending[job_id]
+            continue
         journal_path = root / journal_mod.JOURNAL_FILE
         journal_opted_in = journal_path.exists()
         snapshot_len = 0

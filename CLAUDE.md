@@ -154,6 +154,8 @@ pytest_args = ["-q"]
 poll_interval = 2.0         # seconds between HEAD polls
 max_jobs = 0                # 0 -> build.jobs
 notify_command = ""         # optional shell command run on job completion
+auto_commit = false         # default: park green jobs as proposals (land with `jaunt jobs land`);
+                            #   true restores auto-commit-on-green (pre-1.2.0 behavior)
 
 [skills]
 auto = true                 # auto-generate PyPI helper skills for imported libs
@@ -270,10 +272,12 @@ jaunt reconcile               # Derive/refresh committed contract batteries (cal
 jaunt check                   # Verify committed batteries deterministically (CI gate, no model)
 jaunt eject <module:func>     # Remove contract tracking; leave plain Python + plain pytest
 
-jaunt daemon start            # Background codegen: commit-triggered isolated jobs, auto-commit on green
-jaunt daemon stop|status      # Stop / inspect the daemon
+jaunt daemon start            # Background codegen: commit-triggered isolated jobs; parks green jobs as proposals by default ([daemon] auto_commit = false)
+jaunt daemon stop|status      # Stop / inspect the daemon (status shows landing mode: propose-only | auto-commit)
 jaunt jobs                    # Job records + would-rebuild preview; show <id> [--full]; retry <id>
-jaunt jobs wait               # Block until daemon jobs finish (0 green, 4 failed/parked, 5 timeout)
+jaunt jobs land <id>|--all    # Land parked proposal(s) as provenance commits (re-validates; no --force); --all in job-creation order
+jaunt jobs discard <id>       # Discard a parked proposal (marks DISCARDED, removes patch)
+jaunt jobs wait               # Block until daemon jobs finish (0 green incl. PROPOSED, 4 failed/parked, 5 timeout)
 jaunt log                     # Tail the JAUNT_LOG change journal (-n N, --module X)
 jaunt guard                   # PreToolUse hook: warn when agents touch __generated__ (see docs/hooks.md)
 

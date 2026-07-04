@@ -383,6 +383,39 @@ def test_jobs_wait_includes_terminal_job_within_settle_lookback(
     assert payload["jobs"][0]["error"] == "boom"
 
 
+def test_jobs_wait_treats_proposed_as_green(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A parked proposal is terminal-green: `wait` must return EXIT_OK and stop.
+    _write_config(tmp_path)
+    _daemon_running(monkeypatch, True)
+    job = _new_job(tmp_path)
+    clock = FakeClock()
+    clock.add_event(1.0, lambda: jobs.mark(tmp_path, job, jobs.PROPOSED, cause="spec change"))
+
+    rc = _run_wait(tmp_path, job.id, "--progress", "none", clock=clock)
+
+    assert rc == jaunt.cli.EXIT_OK
+    assert clock.sleeps == [1.0]
+    assert capsys.readouterr().err == ""
+
+
+def test_jobs_wait_json_includes_proposed_state(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_config(tmp_path)
+    job = _new_job(tmp_path)
+    proposed = jobs.mark(tmp_path, job, jobs.PROPOSED, cause="spec change")
+
+    rc = _run_wait(tmp_path, proposed.id, "--json", "--progress", "none")
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == jaunt.cli.EXIT_OK
+    assert payload["ok"] is True
+    assert payload["timed_out"] is False
+    assert payload["jobs"][0]["state"] == jobs.PROPOSED
+
+
 def test_jobs_wait_discovers_project_root_from_subdir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

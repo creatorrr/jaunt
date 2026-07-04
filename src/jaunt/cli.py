@@ -296,6 +296,25 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Land even if the spec changed since the job parked.",
     )
+    jobs_land_p = jobs_sub.add_parser("land", help="Land a parked proposal as a provenance commit.")
+    jobs_land_p.add_argument("job_id", nargs="?")
+    jobs_land_p.add_argument("--all", action="store_true")
+    jobs_land_p.add_argument("--root", default=argparse.SUPPRESS)
+    jobs_land_p.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        default=argparse.SUPPRESS,
+    )
+    jobs_discard_p = jobs_sub.add_parser("discard", help="Discard a parked proposal.")
+    jobs_discard_p.add_argument("job_id")
+    jobs_discard_p.add_argument("--root", default=argparse.SUPPRESS)
+    jobs_discard_p.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        default=argparse.SUPPRESS,
+    )
     jobs_wait_p = jobs_sub.add_parser("wait", help="Wait for daemon jobs to finish.")
     jobs_wait_p.add_argument("job_id", nargs="?")
     jobs_wait_p.add_argument("--root", default=argparse.SUPPRESS)
@@ -802,6 +821,15 @@ def cmd_daemon(args: argparse.Namespace) -> int:
             else:
                 status = "stopped"
             print(f"Daemon: {status}")
+            try:
+                from jaunt.config import load_config
+
+                landing_mode = (
+                    "auto-commit" if load_config(root=root).daemon.auto_commit else "propose-only"
+                )
+            except Exception:
+                landing_mode = "propose-only"
+            print(f"landing: {landing_mode}")
             for job in records[-10:]:
                 print(f"- {job.id} {job.module}: {_job_state_label(job)}")
         return EXIT_OK
@@ -1318,11 +1346,306 @@ def _cmd_jobs_retry(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _land_one_proposal(
+    root: Path, args: argparse.Namespace, job: JobRecord, *, json_mode: bool = False
+) -> tuple[int, bool, dict[str, object]]:
+    from jaunt import jobs as jobs_mod
+    from jaunt import journal as journal_mod
+    from jaunt import landing
+
+    def _fail(
+        code: int, msg: str, *, aborted: bool = False, state: str | None = None
+    ) -> tuple[int, bool, dict[str, object]]:
+        if not json_mode:
+            _eprint(msg)
+        return (
+            code,
+            aborted,
+            {
+                "job_id": job.id,
+                "ok": False,
+                "state": state or job.state,
+                "sha": None,
+                "error": msg,
+            },
+        )
+
+    def _landed(sha: str) -> tuple[int, bool, dict[str, object]]:
+        if not json_mode:
+            print(sha)
+        return (
+            EXIT_OK,
+            False,
+            {
+                "job_id": job.id,
+                "ok": True,
+                "state": jobs_mod.LANDED,
+                "sha": sha,
+                "error": None,
+            },
+        )
+
+    if not job.patch_paths:
+        return _fail(EXIT_CONFIG_OR_DISCOVERY, f"error: proposed job {job.id} has no patch paths")
+
+    try:
+        patch_paths_raw = json.loads(job.patch_paths)
+    except json.JSONDecodeError:
+        return _fail(
+            EXIT_CONFIG_OR_DISCOVERY, f"error: proposed job {job.id} has invalid patch paths"
+        )
+    if (
+        not isinstance(patch_paths_raw, list)
+        or not patch_paths_raw
+        or not all(isinstance(path, str) for path in patch_paths_raw)
+    ):
+        return _fail(
+            EXIT_CONFIG_OR_DISCOVERY, f"error: proposed job {job.id} has invalid patch paths"
+        )
+
+    patch_file = jobs_mod.jobs_dir(root) / f"{job.id}.patch"
+    if not patch_file.exists():
+        return _fail(
+            EXIT_CONFIG_OR_DISCOVERY, f"error: proposed job {job.id} is missing patch file"
+        )
+
+    patch = patch_file.read_text(encoding="utf-8")
+    current_digest = _module_current_digest(root, args, job.module)
+    if current_digest is None or current_digest != job.spec_digest:
+        jobs_mod.mark(root, job, jobs_mod.SUPERSEDED)
+        return _fail(
+            EXIT_PYTEST_FAILURE,
+            f"superseded: {job.module} spec moved since generation; "
+            "the daemon will propose a fresh build",
+            state=jobs_mod.SUPERSEDED,
+        )
+
+    try:
+        current_branch = landing.git_out(root, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        if current_branch != job.branch:
+            return _fail(
+                EXIT_PYTEST_FAILURE,
+                f"error: on branch {current_branch}; proposal was generated on {job.branch}",
+            )
+        dirty = landing.git_out(root, "status", "--porcelain", "--", *patch_paths_raw).strip()
+    except landing.LandingError as e:
+        return _fail(EXIT_PYTEST_FAILURE, str(e), aborted=True)
+    if dirty:
+        return _fail(
+            EXIT_PYTEST_FAILURE,
+            f"error: refusing to land {job.id}; working tree has changes to: "
+            f"{' '.join(patch_paths_raw)}",
+        )
+
+    def truncate_journal(path: Path, size: int) -> None:
+        with open(path, "r+", encoding="utf-8") as f:
+            f.truncate(size)
+
+    journal_path = root / journal_mod.JOURNAL_FILE
+    journal_opted_in = journal_path.exists()
+    # Mirror the daemon auto-commit guard: never sweep unrelated user edits to
+    # JAUNT_LOG into the provenance commit. Daemon-authored additions are safe.
+    if journal_opted_in and journal_mod.user_dirty(root):
+        return _fail(
+            EXIT_PYTEST_FAILURE,
+            f"error: refusing to land {job.id}; {journal_mod.JOURNAL_FILE} has uncommitted "
+            "edits -- commit or stash them first",
+        )
+    snapshot_len = 0
+    extra_paths: tuple[str, ...] = ()
+    if journal_opted_in:
+        snapshot_len = journal_path.stat().st_size
+        journal_mod.append_events(
+            root,
+            [
+                journal_mod.JournalEvent(
+                    "refreeze" if job.refrozen else "build",
+                    job.module,
+                    f"{job.cause or 'spec change'}; battery {job.battery or '-'}",
+                    job.id,
+                )
+            ],
+        )
+        extra_paths = (journal_mod.JOURNAL_FILE,)
+
+    try:
+        expected_head = landing.git_out(root, "rev-parse", "HEAD").strip()
+        sha = landing.land(
+            root,
+            patch,
+            patch_paths=patch_paths_raw,
+            message=landing.build_commit_message(
+                job.module,
+                job.cause or "spec change",
+                job.id,
+                job.spec_digest,
+            ),
+            expected_branch=job.branch,
+            expected_head=expected_head,
+            extra_commit_paths=extra_paths,
+        )
+    except landing.LandingError as e:
+        if journal_opted_in:
+            truncate_journal(journal_path, snapshot_len)
+        return _fail(EXIT_PYTEST_FAILURE, str(e), aborted=True)
+
+    if sha == landing.HEAD_MOVED:
+        if journal_opted_in:
+            truncate_journal(journal_path, snapshot_len)
+        return _fail(EXIT_PYTEST_FAILURE, "head moved; re-run jaunt jobs land")
+    if sha is None:
+        if journal_opted_in:
+            truncate_journal(journal_path, snapshot_len)
+        jobs_mod.mark(root, job, jobs_mod.SUPERSEDED)
+        return _fail(
+            EXIT_PYTEST_FAILURE,
+            "conflict applying proposal; superseded -- the daemon will rebuild",
+            state=jobs_mod.SUPERSEDED,
+        )
+
+    jobs_mod.mark(root, job, jobs_mod.LANDED, landed_commit=sha, phase="")
+    return _landed(sha)
+
+
+def _land_all_proposals(root: Path, args: argparse.Namespace, *, json_mode: bool = False) -> int:
+    from jaunt import jobs as jobs_mod
+
+    proposals = jobs_mod.list_jobs(root, states={jobs_mod.PROPOSED})
+    if not proposals:
+        if json_mode:
+            _emit_json(
+                {"command": "jobs", "action": "land", "ok": True, "landed": [], "results": []}
+            )
+        return EXIT_OK
+
+    all_ok = True
+    results: list[dict[str, object]] = []
+    for job in proposals:
+        code, aborted, payload = _land_one_proposal(root, args, job, json_mode=json_mode)
+        results.append(payload)
+        if code != EXIT_OK:
+            all_ok = False
+        if aborted:
+            break
+
+    if json_mode:
+        _emit_json(
+            {
+                "command": "jobs",
+                "action": "land",
+                "ok": all_ok,
+                "landed": [p["sha"] for p in results if p["ok"]],
+                "results": results,
+            }
+        )
+    return EXIT_OK if all_ok else EXIT_PYTEST_FAILURE
+
+
+def _emit_jobs_action_error(action: str, job_id: str | None, state: str | None, msg: str) -> None:
+    _emit_json(
+        {
+            "command": "jobs",
+            "action": action,
+            "ok": False,
+            "job_id": job_id,
+            "state": state,
+            "sha": None,
+            "error": msg,
+        }
+    )
+
+
+def _cmd_jobs_land(args: argparse.Namespace) -> int:
+    from jaunt import jobs as jobs_mod
+
+    json_mode = _is_json_mode(args)
+    root = Path(args.root).resolve()
+    if args.all:
+        return _land_all_proposals(root, args, json_mode=json_mode)
+    if args.job_id is None:
+        msg = "error: jobs land requires a job id or --all"
+        if json_mode:
+            _emit_jobs_action_error("land", None, None, msg)
+        else:
+            _eprint(msg)
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    job = jobs_mod.load_job(root, args.job_id)
+    if job is None:
+        msg = f"error: job not found: {args.job_id}"
+        if json_mode:
+            _emit_jobs_action_error("land", args.job_id, None, msg)
+        else:
+            _eprint(msg)
+        return EXIT_CONFIG_OR_DISCOVERY
+    if job.state != jobs_mod.PROPOSED:
+        msg = f"error: job {job.id} is {job.state}; only proposed jobs can be landed"
+        if json_mode:
+            _emit_jobs_action_error("land", job.id, job.state, msg)
+        else:
+            _eprint(msg)
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    code, _aborted, payload = _land_one_proposal(root, args, job, json_mode=json_mode)
+    if json_mode:
+        _emit_json({"command": "jobs", "action": "land", **payload})
+    return code
+
+
+def _cmd_jobs_discard(args: argparse.Namespace) -> int:
+    from jaunt import jobs as jobs_mod
+    from jaunt import journal as journal_mod
+
+    json_mode = _is_json_mode(args)
+    root = Path(args.root).resolve()
+    job = jobs_mod.load_job(root, args.job_id)
+    if job is None:
+        msg = f"error: job not found: {args.job_id}"
+        if json_mode:
+            _emit_jobs_action_error("discard", args.job_id, None, msg)
+        else:
+            _eprint(msg)
+        return EXIT_CONFIG_OR_DISCOVERY
+    if job.state != jobs_mod.PROPOSED:
+        msg = f"error: job {job.id} is {job.state}; only proposed jobs can be discarded"
+        if json_mode:
+            _emit_jobs_action_error("discard", job.id, job.state, msg)
+        else:
+            _eprint(msg)
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    jobs_mod.mark(root, job, jobs_mod.DISCARDED)
+    (jobs_mod.jobs_dir(root) / f"{job.id}.patch").unlink(missing_ok=True)
+    journal_mod.append_events(
+        root,
+        [journal_mod.JournalEvent("job-discard", job.module, "discarded", job.id)],
+    )
+    if json_mode:
+        _emit_json(
+            {
+                "command": "jobs",
+                "action": "discard",
+                "ok": True,
+                "job_id": job.id,
+                "state": jobs_mod.DISCARDED,
+                "sha": None,
+                "error": None,
+            }
+        )
+    else:
+        print(f"discarded {job.id}")
+    return EXIT_OK
+
+
 def cmd_jobs(args: argparse.Namespace) -> int:
     if args.jobs_command == "show":
         return _cmd_jobs_show(args)
     if args.jobs_command == "retry":
         return _cmd_jobs_retry(args)
+    if args.jobs_command == "land":
+        return _cmd_jobs_land(args)
+    if args.jobs_command == "discard":
+        return _cmd_jobs_discard(args)
     if args.jobs_command == "wait":
         return _cmd_jobs_wait(args)
     return _cmd_jobs_list(args)

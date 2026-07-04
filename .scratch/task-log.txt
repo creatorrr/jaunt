@@ -1,0 +1,3221 @@
+OpenAI Codex v0.142.4
+--------
+workdir: /home/diwank/github.com/creatorrr/jaunt-impl-propose-only
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: medium
+reasoning summaries: none
+session id: 019f2a8d-5654-7551-a259-a7ad2617bc03
+--------
+user
+# Task: Daemon propose branch in `_land_pending` (jaunt 1.2.0 propose-only daemon)
+
+You are implementing EXACTLY ONE task in the jaunt repo. Do NOT read or execute anything under ~/.claude/, ~/.codex/, .claude/, .agents/, or agents/.
+
+Work only in `/home/diwank/github.com/creatorrr/jaunt-impl-propose-only`.
+
+## Context
+
+Jaunt's daemon runs background codegen jobs. When a job goes green, `_land_pending` in `src/jaunt/daemon.py` currently always auto-commits via `landing.land`. We are adding a **propose-only** mode: when `cfg.daemon.auto_commit` is False (the new default), a green job is parked as a `PROPOSED` proposal with its patch written to `.jaunt/jobs/<id>.patch`, instead of being committed.
+
+Tasks 1 and 2 are already done:
+- `cfg.daemon.auto_commit: bool` exists (default False).
+- `jobs.PROPOSED = "proposed"`, `jobs.DISCARDED = "discarded"` exist; both in `PHASE_CLEAR_STATES`, neither in `ACTIVE_STATES`.
+- `JobRecord.cause: str = ""` and `JobRecord.refrozen: str = ""` fields exist.
+- `jobs.proposed_for_module(root, module) -> JobRecord | None` exists (mirror of `parked_for_module`).
+
+## What to implement (Task 3)
+
+### 1. Propose branch in `_land_pending` (`src/jaunt/daemon.py`)
+
+`_land_pending` currently lives around lines 575-653. After the line:
+
+    message = landing.build_commit_message(job.module, cause, job.id, job.spec_digest)
+
+insert the propose branch (BEFORE the existing journal snapshot / `landing.land` block). When `not cfg.daemon.auto_commit`:
+
+        if not cfg.daemon.auto_commit:
+            (jobs_mod.jobs_dir(root) / f"{job.id}.patch").write_text(
+                result.patch, encoding="utf-8"
+            )
+            prev = jobs_mod.proposed_for_module(root, job.module)
+            if prev is not None and prev.id != job.id:
+                jobs_mod.mark(root, prev, jobs_mod.SUPERSEDED)
+                journal_mod.append_events(
+                    root,
+                    [
+                        journal_mod.JournalEvent(
+                            "job-supersede", prev.module, "newer proposal", prev.id
+                        )
+                    ],
+                )
+            updated = jobs_mod.mark(
+                root,
+                job,
+                jobs_mod.PROPOSED,
+                patch_paths=_json.dumps(list(result.patch_paths)),
+                cause=cause,
+                refrozen="1" if result.build.refrozen else "",
+                battery=battery,
+                phase="",
+            )
+            journal_mod.append_events(
+                root,
+                [
+                    journal_mod.JournalEvent(
+                        "job-propose", job.module, f"{cause}; battery {battery}", job.id
+                    )
+                ],
+            )
+            _notify(cfg, updated)
+            del state.pending[job_id]
+            continue
+
+Notes:
+- `_json` is the module-level `import json as _json` already in daemon.py.
+- `cause`, `action`, `battery`, `message` are already computed just above this point. Keep the existing `message` line (auto-commit path still uses it). The propose branch does NOT commit and does NOT touch the journal snapshot/truncate logic.
+- The auto-commit path (`cfg.daemon.auto_commit` True) must remain BYTE-IDENTICAL to today. Do not change any of the existing journal-snapshot / `landing.land` / PARKED / LANDED code below the propose branch.
+
+### 2. Journal action set (`_is_daemon_journal_addition`, around lines 544-551)
+
+Add `"job-propose"` and `"job-discard"` to the action set so uncommitted propose/discard journal lines are classified as daemon-authored (union-safe). Do NOT add `"job-land"`. The resulting set should be:
+
+    return action in {
+        "build",
+        "refreeze",
+        "job-fail",
+        "job-park",
+        "job-supersede",
+        "job-propose",
+        "job-discard",
+        "probe-fail",
+    }
+
+## Tests to add (`tests/test_daemon.py`)
+
+The test file uses a `repo` fixture (temp git repo whose `jaunt.toml` sets `[daemon] auto_commit = true`), a `jaunt_cfg` fixture, a `FakeRunner`, `_spec_commit(repo)`, `_opt_into_journal(repo)`, and a `_cycle(repo, cfg, state, runner, pool)` helper that drives `run_once` + `drain` to quiescence. `_git(repo, *args)` runs git. Read the existing tests (e.g. `test_run_once_full_cycle_lands_and_journals`, `test_restart_supersedes_stale_parked_job_and_enqueues_fresh`, `test_supersede_on_newer_spec_commit`) to match idioms exactly. `from jaunt.config import load_config` is already imported.
+
+Add these tests.
+
+    def test_green_job_proposes_when_auto_commit_false(repo: Path) -> None:
+        (repo / "jaunt.toml").write_text(
+            'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = false\n',
+            encoding="utf-8",
+        )
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-m", "propose mode")
+        cfg = load_config(root=repo)
+        runner = FakeRunner()
+        state = daemon.DaemonState()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            _spec_commit(repo)
+            _cycle(repo, cfg, state, runner, pool)
+
+        proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
+        assert len(proposed) == 1
+        job = proposed[0]
+        assert job.module == "app"
+        assert (jobs.jobs_dir(repo) / f"{job.id}.patch").read_text(encoding="utf-8")
+        assert json.loads(job.patch_paths)
+        assert job.cause == "spec change"
+        assert job.battery == "3/3"
+        assert not jobs.list_jobs(repo, states={jobs.LANDED})
+        assert "regen" not in _git(repo, "log", "-1", "--format=%s")
+
+Superseding test. A job id derives from (module, spec_digest, base_commit), so two DISTINCT proposals for the same module need different spec digests. The cleanest deterministic approach: run one propose cycle to produce a real PROPOSED job for "app", then change `runner.digest = "digest-v2"`, reset `runner.built = []`, do another `_spec_commit(repo)`, and cycle again to produce a second, differently-ided proposal. Assert exactly one PROPOSED remains (the newer, digest-v2) and exactly one SUPERSEDED (the older). If two-cycle setup is awkward through `_cycle`, instead pre-create an older PROPOSED JobRecord for "app" via `jobs.JobRecord.new(...)` + `jobs.mark(repo, job, jobs.PROPOSED, patch_paths=..., ...)`, then run one propose cycle whose FakeRunner reports a different digest so the produced job id differs, and assert the pre-existing one became SUPERSEDED and the new one is PROPOSED. Pick whichever is cleaner/deterministic and make it pass.
+
+    def test_newer_proposal_supersedes_older(repo: Path) -> None:
+        ...
+
+Auto-commit-unchanged test (repo fixture already sets auto_commit = true):
+
+    def test_auto_commit_true_lands_exactly_as_before(repo: Path, jaunt_cfg: JauntConfig) -> None:
+        _opt_into_journal(repo)
+        runner = FakeRunner()
+        state = daemon.DaemonState()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            _spec_commit(repo)
+            _cycle(repo, jaunt_cfg, state, runner, pool)
+        landed = jobs.list_jobs(repo, states={jobs.LANDED})
+        assert len(landed) == 1 and landed[0].module == "app"
+        assert "regen(app)" in _git(repo, "log", "-1", "--format=%s")
+        assert not jobs.list_jobs(repo, states={jobs.PROPOSED})
+
+## Verification
+
+Run and make green:
+- `uv run pytest tests/test_daemon.py -q`
+- full suite `uv run pytest -q`
+- `uv run ruff check .`
+- `uv run ruff format .`
+- `uv run ty check`
+
+Do NOT modify any files other than `src/jaunt/daemon.py` and `tests/test_daemon.py`. Do NOT change existing test assertions. Do NOT change the auto-commit landing code path.
+
+codex
+I’ll use the Jaunt skill because this is a Jaunt repo change, then keep the edits constrained to `src/jaunt/daemon.py` and `tests/test_daemon.py` as requested.
+exec
+/bin/zsh -lc "sed -n '1,220p' .codex/skills/jaunt/SKILL.md" in /home/diwank/github.com/creatorrr/jaunt-impl-propose-only
+ succeeded in 0ms:
+---
+name: jaunt
+description: "Use when working with the Jaunt spec-driven code generation framework for Python. Trigger for requests mentioning Jaunt, @jaunt.magic, @jaunt.test, spec stubs, jaunt build, jaunt test, jaunt.toml, __generated__ directories, or writing specs/tests that Jaunt will generate implementations for. Also use when the user wants to set up a new Jaunt project, configure LLM providers, debug build failures, or understand the spec-driven development workflow."
+---
+
+# Jaunt (spec-driven code generation)
+
+Jaunt is a spec-driven code generation framework for Python: you write intent as
+`@jaunt.magic` / `@jaunt.test` / `@jaunt.contract` stubs and Jaunt generates real
+implementations and pytest tests into `__generated__/` using the OpenAI Codex CLI.
+
+## Get the current workflow primer
+
+Jaunt ships its own always-current, **project-aware** agent briefing. Run it and
+load the output into context before working:
+
+```bash
+jaunt instructions          # markdown primer + a live snapshot of THIS project
+jaunt instructions --json   # {command, ok, text, project} for tooling/MCP
+```
+
+`jaunt instructions` is the single source of truth for how to author specs, run
+the build/test loop, read build status, and use contract mode. This file is kept
+intentionally thin so it cannot drift from the installed CLI.
+
+## Hard rules (if you cannot run the CLI)
+
+- **Never edit files under `__generated__/`** — they are overwritten on every build.
+- **Never hand-write the body of a `@jaunt.magic` symbol.** The docstring is the
+  contract and Jaunt fills in the code; keep the body a `raise RuntimeError(...)`
+  stub.
+- **Pair every `@jaunt.magic` spec with `@jaunt.test` coverage.**
+
+codex
+I’m going to inspect only the daemon/test areas needed for this change, then patch the requested branch without disturbing the existing landing path.
+exec
+/bin/zsh -lc "sed -n '520,700p' src/jaunt/daemon.py" in /home/diwank/github.com/creatorrr/jaunt-impl-propose-only
+ succeeded in 0ms:
+            check=False,
+        )
+    except Exception:
+        pass
+
+
+def _truncate_journal(path: Path, size: int) -> None:
+    with open(path, "r+", encoding="utf-8") as f:
+        f.truncate(size)
+
+
+def _is_daemon_journal_addition(line: str) -> bool:
+    if line.startswith("+++"):
+        return False
+    if not line.startswith("+"):
+        return False
+    parts = line[1:].split(maxsplit=3)
+    if len(parts) < 4:
+        return False
+    date, timestamp, action, _rest = parts
+    if len(date) != 10 or date[4] != "-" or date[7] != "-":
+        return False
+    if len(timestamp) != 6 or timestamp[2] != ":" or timestamp[-1] != "Z":
+        return False
+    return action in {
+        "build",
+        "refreeze",
+        "job-fail",
+        "job-park",
+        "job-supersede",
+        "probe-fail",
+    }
+
+
+def _journal_user_dirty(root: Path) -> bool:
+    status = landing.git_out(root, "status", "--porcelain", "--", journal_mod.JOURNAL_FILE).strip()
+    if not status:
+        return False
+    if status.startswith("??"):
+        return True
+
+    has_daemon_addition = False
+    for args in (("diff", "--unified=0"), ("diff", "--cached", "--unified=0")):
+        diff = landing.git_out(root, *args, "--", journal_mod.JOURNAL_FILE)
+        for line in diff.splitlines():
+            if line.startswith(("diff --git", "index ", "@@ ", "--- ", "+++ ")):
+                continue
+            if _is_daemon_journal_addition(line):
+                has_daemon_addition = True
+                continue
+            if line.startswith(("+", "-")):
+                return True
+    return not has_daemon_addition
+
+
+def _land_pending(root: Path, cfg: JauntConfig, state: DaemonState) -> None:
+    for job_id, result in list(state.pending.items()):
+        job = jobs_mod.load_job(root, job_id)
+        if job is None or job.state not in (jobs_mod.RUNNING, jobs_mod.GREEN):
+            del state.pending[job_id]
+            continue
+        if not result.build.ok or (result.gate is not None and not result.gate.ok):
+            detail = result.build.error or (result.gate.detail if result.gate else "gate failed")
+            updated = jobs_mod.mark(root, job, jobs_mod.FAILED, error=detail, phase="")
+            _notify(cfg, updated)
+            journal_mod.append_events(
+                root, [journal_mod.JournalEvent("job-fail", job.module, detail, job.id)]
+            )
+            del state.pending[job_id]
+            continue
+
+        cause = "cosmetic (gate: EQUIVALENT)" if result.build.refrozen else "spec change"
+        action = "refreeze" if result.build.refrozen else "build"
+        battery = result.gate.battery if result.gate else "-"
+        message = landing.build_commit_message(job.module, cause, job.id, job.spec_digest)
+        journal_path = root / journal_mod.JOURNAL_FILE
+        journal_opted_in = journal_path.exists()
+        snapshot_len = 0
+        extra_paths: tuple[str, ...] = ()
+        if journal_opted_in:
+            if _journal_user_dirty(root):
+                if not state.journal_dirty_notified:
+                    _notify(cfg, job, state_override="deferred")
+                    state.journal_dirty_notified = True
+                continue
+            state.journal_dirty_notified = False
+            snapshot_len = journal_path.stat().st_size
+            journal_mod.append_events(
+                root,
+                [
+                    journal_mod.JournalEvent(
+                        action, job.module, f"{cause}; battery {battery}", job.id
+                    )
+                ],
+            )
+            extra_paths = (journal_mod.JOURNAL_FILE,)
+        try:
+            sha = landing.land(
+                root,
+                result.patch,
+                patch_paths=list(result.patch_paths),
+                message=message,
+                expected_branch=job.branch,
+                expected_head=state.last_head,
+                extra_commit_paths=extra_paths,
+            )
+        except Exception:
+            if journal_opted_in:
+                _truncate_journal(journal_path, snapshot_len)
+            raise
+        if sha == landing.HEAD_MOVED:
+            if journal_opted_in:
+                _truncate_journal(journal_path, snapshot_len)
+            continue
+        del state.pending[job_id]
+        if sha is None:
+            if journal_opted_in:
+                _truncate_journal(journal_path, snapshot_len)
+            (jobs_mod.jobs_dir(root) / f"{job.id}.patch").write_text(result.patch, encoding="utf-8")
+            updated = jobs_mod.mark(
+                root,
+                job,
+                jobs_mod.PARKED,
+                patch_paths=_json.dumps(list(result.patch_paths)),
+                phase="",
+            )
+            _notify(cfg, updated)
+            journal_mod.append_events(
+                root, [journal_mod.JournalEvent("job-park", job.module, "landing conflict", job.id)]
+            )
+        else:
+            state.last_head = sha
+            updated = jobs_mod.mark(root, job, jobs_mod.LANDED, landed_commit=sha, phase="")
+            _notify(cfg, updated)
+
+
+def run_once(
+    root: Path,
+    cfg: JauntConfig,
+    state: DaemonState,
+    runner: Runner,
+    pool: Executor,
+    *,
+    spawn: bool = True,
+) -> None:
+    head = _head(root)
+    if head != state.last_head:
+        try:
+            stale, digests = _probe_head(root, head, runner)
+        except ProbeError as err:
+            detail = _one_line_detail(err)
+            if detail != state.last_probe_error:
+                journal_mod.append_events(
+                    root, [journal_mod.JournalEvent("probe-fail", "-", detail)]
+                )
+            state.last_probe_error = detail
+        else:
+            state.last_probe_error = ""
+            state.last_head = head
+            branch = _branch(root)
+            for module, _change in sorted(stale.items()):
+                digest = digests.get(module, "")
+                existing = jobs_mod.active_for_module(root, module)
+                if existing is not None:
+                    if existing.spec_digest == digest:
+                        continue
+                    jobs_mod.mark(root, existing, jobs_mod.SUPERSEDED, phase="")
+                    journal_mod.append_events(
+                        root,
+                        [
+                            journal_mod.JournalEvent(
+                                "job-supersede",
+                                existing.module,
+                                "active job stale; spec changed",
+                                existing.id,
+                            )
+                        ],
+                    )
+                    state.futures.pop(existing.id, None)
+                    state.pending.pop(existing.id, None)
+                parked = jobs_mod.parked_for_module(root, module)
+
+exec
+/bin/zsh -lc 'rg -n "test_run_once_full_cycle_lands_and_journals|test_restart_supersedes_stale_parked_job_and_enqueues_fresh|test_supersede_on_newer_spec_commit|class FakeRunner|def _cycle|def _spec_commit|def _opt_into_journal" tests/test_daemon.py' in /home/diwank/github.com/creatorrr/jaunt-impl-propose-only
+ succeeded in 0ms:
+74:class FakeRunner:
+101:def _spec_commit(repo: Path, body: str = '"""spec v2"""\n') -> None:
+107:def _opt_into_journal(repo: Path) -> None:
+134:def _cycle(
+329:def test_run_once_full_cycle_lands_and_journals(repo: Path, jaunt_cfg: JauntConfig) -> None:
+593:def test_restart_supersedes_stale_parked_job_and_enqueues_fresh(
+661:def test_supersede_on_newer_spec_commit(repo: Path, jaunt_cfg: JauntConfig) -> None:
+
+exec
+/bin/zsh -lc 'uv run jaunt instructions' in /home/diwank/github.com/creatorrr/jaunt-impl-propose-only
+ succeeded in 0ms:
+# Jaunt — agent primer
+
+Jaunt is a spec-driven code generation framework for Python. You write
+**intent** as decorator-marked stubs; Jaunt generates the **implementation** with
+the OpenAI Codex CLI (`codex exec`) and writes it under `__generated__/`.
+
+## Your role (read this first)
+
+You author and refine *specs*. You do **not** write the implementations.
+
+1. **Never hand-write the body of a `@jaunt.magic` symbol.** Its body stays a
+   stub (`raise RuntimeError("spec stub ...")`). The docstring is the contract;
+   Jaunt fills in the code.
+2. **Never edit files under `__generated__/`.** They are overwritten on every
+   build. Fix the spec and rebuild instead.
+3. **Pair every implementation spec with test intent.** A `@jaunt.magic` symbol
+   without `@jaunt.test` coverage is unfinished work.
+
+## Mental model
+
+- A **spec** is a decorated stub describing *what* to build. The full, cleaned
+  docstring is the behavioral contract — later lines matter as much as the first.
+- `jaunt build` generates implementations into `__generated__/`; importing the
+  symbol transparently resolves to the generated code.
+- Builds are **incremental**: Jaunt hashes each spec's normalized contract and its
+  transitive dependencies. Cosmetic edits (formatting, comments) do not trigger a
+  rebuild; signature, docstring-contract, and dependency-API changes do.
+
+## The two modes
+
+Both coexist and are selected per symbol by decorator.
+
+- **Magic mode** — `@jaunt.magic` / `@jaunt.test`. The docstring is canonical and
+  Jaunt generates the implementation (and tests) under `__generated__/`. Use this
+  when you want Jaunt to write the code.
+- **Contract mode** — `@jaunt.contract`. The *committed code* is canonical; the
+  docstring is a contract; Jaunt derives a committed pytest battery under
+  `tests/contract/` (it does not generate the implementation). Use this to pin
+  behavior of code you want to keep hand-written. It covers top-level functions
+  (sync or async) and whole classes, and derived cases may declare pytest
+  fixtures resolved from `tests/contract/conftest.py`.
+
+## The build/test loop
+
+1. Write `@jaunt.magic` specs (and `@jaunt.test` specs).
+2. `jaunt build` → generate implementations.
+3. `jaunt test` → generate tests and run pytest.
+4. Review the generated code in `__generated__/`. If it is wrong, **refine the
+   spec docstring** (or add a `prompt=` hint) and rebuild — do not patch the
+   output.
+5. `jaunt status` shows what is stale and needs rebuilding.
+
+## Writing a good `@jaunt.magic` spec
+
+```python
+import jaunt
+
+@jaunt.magic()
+def slugify(title: str) -> str:
+    """
+    Convert a title to a URL-safe slug.
+
+    Rules:
+    - Lowercase the input.
+    - Replace whitespace runs with a single "-".
+    - Remove characters that are not ASCII alphanumerics, "-", or "_".
+    - Raise ValueError if the result is empty.
+    """
+    raise RuntimeError("spec stub (generated at build time)")
+```
+
+Principles:
+
+- Be explicit about behavior: inputs, outputs, invariants, what "correct" means.
+- Name the failure modes: which exception, under which condition.
+- Cover edge cases: empty input, `None`, boundaries, duplicates.
+- Use full type annotations on every parameter and the return.
+- Prefer pure logic; push I/O behind parameters (dependency injection).
+- Declare dependencies with `deps=[other_spec]` when one spec uses another.
+- For a whole-class `@jaunt.magic`, the declared members and method signatures are
+  part of the exported contract — changing them can invalidate dependents.
+
+## Whole-class `@jaunt.magic` method tiers
+
+Inside a class-level `@jaunt.magic`, each method is in exactly one of three tiers:
+
+- **Preserved** (`@jaunt.preserve`): hand-written; kept verbatim.
+- **Sealed** (inner `@jaunt.magic` on a stub): Jaunt writes the body, but the
+  declared signature is locked — do not change params, defaults, annotations, or
+  the return type. Signature drift is a hard build error.
+- **Guidepost** (an unmarked stub): a sketch of intent; the model may adapt the
+  signature or split it into several methods as long as the docstring behavior is
+  delivered.
+
+```python
+@jaunt.magic()
+class Cache:
+    """A tiny key/value cache. Design the internals."""
+
+    @jaunt.magic
+    def get(self, key: str) -> str | None: ...  # sealed: this signature is locked
+```
+
+Inner `@jaunt.magic` here takes no kwargs and cannot sit under `@property` (v1). A
+spec'd base class in the class header is an always-on dependency (not gated by
+`infer_deps`), and a cross-module base's generated public API feeds the subclass's
+freshness.
+
+## Writing a good `@jaunt.test` spec
+
+```python
+@jaunt.test()
+def test_slugify_basic() -> None:
+    """Assert slugify("Hello World") == "hello-world" and "  A  B  " -> "a-b"."""
+    raise AssertionError("spec stub (generated at test time)")
+
+@jaunt.test()
+def test_slugify_rejects_empty() -> None:
+    """slugify("!!!") raises ValueError (nothing remains after filtering)."""
+    raise AssertionError("spec stub (generated at test time)")
+```
+
+Keep tests deterministic (no network/clock unless injected), small, and focused on
+the public contract. Include negative/error-path cases. Names must start with
+`test_`.
+
+## Commands
+
+| Command | What it does |
+|---------|--------------|
+| `jaunt build` | Generate implementations for `@jaunt.magic` specs. |
+| `jaunt test` | Generate tests for `@jaunt.test` specs and run pytest. |
+| `jaunt status` | Show which modules are stale vs fresh (and why). |
+| `jaunt specs` | List `@jaunt.magic` specs and their dependency graph. |
+| `jaunt log` | Show the `JAUNT_LOG` change journal (recent builds/adopts). |
+| `jaunt daemon` | Run, stop, or inspect the background codegen daemon. |
+| `jaunt jobs` | List daemon jobs, inspect parked failures, or retry landing. |
+| `jaunt jobs wait` | Block for daemon completion: 0 green, 4 failed/parked, 5 timeout, 2 daemon-not-running. |
+| `jaunt watch` | Rebuild (and optionally test) on file changes. |
+| `jaunt init` | Scaffold `jaunt.toml` + source/test directories. |
+| `jaunt clean` | Remove `__generated__/` directories. |
+| `jaunt instructions` | Print this agent primer (project-aware). |
+| `jaunt adopt` | Track existing code with `@jaunt.contract` and derive its battery. |
+| `jaunt reconcile` | Derive/refresh committed contract batteries (calls the model). |
+| `jaunt check` | Verify committed contract batteries deterministically (CI gate). |
+| `jaunt eject` | Remove contract tracking; leave plain Python + pytest. |
+| `jaunt guard` | Warn-on-access PreToolUse hook for `__generated__/` (see docs/hooks.md). |
+
+For exact flags on any command, run `jaunt <cmd> --help`. Common flags:
+`--root`, `--config`, `--json`, `--force`, `--target MODULE`, `--no-infer-deps`.
+Progress: `--progress {auto,rich,plain,none}` (`auto` = rich on TTY, plain lines
+off-TTY; explicit `plain` works with `--json`).
+
+Agent loop: `git commit … && jaunt jobs wait --timeout 1800`.
+
+## Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success. |
+| 2 | Config, discovery, or dependency-cycle error. |
+| 3 | Code generation error. |
+| 4 | Pytest failure, contract `check`/`reconcile` block, or daemon job failed/parked. |
+| 5 | Timeout while waiting for daemon jobs. |
+
+## Incremental builds & freshness
+
+- `jaunt status` lists stale vs fresh modules. A dependency's API change (signature,
+  whole-class members, contract docstring) makes its dependents stale too.
+- `jaunt build --force` ignores the incremental cache and regenerates everything.
+- `jaunt build --target my_pkg.mymod` rebuilds one module (and its dependents).
+
+## Anti-patterns to avoid
+
+- Editing `__generated__/` by hand (it will be overwritten).
+- Writing real logic inside a `@jaunt.magic` body (the body must stay a stub).
+- Vague docstrings ("does X") with no semantics, edge cases, or error behavior.
+- Shipping a `@jaunt.magic` spec with no `@jaunt.test` coverage.
+- Over-constraining the implementation with details the contract does not require.
+
+## Your project right now
+
+> No jaunt.toml found — run `jaunt init` to start. (Showing framework rules only.)
+
+
+codex
+I found the landing code exactly where expected. The current journal action filter is missing the two propose-only events, and the auto-commit path starts immediately after the commit-message line.
+exec
+/bin/zsh -lc "sed -n '1,180p' tests/test_daemon.py" in /home/diwank/github.com/creatorrr/jaunt-impl-propose-only
+ succeeded in 0ms:
+from __future__ import annotations
+
+import json
+import os
+import signal
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from jaunt import cli, daemon, jobs, journal
+from jaunt.config import JauntConfig, load_config
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+@pytest.fixture()
+def repo(tmp_path: Path) -> Path:
+    r = tmp_path / "repo"
+    r.mkdir()
+    _git(r, "init", "-b", "main")
+    _git(r, "config", "user.email", "t@example.com")
+    _git(r, "config", "user.name", "T")
+    (r / "src").mkdir()
+    (r / "src" / "app.py").write_text('"""spec v1"""\n', encoding="utf-8")
+    (r / ".gitignore").write_text(".jaunt/\n", encoding="utf-8")
+    (r / "jaunt.toml").write_text(
+        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = true\n',
+        encoding="utf-8",
+    )
+    _git(r, "add", "-A")
+    _git(r, "commit", "-m", "init")
+    return r
+
+
+@pytest.fixture()
+def jaunt_cfg(repo: Path) -> JauntConfig:
+    return load_config(root=repo)
+
+
+@pytest.fixture()
+def jaunt_cfg_with_notify(repo: Path, tmp_path: Path) -> JauntConfig:
+    notify_path = tmp_path / "notify.txt"
+    notify_command = f"echo $JAUNT_JOB_MODULE:$JAUNT_JOB_STATE >> {notify_path.as_posix()}"
+    (repo / "jaunt.toml").write_text(
+        "\n".join(
+            [
+                "version = 1",
+                "",
+                "[paths]",
+                'source_roots = ["src"]',
+                "",
+                "[daemon]",
+                "auto_commit = true",
+                f"notify_command = '{notify_command}'",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return load_config(root=repo)
+
+
+class FakeRunner:
+    """Stale until built; probe returns a controllable digest so tests can supersede."""
+
+    def __init__(self, module: str = "app", change: str = "prose") -> None:
+        self.module = module
+        self.change = change
+        self.digest = "digest-v1"
+        self.built: list[str] = []
+
+    def probe(self, worktree: Path) -> tuple[dict[str, str], dict[str, str]]:
+        if self.built:
+            return {}, {}
+        return {self.module: self.change}, {self.module: self.digest}
+
+    def build(
+        self, worktree: Path, module: str, heartbeat: daemon.Heartbeat | None = None
+    ) -> daemon.BuildOutcome:
+        gen = worktree / "src" / "__generated__"
+        gen.mkdir(parents=True, exist_ok=True)
+        (gen / f"{module}.py").write_text("generated = True\n", encoding="utf-8")
+        self.built.append(module)
+        return daemon.BuildOutcome(ok=True, refrozen=False)
+
+    def gate(self, worktree: Path, module: str) -> daemon.GateOutcome:
+        return daemon.GateOutcome(ok=True, battery="3/3")
+
+
+def _spec_commit(repo: Path, body: str = '"""spec v2"""\n') -> None:
+    (repo / "src" / "app.py").write_text(body, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "spec commit")
+
+
+def _opt_into_journal(repo: Path) -> None:
+    (repo / journal.JOURNAL_FILE).touch()
+    _git(repo, "add", "--", journal.JOURNAL_FILE)
+    _git(repo, "commit", "-m", "opt into journal")
+
+
+def _wait_for_marker(path: Path, proc: subprocess.Popen[str], timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return
+        if proc.poll() is not None:
+            stdout, stderr = proc.communicate()
+            pytest.fail(
+                f"child exited before writing {path}: rc={proc.returncode} "
+                f"stdout={stdout!r} stderr={stderr!r}"
+            )
+        time.sleep(0.05)
+    pytest.fail(f"timed out waiting for {path}")
+
+
+def _install_failing_pre_commit(repo: Path) -> None:
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+
+
+def _cycle(
+    repo: Path,
+    cfg: JauntConfig,
+    state: daemon.DaemonState,
+    runner: FakeRunner,
+    pool: ThreadPoolExecutor,
+    n: int = 3,
+) -> None:
+    """Drive run_once to quiescence: probe/spawn, drain, collect/land."""
+    for _ in range(n):
+        daemon.run_once(repo, cfg, state, runner, pool)
+        daemon.drain(state)
+
+
+def test_lock_acquire_release(tmp_path: Path) -> None:
+    lockfile = tmp_path / ".jaunt" / "daemon.pid"
+    handle = daemon.acquire_lock(tmp_path)
+    assert handle is not None
+    try:
+        st = os.fstat(handle.fd)
+        pst = os.stat(lockfile)
+        assert (pst.st_dev, pst.st_ino) == (st.st_dev, st.st_ino)
+        assert lockfile.read_text(encoding="utf-8") == f"{os.getpid()}\n"
+    finally:
+        daemon.release_lock(handle)
+    assert not lockfile.exists()
+
+
+def test_lock_cross_process_contention_fails(tmp_path: Path) -> None:
+    handle = daemon.acquire_lock(tmp_path)
+    assert handle is not None
+    try:
+        code = """
+import sys
+from pathlib import Path
+from jaunt import daemon
+
+handle = daemon.acquire_lock(Path(sys.argv[1]))
+if handle is None:
+    print("blocked")
+    raise SystemExit(0)
+daemon.release_lock(handle)
+print("acquired")
+raise SystemExit(1)
+"""
+        proc = subprocess.run(
+            [sys.executable, "-c", code, str(tmp_path)],
+
+exec
+/bin/zsh -lc "sed -n '300,380p' tests/test_daemon.py" in /home/diwank/github.com/creatorrr/jaunt-impl-propose-only
+ succeeded in 0ms:
+    assert payload == {
+        "command": "daemon-status",
+        "ok": True,
+        "running": False,
+        "pid": None,
+        "jobs": [],
+    }
+
+
+def test_daemon_status_prints_and_emits_phase(
+    repo: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = jobs.JobRecord.new(module="app", spec_digest="d", base_commit="c", branch="main")
+    jobs.save_job(repo, job)
+    running = jobs.mark(repo, job, jobs.RUNNING, phase="[build] app: generating")
+    monkeypatch.setattr(daemon, "probe_lock", lambda _root: (True, 1234))
+
+    assert cli.main(["daemon", "status", "--root", str(repo)]) == 0
+    out = capsys.readouterr().out
+
+    assert f"- {running.id} app: running — [build] app: generating" in out
+
+    assert cli.main(["daemon", "status", "--root", str(repo), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["jobs"] == [
+        {"id": running.id, "module": "app", "state": "running", "phase": running.phase}
+    ]
+
+
+def test_run_once_full_cycle_lands_and_journals(repo: Path, jaunt_cfg: JauntConfig) -> None:
+    _opt_into_journal(repo)
+    runner = FakeRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        _spec_commit(repo)
+        _cycle(repo, jaunt_cfg, state, runner, pool)
+
+    landed = jobs.list_jobs(repo, states={jobs.LANDED})
+    assert len(landed) == 1 and landed[0].module == "app"
+    assert landed[0].spec_digest == "digest-v1"
+    assert "regen(app)" in _git(repo, "log", "-1", "--format=%s")
+    assert any(
+        "build" in line and "app" in line and "3/3" in line for line in journal.read_lines(repo)
+    )
+    assert (repo / "src" / "__generated__" / "app.py").exists()
+
+
+def test_run_once_spawn_false_leaves_queued_job_unsubmitted(
+    repo: Path, jaunt_cfg: JauntConfig
+) -> None:
+    job = jobs.JobRecord.new(
+        module="app",
+        spec_digest="digest-v1",
+        base_commit=_git(repo, "rev-parse", "HEAD"),
+        branch="main",
+    )
+    jobs.save_job(repo, job)
+    state = daemon.DaemonState()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        daemon.run_once(repo, jaunt_cfg, state, FakeRunner(), pool, spawn=False)
+
+    loaded = jobs.load_job(repo, job.id)
+    assert loaded is not None
+    assert loaded.state == jobs.QUEUED
+    assert state.futures == {}
+
+
+def test_run_once_default_spawn_starts_queued_job(repo: Path, jaunt_cfg: JauntConfig) -> None:
+    job = jobs.JobRecord.new(
+        module="app",
+        spec_digest="digest-v1",
+        base_commit=_git(repo, "rev-parse", "HEAD"),
+        branch="main",
+    )
+    jobs.save_job(repo, job)
+    state = daemon.DaemonState()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        daemon.run_once(repo, jaunt_cfg, state, FakeRunner(), pool)
+
+
+exec
+/bin/zsh -lc "sed -n '560,720p' tests/test_daemon.py" in /home/diwank/github.com/creatorrr/jaunt-impl-propose-only
+ succeeded in 0ms:
+    assert any("job-park" in line and parked[0].id in line for line in lines)
+    assert not any("build" in line and parked[0].id in line for line in lines)
+
+
+def test_restart_preserves_parked_job(repo: Path, jaunt_cfg: JauntConfig) -> None:
+    runner = FakeRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        _spec_commit(repo)
+        _install_failing_pre_commit(repo)
+        _cycle(repo, jaunt_cfg, state, runner, pool)
+
+        parked = jobs.list_jobs(repo, states={jobs.PARKED})[0]
+        patch_path = jobs.jobs_dir(repo) / f"{parked.id}.patch"
+        patch_content = patch_path.read_text(encoding="utf-8")
+
+        runner.built = []
+        restarted = daemon.DaemonState()
+        daemon.run_once(repo, jaunt_cfg, restarted, runner, pool)
+        daemon.drain(restarted)
+
+    loaded = jobs.load_job(repo, parked.id)
+    assert loaded is not None
+    assert loaded.state == jobs.PARKED
+    assert loaded.patch_paths == parked.patch_paths
+    assert loaded.updated == parked.updated
+    assert loaded.error == parked.error
+    assert patch_path.read_text(encoding="utf-8") == patch_content
+    assert [
+        job for job in jobs.list_jobs(repo, states=jobs.ACTIVE_STATES) if job.module == "app"
+    ] == []
+
+
+def test_restart_supersedes_stale_parked_job_and_enqueues_fresh(
+    repo: Path, jaunt_cfg: JauntConfig
+) -> None:
+    _opt_into_journal(repo)
+    runner = FakeRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        _spec_commit(repo)
+        _install_failing_pre_commit(repo)
+        _cycle(repo, jaunt_cfg, state, runner, pool)
+
+        parked = jobs.list_jobs(repo, states={jobs.PARKED})[0]
+        runner.digest = "digest-v2"
+        runner.built = []
+        (repo / ".git" / "hooks" / "pre-commit").unlink()
+        _spec_commit(repo, '"""spec v3"""\n')
+
+        restarted = daemon.DaemonState()
+        _cycle(repo, jaunt_cfg, restarted, runner, pool)
+
+    loaded = jobs.load_job(repo, parked.id)
+    assert loaded is not None
+    assert loaded.state == jobs.SUPERSEDED
+    landed = jobs.list_jobs(repo, states={jobs.LANDED})
+    assert any(job.module == "app" and job.spec_digest == "digest-v2" for job in landed)
+    assert any(
+        "job-supersede" in line and parked.id in line for line in journal.read_lines(repo, limit=0)
+    )
+
+
+def test_park_truncates_preappended_success_line(repo: Path, jaunt_cfg: JauntConfig) -> None:
+    _opt_into_journal(repo)
+    runner = FakeRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        _spec_commit(repo)
+        daemon.run_once(repo, jaunt_cfg, state, runner, pool)
+        daemon.drain(state)
+        before = (repo / journal.JOURNAL_FILE).read_text(encoding="utf-8")
+        dirty = repo / "src" / "__generated__" / "app.py"
+        dirty.parent.mkdir(parents=True, exist_ok=True)
+        dirty.write_text("local edit\n", encoding="utf-8")
+        daemon.run_once(repo, jaunt_cfg, state, runner, pool)
+
+    parked = jobs.list_jobs(repo, states={jobs.PARKED})
+    assert parked and parked[0].module == "app"
+    after = (repo / journal.JOURNAL_FILE).read_text(encoding="utf-8")
+    appended = after.removeprefix(before).splitlines()
+    assert len(appended) == 1
+    assert "job-park" in appended[0] and parked[0].id in appended[0]
+    assert "build" not in after
+
+
+def test_notify_command_fires_with_env(
+    repo: Path, jaunt_cfg_with_notify: JauntConfig, tmp_path: Path
+) -> None:
+    runner = FakeRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        _spec_commit(repo)
+        daemon.run_once(repo, jaunt_cfg_with_notify, state, runner, pool)
+        daemon.drain(state)
+        daemon.run_once(repo, jaunt_cfg_with_notify, state, runner, pool)
+
+    text = (tmp_path / "notify.txt").read_text(encoding="utf-8")
+    assert "app:landed" in text
+
+
+def test_supersede_on_newer_spec_commit(repo: Path, jaunt_cfg: JauntConfig) -> None:
+    event = threading.Event()
+
+    class BlockingRunner(FakeRunner):
+        def build(
+            self, worktree: Path, module: str, heartbeat: daemon.Heartbeat | None = None
+        ) -> daemon.BuildOutcome:
+            event.wait(timeout=10)
+            return super().build(worktree, module, heartbeat=heartbeat)
+
+    runner = BlockingRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        _spec_commit(repo)
+        daemon.run_once(repo, jaunt_cfg, state, runner, pool)
+        first = jobs.list_jobs(repo, states={jobs.RUNNING})[0]
+
+        runner.digest = "digest-v2"
+        _spec_commit(repo, '"""spec v3"""\n')
+        daemon.run_once(repo, jaunt_cfg, state, runner, pool)
+        event.set()
+        _cycle(repo, jaunt_cfg, state, runner, pool)
+
+    loaded = jobs.load_job(repo, first.id)
+    assert loaded is not None
+    assert loaded.state == jobs.SUPERSEDED
+    landed = jobs.list_jobs(repo, states={jobs.LANDED})
+    assert landed and landed[0].spec_digest == "digest-v2"
+    assert not (repo / journal.JOURNAL_FILE).exists()
+
+
+def test_active_supersede_on_newer_spec_commit_journals(repo: Path, jaunt_cfg: JauntConfig) -> None:
+    _opt_into_journal(repo)
+    event = threading.Event()
+
+    class BlockingRunner(FakeRunner):
+        def build(
+            self, worktree: Path, module: str, heartbeat: daemon.Heartbeat | None = None
+        ) -> daemon.BuildOutcome:
+            event.wait(timeout=10)
+            return super().build(worktree, module, heartbeat=heartbeat)
+
+    runner = BlockingRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        _spec_commit(repo)
+        daemon.run_once(repo, jaunt_cfg, state, runner, pool)
+        first = jobs.list_jobs(repo, states={jobs.RUNNING})[0]
+
+        runner.digest = "digest-v2"
+        _spec_commit(repo, '"""spec v3"""\n')
+        daemon.run_once(repo, jaunt_cfg, state, runner, pool)
+        event.set()
+        _cycle(repo, jaunt_cfg, state, runner, pool)
+
+    supersede_lines = [
+        line for line in journal.read_lines(repo, limit=0) if "job-supersede" in line
+    ]
+    assert len(supersede_lines) == 1
+    assert "app" in supersede_lines[0]
+
+exec
+/bin/zsh -lc 'rg -n "PROPOSED|DISCARDED|auto_commit|patch_paths|cause|refrozen" src/jaunt tests/test_daemon.py' in /home/diwank/github.com/creatorrr/jaunt-impl-propose-only
+ succeeded in 0ms:
+tests/test_daemon.py:38:        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = true\n',
+tests/test_daemon.py:64:                "auto_commit = true",
+tests/test_daemon.py:95:        return daemon.BuildOutcome(ok=True, refrozen=False)
+tests/test_daemon.py:428:    captured_patch_paths: list[list[str]] = []
+tests/test_daemon.py:432:        captured_patch_paths.append(list(kwargs["patch_paths"]))
+tests/test_daemon.py:443:    assert captured_patch_paths
+tests/test_daemon.py:444:    assert journal.JOURNAL_FILE not in captured_patch_paths[0]
+tests/test_daemon.py:584:    assert loaded.patch_paths == parked.patch_paths
+tests/test_daemon.py:840:    assert outcome == daemon.BuildOutcome(ok=True, refrozen=False)
+tests/test_daemon.py:961:            return daemon.BuildOutcome(ok=False, refrozen=False, error="codex exited 3")
+src/jaunt/progress.py:102:            # Progress is best-effort; never fail the CLI because of rendering.
+src/jaunt/validation.py:362:            "code because their provenance cannot be checked."
+src/jaunt/deps.py:291:        # Inference is strictly best-effort; never fail the build because it
+src/jaunt/class_analysis.py:83:    class, so counting it would cause a false drift error.
+src/jaunt/class_analysis.py:208:    ``block`` only. Cross-module spec'd bases are excluded by the builder because
+src/jaunt/cli.py:809:                    "auto-commit" if load_config(root=root).daemon.auto_commit else "propose-only"
+src/jaunt/cli.py:1272:    if not job.patch_paths:
+src/jaunt/cli.py:1277:        patch_paths_raw = json.loads(job.patch_paths)
+src/jaunt/cli.py:1281:    if not isinstance(patch_paths_raw, list) or not all(
+src/jaunt/cli.py:1282:        isinstance(path, str) for path in patch_paths_raw
+src/jaunt/cli.py:1307:            patch_paths=patch_paths_raw,
+src/jaunt/cli.py:2183:                        "refrozen": [],
+src/jaunt/cli.py:2305:        refrozen_modules: set[str] = set()
+src/jaunt/cli.py:2359:            refrozen_modules = set(plan.refrozen)
+src/jaunt/cli.py:2365:            api_changed = api_changed - refrozen_modules
+src/jaunt/cli.py:2429:        for mod in sorted(refrozen_modules):
+src/jaunt/cli.py:2456:                    "refrozen": sorted(refrozen_modules),
+src/jaunt/cli.py:2647:                _emit_json({"command": "test", "ok": True, "exit_code": 0, "refrozen": []})
+src/jaunt/cli.py:2711:        test_refrozen_modules: set[str] = set()
+src/jaunt/cli.py:2753:            test_refrozen_modules = set(test_plan.refrozen)
+src/jaunt/cli.py:2855:                    "refrozen": sorted(test_refrozen_modules),
+src/jaunt/tester.py:558:            refrozen=False,
+src/jaunt/tester.py:566:            refrozen=False,
+src/jaunt/tester.py:574:            refrozen=False,
+src/jaunt/tester.py:586:        return RefreezeOutcome(refrozen=False, needs_rebuild=True, errors=tuple(errors))
+src/jaunt/tester.py:600:    return RefreezeOutcome(refrozen=True, needs_rebuild=False)
+src/jaunt/tester.py:648:    refrozen: set[str] = set()
+src/jaunt/tester.py:691:                elif outcome.refrozen:
+src/jaunt/tester.py:692:                    refrozen.add(module_name)
+src/jaunt/tester.py:733:    for module_name in sorted(set(stale_modules) - rebuild - failed_refreeze - refrozen):
+src/jaunt/tester.py:753:        elif outcome.refrozen:
+src/jaunt/tester.py:754:            refrozen.add(module_name)
+src/jaunt/tester.py:757:    refrozen -= rebuild
+src/jaunt/tester.py:758:    return RefreezePlan(rebuild=rebuild, refrozen=refrozen, failed_refreeze=failed_refreeze)
+src/jaunt/daemon.py:32:    refrozen: bool
+src/jaunt/daemon.py:62:    patch_paths: tuple[str, ...] = ()
+src/jaunt/daemon.py:170:        if module in payload.get("refrozen", []):
+src/jaunt/daemon.py:171:            return BuildOutcome(ok=True, refrozen=True)
+src/jaunt/daemon.py:173:            return BuildOutcome(ok=True, refrozen=False)
+src/jaunt/daemon.py:175:        return BuildOutcome(ok=False, refrozen=False, error=error.splitlines()[0][:200])
+src/jaunt/daemon.py:462:        return JobResult(job_id=job.id, build=build, gate=gate, patch=patch, patch_paths=paths)
+src/jaunt/daemon.py:591:        cause = "cosmetic (gate: EQUIVALENT)" if result.build.refrozen else "spec change"
+src/jaunt/daemon.py:592:        action = "refreeze" if result.build.refrozen else "build"
+src/jaunt/daemon.py:594:        message = landing.build_commit_message(job.module, cause, job.id, job.spec_digest)
+src/jaunt/daemon.py:611:                        action, job.module, f"{cause}; battery {battery}", job.id
+src/jaunt/daemon.py:620:                patch_paths=list(result.patch_paths),
+src/jaunt/daemon.py:643:                patch_paths=_json.dumps(list(result.patch_paths)),
+src/jaunt/jobs.py:18:PROPOSED = "proposed"
+src/jaunt/jobs.py:19:DISCARDED = "discarded"
+src/jaunt/jobs.py:22:PHASE_CLEAR_STATES = frozenset({GREEN, LANDED, PARKED, FAILED, SUPERSEDED, PROPOSED, DISCARDED})
+src/jaunt/jobs.py:45:    patch_paths: str = ""  # JSON-encoded list; set when a job parks so retry can re-land
+src/jaunt/jobs.py:46:    cause: str = ""  # human cause recorded at green time; reused for the landing commit
+src/jaunt/jobs.py:47:    refrozen: str = ""  # "1" when the green result was a re-freeze (journal action "refreeze")
+src/jaunt/jobs.py:117:    for job in list_jobs(root, states={PROPOSED}):
+src/jaunt/config.py:102:    auto_commit: bool = False
+src/jaunt/config.py:523:    if "auto_commit" in daemon_tbl:
+src/jaunt/config.py:524:        daemon_auto_commit = _as_bool(daemon_tbl["auto_commit"], name="daemon.auto_commit")
+src/jaunt/config.py:526:        daemon_auto_commit = False
+src/jaunt/config.py:728:            auto_commit=daemon_auto_commit,
+src/jaunt/builder.py:316:    refrozen: bool
+src/jaunt/builder.py:324:    refrozen: set[str]
+src/jaunt/builder.py:360:            refrozen=False,
+src/jaunt/builder.py:368:            refrozen=False,
+src/jaunt/builder.py:380:        return RefreezeOutcome(refrozen=False, needs_rebuild=True, errors=tuple(errors))
+src/jaunt/builder.py:395:    return RefreezeOutcome(refrozen=True, needs_rebuild=False)
+src/jaunt/builder.py:473:    refrozen: set[str] = set()
+src/jaunt/builder.py:509:                elif outcome.refrozen:
+src/jaunt/builder.py:510:                    refrozen.add(module_name)
+src/jaunt/builder.py:541:    for module_name in sorted(set(stale_modules) - rebuild - failed_refreeze - refrozen):
+src/jaunt/builder.py:558:        elif outcome.refrozen:
+src/jaunt/builder.py:559:            refrozen.add(module_name)
+src/jaunt/builder.py:562:    refrozen -= rebuild
+src/jaunt/builder.py:563:    return RefreezePlan(rebuild=rebuild, refrozen=refrozen, failed_refreeze=failed_refreeze)
+src/jaunt/landing.py:50:def build_commit_message(module: str, cause: str, job_id: str, spec_digest: str) -> str:
+src/jaunt/landing.py:51:    return f"regen({module}): {cause}\n\nJaunt-Job: {job_id}\nJaunt-Spec: {spec_digest[:8]}\n"
+src/jaunt/landing.py:58:def _rollback_paths(repo: Path, patch_paths: Sequence[str]) -> None:
+src/jaunt/landing.py:69:            *patch_paths,
+src/jaunt/landing.py:76:        ["git", "-C", str(repo), "clean", "-fd", "--", *patch_paths],
+src/jaunt/landing.py:103:def _apply_include_args(patch_paths: Sequence[str]) -> list[str]:
+src/jaunt/landing.py:104:    return [f"--include={path}" for path in patch_paths]
+src/jaunt/landing.py:111:    patch_paths: Sequence[str],
+src/jaunt/landing.py:117:    if not patch or not patch_paths:
+src/jaunt/landing.py:125:    dirty = git_out(repo, "status", "--porcelain", "--", *patch_paths).strip()
+src/jaunt/landing.py:141:                *_apply_include_args(patch_paths),
+src/jaunt/landing.py:149:            _rollback_paths(repo, patch_paths)
+src/jaunt/landing.py:153:            _rollback_paths(repo, patch_paths)
+src/jaunt/landing.py:155:        commit_paths = [*patch_paths, *extra_commit_paths]
+src/jaunt/landing.py:161:            _rollback_paths(repo, patch_paths)
+src/jaunt/skills/builtin/dbos/SKILL.md:23:- Workflow inputs and outputs should be serializable because DBOS persists execution state.
+src/jaunt/skills/builtin/starlette/SKILL.md:74:- Middleware order matters because wrappers are nested around the app.
+
+codex
+The existing tests already force `auto_commit = true` in the repo fixture, so the new propose tests need to override only their local `jaunt.toml` before loading config. I’m checking the job record helpers now so the supersede assertions line up with the actual storage format.
+exec
+/bin/zsh -lc "sed -n '1,150p' src/jaunt/jobs.py" in /home/diwank/github.com/creatorrr/jaunt-impl-propose-only
+exec
+/bin/zsh -lc "sed -n '400,460p' tests/test_daemon.py" in /home/diwank/github.com/creatorrr/jaunt-impl-propose-only
+ succeeded in 0ms:
+    runner = FakeRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        _spec_commit(repo)
+        _cycle(repo, jaunt_cfg, state, runner, pool)
+
+    committed = set(_git(repo, "show", "--name-only", "--format=", "HEAD").splitlines())
+    assert "src/__generated__/app.py" in committed
+    assert journal.JOURNAL_FILE in committed
+    blob = _git(repo, "show", f"HEAD:{journal.JOURNAL_FILE}")
+    assert "build" in blob and "app" in blob
+    assert _git(repo, "status", "--porcelain") == ""
+
+
+def test_worker_journal_change_is_ignored_and_job_lands(
+    repo: Path, jaunt_cfg: JauntConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _opt_into_journal(repo)
+
+    class WorkerJournalRunner(FakeRunner):
+        def build(
+            self, worktree: Path, module: str, heartbeat: daemon.Heartbeat | None = None
+        ) -> daemon.BuildOutcome:
+            outcome = super().build(worktree, module, heartbeat=heartbeat)
+            with open(worktree / journal.JOURNAL_FILE, "a", encoding="utf-8") as f:
+                f.write("worker-build journal line\n")
+            return outcome
+
+    captured_patch_paths: list[list[str]] = []
+    original_land = daemon.landing.land
+
+    def land_spy(*args: Any, **kwargs: Any) -> str | None:
+        captured_patch_paths.append(list(kwargs["patch_paths"]))
+        return original_land(*args, **kwargs)
+
+    monkeypatch.setattr(daemon.landing, "land", land_spy)
+
+    runner = WorkerJournalRunner()
+    state = daemon.DaemonState()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        _spec_commit(repo)
+        _cycle(repo, jaunt_cfg, state, runner, pool)
+
+    assert captured_patch_paths
+    assert journal.JOURNAL_FILE not in captured_patch_paths[0]
+    assert not jobs.list_jobs(repo, states={jobs.PARKED})
+    landed = jobs.list_jobs(repo, states={jobs.LANDED})
+    assert len(landed) == 1 and landed[0].module == "app"
+
+    committed = set(_git(repo, "show", "--name-only", "--format=", "HEAD").splitlines())
+    assert "src/__generated__/app.py" in committed
+    assert journal.JOURNAL_FILE in committed
+
+    blob = _git(repo, "show", f"HEAD:{journal.JOURNAL_FILE}")
+    lines = blob.splitlines()
+    assert len(lines) == 1
+    assert "build" in lines[0] and "app" in lines[0] and "3/3" in lines[0]
+    assert "worker-build" not in blob
+
+
+def test_dirty_jaunt_log_defers_landing_without_appending(
+
+ succeeded in 0ms:
+"""Persisted job records for the jaunt daemon (.jaunt/jobs/*.json)."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import time
+from dataclasses import asdict, dataclass, replace
+from pathlib import Path
+
+QUEUED = "queued"
+RUNNING = "running"
+GREEN = "green"
+LANDED = "landed"
+PARKED = "parked"
+FAILED = "failed"
+SUPERSEDED = "superseded"
+PROPOSED = "proposed"
+DISCARDED = "discarded"
+
+ACTIVE_STATES = frozenset({QUEUED, RUNNING, GREEN})
+PHASE_CLEAR_STATES = frozenset({GREEN, LANDED, PARKED, FAILED, SUPERSEDED, PROPOSED, DISCARDED})
+
+
+def new_job_id(module: str, spec_digest: str, base_commit: str) -> str:
+    return hashlib.sha256(f"{module}\x00{spec_digest}\x00{base_commit}".encode()).hexdigest()[:8]
+
+
+@dataclass(frozen=True)
+class JobRecord:
+    id: str
+    module: str
+    spec_digest: str
+    base_commit: str
+    branch: str
+    state: str
+    created: float
+    updated: float
+    phase: str = ""
+    gate: str = ""
+    battery: str = ""
+    landed_commit: str = ""
+    error: str = ""
+    detail_log: str = ""
+    patch_paths: str = ""  # JSON-encoded list; set when a job parks so retry can re-land
+    cause: str = ""  # human cause recorded at green time; reused for the landing commit
+    refrozen: str = ""  # "1" when the green result was a re-freeze (journal action "refreeze")
+
+    @classmethod
+    def new(cls, *, module: str, spec_digest: str, base_commit: str, branch: str) -> JobRecord:
+        now = time.time()
+        return cls(
+            id=new_job_id(module, spec_digest, base_commit),
+            module=module,
+            spec_digest=spec_digest,
+            base_commit=base_commit,
+            branch=branch,
+            state=QUEUED,
+            created=now,
+            updated=now,
+        )
+
+
+def jobs_dir(root: Path) -> Path:
+    return root / ".jaunt" / "jobs"
+
+
+def _path(root: Path, job_id: str) -> Path:
+    return jobs_dir(root) / f"{job_id}.json"
+
+
+def save_job(root: Path, job: JobRecord) -> None:
+    path = _path(root, job.id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(asdict(job), sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def load_job(root: Path, job_id: str) -> JobRecord | None:
+    path = _path(root, job_id)
+    if not path.exists():
+        return None
+    try:
+        return JobRecord(**json.loads(path.read_text(encoding="utf-8")))
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def list_jobs(root: Path, states: frozenset[str] | set[str] | None = None) -> list[JobRecord]:
+    directory = jobs_dir(root)
+    if not directory.exists():
+        return []
+    records = []
+    for path in directory.glob("*.json"):
+        job = load_job(root, path.stem)
+        if job is not None and (states is None or job.state in states):
+            records.append(job)
+    return sorted(records, key=lambda j: (j.created, j.id))
+
+
+def active_for_module(root: Path, module: str) -> JobRecord | None:
+    for job in list_jobs(root, states=ACTIVE_STATES):
+        if job.module == module:
+            return job
+    return None
+
+
+def parked_for_module(root: Path, module: str) -> JobRecord | None:
+    for job in list_jobs(root, states={PARKED}):
+        if job.module == module:
+            return job
+    return None
+
+
+def proposed_for_module(root: Path, module: str) -> JobRecord | None:
+    for job in list_jobs(root, states={PROPOSED}):
+        if job.module == module:
+            return job
+    return None
+
+
+def mark(root: Path, job: JobRecord, state: str, **updates: str) -> JobRecord:
+    if state in PHASE_CLEAR_STATES and "phase" not in updates:
+        updates["phase"] = ""
+    updated = replace(job, state=state, updated=time.time(), **updates)
+    save_job(root, updated)
+    return updated
+
+exec
+/bin/zsh -lc 'git status --short' in /home/diwank/github.com/creatorrr/jaunt-impl-propose-only
+ succeeded in 0ms:
+?? .scratch/
+
+codex
+I’m making the smallest direct patch now: add the propose branch before any journal snapshot/landing work, then add three daemon tests near the existing full-cycle coverage.
+apply patch
+patch: completed
+/home/diwank/github.com/creatorrr/jaunt-impl-propose-only/src/jaunt/daemon.py
+diff --git a/src/jaunt/daemon.py b/src/jaunt/daemon.py
+index 5b29331abeff5c171fd5d794edcc62bbf04426bb..25e6b026217f43e91e8fe46bbda67b6a4fc20ce8
+--- a/src/jaunt/daemon.py
++++ b/src/jaunt/daemon.py
+@@ -547,6 +547,8 @@
+         "job-fail",
+         "job-park",
+         "job-supersede",
++        "job-propose",
++        "job-discard",
+         "probe-fail",
+     }
+ 
+@@ -592,6 +594,42 @@
+         action = "refreeze" if result.build.refrozen else "build"
+         battery = result.gate.battery if result.gate else "-"
+         message = landing.build_commit_message(job.module, cause, job.id, job.spec_digest)
++        if not cfg.daemon.auto_commit:
++            (jobs_mod.jobs_dir(root) / f"{job.id}.patch").write_text(
++                result.patch, encoding="utf-8"
++            )
++            prev = jobs_mod.proposed_for_module(root, job.module)
++            if prev is not None and prev.id != job.id:
++                jobs_mod.mark(root, prev, jobs_mod.SUPERSEDED)
++                journal_mod.append_events(
++                    root,
++                    [
++                        journal_mod.JournalEvent(
++                            "job-supersede", prev.module, "newer proposal", prev.id
++                        )
++                    ],
++                )
++            updated = jobs_mod.mark(
++                root,
++                job,
++                jobs_mod.PROPOSED,
++                patch_paths=_json.dumps(list(result.patch_paths)),
++                cause=cause,
++                refrozen="1" if result.build.refrozen else "",
++                battery=battery,
++                phase="",
++            )
++            journal_mod.append_events(
++                root,
++                [
++                    journal_mod.JournalEvent(
++                        "job-propose", job.module, f"{cause}; battery {battery}", job.id
++                    )
++                ],
++            )
++            _notify(cfg, updated)
++            del state.pending[job_id]
++            continue
+         journal_path = root / journal_mod.JOURNAL_FILE
+         journal_opted_in = journal_path.exists()
+         snapshot_len = 0
+
+diff --git a/src/jaunt/daemon.py b/src/jaunt/daemon.py
+index 5b29331abeff5c171fd5d794edcc62bbf04426bb..25e6b026217f43e91e8fe46bbda67b6a4fc20ce8
+--- a/src/jaunt/daemon.py
++++ b/src/jaunt/daemon.py
+@@ -547,6 +547,8 @@
+         "job-fail",
+         "job-park",
+         "job-supersede",
++        "job-propose",
++        "job-discard",
+         "probe-fail",
+     }
+ 
+@@ -592,6 +594,42 @@
+         action = "refreeze" if result.build.refrozen else "build"
+         battery = result.gate.battery if result.gate else "-"
+         message = landing.build_commit_message(job.module, cause, job.id, job.spec_digest)
++        if not cfg.daemon.auto_commit:
++            (jobs_mod.jobs_dir(root) / f"{job.id}.patch").write_text(
++                result.patch, encoding="utf-8"
++            )
++            prev = jobs_mod.proposed_for_module(root, job.module)
++            if prev is not None and prev.id != job.id:
++                jobs_mod.mark(root, prev, jobs_mod.SUPERSEDED)
++                journal_mod.append_events(
++                    root,
++                    [
++                        journal_mod.JournalEvent(
++                            "job-supersede", prev.module, "newer proposal", prev.id
++                        )
++                    ],
++                )
++            updated = jobs_mod.mark(
++                root,
++                job,
++                jobs_mod.PROPOSED,
++                patch_paths=_json.dumps(list(result.patch_paths)),
++                cause=cause,
++                refrozen="1" if result.build.refrozen else "",
++                battery=battery,
++                phase="",
++            )
++            journal_mod.append_events(
++                root,
++                [
++                    journal_mod.JournalEvent(
++                        "job-propose", job.module, f"{cause}; battery {battery}", job.id
++                    )
++                ],
++            )
++            _notify(cfg, updated)
++            del state.pending[job_id]
++            continue
+         journal_path = root / journal_mod.JOURNAL_FILE
+         journal_opted_in = journal_path.exists()
+         snapshot_len = 0
+
+codex
+The daemon patch is in place and leaves the old landing block below it untouched. I’m adding tests using the existing `FakeRunner`, `_cycle`, and job-listing idioms.
+apply patch
+patch: completed
+/home/diwank/github.com/creatorrr/jaunt-impl-propose-only/tests/test_daemon.py
+diff --git a/src/jaunt/daemon.py b/src/jaunt/daemon.py
+index 5b29331abeff5c171fd5d794edcc62bbf04426bb..25e6b026217f43e91e8fe46bbda67b6a4fc20ce8
+--- a/src/jaunt/daemon.py
++++ b/src/jaunt/daemon.py
+@@ -547,6 +547,8 @@
+         "job-fail",
+         "job-park",
+         "job-supersede",
++        "job-propose",
++        "job-discard",
+         "probe-fail",
+     }
+ 
+@@ -592,6 +594,42 @@
+         action = "refreeze" if result.build.refrozen else "build"
+         battery = result.gate.battery if result.gate else "-"
+         message = landing.build_commit_message(job.module, cause, job.id, job.spec_digest)
++        if not cfg.daemon.auto_commit:
++            (jobs_mod.jobs_dir(root) / f"{job.id}.patch").write_text(
++                result.patch, encoding="utf-8"
++            )
++            prev = jobs_mod.proposed_for_module(root, job.module)
++            if prev is not None and prev.id != job.id:
++                jobs_mod.mark(root, prev, jobs_mod.SUPERSEDED)
++                journal_mod.append_events(
++                    root,
++                    [
++                        journal_mod.JournalEvent(
++                            "job-supersede", prev.module, "newer proposal", prev.id
++                        )
++                    ],
++                )
++            updated = jobs_mod.mark(
++                root,
++                job,
++                jobs_mod.PROPOSED,
++                patch_paths=_json.dumps(list(result.patch_paths)),
++                cause=cause,
++                refrozen="1" if result.build.refrozen else "",
++                battery=battery,
++                phase="",
++            )
++            journal_mod.append_events(
++                root,
++                [
++                    journal_mod.JournalEvent(
++                        "job-propose", job.module, f"{cause}; battery {battery}", job.id
++                    )
++                ],
++            )
++            _notify(cfg, updated)
++            del state.pending[job_id]
++            continue
+         journal_path = root / journal_mod.JOURNAL_FILE
+         journal_opted_in = journal_path.exists()
+         snapshot_len = 0
+diff --git a/tests/test_daemon.py b/tests/test_daemon.py
+index 39b078fcd6a8d04dabdcda41c67f4930e162795e..d3958737a1d2f9633f850e4450a23abd95a6f2b6
+--- a/tests/test_daemon.py
++++ b/tests/test_daemon.py
+@@ -344,6 +344,74 @@
+     assert (repo / "src" / "__generated__" / "app.py").exists()
+ 
+ 
++def test_green_job_proposes_when_auto_commit_false(repo: Path) -> None:
++    (repo / "jaunt.toml").write_text(
++        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = false\n',
++        encoding="utf-8",
++    )
++    _git(repo, "add", "-A")
++    _git(repo, "commit", "-m", "propose mode")
++    cfg = load_config(root=repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, cfg, state, runner, pool)
++
++    proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
++    assert len(proposed) == 1
++    job = proposed[0]
++    assert job.module == "app"
++    assert (jobs.jobs_dir(repo) / f"{job.id}.patch").read_text(encoding="utf-8")
++    assert json.loads(job.patch_paths)
++    assert job.cause == "spec change"
++    assert job.battery == "3/3"
++    assert not jobs.list_jobs(repo, states={jobs.LANDED})
++    assert "regen" not in _git(repo, "log", "-1", "--format=%s")
++
++
++def test_newer_proposal_supersedes_older(repo: Path) -> None:
++    (repo / "jaunt.toml").write_text(
++        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = false\n',
++        encoding="utf-8",
++    )
++    _git(repo, "add", "-A")
++    _git(repo, "commit", "-m", "propose mode")
++    cfg = load_config(root=repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, cfg, state, runner, pool)
++
++        older = jobs.list_jobs(repo, states={jobs.PROPOSED})[0]
++        runner.digest = "digest-v2"
++        runner.built = []
++        _spec_commit(repo, '"""spec v3"""\n')
++        _cycle(repo, cfg, state, runner, pool)
++
++    proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
++    assert len(proposed) == 1
++    assert proposed[0].id != older.id
++    assert proposed[0].spec_digest == "digest-v2"
++    superseded = jobs.list_jobs(repo, states={jobs.SUPERSEDED})
++    assert len(superseded) == 1
++    assert superseded[0].id == older.id
++
++
++def test_auto_commit_true_lands_exactly_as_before(repo: Path, jaunt_cfg: JauntConfig) -> None:
++    _opt_into_journal(repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, jaunt_cfg, state, runner, pool)
++    landed = jobs.list_jobs(repo, states={jobs.LANDED})
++    assert len(landed) == 1 and landed[0].module == "app"
++    assert "regen(app)" in _git(repo, "log", "-1", "--format=%s")
++    assert not jobs.list_jobs(repo, states={jobs.PROPOSED})
++
++
+ def test_run_once_spawn_false_leaves_queued_job_unsubmitted(
+     repo: Path, jaunt_cfg: JauntConfig
+ ) -> None:
+
+diff --git a/src/jaunt/daemon.py b/src/jaunt/daemon.py
+index 5b29331abeff5c171fd5d794edcc62bbf04426bb..25e6b026217f43e91e8fe46bbda67b6a4fc20ce8
+--- a/src/jaunt/daemon.py
++++ b/src/jaunt/daemon.py
+@@ -547,6 +547,8 @@
+         "job-fail",
+         "job-park",
+         "job-supersede",
++        "job-propose",
++        "job-discard",
+         "probe-fail",
+     }
+ 
+@@ -592,6 +594,42 @@
+         action = "refreeze" if result.build.refrozen else "build"
+         battery = result.gate.battery if result.gate else "-"
+         message = landing.build_commit_message(job.module, cause, job.id, job.spec_digest)
++        if not cfg.daemon.auto_commit:
++            (jobs_mod.jobs_dir(root) / f"{job.id}.patch").write_text(
++                result.patch, encoding="utf-8"
++            )
++            prev = jobs_mod.proposed_for_module(root, job.module)
++            if prev is not None and prev.id != job.id:
++                jobs_mod.mark(root, prev, jobs_mod.SUPERSEDED)
++                journal_mod.append_events(
++                    root,
++                    [
++                        journal_mod.JournalEvent(
++                            "job-supersede", prev.module, "newer proposal", prev.id
++                        )
++                    ],
++                )
++            updated = jobs_mod.mark(
++                root,
++                job,
++                jobs_mod.PROPOSED,
++                patch_paths=_json.dumps(list(result.patch_paths)),
++                cause=cause,
++                refrozen="1" if result.build.refrozen else "",
++                battery=battery,
++                phase="",
++            )
++            journal_mod.append_events(
++                root,
++                [
++                    journal_mod.JournalEvent(
++                        "job-propose", job.module, f"{cause}; battery {battery}", job.id
++                    )
++                ],
++            )
++            _notify(cfg, updated)
++            del state.pending[job_id]
++            continue
+         journal_path = root / journal_mod.JOURNAL_FILE
+         journal_opted_in = journal_path.exists()
+         snapshot_len = 0
+diff --git a/tests/test_daemon.py b/tests/test_daemon.py
+index 39b078fcd6a8d04dabdcda41c67f4930e162795e..d3958737a1d2f9633f850e4450a23abd95a6f2b6
+--- a/tests/test_daemon.py
++++ b/tests/test_daemon.py
+@@ -344,6 +344,74 @@
+     assert (repo / "src" / "__generated__" / "app.py").exists()
+ 
+ 
++def test_green_job_proposes_when_auto_commit_false(repo: Path) -> None:
++    (repo / "jaunt.toml").write_text(
++        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = false\n',
++        encoding="utf-8",
++    )
++    _git(repo, "add", "-A")
++    _git(repo, "commit", "-m", "propose mode")
++    cfg = load_config(root=repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, cfg, state, runner, pool)
++
++    proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
++    assert len(proposed) == 1
++    job = proposed[0]
++    assert job.module == "app"
++    assert (jobs.jobs_dir(repo) / f"{job.id}.patch").read_text(encoding="utf-8")
++    assert json.loads(job.patch_paths)
++    assert job.cause == "spec change"
++    assert job.battery == "3/3"
++    assert not jobs.list_jobs(repo, states={jobs.LANDED})
++    assert "regen" not in _git(repo, "log", "-1", "--format=%s")
++
++
++def test_newer_proposal_supersedes_older(repo: Path) -> None:
++    (repo / "jaunt.toml").write_text(
++        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = false\n',
++        encoding="utf-8",
++    )
++    _git(repo, "add", "-A")
++    _git(repo, "commit", "-m", "propose mode")
++    cfg = load_config(root=repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, cfg, state, runner, pool)
++
++        older = jobs.list_jobs(repo, states={jobs.PROPOSED})[0]
++        runner.digest = "digest-v2"
++        runner.built = []
++        _spec_commit(repo, '"""spec v3"""\n')
++        _cycle(repo, cfg, state, runner, pool)
++
++    proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
++    assert len(proposed) == 1
++    assert proposed[0].id != older.id
++    assert proposed[0].spec_digest == "digest-v2"
++    superseded = jobs.list_jobs(repo, states={jobs.SUPERSEDED})
++    assert len(superseded) == 1
++    assert superseded[0].id == older.id
++
++
++def test_auto_commit_true_lands_exactly_as_before(repo: Path, jaunt_cfg: JauntConfig) -> None:
++    _opt_into_journal(repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, jaunt_cfg, state, runner, pool)
++    landed = jobs.list_jobs(repo, states={jobs.LANDED})
++    assert len(landed) == 1 and landed[0].module == "app"
++    assert "regen(app)" in _git(repo, "log", "-1", "--format=%s")
++    assert not jobs.list_jobs(repo, states={jobs.PROPOSED})
++
++
+ def test_run_once_spawn_false_leaves_queued_job_unsubmitted(
+     repo: Path, jaunt_cfg: JauntConfig
+ ) -> None:
+
+codex
+The tests are added. I’m running the daemon test file first to catch behavioral issues before spending time on the full suite.
+exec
+/bin/zsh -lc 'uv run pytest tests/test_daemon.py -q' in /home/diwank/github.com/creatorrr/jaunt-impl-propose-only
+diff --git a/src/jaunt/daemon.py b/src/jaunt/daemon.py
+index 5b29331abeff5c171fd5d794edcc62bbf04426bb..25e6b026217f43e91e8fe46bbda67b6a4fc20ce8
+--- a/src/jaunt/daemon.py
++++ b/src/jaunt/daemon.py
+@@ -547,6 +547,8 @@
+         "job-fail",
+         "job-park",
+         "job-supersede",
++        "job-propose",
++        "job-discard",
+         "probe-fail",
+     }
+ 
+@@ -592,6 +594,42 @@
+         action = "refreeze" if result.build.refrozen else "build"
+         battery = result.gate.battery if result.gate else "-"
+         message = landing.build_commit_message(job.module, cause, job.id, job.spec_digest)
++        if not cfg.daemon.auto_commit:
++            (jobs_mod.jobs_dir(root) / f"{job.id}.patch").write_text(
++                result.patch, encoding="utf-8"
++            )
++            prev = jobs_mod.proposed_for_module(root, job.module)
++            if prev is not None and prev.id != job.id:
++                jobs_mod.mark(root, prev, jobs_mod.SUPERSEDED)
++                journal_mod.append_events(
++                    root,
++                    [
++                        journal_mod.JournalEvent(
++                            "job-supersede", prev.module, "newer proposal", prev.id
++                        )
++                    ],
++                )
++            updated = jobs_mod.mark(
++                root,
++                job,
++                jobs_mod.PROPOSED,
++                patch_paths=_json.dumps(list(result.patch_paths)),
++                cause=cause,
++                refrozen="1" if result.build.refrozen else "",
++                battery=battery,
++                phase="",
++            )
++            journal_mod.append_events(
++                root,
++                [
++                    journal_mod.JournalEvent(
++                        "job-propose", job.module, f"{cause}; battery {battery}", job.id
++                    )
++                ],
++            )
++            _notify(cfg, updated)
++            del state.pending[job_id]
++            continue
+         journal_path = root / journal_mod.JOURNAL_FILE
+         journal_opted_in = journal_path.exists()
+         snapshot_len = 0
+diff --git a/tests/test_daemon.py b/tests/test_daemon.py
+index 39b078fcd6a8d04dabdcda41c67f4930e162795e..d3958737a1d2f9633f850e4450a23abd95a6f2b6
+--- a/tests/test_daemon.py
++++ b/tests/test_daemon.py
+@@ -344,6 +344,74 @@
+     assert (repo / "src" / "__generated__" / "app.py").exists()
+ 
+ 
++def test_green_job_proposes_when_auto_commit_false(repo: Path) -> None:
++    (repo / "jaunt.toml").write_text(
++        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = false\n',
++        encoding="utf-8",
++    )
++    _git(repo, "add", "-A")
++    _git(repo, "commit", "-m", "propose mode")
++    cfg = load_config(root=repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, cfg, state, runner, pool)
++
++    proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
++    assert len(proposed) == 1
++    job = proposed[0]
++    assert job.module == "app"
++    assert (jobs.jobs_dir(repo) / f"{job.id}.patch").read_text(encoding="utf-8")
++    assert json.loads(job.patch_paths)
++    assert job.cause == "spec change"
++    assert job.battery == "3/3"
++    assert not jobs.list_jobs(repo, states={jobs.LANDED})
++    assert "regen" not in _git(repo, "log", "-1", "--format=%s")
++
++
++def test_newer_proposal_supersedes_older(repo: Path) -> None:
++    (repo / "jaunt.toml").write_text(
++        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = false\n',
++        encoding="utf-8",
++    )
++    _git(repo, "add", "-A")
++    _git(repo, "commit", "-m", "propose mode")
++    cfg = load_config(root=repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, cfg, state, runner, pool)
++
++        older = jobs.list_jobs(repo, states={jobs.PROPOSED})[0]
++        runner.digest = "digest-v2"
++        runner.built = []
++        _spec_commit(repo, '"""spec v3"""\n')
++        _cycle(repo, cfg, state, runner, pool)
++
++    proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
++    assert len(proposed) == 1
++    assert proposed[0].id != older.id
++    assert proposed[0].spec_digest == "digest-v2"
++    superseded = jobs.list_jobs(repo, states={jobs.SUPERSEDED})
++    assert len(superseded) == 1
++    assert superseded[0].id == older.id
++
++
++def test_auto_commit_true_lands_exactly_as_before(repo: Path, jaunt_cfg: JauntConfig) -> None:
++    _opt_into_journal(repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, jaunt_cfg, state, runner, pool)
++    landed = jobs.list_jobs(repo, states={jobs.LANDED})
++    assert len(landed) == 1 and landed[0].module == "app"
++    assert "regen(app)" in _git(repo, "log", "-1", "--format=%s")
++    assert not jobs.list_jobs(repo, states={jobs.PROPOSED})
++
++
+ def test_run_once_spawn_false_leaves_queued_job_unsubmitted(
+     repo: Path, jaunt_cfg: JauntConfig
+ ) -> None:
+
+ succeeded in 4274ms:
+..........................................                               [100%]
+42 passed in 4.05s
+
+codex
+`tests/test_daemon.py` is green. I’m moving through the requested verification commands now, starting with the full test suite.
+exec
+/bin/zsh -lc 'uv run pytest -q' in /home/diwank/github.com/creatorrr/jaunt-impl-propose-only
+diff --git a/src/jaunt/daemon.py b/src/jaunt/daemon.py
+index 5b29331abeff5c171fd5d794edcc62bbf04426bb..25e6b026217f43e91e8fe46bbda67b6a4fc20ce8
+--- a/src/jaunt/daemon.py
++++ b/src/jaunt/daemon.py
+@@ -547,6 +547,8 @@
+         "job-fail",
+         "job-park",
+         "job-supersede",
++        "job-propose",
++        "job-discard",
+         "probe-fail",
+     }
+ 
+@@ -592,6 +594,42 @@
+         action = "refreeze" if result.build.refrozen else "build"
+         battery = result.gate.battery if result.gate else "-"
+         message = landing.build_commit_message(job.module, cause, job.id, job.spec_digest)
++        if not cfg.daemon.auto_commit:
++            (jobs_mod.jobs_dir(root) / f"{job.id}.patch").write_text(
++                result.patch, encoding="utf-8"
++            )
++            prev = jobs_mod.proposed_for_module(root, job.module)
++            if prev is not None and prev.id != job.id:
++                jobs_mod.mark(root, prev, jobs_mod.SUPERSEDED)
++                journal_mod.append_events(
++                    root,
++                    [
++                        journal_mod.JournalEvent(
++                            "job-supersede", prev.module, "newer proposal", prev.id
++                        )
++                    ],
++                )
++            updated = jobs_mod.mark(
++                root,
++                job,
++                jobs_mod.PROPOSED,
++                patch_paths=_json.dumps(list(result.patch_paths)),
++                cause=cause,
++                refrozen="1" if result.build.refrozen else "",
++                battery=battery,
++                phase="",
++            )
++            journal_mod.append_events(
++                root,
++                [
++                    journal_mod.JournalEvent(
++                        "job-propose", job.module, f"{cause}; battery {battery}", job.id
++                    )
++                ],
++            )
++            _notify(cfg, updated)
++            del state.pending[job_id]
++            continue
+         journal_path = root / journal_mod.JOURNAL_FILE
+         journal_opted_in = journal_path.exists()
+         snapshot_len = 0
+diff --git a/tests/test_daemon.py b/tests/test_daemon.py
+index 39b078fcd6a8d04dabdcda41c67f4930e162795e..d3958737a1d2f9633f850e4450a23abd95a6f2b6
+--- a/tests/test_daemon.py
++++ b/tests/test_daemon.py
+@@ -344,6 +344,74 @@
+     assert (repo / "src" / "__generated__" / "app.py").exists()
+ 
+ 
++def test_green_job_proposes_when_auto_commit_false(repo: Path) -> None:
++    (repo / "jaunt.toml").write_text(
++        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = false\n',
++        encoding="utf-8",
++    )
++    _git(repo, "add", "-A")
++    _git(repo, "commit", "-m", "propose mode")
++    cfg = load_config(root=repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, cfg, state, runner, pool)
++
++    proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
++    assert len(proposed) == 1
++    job = proposed[0]
++    assert job.module == "app"
++    assert (jobs.jobs_dir(repo) / f"{job.id}.patch").read_text(encoding="utf-8")
++    assert json.loads(job.patch_paths)
++    assert job.cause == "spec change"
++    assert job.battery == "3/3"
++    assert not jobs.list_jobs(repo, states={jobs.LANDED})
++    assert "regen" not in _git(repo, "log", "-1", "--format=%s")
++
++
++def test_newer_proposal_supersedes_older(repo: Path) -> None:
++    (repo / "jaunt.toml").write_text(
++        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = false\n',
++        encoding="utf-8",
++    )
++    _git(repo, "add", "-A")
++    _git(repo, "commit", "-m", "propose mode")
++    cfg = load_config(root=repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, cfg, state, runner, pool)
++
++        older = jobs.list_jobs(repo, states={jobs.PROPOSED})[0]
++        runner.digest = "digest-v2"
++        runner.built = []
++        _spec_commit(repo, '"""spec v3"""\n')
++        _cycle(repo, cfg, state, runner, pool)
++
++    proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
++    assert len(proposed) == 1
++    assert proposed[0].id != older.id
++    assert proposed[0].spec_digest == "digest-v2"
++    superseded = jobs.list_jobs(repo, states={jobs.SUPERSEDED})
++    assert len(superseded) == 1
++    assert superseded[0].id == older.id
++
++
++def test_auto_commit_true_lands_exactly_as_before(repo: Path, jaunt_cfg: JauntConfig) -> None:
++    _opt_into_journal(repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, jaunt_cfg, state, runner, pool)
++    landed = jobs.list_jobs(repo, states={jobs.LANDED})
++    assert len(landed) == 1 and landed[0].module == "app"
++    assert "regen(app)" in _git(repo, "log", "-1", "--format=%s")
++    assert not jobs.list_jobs(repo, states={jobs.PROPOSED})
++
++
+ def test_run_once_spawn_false_leaves_queued_job_unsubmitted(
+     repo: Path, jaunt_cfg: JauntConfig
+ ) -> None:
+
+ succeeded in 24098ms:
+........................................................................ [  6%]
+........................................................................ [ 13%]
+........................................................................ [ 20%]
+........................................................................ [ 27%]
+........................................................................ [ 34%]
+........................................................................ [ 40%]
+........................................................................ [ 47%]
+........................................................................ [ 54%]
+........................................................................ [ 61%]
+........................................................................ [ 68%]
+........................................................................ [ 74%]
+........................................................................ [ 81%]
+........................................................................ [ 88%]
+........................................................................ [ 95%]
+..................................................                       [100%]
+1058 passed in 23.68s
+
+codex
+The full suite is green. Next I’m running ruff; if formatting changes anything, I’ll re-check the affected validations.
+exec
+/bin/zsh -lc 'uv run ruff check .' in /home/diwank/github.com/creatorrr/jaunt-impl-propose-only
+ succeeded in 0ms:
+All checks passed!
+
+diff --git a/src/jaunt/daemon.py b/src/jaunt/daemon.py
+index 5b29331abeff5c171fd5d794edcc62bbf04426bb..25e6b026217f43e91e8fe46bbda67b6a4fc20ce8
+--- a/src/jaunt/daemon.py
++++ b/src/jaunt/daemon.py
+@@ -547,6 +547,8 @@
+         "job-fail",
+         "job-park",
+         "job-supersede",
++        "job-propose",
++        "job-discard",
+         "probe-fail",
+     }
+ 
+@@ -592,6 +594,42 @@
+         action = "refreeze" if result.build.refrozen else "build"
+         battery = result.gate.battery if result.gate else "-"
+         message = landing.build_commit_message(job.module, cause, job.id, job.spec_digest)
++        if not cfg.daemon.auto_commit:
++            (jobs_mod.jobs_dir(root) / f"{job.id}.patch").write_text(
++                result.patch, encoding="utf-8"
++            )
++            prev = jobs_mod.proposed_for_module(root, job.module)
++            if prev is not None and prev.id != job.id:
++                jobs_mod.mark(root, prev, jobs_mod.SUPERSEDED)
++                journal_mod.append_events(
++                    root,
++                    [
++                        journal_mod.JournalEvent(
++                            "job-supersede", prev.module, "newer proposal", prev.id
++                        )
++                    ],
++                )
++            updated = jobs_mod.mark(
++                root,
++                job,
++                jobs_mod.PROPOSED,
++                patch_paths=_json.dumps(list(result.patch_paths)),
++                cause=cause,
++                refrozen="1" if result.build.refrozen else "",
++                battery=battery,
++                phase="",
++            )
++            journal_mod.append_events(
++                root,
++                [
++                    journal_mod.JournalEvent(
++                        "job-propose", job.module, f"{cause}; battery {battery}", job.id
++                    )
++                ],
++            )
++            _notify(cfg, updated)
++            del state.pending[job_id]
++            continue
+         journal_path = root / journal_mod.JOURNAL_FILE
+         journal_opted_in = journal_path.exists()
+         snapshot_len = 0
+diff --git a/tests/test_daemon.py b/tests/test_daemon.py
+index 39b078fcd6a8d04dabdcda41c67f4930e162795e..d3958737a1d2f9633f850e4450a23abd95a6f2b6
+--- a/tests/test_daemon.py
++++ b/tests/test_daemon.py
+@@ -344,6 +344,74 @@
+     assert (repo / "src" / "__generated__" / "app.py").exists()
+ 
+ 
++def test_green_job_proposes_when_auto_commit_false(repo: Path) -> None:
++    (repo / "jaunt.toml").write_text(
++        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = false\n',
++        encoding="utf-8",
++    )
++    _git(repo, "add", "-A")
++    _git(repo, "commit", "-m", "propose mode")
++    cfg = load_config(root=repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, cfg, state, runner, pool)
++
++    proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
++    assert len(proposed) == 1
++    job = proposed[0]
++    assert job.module == "app"
++    assert (jobs.jobs_dir(repo) / f"{job.id}.patch").read_text(encoding="utf-8")
++    assert json.loads(job.patch_paths)
++    assert job.cause == "spec change"
++    assert job.battery == "3/3"
++    assert not jobs.list_jobs(repo, states={jobs.LANDED})
++    assert "regen" not in _git(repo, "log", "-1", "--format=%s")
++
++
++def test_newer_proposal_supersedes_older(repo: Path) -> None:
++    (repo / "jaunt.toml").write_text(
++        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = false\n',
++        encoding="utf-8",
++    )
++    _git(repo, "add", "-A")
++    _git(repo, "commit", "-m", "propose mode")
++    cfg = load_config(root=repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, cfg, state, runner, pool)
++
++        older = jobs.list_jobs(repo, states={jobs.PROPOSED})[0]
++        runner.digest = "digest-v2"
++        runner.built = []
++        _spec_commit(repo, '"""spec v3"""\n')
++        _cycle(repo, cfg, state, runner, pool)
++
++    proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
++    assert len(proposed) == 1
++    assert proposed[0].id != older.id
++    assert proposed[0].spec_digest == "digest-v2"
++    superseded = jobs.list_jobs(repo, states={jobs.SUPERSEDED})
++    assert len(superseded) == 1
++    assert superseded[0].id == older.id
++
++
++def test_auto_commit_true_lands_exactly_as_before(repo: Path, jaunt_cfg: JauntConfig) -> None:
++    _opt_into_journal(repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, jaunt_cfg, state, runner, pool)
++    landed = jobs.list_jobs(repo, states={jobs.LANDED})
++    assert len(landed) == 1 and landed[0].module == "app"
++    assert "regen(app)" in _git(repo, "log", "-1", "--format=%s")
++    assert not jobs.list_jobs(repo, states={jobs.PROPOSED})
++
++
+ def test_run_once_spawn_false_leaves_queued_job_unsubmitted(
+     repo: Path, jaunt_cfg: JauntConfig
+ ) -> None:
+
+codex
+`ruff check` passed. I’m running `ruff format` now, then I’ll verify the formatter did not broaden the file set.
+exec
+/bin/zsh -lc 'uv run ruff format .' in /home/diwank/github.com/creatorrr/jaunt-impl-propose-only
+ succeeded in 0ms:
+1 file reformatted, 192 files left unchanged
+
+diff --git a/src/jaunt/daemon.py b/src/jaunt/daemon.py
+index 5b29331abeff5c171fd5d794edcc62bbf04426bb..25e6b026217f43e91e8fe46bbda67b6a4fc20ce8
+--- a/src/jaunt/daemon.py
++++ b/src/jaunt/daemon.py
+@@ -547,6 +547,8 @@
+         "job-fail",
+         "job-park",
+         "job-supersede",
++        "job-propose",
++        "job-discard",
+         "probe-fail",
+     }
+ 
+@@ -592,6 +594,42 @@
+         action = "refreeze" if result.build.refrozen else "build"
+         battery = result.gate.battery if result.gate else "-"
+         message = landing.build_commit_message(job.module, cause, job.id, job.spec_digest)
++        if not cfg.daemon.auto_commit:
++            (jobs_mod.jobs_dir(root) / f"{job.id}.patch").write_text(
++                result.patch, encoding="utf-8"
++            )
++            prev = jobs_mod.proposed_for_module(root, job.module)
++            if prev is not None and prev.id != job.id:
++                jobs_mod.mark(root, prev, jobs_mod.SUPERSEDED)
++                journal_mod.append_events(
++                    root,
++                    [
++                        journal_mod.JournalEvent(
++                            "job-supersede", prev.module, "newer proposal", prev.id
++                        )
++                    ],
++                )
++            updated = jobs_mod.mark(
++                root,
++                job,
++                jobs_mod.PROPOSED,
++                patch_paths=_json.dumps(list(result.patch_paths)),
++                cause=cause,
++                refrozen="1" if result.build.refrozen else "",
++                battery=battery,
++                phase="",
++            )
++            journal_mod.append_events(
++                root,
++                [
++                    journal_mod.JournalEvent(
++                        "job-propose", job.module, f"{cause}; battery {battery}", job.id
++                    )
++                ],
++            )
++            _notify(cfg, updated)
++            del state.pending[job_id]
++            continue
+         journal_path = root / journal_mod.JOURNAL_FILE
+         journal_opted_in = journal_path.exists()
+         snapshot_len = 0
+diff --git a/tests/test_daemon.py b/tests/test_daemon.py
+index 39b078fcd6a8d04dabdcda41c67f4930e162795e..d3958737a1d2f9633f850e4450a23abd95a6f2b6
+--- a/tests/test_daemon.py
++++ b/tests/test_daemon.py
+@@ -344,6 +344,74 @@
+     assert (repo / "src" / "__generated__" / "app.py").exists()
+ 
+ 
++def test_green_job_proposes_when_auto_commit_false(repo: Path) -> None:
++    (repo / "jaunt.toml").write_text(
++        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = false\n',
++        encoding="utf-8",
++    )
++    _git(repo, "add", "-A")
++    _git(repo, "commit", "-m", "propose mode")
++    cfg = load_config(root=repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, cfg, state, runner, pool)
++
++    proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
++    assert len(proposed) == 1
++    job = proposed[0]
++    assert job.module == "app"
++    assert (jobs.jobs_dir(repo) / f"{job.id}.patch").read_text(encoding="utf-8")
++    assert json.loads(job.patch_paths)
++    assert job.cause == "spec change"
++    assert job.battery == "3/3"
++    assert not jobs.list_jobs(repo, states={jobs.LANDED})
++    assert "regen" not in _git(repo, "log", "-1", "--format=%s")
++
++
++def test_newer_proposal_supersedes_older(repo: Path) -> None:
++    (repo / "jaunt.toml").write_text(
++        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = false\n',
++        encoding="utf-8",
++    )
++    _git(repo, "add", "-A")
++    _git(repo, "commit", "-m", "propose mode")
++    cfg = load_config(root=repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, cfg, state, runner, pool)
++
++        older = jobs.list_jobs(repo, states={jobs.PROPOSED})[0]
++        runner.digest = "digest-v2"
++        runner.built = []
++        _spec_commit(repo, '"""spec v3"""\n')
++        _cycle(repo, cfg, state, runner, pool)
++
++    proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
++    assert len(proposed) == 1
++    assert proposed[0].id != older.id
++    assert proposed[0].spec_digest == "digest-v2"
++    superseded = jobs.list_jobs(repo, states={jobs.SUPERSEDED})
++    assert len(superseded) == 1
++    assert superseded[0].id == older.id
++
++
++def test_auto_commit_true_lands_exactly_as_before(repo: Path, jaunt_cfg: JauntConfig) -> None:
++    _opt_into_journal(repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, jaunt_cfg, state, runner, pool)
++    landed = jobs.list_jobs(repo, states={jobs.LANDED})
++    assert len(landed) == 1 and landed[0].module == "app"
++    assert "regen(app)" in _git(repo, "log", "-1", "--format=%s")
++    assert not jobs.list_jobs(repo, states={jobs.PROPOSED})
++
++
+ def test_run_once_spawn_false_leaves_queued_job_unsubmitted(
+     repo: Path, jaunt_cfg: JauntConfig
+ ) -> None:
+
+codex
+`ruff format` reformatted one file. I’m checking the diff scope before typechecking so we can confirm only the requested files changed.
+exec
+/bin/zsh -lc 'git diff --stat' in /home/diwank/github.com/creatorrr/jaunt-impl-propose-only
+ succeeded in 0ms:
+ src/jaunt/daemon.py  | 36 ++++++++++++++++++++++++++++
+ tests/test_daemon.py | 68 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 104 insertions(+)
+
+exec
+/bin/zsh -lc 'git status --short' in /home/diwank/github.com/creatorrr/jaunt-impl-propose-only
+ succeeded in 0ms:
+ M src/jaunt/daemon.py
+ M tests/test_daemon.py
+?? .scratch/
+
+exec
+/bin/zsh -lc 'uv run ty check' in /home/diwank/github.com/creatorrr/jaunt-impl-propose-only
+diff --git a/src/jaunt/daemon.py b/src/jaunt/daemon.py
+index 5b29331abeff5c171fd5d794edcc62bbf04426bb..25e6b026217f43e91e8fe46bbda67b6a4fc20ce8
+--- a/src/jaunt/daemon.py
++++ b/src/jaunt/daemon.py
+@@ -547,6 +547,8 @@
+         "job-fail",
+         "job-park",
+         "job-supersede",
++        "job-propose",
++        "job-discard",
+         "probe-fail",
+     }
+ 
+@@ -592,6 +594,42 @@
+         action = "refreeze" if result.build.refrozen else "build"
+         battery = result.gate.battery if result.gate else "-"
+         message = landing.build_commit_message(job.module, cause, job.id, job.spec_digest)
++        if not cfg.daemon.auto_commit:
++            (jobs_mod.jobs_dir(root) / f"{job.id}.patch").write_text(
++                result.patch, encoding="utf-8"
++            )
++            prev = jobs_mod.proposed_for_module(root, job.module)
++            if prev is not None and prev.id != job.id:
++                jobs_mod.mark(root, prev, jobs_mod.SUPERSEDED)
++                journal_mod.append_events(
++                    root,
++                    [
++                        journal_mod.JournalEvent(
++                            "job-supersede", prev.module, "newer proposal", prev.id
++                        )
++                    ],
++                )
++            updated = jobs_mod.mark(
++                root,
++                job,
++                jobs_mod.PROPOSED,
++                patch_paths=_json.dumps(list(result.patch_paths)),
++                cause=cause,
++                refrozen="1" if result.build.refrozen else "",
++                battery=battery,
++                phase="",
++            )
++            journal_mod.append_events(
++                root,
++                [
++                    journal_mod.JournalEvent(
++                        "job-propose", job.module, f"{cause}; battery {battery}", job.id
++                    )
++                ],
++            )
++            _notify(cfg, updated)
++            del state.pending[job_id]
++            continue
+         journal_path = root / journal_mod.JOURNAL_FILE
+         journal_opted_in = journal_path.exists()
+         snapshot_len = 0
+diff --git a/tests/test_daemon.py b/tests/test_daemon.py
+index 39b078fcd6a8d04dabdcda41c67f4930e162795e..d3958737a1d2f9633f850e4450a23abd95a6f2b6
+--- a/tests/test_daemon.py
++++ b/tests/test_daemon.py
+@@ -344,6 +344,74 @@
+     assert (repo / "src" / "__generated__" / "app.py").exists()
+ 
+ 
++def test_green_job_proposes_when_auto_commit_false(repo: Path) -> None:
++    (repo / "jaunt.toml").write_text(
++        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = false\n',
++        encoding="utf-8",
++    )
++    _git(repo, "add", "-A")
++    _git(repo, "commit", "-m", "propose mode")
++    cfg = load_config(root=repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, cfg, state, runner, pool)
++
++    proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
++    assert len(proposed) == 1
++    job = proposed[0]
++    assert job.module == "app"
++    assert (jobs.jobs_dir(repo) / f"{job.id}.patch").read_text(encoding="utf-8")
++    assert json.loads(job.patch_paths)
++    assert job.cause == "spec change"
++    assert job.battery == "3/3"
++    assert not jobs.list_jobs(repo, states={jobs.LANDED})
++    assert "regen" not in _git(repo, "log", "-1", "--format=%s")
++
++
++def test_newer_proposal_supersedes_older(repo: Path) -> None:
++    (repo / "jaunt.toml").write_text(
++        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = false\n',
++        encoding="utf-8",
++    )
++    _git(repo, "add", "-A")
++    _git(repo, "commit", "-m", "propose mode")
++    cfg = load_config(root=repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, cfg, state, runner, pool)
++
++        older = jobs.list_jobs(repo, states={jobs.PROPOSED})[0]
++        runner.digest = "digest-v2"
++        runner.built = []
++        _spec_commit(repo, '"""spec v3"""\n')
++        _cycle(repo, cfg, state, runner, pool)
++
++    proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
++    assert len(proposed) == 1
++    assert proposed[0].id != older.id
++    assert proposed[0].spec_digest == "digest-v2"
++    superseded = jobs.list_jobs(repo, states={jobs.SUPERSEDED})
++    assert len(superseded) == 1
++    assert superseded[0].id == older.id
++
++
++def test_auto_commit_true_lands_exactly_as_before(repo: Path, jaunt_cfg: JauntConfig) -> None:
++    _opt_into_journal(repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, jaunt_cfg, state, runner, pool)
++    landed = jobs.list_jobs(repo, states={jobs.LANDED})
++    assert len(landed) == 1 and landed[0].module == "app"
++    assert "regen(app)" in _git(repo, "log", "-1", "--format=%s")
++    assert not jobs.list_jobs(repo, states={jobs.PROPOSED})
++
++
+ def test_run_once_spawn_false_leaves_queued_job_unsubmitted(
+     repo: Path, jaunt_cfg: JauntConfig
+ ) -> None:
+
+ succeeded in 184ms:
+All checks passed!
+
+codex
+The changed files are only `src/jaunt/daemon.py` and `tests/test_daemon.py`; `.scratch/` was already untracked and untouched. Type checking passed, and I’m doing a final ruff/test pass after formatting.
+exec
+/bin/zsh -lc 'uv run ruff check .' in /home/diwank/github.com/creatorrr/jaunt-impl-propose-only
+ succeeded in 0ms:
+All checks passed!
+
+exec
+/bin/zsh -lc 'uv run pytest tests/test_daemon.py -q' in /home/diwank/github.com/creatorrr/jaunt-impl-propose-only
+diff --git a/src/jaunt/daemon.py b/src/jaunt/daemon.py
+index 5b29331abeff5c171fd5d794edcc62bbf04426bb..25e6b026217f43e91e8fe46bbda67b6a4fc20ce8
+--- a/src/jaunt/daemon.py
++++ b/src/jaunt/daemon.py
+@@ -547,6 +547,8 @@
+         "job-fail",
+         "job-park",
+         "job-supersede",
++        "job-propose",
++        "job-discard",
+         "probe-fail",
+     }
+ 
+@@ -592,6 +594,42 @@
+         action = "refreeze" if result.build.refrozen else "build"
+         battery = result.gate.battery if result.gate else "-"
+         message = landing.build_commit_message(job.module, cause, job.id, job.spec_digest)
++        if not cfg.daemon.auto_commit:
++            (jobs_mod.jobs_dir(root) / f"{job.id}.patch").write_text(
++                result.patch, encoding="utf-8"
++            )
++            prev = jobs_mod.proposed_for_module(root, job.module)
++            if prev is not None and prev.id != job.id:
++                jobs_mod.mark(root, prev, jobs_mod.SUPERSEDED)
++                journal_mod.append_events(
++                    root,
++                    [
++                        journal_mod.JournalEvent(
++                            "job-supersede", prev.module, "newer proposal", prev.id
++                        )
++                    ],
++                )
++            updated = jobs_mod.mark(
++                root,
++                job,
++                jobs_mod.PROPOSED,
++                patch_paths=_json.dumps(list(result.patch_paths)),
++                cause=cause,
++                refrozen="1" if result.build.refrozen else "",
++                battery=battery,
++                phase="",
++            )
++            journal_mod.append_events(
++                root,
++                [
++                    journal_mod.JournalEvent(
++                        "job-propose", job.module, f"{cause}; battery {battery}", job.id
++                    )
++                ],
++            )
++            _notify(cfg, updated)
++            del state.pending[job_id]
++            continue
+         journal_path = root / journal_mod.JOURNAL_FILE
+         journal_opted_in = journal_path.exists()
+         snapshot_len = 0
+diff --git a/tests/test_daemon.py b/tests/test_daemon.py
+index 39b078fcd6a8d04dabdcda41c67f4930e162795e..d3958737a1d2f9633f850e4450a23abd95a6f2b6
+--- a/tests/test_daemon.py
++++ b/tests/test_daemon.py
+@@ -344,6 +344,74 @@
+     assert (repo / "src" / "__generated__" / "app.py").exists()
+ 
+ 
++def test_green_job_proposes_when_auto_commit_false(repo: Path) -> None:
++    (repo / "jaunt.toml").write_text(
++        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = false\n',
++        encoding="utf-8",
++    )
++    _git(repo, "add", "-A")
++    _git(repo, "commit", "-m", "propose mode")
++    cfg = load_config(root=repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, cfg, state, runner, pool)
++
++    proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
++    assert len(proposed) == 1
++    job = proposed[0]
++    assert job.module == "app"
++    assert (jobs.jobs_dir(repo) / f"{job.id}.patch").read_text(encoding="utf-8")
++    assert json.loads(job.patch_paths)
++    assert job.cause == "spec change"
++    assert job.battery == "3/3"
++    assert not jobs.list_jobs(repo, states={jobs.LANDED})
++    assert "regen" not in _git(repo, "log", "-1", "--format=%s")
++
++
++def test_newer_proposal_supersedes_older(repo: Path) -> None:
++    (repo / "jaunt.toml").write_text(
++        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = false\n',
++        encoding="utf-8",
++    )
++    _git(repo, "add", "-A")
++    _git(repo, "commit", "-m", "propose mode")
++    cfg = load_config(root=repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, cfg, state, runner, pool)
++
++        older = jobs.list_jobs(repo, states={jobs.PROPOSED})[0]
++        runner.digest = "digest-v2"
++        runner.built = []
++        _spec_commit(repo, '"""spec v3"""\n')
++        _cycle(repo, cfg, state, runner, pool)
++
++    proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
++    assert len(proposed) == 1
++    assert proposed[0].id != older.id
++    assert proposed[0].spec_digest == "digest-v2"
++    superseded = jobs.list_jobs(repo, states={jobs.SUPERSEDED})
++    assert len(superseded) == 1
++    assert superseded[0].id == older.id
++
++
++def test_auto_commit_true_lands_exactly_as_before(repo: Path, jaunt_cfg: JauntConfig) -> None:
++    _opt_into_journal(repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, jaunt_cfg, state, runner, pool)
++    landed = jobs.list_jobs(repo, states={jobs.LANDED})
++    assert len(landed) == 1 and landed[0].module == "app"
++    assert "regen(app)" in _git(repo, "log", "-1", "--format=%s")
++    assert not jobs.list_jobs(repo, states={jobs.PROPOSED})
++
++
+ def test_run_once_spawn_false_leaves_queued_job_unsubmitted(
+     repo: Path, jaunt_cfg: JauntConfig
+ ) -> None:
+
+ succeeded in 4205ms:
+..........................................                               [100%]
+42 passed in 3.85s
+
+codex
+The final ruff check and daemon tests passed after formatting. I’m rerunning the full suite once more so the final state is verified in order.
+exec
+/bin/zsh -lc 'uv run pytest -q' in /home/diwank/github.com/creatorrr/jaunt-impl-propose-only
+diff --git a/src/jaunt/daemon.py b/src/jaunt/daemon.py
+index 5b29331abeff5c171fd5d794edcc62bbf04426bb..25e6b026217f43e91e8fe46bbda67b6a4fc20ce8
+--- a/src/jaunt/daemon.py
++++ b/src/jaunt/daemon.py
+@@ -547,6 +547,8 @@
+         "job-fail",
+         "job-park",
+         "job-supersede",
++        "job-propose",
++        "job-discard",
+         "probe-fail",
+     }
+ 
+@@ -592,6 +594,42 @@
+         action = "refreeze" if result.build.refrozen else "build"
+         battery = result.gate.battery if result.gate else "-"
+         message = landing.build_commit_message(job.module, cause, job.id, job.spec_digest)
++        if not cfg.daemon.auto_commit:
++            (jobs_mod.jobs_dir(root) / f"{job.id}.patch").write_text(
++                result.patch, encoding="utf-8"
++            )
++            prev = jobs_mod.proposed_for_module(root, job.module)
++            if prev is not None and prev.id != job.id:
++                jobs_mod.mark(root, prev, jobs_mod.SUPERSEDED)
++                journal_mod.append_events(
++                    root,
++                    [
++                        journal_mod.JournalEvent(
++                            "job-supersede", prev.module, "newer proposal", prev.id
++                        )
++                    ],
++                )
++            updated = jobs_mod.mark(
++                root,
++                job,
++                jobs_mod.PROPOSED,
++                patch_paths=_json.dumps(list(result.patch_paths)),
++                cause=cause,
++                refrozen="1" if result.build.refrozen else "",
++                battery=battery,
++                phase="",
++            )
++            journal_mod.append_events(
++                root,
++                [
++                    journal_mod.JournalEvent(
++                        "job-propose", job.module, f"{cause}; battery {battery}", job.id
++                    )
++                ],
++            )
++            _notify(cfg, updated)
++            del state.pending[job_id]
++            continue
+         journal_path = root / journal_mod.JOURNAL_FILE
+         journal_opted_in = journal_path.exists()
+         snapshot_len = 0
+diff --git a/tests/test_daemon.py b/tests/test_daemon.py
+index 39b078fcd6a8d04dabdcda41c67f4930e162795e..d3958737a1d2f9633f850e4450a23abd95a6f2b6
+--- a/tests/test_daemon.py
++++ b/tests/test_daemon.py
+@@ -344,6 +344,74 @@
+     assert (repo / "src" / "__generated__" / "app.py").exists()
+ 
+ 
++def test_green_job_proposes_when_auto_commit_false(repo: Path) -> None:
++    (repo / "jaunt.toml").write_text(
++        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = false\n',
++        encoding="utf-8",
++    )
++    _git(repo, "add", "-A")
++    _git(repo, "commit", "-m", "propose mode")
++    cfg = load_config(root=repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, cfg, state, runner, pool)
++
++    proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
++    assert len(proposed) == 1
++    job = proposed[0]
++    assert job.module == "app"
++    assert (jobs.jobs_dir(repo) / f"{job.id}.patch").read_text(encoding="utf-8")
++    assert json.loads(job.patch_paths)
++    assert job.cause == "spec change"
++    assert job.battery == "3/3"
++    assert not jobs.list_jobs(repo, states={jobs.LANDED})
++    assert "regen" not in _git(repo, "log", "-1", "--format=%s")
++
++
++def test_newer_proposal_supersedes_older(repo: Path) -> None:
++    (repo / "jaunt.toml").write_text(
++        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = false\n',
++        encoding="utf-8",
++    )
++    _git(repo, "add", "-A")
++    _git(repo, "commit", "-m", "propose mode")
++    cfg = load_config(root=repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, cfg, state, runner, pool)
++
++        older = jobs.list_jobs(repo, states={jobs.PROPOSED})[0]
++        runner.digest = "digest-v2"
++        runner.built = []
++        _spec_commit(repo, '"""spec v3"""\n')
++        _cycle(repo, cfg, state, runner, pool)
++
++    proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
++    assert len(proposed) == 1
++    assert proposed[0].id != older.id
++    assert proposed[0].spec_digest == "digest-v2"
++    superseded = jobs.list_jobs(repo, states={jobs.SUPERSEDED})
++    assert len(superseded) == 1
++    assert superseded[0].id == older.id
++
++
++def test_auto_commit_true_lands_exactly_as_before(repo: Path, jaunt_cfg: JauntConfig) -> None:
++    _opt_into_journal(repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, jaunt_cfg, state, runner, pool)
++    landed = jobs.list_jobs(repo, states={jobs.LANDED})
++    assert len(landed) == 1 and landed[0].module == "app"
++    assert "regen(app)" in _git(repo, "log", "-1", "--format=%s")
++    assert not jobs.list_jobs(repo, states={jobs.PROPOSED})
++
++
+ def test_run_once_spawn_false_leaves_queued_job_unsubmitted(
+     repo: Path, jaunt_cfg: JauntConfig
+ ) -> None:
+
+ succeeded in 21515ms:
+........................................................................ [  6%]
+........................................................................ [ 13%]
+........................................................................ [ 20%]
+........................................................................ [ 27%]
+........................................................................ [ 34%]
+........................................................................ [ 40%]
+........................................................................ [ 47%]
+........................................................................ [ 54%]
+........................................................................ [ 61%]
+........................................................................ [ 68%]
+........................................................................ [ 74%]
+........................................................................ [ 81%]
+........................................................................ [ 88%]
+........................................................................ [ 95%]
+..................................................                       [100%]
+1058 passed in 21.06s
+
+codex
+Everything requested is green. I’m doing one final diff read for a sanity check before I summarize.
+exec
+/bin/zsh -lc 'git diff -- src/jaunt/daemon.py tests/test_daemon.py' in /home/diwank/github.com/creatorrr/jaunt-impl-propose-only
+ succeeded in 0ms:
+diff --git a/src/jaunt/daemon.py b/src/jaunt/daemon.py
+index 5b29331..5b112fd 100644
+--- a/src/jaunt/daemon.py
++++ b/src/jaunt/daemon.py
+@@ -547,6 +547,8 @@ def _is_daemon_journal_addition(line: str) -> bool:
+         "job-fail",
+         "job-park",
+         "job-supersede",
++        "job-propose",
++        "job-discard",
+         "probe-fail",
+     }
+ 
+@@ -592,6 +594,40 @@ def _land_pending(root: Path, cfg: JauntConfig, state: DaemonState) -> None:
+         action = "refreeze" if result.build.refrozen else "build"
+         battery = result.gate.battery if result.gate else "-"
+         message = landing.build_commit_message(job.module, cause, job.id, job.spec_digest)
++        if not cfg.daemon.auto_commit:
++            (jobs_mod.jobs_dir(root) / f"{job.id}.patch").write_text(result.patch, encoding="utf-8")
++            prev = jobs_mod.proposed_for_module(root, job.module)
++            if prev is not None and prev.id != job.id:
++                jobs_mod.mark(root, prev, jobs_mod.SUPERSEDED)
++                journal_mod.append_events(
++                    root,
++                    [
++                        journal_mod.JournalEvent(
++                            "job-supersede", prev.module, "newer proposal", prev.id
++                        )
++                    ],
++                )
++            updated = jobs_mod.mark(
++                root,
++                job,
++                jobs_mod.PROPOSED,
++                patch_paths=_json.dumps(list(result.patch_paths)),
++                cause=cause,
++                refrozen="1" if result.build.refrozen else "",
++                battery=battery,
++                phase="",
++            )
++            journal_mod.append_events(
++                root,
++                [
++                    journal_mod.JournalEvent(
++                        "job-propose", job.module, f"{cause}; battery {battery}", job.id
++                    )
++                ],
++            )
++            _notify(cfg, updated)
++            del state.pending[job_id]
++            continue
+         journal_path = root / journal_mod.JOURNAL_FILE
+         journal_opted_in = journal_path.exists()
+         snapshot_len = 0
+diff --git a/tests/test_daemon.py b/tests/test_daemon.py
+index 39b078f..d395873 100644
+--- a/tests/test_daemon.py
++++ b/tests/test_daemon.py
+@@ -344,6 +344,74 @@ def test_run_once_full_cycle_lands_and_journals(repo: Path, jaunt_cfg: JauntConf
+     assert (repo / "src" / "__generated__" / "app.py").exists()
+ 
+ 
++def test_green_job_proposes_when_auto_commit_false(repo: Path) -> None:
++    (repo / "jaunt.toml").write_text(
++        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = false\n',
++        encoding="utf-8",
++    )
++    _git(repo, "add", "-A")
++    _git(repo, "commit", "-m", "propose mode")
++    cfg = load_config(root=repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, cfg, state, runner, pool)
++
++    proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
++    assert len(proposed) == 1
++    job = proposed[0]
++    assert job.module == "app"
++    assert (jobs.jobs_dir(repo) / f"{job.id}.patch").read_text(encoding="utf-8")
++    assert json.loads(job.patch_paths)
++    assert job.cause == "spec change"
++    assert job.battery == "3/3"
++    assert not jobs.list_jobs(repo, states={jobs.LANDED})
++    assert "regen" not in _git(repo, "log", "-1", "--format=%s")
++
++
++def test_newer_proposal_supersedes_older(repo: Path) -> None:
++    (repo / "jaunt.toml").write_text(
++        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = false\n',
++        encoding="utf-8",
++    )
++    _git(repo, "add", "-A")
++    _git(repo, "commit", "-m", "propose mode")
++    cfg = load_config(root=repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, cfg, state, runner, pool)
++
++        older = jobs.list_jobs(repo, states={jobs.PROPOSED})[0]
++        runner.digest = "digest-v2"
++        runner.built = []
++        _spec_commit(repo, '"""spec v3"""\n')
++        _cycle(repo, cfg, state, runner, pool)
++
++    proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
++    assert len(proposed) == 1
++    assert proposed[0].id != older.id
++    assert proposed[0].spec_digest == "digest-v2"
++    superseded = jobs.list_jobs(repo, states={jobs.SUPERSEDED})
++    assert len(superseded) == 1
++    assert superseded[0].id == older.id
++
++
++def test_auto_commit_true_lands_exactly_as_before(repo: Path, jaunt_cfg: JauntConfig) -> None:
++    _opt_into_journal(repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, jaunt_cfg, state, runner, pool)
++    landed = jobs.list_jobs(repo, states={jobs.LANDED})
++    assert len(landed) == 1 and landed[0].module == "app"
++    assert "regen(app)" in _git(repo, "log", "-1", "--format=%s")
++    assert not jobs.list_jobs(repo, states={jobs.PROPOSED})
++
++
+ def test_run_once_spawn_false_leaves_queued_job_unsubmitted(
+     repo: Path, jaunt_cfg: JauntConfig
+ ) -> None:
+
+exec
+/bin/zsh -lc 'git status --short' in /home/diwank/github.com/creatorrr/jaunt-impl-propose-only
+ succeeded in 0ms:
+ M src/jaunt/daemon.py
+ M tests/test_daemon.py
+?? .scratch/
+
+diff --git a/src/jaunt/daemon.py b/src/jaunt/daemon.py
+index 5b29331abeff5c171fd5d794edcc62bbf04426bb..25e6b026217f43e91e8fe46bbda67b6a4fc20ce8
+--- a/src/jaunt/daemon.py
++++ b/src/jaunt/daemon.py
+@@ -547,6 +547,8 @@
+         "job-fail",
+         "job-park",
+         "job-supersede",
++        "job-propose",
++        "job-discard",
+         "probe-fail",
+     }
+ 
+@@ -592,6 +594,42 @@
+         action = "refreeze" if result.build.refrozen else "build"
+         battery = result.gate.battery if result.gate else "-"
+         message = landing.build_commit_message(job.module, cause, job.id, job.spec_digest)
++        if not cfg.daemon.auto_commit:
++            (jobs_mod.jobs_dir(root) / f"{job.id}.patch").write_text(
++                result.patch, encoding="utf-8"
++            )
++            prev = jobs_mod.proposed_for_module(root, job.module)
++            if prev is not None and prev.id != job.id:
++                jobs_mod.mark(root, prev, jobs_mod.SUPERSEDED)
++                journal_mod.append_events(
++                    root,
++                    [
++                        journal_mod.JournalEvent(
++                            "job-supersede", prev.module, "newer proposal", prev.id
++                        )
++                    ],
++                )
++            updated = jobs_mod.mark(
++                root,
++                job,
++                jobs_mod.PROPOSED,
++                patch_paths=_json.dumps(list(result.patch_paths)),
++                cause=cause,
++                refrozen="1" if result.build.refrozen else "",
++                battery=battery,
++                phase="",
++            )
++            journal_mod.append_events(
++                root,
++                [
++                    journal_mod.JournalEvent(
++                        "job-propose", job.module, f"{cause}; battery {battery}", job.id
++                    )
++                ],
++            )
++            _notify(cfg, updated)
++            del state.pending[job_id]
++            continue
+         journal_path = root / journal_mod.JOURNAL_FILE
+         journal_opted_in = journal_path.exists()
+         snapshot_len = 0
+diff --git a/tests/test_daemon.py b/tests/test_daemon.py
+index 39b078fcd6a8d04dabdcda41c67f4930e162795e..d3958737a1d2f9633f850e4450a23abd95a6f2b6
+--- a/tests/test_daemon.py
++++ b/tests/test_daemon.py
+@@ -344,6 +344,74 @@
+     assert (repo / "src" / "__generated__" / "app.py").exists()
+ 
+ 
++def test_green_job_proposes_when_auto_commit_false(repo: Path) -> None:
++    (repo / "jaunt.toml").write_text(
++        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = false\n',
++        encoding="utf-8",
++    )
++    _git(repo, "add", "-A")
++    _git(repo, "commit", "-m", "propose mode")
++    cfg = load_config(root=repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, cfg, state, runner, pool)
++
++    proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
++    assert len(proposed) == 1
++    job = proposed[0]
++    assert job.module == "app"
++    assert (jobs.jobs_dir(repo) / f"{job.id}.patch").read_text(encoding="utf-8")
++    assert json.loads(job.patch_paths)
++    assert job.cause == "spec change"
++    assert job.battery == "3/3"
++    assert not jobs.list_jobs(repo, states={jobs.LANDED})
++    assert "regen" not in _git(repo, "log", "-1", "--format=%s")
++
++
++def test_newer_proposal_supersedes_older(repo: Path) -> None:
++    (repo / "jaunt.toml").write_text(
++        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = false\n',
++        encoding="utf-8",
++    )
++    _git(repo, "add", "-A")
++    _git(repo, "commit", "-m", "propose mode")
++    cfg = load_config(root=repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, cfg, state, runner, pool)
++
++        older = jobs.list_jobs(repo, states={jobs.PROPOSED})[0]
++        runner.digest = "digest-v2"
++        runner.built = []
++        _spec_commit(repo, '"""spec v3"""\n')
++        _cycle(repo, cfg, state, runner, pool)
++
++    proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
++    assert len(proposed) == 1
++    assert proposed[0].id != older.id
++    assert proposed[0].spec_digest == "digest-v2"
++    superseded = jobs.list_jobs(repo, states={jobs.SUPERSEDED})
++    assert len(superseded) == 1
++    assert superseded[0].id == older.id
++
++
++def test_auto_commit_true_lands_exactly_as_before(repo: Path, jaunt_cfg: JauntConfig) -> None:
++    _opt_into_journal(repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, jaunt_cfg, state, runner, pool)
++    landed = jobs.list_jobs(repo, states={jobs.LANDED})
++    assert len(landed) == 1 and landed[0].module == "app"
++    assert "regen(app)" in _git(repo, "log", "-1", "--format=%s")
++    assert not jobs.list_jobs(repo, states={jobs.PROPOSED})
++
++
+ def test_run_once_spawn_false_leaves_queued_job_unsubmitted(
+     repo: Path, jaunt_cfg: JauntConfig
+ ) -> None:
+
+codex
+Implemented Task 3.
+
+Changed:
+- [src/jaunt/daemon.py](/home/diwank/github.com/creatorrr/jaunt-impl-propose-only/src/jaunt/daemon.py): propose-only branch writes `.jaunt/jobs/<id>.patch`, supersedes older proposals, marks `PROPOSED`, journals `job-propose`, and leaves the existing auto-commit landing path unchanged.
+- [tests/test_daemon.py](/home/diwank/github.com/creatorrr/jaunt-impl-propose-only/tests/test_daemon.py): added propose mode, proposal supersede, and auto-commit unchanged coverage.
+
+Verification passed:
+- `uv run pytest tests/test_daemon.py -q` → 42 passed
+- `uv run pytest -q` → 1058 passed
+- `uv run ruff check .` → passed
+- `uv run ruff format .` → completed
+- `uv run ty check` → passed
+
+Only `src/jaunt/daemon.py` and `tests/test_daemon.py` are modified. `.scratch/` remains untracked and untouched.
+diff --git a/src/jaunt/daemon.py b/src/jaunt/daemon.py
+index 5b29331abeff5c171fd5d794edcc62bbf04426bb..25e6b026217f43e91e8fe46bbda67b6a4fc20ce8
+--- a/src/jaunt/daemon.py
++++ b/src/jaunt/daemon.py
+@@ -547,6 +547,8 @@
+         "job-fail",
+         "job-park",
+         "job-supersede",
++        "job-propose",
++        "job-discard",
+         "probe-fail",
+     }
+ 
+@@ -592,6 +594,42 @@
+         action = "refreeze" if result.build.refrozen else "build"
+         battery = result.gate.battery if result.gate else "-"
+         message = landing.build_commit_message(job.module, cause, job.id, job.spec_digest)
++        if not cfg.daemon.auto_commit:
++            (jobs_mod.jobs_dir(root) / f"{job.id}.patch").write_text(
++                result.patch, encoding="utf-8"
++            )
++            prev = jobs_mod.proposed_for_module(root, job.module)
++            if prev is not None and prev.id != job.id:
++                jobs_mod.mark(root, prev, jobs_mod.SUPERSEDED)
++                journal_mod.append_events(
++                    root,
++                    [
++                        journal_mod.JournalEvent(
++                            "job-supersede", prev.module, "newer proposal", prev.id
++                        )
++                    ],
++                )
++            updated = jobs_mod.mark(
++                root,
++                job,
++                jobs_mod.PROPOSED,
++                patch_paths=_json.dumps(list(result.patch_paths)),
++                cause=cause,
++                refrozen="1" if result.build.refrozen else "",
++                battery=battery,
++                phase="",
++            )
++            journal_mod.append_events(
++                root,
++                [
++                    journal_mod.JournalEvent(
++                        "job-propose", job.module, f"{cause}; battery {battery}", job.id
++                    )
++                ],
++            )
++            _notify(cfg, updated)
++            del state.pending[job_id]
++            continue
+         journal_path = root / journal_mod.JOURNAL_FILE
+         journal_opted_in = journal_path.exists()
+         snapshot_len = 0
+diff --git a/tests/test_daemon.py b/tests/test_daemon.py
+index 39b078fcd6a8d04dabdcda41c67f4930e162795e..d3958737a1d2f9633f850e4450a23abd95a6f2b6
+--- a/tests/test_daemon.py
++++ b/tests/test_daemon.py
+@@ -344,6 +344,74 @@
+     assert (repo / "src" / "__generated__" / "app.py").exists()
+ 
+ 
++def test_green_job_proposes_when_auto_commit_false(repo: Path) -> None:
++    (repo / "jaunt.toml").write_text(
++        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = false\n',
++        encoding="utf-8",
++    )
++    _git(repo, "add", "-A")
++    _git(repo, "commit", "-m", "propose mode")
++    cfg = load_config(root=repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, cfg, state, runner, pool)
++
++    proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
++    assert len(proposed) == 1
++    job = proposed[0]
++    assert job.module == "app"
++    assert (jobs.jobs_dir(repo) / f"{job.id}.patch").read_text(encoding="utf-8")
++    assert json.loads(job.patch_paths)
++    assert job.cause == "spec change"
++    assert job.battery == "3/3"
++    assert not jobs.list_jobs(repo, states={jobs.LANDED})
++    assert "regen" not in _git(repo, "log", "-1", "--format=%s")
++
++
++def test_newer_proposal_supersedes_older(repo: Path) -> None:
++    (repo / "jaunt.toml").write_text(
++        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = false\n',
++        encoding="utf-8",
++    )
++    _git(repo, "add", "-A")
++    _git(repo, "commit", "-m", "propose mode")
++    cfg = load_config(root=repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, cfg, state, runner, pool)
++
++        older = jobs.list_jobs(repo, states={jobs.PROPOSED})[0]
++        runner.digest = "digest-v2"
++        runner.built = []
++        _spec_commit(repo, '"""spec v3"""\n')
++        _cycle(repo, cfg, state, runner, pool)
++
++    proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
++    assert len(proposed) == 1
++    assert proposed[0].id != older.id
++    assert proposed[0].spec_digest == "digest-v2"
++    superseded = jobs.list_jobs(repo, states={jobs.SUPERSEDED})
++    assert len(superseded) == 1
++    assert superseded[0].id == older.id
++
++
++def test_auto_commit_true_lands_exactly_as_before(repo: Path, jaunt_cfg: JauntConfig) -> None:
++    _opt_into_journal(repo)
++    runner = FakeRunner()
++    state = daemon.DaemonState()
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        _spec_commit(repo)
++        _cycle(repo, jaunt_cfg, state, runner, pool)
++    landed = jobs.list_jobs(repo, states={jobs.LANDED})
++    assert len(landed) == 1 and landed[0].module == "app"
++    assert "regen(app)" in _git(repo, "log", "-1", "--format=%s")
++    assert not jobs.list_jobs(repo, states={jobs.PROPOSED})
++
++
+ def test_run_once_spawn_false_leaves_queued_job_unsubmitted(
+     repo: Path, jaunt_cfg: JauntConfig
+ ) -> None:
+
+tokens used
+48,579
+Implemented Task 3.
+
+Changed:
+- [src/jaunt/daemon.py](/home/diwank/github.com/creatorrr/jaunt-impl-propose-only/src/jaunt/daemon.py): propose-only branch writes `.jaunt/jobs/<id>.patch`, supersedes older proposals, marks `PROPOSED`, journals `job-propose`, and leaves the existing auto-commit landing path unchanged.
+- [tests/test_daemon.py](/home/diwank/github.com/creatorrr/jaunt-impl-propose-only/tests/test_daemon.py): added propose mode, proposal supersede, and auto-commit unchanged coverage.
+
+Verification passed:
+- `uv run pytest tests/test_daemon.py -q` → 42 passed
+- `uv run pytest -q` → 1058 passed
+- `uv run ruff check .` → passed
+- `uv run ruff format .` → completed
+- `uv run ty check` → passed
+
+Only `src/jaunt/daemon.py` and `tests/test_daemon.py` are modified. `.scratch/` remains untracked and untouched.

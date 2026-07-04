@@ -7,6 +7,7 @@ so that discovered modules are importable.
 
 from __future__ import annotations
 
+import ast
 import fnmatch
 import importlib
 import sys
@@ -123,6 +124,40 @@ def _module_name_for_file(
     return f"{prefix}.{base_mod}"
 
 
+_JAUNT_DECORATOR_NAMES = frozenset({"magic", "test", "contract", "preserve"})
+
+
+def _has_jaunt_markers(source: str) -> bool:
+    """True when the source shows evidence of jaunt specs (import or decorator).
+
+    Cheap textual prefilter first — files without the substring ``jaunt`` are
+    never parsed. Files that fail to parse cannot define importable specs.
+    """
+    if "jaunt" not in source:
+        return False
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(a.name == "jaunt" or a.name.startswith("jaunt.") for a in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            if mod == "jaunt" or mod.startswith("jaunt."):
+                return True
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            for dec in node.decorator_list:
+                target = dec.func if isinstance(dec, ast.Call) else dec
+                name = (
+                    target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", "")
+                )
+                if name in _JAUNT_DECORATOR_NAMES:
+                    return True
+    return False
+
+
 def discover_module_files(
     *,
     roots: list[Path],
@@ -130,6 +165,7 @@ def discover_module_files(
     generated_dir: str,
     module_prefix: str | None = None,
     target_modules: set[str] | None = None,
+    spec_prescreen: bool = True,
 ) -> list[tuple[str, Path]]:
     """Discover Python modules and their backing files under the provided roots."""
 
@@ -176,6 +212,14 @@ def discover_module_files(
             if _is_excluded(rel_posix, exclude=exclude):
                 continue
 
+            if spec_prescreen:
+                try:
+                    source = py_file.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                if not _has_jaunt_markers(source):
+                    continue
+
             module_name = _module_name_for_file(root=root, py_file=py_file, module_prefix=prefix)
             if module_name is None:
                 continue
@@ -191,6 +235,7 @@ def discover_modules(
     generated_dir: str,
     module_prefix: str | None = None,
     target_modules: set[str] | None = None,
+    spec_prescreen: bool = True,
 ) -> list[str]:
     """Discover Python module names under the provided roots.
 
@@ -210,6 +255,7 @@ def discover_modules(
             generated_dir=generated_dir,
             module_prefix=module_prefix,
             target_modules=target_modules,
+            spec_prescreen=spec_prescreen,
         )
     ]
 

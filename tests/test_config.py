@@ -195,6 +195,7 @@ def test_daemon_config_defaults_and_parses(tmp_path: Path) -> None:
     assert cfg.daemon.poll_interval == 2.0
     assert cfg.daemon.max_jobs == 0
     assert cfg.daemon.notify_command == ""
+    assert cfg.daemon.auto_commit is False
 
     (tmp_path / "jaunt-daemon.toml").write_text(
         "\n".join(
@@ -215,6 +216,20 @@ def test_daemon_config_defaults_and_parses(tmp_path: Path) -> None:
     assert cfg2.daemon.poll_interval == 5.0
     assert cfg2.daemon.max_jobs == 2
     assert cfg2.daemon.notify_command == "notify-send jaunt"
+
+
+def test_daemon_auto_commit_defaults_false(tmp_path: Path) -> None:
+    (tmp_path / "jaunt.toml").write_text("version = 1\n", encoding="utf-8")
+    cfg = load_config(root=tmp_path)
+    assert cfg.daemon.auto_commit is False
+
+
+def test_daemon_auto_commit_parses_true(tmp_path: Path) -> None:
+    (tmp_path / "jaunt.toml").write_text(
+        "version = 1\n[daemon]\nauto_commit = true\n", encoding="utf-8"
+    )
+    cfg = load_config(root=tmp_path)
+    assert cfg.daemon.auto_commit is True
 
 
 def test_skills_config_defaults_and_parses(tmp_path: Path) -> None:
