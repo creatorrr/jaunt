@@ -1,0 +1,48 @@
+---
+title: Upgrading
+description: "Per-version migration notes. Version churn lives only here."
+---
+
+The rest of the reference is versionless. This page collects what changes
+between releases and what you have to do about it. For the complete log, see the
+[GitHub releases](https://github.com/creatorrr/jaunt/releases).
+
+## 1.3.0
+
+Adoption-feedback release: strict config, `.pyi` stubs, a CI-grade `check`, and
+the `@jaunt.sig` vocabulary.
+
+- **Generated layout for top-level modules changed.** A bare module `timing`
+  under a source root now generates to `__generated__/timing.py` instead of the
+  old `timing/__generated__/__init__.py`, which shadowed the module name.
+  Package members (`pkg.mod` → `pkg/__generated__/mod.py`) are unchanged. If you
+  have a top-level-module project, run `jaunt clean && jaunt build` once to
+  migrate. See [Output Locations](/docs/reference/output-layout).
+- **Config validation is strict.** Unknown sections and keys are now errors
+  (exit `2`) with a did-you-mean suggestion. Upgrading can surface a latent typo
+  that was previously ignored and silently left a setting at its default. Fix
+  the reported key. See [Strict validation](/docs/reference/config#strict-validation).
+- **`emit_stubs` defaults on.** Builds now write a `.pyi` beside each spec
+  module, and a missing or stale stub marks the module stale. Set
+  `[build] emit_stubs = false` to opt out. See
+  [`.pyi` stubs](/docs/reference/output-layout#pyi-stubs).
+- **`jaunt check` gates magic drift.** `check` now fails on an unbuilt or stale
+  `@jaunt.magic` module, not just contract drift, so it is the single CI gate
+  for both modes. Scope it with `--contracts-only` or `--magic-only`. See
+  [the CI guide](/docs/guides/ci).
+- **`@jaunt.sig` for sealed methods.** In a whole-class spec, mark a method
+  `@jaunt.sig` to seal its signature (exact params, defaults, annotations, and
+  return type enforced). See [writing magic specs](/docs/guides/writing-magic-specs).
+- **Repo-map drift is decoupled from magic freshness.** `status` and `check`
+  track `treedocs.yaml` drift separately; `--magic-only` skips it entirely.
+
+## 1.2.0
+
+- **The daemon parks green jobs by default.** `[daemon] auto_commit` now
+  defaults to `false`: a green job becomes a reviewable proposal you land with
+  `jaunt jobs land`, rather than an automatic commit. This is the one behavior
+  change existing daemon users feel. To restore the pre-1.2 auto-commit-on-green
+  loop, set `auto_commit = true`. See the
+  [Background Daemon guide](/docs/guides/daemon).
+
+Next: back to [CLI](/docs/reference/cli).

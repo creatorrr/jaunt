@@ -1,149 +1,84 @@
 ---
 title: CLI
-description: "Commands, flags, and exit codes."
+description: "Every command, grouped by workflow, with flags and exit codes."
 ---
 
-For a guided, end-to-end introduction, start with [Quickstart](/docs/tutorials/quickstart).
+The `jaunt` entry point is `jaunt.cli:main`. Commands are grouped below by the
+job they do: authoring specs, building, testing, contract mode, the daemon, and
+project maintenance. New to Jaunt? Start with [Quickstart](/docs/tutorials/quickstart)
+instead.
 
-Entry point: `jaunt = "jaunt.cli:main"` (see `pyproject.toml` in the repo root).
+Every generation command runs through the Codex engine and needs the `codex`
+CLI installed and authenticated (`codex login`). See [Codex Engine](/docs/concepts/codex-engine).
 
-All generation commands run through the Codex engine
-(`[agent].engine = "codex"`, the only supported value). They require the
-`codex` CLI installed and authenticated (`codex login`).
+## Common flags
 
-## Init
+These apply to every generation command (`build`, `test`, `status`, `check`,
+`watch`, `tree`, `specs`, `adopt`, `reconcile`, `eject`). Per-command sections
+below list only the flags unique to that command.
 
-Create a starter `jaunt.toml` in the target directory:
+| Flag | Effect |
+|------|--------|
+| `--root PATH` | Project root. Default: search upward from cwd for `jaunt.toml`. |
+| `--config PATH` | Path to `jaunt.toml`. Default: `<root>/jaunt.toml`. |
+| `--jobs N` | Concurrency override. |
+| `--target MODULE[:QUALNAME]` | Restrict work to one or more modules (repeatable; filtering is module-level). |
+| `--no-infer-deps` | Disable AST dependency inference; explicit `deps=` still applies. |
+| `--progress {auto,rich,plain,none}` | Progress mode. `auto` is rich on a TTY, plain lines off it. |
+| `--no-progress` | Disable progress output. |
+| `--no-cache` | Bypass the LLM response cache. |
+| `--json` | Emit a machine-readable envelope on stdout. See [JSON Output](/docs/reference/json-output). |
 
-```bash
-uv run jaunt init
-uv run jaunt init --root /tmp/myproj
-uv run jaunt init --force
-uv run jaunt init --json
-```
+## Authoring
 
-## Build
+### `jaunt init`
 
-Generate implementation modules for `@jaunt.magic` specs:
-
-```bash
-uv run jaunt build
-uv run jaunt build --force
-uv run jaunt build --jobs 16
-uv run jaunt build --target my_app.specs
-uv run jaunt build --no-infer-deps
-uv run jaunt build --json
-```
-
-If an upstream module's exported API changed, `jaunt build` also regenerates its stale dependents.
-
-Generation-shaping flags (also accepted by `jaunt test` and `jaunt watch`):
-
-- `--instruction "..."`: extra build instruction appended to the prompt (repeatable).
-- `--include-target-tests` / `--no-include-target-tests`: include targeted test-spec source in build prompts (default: off, or `[build] include_target_tests`).
-- `--no-auto-skills`: skip auto-generated PyPI skills for this run.
-- `--no-builtin-skills`: don't seed Jaunt's bundled builtin skills into the Codex workspace.
-- `--no-repo-map` (build only): disable repo-map injection for this build. See [Repo Context](/docs/concepts/repo-context).
-- `--no-semantic-gate` (build/test): force every normalized-digest change to rebuild, skipping the Layer B semantic gate (Layer A linter-resistance still applies). See [Change Detection](/docs/concepts/change-detection).
-
-## Test
-
-Generate tests for `@jaunt.test` specs and run pytest:
+Scaffold a `jaunt.toml`, source/test directories, and a starter spec.
 
 ```bash
-uv run jaunt test
-uv run jaunt test --no-build
-uv run jaunt test --no-run
-uv run jaunt test --pytest-args=-k --pytest-args email
-uv run jaunt test --no-redact-derived   # debug only — see below
-uv run jaunt test --json
+jaunt init
+jaunt init --root /tmp/myproj
+jaunt init --force
 ```
 
-Generated tests are split into a **held-out set**: cases anchored to the docstring's
-canonical examples are tagged `@pytest.mark.jaunt_tier("example")`, everything the test
-generator derives itself is tagged `@pytest.mark.jaunt_tier("derived")`. When a test
-fails and Jaunt regenerates the implementation, *derived* failures are redacted to an
-opaque id + exception class (the implementation generator never sees the expected value
-it would otherwise game), while *example* failures keep full detail. `--no-redact-derived`
-disables this and feeds full failure detail back for all tiers — a **debugging escape
-hatch only**; it defeats the implementer/tester barrier and logs a warning.
+| Flag | Effect |
+|------|--------|
+| `--root PATH` | Directory to create `jaunt.toml` in (default: cwd). |
+| `--force` | Overwrite an existing `jaunt.toml`. |
+| `--json` | Machine-readable output. |
 
-## Contract Mode
+`init` takes no other common flags.
 
-Adopt existing, committed code under docstring contracts and keep a derived
-pytest battery in sync (see the [Contract Mode guide](/docs/guides/contract-mode)):
+### `jaunt specs`
+
+List `@jaunt.magic` specs and the dependency graph between them.
 
 ```bash
-uv run jaunt adopt my_app.slug:slugify   # add @jaunt.contract + derive its battery
-uv run jaunt reconcile                   # derive/refresh committed batteries (calls the model)
-uv run jaunt check                       # CI gate (no model): contract batteries + magic-mode freshness
-uv run jaunt eject my_app.slug:slugify   # remove contract tracking; leave plain pytest
-uv run jaunt eject --all
+jaunt specs
+jaunt specs --module my_app.specs
 ```
 
-`jaunt reconcile` is the only contract command that calls the model. `jaunt check`
-is deterministic (no model, no API key) and is the single required CI gate for
-BOTH modes: it verifies committed contract batteries AND `@jaunt.magic`
-freshness, exiting `4` on any blocking drift — contract drift (unbuilt /
-stale-prose / signature-drift / behavior-drift) or a magic module that is
-unbuilt or stale (including a missing/stale `.pyi` stub). Scope it with
-`--contracts-only` or `--magic-only` (mutually exclusive). `--json` reports a
-`magic` block: `{"magic": {"fresh": [...], "stale": {"<module>": "<reason>"},
-"unbuilt": [...]}}`. A project with no magic specs and no contract drift exits 0.
+| Flag | Effect |
+|------|--------|
+| `--module MODULE` | Restrict output to one module. |
+| `--no-infer-deps` | Explicit deps only. |
+| `--json` | Emits `specs` and `dependency_graph`. |
 
-## Eval
+### `jaunt instructions`
 
-<Callout type="warning">
-  `jaunt eval` is **not currently supported** under the Codex engine (a rework
-  is pending). The command exits with an error (code `2`). The provider/compare
-  benchmarking suite predates the Codex cutover and will return in a future
-  release.
-</Callout>
-
-## Status
-
-Show stale/fresh modules:
+Print a project-aware agent primer: the authoring modes, the build/test loop,
+the command and exit-code reference, then a live snapshot of the current project
+(resolved `[paths]`, engine/model, semantic-gate and repo-map settings, which
+modules are stale). Run before an initialized project exists, it prints the
+framework rules plus the full `jaunt.toml` schema and a note to run `jaunt init`.
 
 ```bash
-uv run jaunt status
-uv run jaunt status --target my_app.specs
-uv run jaunt status --magic-only
-uv run jaunt status --json
+jaunt instructions
+jaunt instructions --json
 ```
 
-`jaunt status` should reflect the same dependency-driven freshness model as `jaunt build`, including modules invalidated by an upstream dependency API change. `--magic-only` probes only `@jaunt.magic` freshness, skipping contract checks and repo-map drift.
-
-## Specs
-
-List `@jaunt.magic` specs and their dependency graph (useful for agents and tooling):
-
-```bash
-uv run jaunt specs
-uv run jaunt specs --module my_app.specs
-uv run jaunt specs --no-infer-deps
-uv run jaunt specs --json
-```
-
-## Instructions
-
-Print a tight, **project-aware** agent primer to load into a coding agent's
-context before it operates Jaunt:
-
-```bash
-uv run jaunt instructions
-uv run jaunt instructions --json
-```
-
-The output is the framework rules (the two authoring modes, the build/test loop,
-how to write a good spec, the command and exit-code reference) followed by a live
-snapshot of the current project: resolved `[paths]`, engine/model, semantic-gate
-and repo-map settings, and which modules are stale. It ships with the package, so
-the briefing always matches the installed version.
-
-Run outside an initialized project, it still succeeds (exit `0`) — it prints the
-framework rules plus a note to run `jaunt init`. `--json` emits
-`{command, ok, text, project}`, where `project` is the structured live snapshot
-(or `null` when there is no `jaunt.toml`).
+`--json` emits `{command, ok, text, project}`, where `project` is the structured
+snapshot (or `null` with no `jaunt.toml`).
 
 <Callout>
   `jaunt instructions` is the single source of truth for the agent workflow. The
@@ -151,167 +86,332 @@ framework rules plus a note to run `jaunt init`. `--json` emits
   cannot drift from the installed CLI.
 </Callout>
 
-## Tree
+## Building
 
-Maintain `treedocs.yaml`, the one-line-per-path repo map injected into build
-prompts (see [Repo Context](/docs/concepts/repo-context)):
+### `jaunt build`
 
-```bash
-uv run jaunt tree             # sync the tree (AST-only descriptions by default)
-uv run jaunt tree --check     # CI gate: exit 4 if the tree is stale
-```
-
-LLM enrichment of descriptions is controlled by the `[context] enrich` config
-flag (default `false` — AST-only, offline).
-
-## Log
-
-Tail the `JAUNT_LOG` change journal that build/test/daemon runs append to:
+Generate implementation modules for `@jaunt.magic` specs. Stale dependents of a
+changed upstream API are rebuilt too.
 
 ```bash
-uv run jaunt log
-uv run jaunt log -n 50          # 0 = all lines
-uv run jaunt log --module my_app.specs
-uv run jaunt log --json
+jaunt build
+jaunt build --force
+jaunt build --target my_app.specs
+jaunt build --jobs 16
 ```
 
-## Clean
+| Flag | Effect |
+|------|--------|
+| `--force` | Regenerate everything, ignoring digests. |
+| `--instruction "..."` | Extra build instruction appended to the prompt (repeatable). |
+| `--include-target-tests` / `--no-include-target-tests` | Include targeted test-spec source in build prompts (default from `[build] include_target_tests`). |
+| `--no-auto-skills` | Skip auto-generated PyPI skills this run. |
+| `--no-builtin-skills` | Don't seed the bundled builtin skills into the Codex workspace. |
+| `--no-repo-map` | Disable repo-map injection this run. See [Repo Context](/docs/concepts/repo-context). |
+| `--no-semantic-gate` | Rebuild on every real change; skip the Layer B gate (Layer A still applies). See [Change Detection](/docs/concepts/change-detection). |
 
-Remove generated directories under configured source/test roots:
+`--json` reports `generated`, `skipped`, `refrozen`, `failed`, `cost`, and
+`context_stats`, plus `needs_deps` and `emitted_stubs` when present — see
+[JSON Output](/docs/reference/json-output#build).
+
+### `jaunt watch`
+
+Watch source and test roots and rebuild on relevant `.py` changes.
 
 ```bash
-uv run jaunt clean
-uv run jaunt clean --dry-run
-uv run jaunt clean --json
+jaunt watch
+jaunt watch --test
 ```
 
-## Watch
+Accepts the `build`-shaping flags (`--instruction`, `--include-target-tests`,
+`--no-auto-skills`, `--no-builtin-skills`) plus `--test` (run tests after each
+successful build). With `--json`, watch emits one envelope per rebuild cycle,
+not nested build/test documents.
 
-Watch source/test roots and rebuild on relevant `.py` changes:
+### `jaunt status`
+
+Show which modules are stale or fresh, using the same dependency-driven
+freshness model as `build` (including modules invalidated by an upstream API
+change).
 
 ```bash
-uv run jaunt watch
-uv run jaunt watch --test
-uv run jaunt watch --json
+jaunt status
+jaunt status --magic-only
 ```
 
-When `--json` is enabled, watch emits one JSON object per rebuild cycle (the watch envelope), not nested build/test JSON documents.
+| Flag | Effect |
+|------|--------|
+| `--magic-only` | Probe only `@jaunt.magic` freshness; skip contract and repo-map checks. |
 
-## Daemon Jobs
+### `jaunt clean`
 
-Run background codegen jobs from committed spec changes:
+Remove `__generated__` directories and header-marked `.pyi` stubs under the
+configured roots.
 
 ```bash
-uv run jaunt daemon start
-uv run jaunt daemon status
-uv run jaunt daemon stop
-
-uv run jaunt jobs
-uv run jaunt jobs show <id> --full
-uv run jaunt jobs retry <id>
-uv run jaunt jobs land <id>
-uv run jaunt jobs land --all
-uv run jaunt jobs discard <id>
-uv run jaunt jobs wait --timeout 1800
-uv run jaunt jobs wait <id> --timeout 1800 --json --progress plain
+jaunt clean
+jaunt clean --dry-run
 ```
 
-`jaunt jobs` shows job records, pending rebuilds, and the latest heartbeat phase for
-running jobs. `jaunt jobs wait` blocks until a target job finishes, or without an id
-until the daemon is idle; `--settle N` controls the idle race-guard window and
-`--timeout N` exits with code `5` if time runs out. A parked proposal (`PROPOSED`)
-is treated as terminal-green, so `jaunt jobs wait` returns `0` on it.
+| Flag | Effect |
+|------|--------|
+| `--dry-run` | List what would be removed without deleting. |
+| `--json` | Emits `would_remove`. |
+
+## Testing
+
+### `jaunt test`
+
+Generate pytest coverage for `@jaunt.test` specs, then run pytest on the
+generated files (not the whole suite).
+
+```bash
+jaunt test
+jaunt test --no-build
+jaunt test --no-run
+jaunt test --pytest-args=-k --pytest-args email
+```
+
+| Flag | Effect |
+|------|--------|
+| `--no-build` | Skip the `build` step. |
+| `--no-run` | Generate tests without running pytest. |
+| `--pytest-args ARG` | Extra arg appended to pytest (repeatable). |
+| `--no-semantic-gate` | Rebuild on every real change; skip the Layer B gate. |
+| `--no-redact-derived` | Debug only — feed full derived-tier failure detail into repair. |
+
+Generated tests split into a held-out set: cases anchored to the docstring's
+canonical examples are tagged `@pytest.mark.jaunt_tier("example")`; everything
+the generator derives itself is tagged `@pytest.mark.jaunt_tier("derived")`.
+When a test fails and Jaunt regenerates the implementation, derived failures are
+redacted to an opaque id plus exception class so the implementation generator
+never sees the value it would otherwise game; example failures keep full detail.
+`--no-redact-derived` disables that barrier and logs a warning — a debugging
+escape hatch only.
+
+## Contract mode
+
+Adopt committed code under docstring contracts and keep a derived pytest battery
+in sync. See the [Contract Mode guide](/docs/guides/contract-mode).
+
+### `jaunt adopt`
+
+Add `@jaunt.contract` to a function and derive its battery.
+
+```bash
+jaunt adopt my_app.slug:slugify
+```
+
+Takes a positional `ref` (`module:func`) plus the common flags.
+
+### `jaunt reconcile`
+
+Derive or refresh committed contract batteries. This is the only contract
+command that calls the model.
+
+```bash
+jaunt reconcile
+```
+
+### `jaunt check`
+
+The single deterministic CI gate for both modes — no model, no API key. It
+verifies committed contract batteries and `@jaunt.magic` freshness, exiting `4`
+on any blocking drift: a contract that is unbuilt, stale-prose, signature-drift,
+or behavior-drift; or a magic module that is unbuilt or stale (including a
+missing or stale `.pyi` stub).
+
+```bash
+jaunt check
+jaunt check --contracts-only
+jaunt check --magic-only
+```
+
+| Flag | Effect |
+|------|--------|
+| `--contracts-only` | Gate only contract batteries. |
+| `--magic-only` | Gate only `@jaunt.magic` freshness. |
+
+`--contracts-only` and `--magic-only` are mutually exclusive. `--json` reports a
+`magic` block (`fresh` / `stale` / `unbuilt`); see
+[JSON Output](/docs/reference/json-output#check). A project with no magic specs
+and no contract drift exits `0`.
+
+### `jaunt eject`
+
+Remove contract tracking; leave plain Python and plain pytest.
+
+```bash
+jaunt eject my_app.slug:slugify
+jaunt eject --all
+```
+
+| Flag | Effect |
+|------|--------|
+| `--all` | Eject every contract function. |
+
+## Daemon
+
+Background codegen from committed spec changes. See the
+[Background Daemon guide](/docs/guides/daemon).
+
+### `jaunt daemon`
+
+```bash
+jaunt daemon start     # foreground; Ctrl-C to stop
+jaunt daemon status
+jaunt daemon stop
+```
+
+`start` and `status` accept `--root` and `--json`; `stop` accepts `--root`.
+
+### `jaunt jobs`
+
+Inspect job records and the pending-rebuild preview, and land or discard parked
+proposals.
+
+```bash
+jaunt jobs
+jaunt jobs show <id> --full
+jaunt jobs retry <id>
+jaunt jobs land <id>
+jaunt jobs land --all
+jaunt jobs discard <id>
+jaunt jobs wait --timeout 1800
+```
+
+| Subcommand | Purpose | Flags |
+|------------|---------|-------|
+| (bare) `jobs` | Job records, pending rebuilds, latest heartbeat phase. | `--root`, `--json` |
+| `show ID` | One job record. | `--full` (local detail log), `--json` |
+| `retry ID` | Retry landing a parked job. | `--force` (land even if the spec changed since parking) |
+| `land [ID]` | Land a parked proposal as a provenance commit. | `--all`, `--json` |
+| `discard ID` | Mark a proposal `DISCARDED` and drop its patch. | `--json` |
+| `wait [ID]` | Block until a job (or the daemon) is idle. | `--timeout N`, `--settle N`, `--progress`, `--json` |
 
 Under the default propose-only mode (`[daemon] auto_commit = false`), green jobs
 are parked as proposals rather than committed:
 
-- `jaunt jobs land <id>` lands one parked proposal as a provenance commit. It
-  re-validates first: a stale spec digest, a mismatched branch, dirty target
-  paths, or a 3-way apply conflict all refuse the land (exit `4`); a stale digest
-  or apply conflict also marks the proposal `SUPERSEDED`. There is no `--force`.
-- `jaunt jobs land --all` lands every fresh proposal in job-creation order (the
-  daemon queues in dependency order), prints per-job outcomes, and exits `0` only
-  when every attempted land succeeded, else `4`.
-- `jaunt jobs discard <id>` marks a proposal `DISCARDED` and removes its patch
-  artifact.
+- `jaunt jobs land <id>` lands one proposal. It re-validates first: a stale spec
+  digest, a mismatched branch, dirty target paths, or a 3-way apply conflict all
+  refuse the land (exit `4`); a stale digest or apply conflict also marks the
+  proposal `SUPERSEDED`. `jaunt jobs land` has no `--force`; use
+  `jaunt jobs retry <id> --force` to land despite a changed spec.
+- `jaunt jobs land --all` lands every fresh proposal in job-creation order,
+  prints per-job outcomes, and exits `0` only when every attempted land
+  succeeded, else `4`.
+- `jaunt jobs discard <id>` drops a proposal and its patch artifact.
 
-Bad ids or wrong-state jobs exit `2`.
+`jaunt jobs wait` blocks until the target job finishes, or (without an id) until
+the daemon is idle. A parked proposal (`PROPOSED`) counts as terminal-green, so
+`wait` returns `0` on it. `--settle N` sets the idle race-guard window;
+`--timeout N` exits `5` on timeout. Bad ids or wrong-state jobs exit `2`.
 
 <Callout>
   **Automation**
 
   | Pattern | Command |
   |---------|---------|
-  | Blocking agent loop (propose-only) | `git commit … && uv run jaunt jobs wait --timeout 1800 && uv run jaunt jobs land --all` |
-  | Blocking agent loop (auto-commit) | `git commit … && uv run jaunt jobs wait --timeout 1800` |
-  | Push notification | Set `[daemon] notify_command` to run your hook on proposed, landed, parked, or failed jobs. |
+  | Agent loop (propose-only) | `git commit … && jaunt jobs wait --timeout 1800 && jaunt jobs land --all` |
+  | Agent loop (auto-commit) | `git commit … && jaunt jobs wait --timeout 1800` |
+  | Notifications | Set `[daemon] notify_command` to run your hook on proposed, landed, parked, or failed jobs. |
 </Callout>
 
-See the [Background Daemon guide](/docs/guides/daemon) for the full workflow.
+### `jaunt log`
 
-## Guard
-
-A PreToolUse hook for coding agents that warns when a tool call is about to
-touch files under the generated dir:
+Tail the `JAUNT_LOG` change journal that build, test, and daemon runs append to.
 
 ```bash
-uv run jaunt guard
-uv run jaunt guard --generated-dir __generated__
+jaunt log
+jaunt log -n 50          # 0 = all lines
+jaunt log --module my_app.specs
 ```
 
-It reads the hook payload on stdin and emits a warning for `__generated__`
-paths (see `docs/hooks.md` in the repo for Claude Code wiring).
+| Flag | Effect |
+|------|--------|
+| `-n, --lines N` | Number of lines (`0` for all). |
+| `--module MODULE` | Filter by module name. |
+| `--root PATH`, `--json` | Root override; machine-readable output. |
 
-## Cache
+### `jaunt guard`
 
-Inspect or clear the LLM response cache under `.jaunt/`:
+A PreToolUse hook for coding agents that reads a hook payload on stdin and warns
+when a tool call is about to touch files under the generated dir. See
+`docs/hooks.md` in the repo for Claude Code wiring.
 
 ```bash
-uv run jaunt cache info
-uv run jaunt cache clear
+jaunt guard
+jaunt guard --generated-dir __generated__
 ```
 
-## Skills
+| Flag | Effect |
+|------|--------|
+| `--generated-dir DIR` | Override the guarded dir (default from `jaunt.toml` or `__generated__`). |
 
-Manage project-local skills under `.agents/skills/`:
+## Maintenance
+
+### `jaunt tree`
+
+Maintain `treedocs.yaml`, the one-line-per-path repo map injected into build
+prompts. See [Repo Context](/docs/concepts/repo-context).
 
 ```bash
-uv run jaunt skill list
-uv run jaunt skill show rich
-uv run jaunt skill add rich --description "Rich usage notes" --lib rich
-uv run jaunt skill remove rich -f
-uv run jaunt skill import --from /path/to/skills-dir
-uv run jaunt skill refresh
-uv run jaunt skill build rich
+jaunt tree             # sync (AST-only descriptions by default)
+jaunt tree --check     # CI gate: exit 4 if the tree is stale
+jaunt tree --enrich    # force LLM enrichment this run
 ```
 
-Two skill commands generate content through the Codex engine:
+| Flag | Effect |
+|------|--------|
+| `--check` | Exit `4` if the tree is stale. |
+| `--enrich` / `--no-enrich` | Force or forbid LLM enrichment this run (default from `[context] enrich`). |
 
-- `jaunt skill build <name>`: expand or refine a user-managed checked-in skill
-- `jaunt skill refresh`: refresh Jaunt-managed auto-generated skills
+### `jaunt cache`
 
-Like `build` and `test`, both drive `codex exec` under the hood.
+Inspect or clear the LLM response cache under `.jaunt/`.
 
-Note: `jaunt skill build <name>` expects the skill to exist already and to have
-library metadata, usually from `jaunt skill add <name> --lib <package>`.
+```bash
+jaunt cache info
+jaunt cache clear
+```
 
-## Common Flags
+Both accept `--root`, `--config`, and `--json`.
 
-- `--root /path/to/project`: override project discovery (otherwise Jaunt searches upward for `jaunt.toml`).
-- `--config /path/to/jaunt.toml`: override config path.
-- `--target MODULE[:QUALNAME]`: restrict work to one or more modules (currently module-level; `:QUALNAME` is ignored for filtering).
-- `--no-infer-deps`: disable best-effort dependency inference (explicit `deps=` still applies).
-- `--progress {auto,rich,plain,none}`: progress output mode; `auto` is rich on TTY and plain lines off-TTY. Explicit `--progress plain` works with `--json` (progress on stderr, JSON on stdout).
-- `--json`: emit structured JSON output for agent/CI workflows.
+### `jaunt skill`
 
-## Exit Codes
+Manage project-local skills under `.agents/skills/`.
 
-- `0`: success
-- `2`: config/discovery/dependency-cycle errors
-- `3`: generation errors (LLM/backend/validation/import)
-- `4`: pytest failure, contract check/reconcile block, or daemon job failed/parked during `jobs wait`
-- `5`: timeout while waiting for daemon jobs
+```bash
+jaunt skill list
+jaunt skill show rich
+jaunt skill add rich --description "Rich usage notes" --lib rich
+jaunt skill remove rich -f
+jaunt skill import --from /path/to/skills-dir
+jaunt skill refresh
+jaunt skill build rich
+```
 
-Note: `jaunt test` runs pytest only on the generated test files it just wrote (not the entire suite). Run `pytest` separately for a full test run.
+Two subcommands generate content through the Codex engine: `skill build <name>`
+expands a user-managed checked-in skill (it must already exist with `--lib`
+metadata, usually from `skill add <name> --lib <package>`), and `skill refresh`
+regenerates Jaunt-managed auto skills. Both drive `codex exec` under the hood.
+
+### `jaunt eval`
+
+<Callout type="warn">
+  `jaunt eval` is **not currently supported** under the Codex engine (a rework
+  is pending). The command exits `2`. The provider/compare benchmarking suite
+  predates the Codex cutover and will return in a future release.
+</Callout>
+
+## Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `2` | Config, discovery, or dependency-cycle error; bad or wrong-state job id |
+| `3` | Generation error (LLM / backend / validation / import) |
+| `4` | Pytest failure, contract `check`/`reconcile` block, stale `tree --check`, or a daemon job failed/parked during `jobs wait` |
+| `5` | Timeout while waiting for daemon jobs |
 
 Next: [Configuration](/docs/reference/config).
