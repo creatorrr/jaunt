@@ -203,6 +203,9 @@ uv run jaunt daemon stop
 uv run jaunt jobs
 uv run jaunt jobs show <id> --full
 uv run jaunt jobs retry <id>
+uv run jaunt jobs land <id>
+uv run jaunt jobs land --all
+uv run jaunt jobs discard <id>
 uv run jaunt jobs wait --timeout 1800
 uv run jaunt jobs wait <id> --timeout 1800 --json --progress plain
 ```
@@ -210,15 +213,32 @@ uv run jaunt jobs wait <id> --timeout 1800 --json --progress plain
 `jaunt jobs` shows job records, pending rebuilds, and the latest heartbeat phase for
 running jobs. `jaunt jobs wait` blocks until a target job finishes, or without an id
 until the daemon is idle; `--settle N` controls the idle race-guard window and
-`--timeout N` exits with code `5` if time runs out.
+`--timeout N` exits with code `5` if time runs out. A parked proposal (`PROPOSED`)
+is treated as terminal-green, so `jaunt jobs wait` returns `0` on it.
+
+Under the default propose-only mode (`[daemon] auto_commit = false`), green jobs
+are parked as proposals rather than committed:
+
+- `jaunt jobs land <id>` lands one parked proposal as a provenance commit. It
+  re-validates first: a stale spec digest, a mismatched branch, dirty target
+  paths, or a 3-way apply conflict all refuse the land (exit `4`); a stale digest
+  or apply conflict also marks the proposal `SUPERSEDED`. There is no `--force`.
+- `jaunt jobs land --all` lands every fresh proposal in job-creation order (the
+  daemon queues in dependency order), prints per-job outcomes, and exits `0` only
+  when every attempted land succeeded, else `4`.
+- `jaunt jobs discard <id>` marks a proposal `DISCARDED` and removes its patch
+  artifact.
+
+Bad ids or wrong-state jobs exit `2`.
 
 <Callout>
   **Automation**
 
   | Pattern | Command |
   |---------|---------|
-  | Blocking agent loop | `git commit … && uv run jaunt jobs wait --timeout 1800` |
-  | Push notification | Set `[daemon] notify_command` to run your hook on landed, parked, or failed jobs. |
+  | Blocking agent loop (propose-only) | `git commit … && uv run jaunt jobs wait --timeout 1800 && uv run jaunt jobs land --all` |
+  | Blocking agent loop (auto-commit) | `git commit … && uv run jaunt jobs wait --timeout 1800` |
+  | Push notification | Set `[daemon] notify_command` to run your hook on proposed, landed, parked, or failed jobs. |
 </Callout>
 
 See the [Background Daemon guide](/docs/guides/daemon) for the full workflow.

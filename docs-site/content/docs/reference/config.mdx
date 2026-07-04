@@ -72,8 +72,12 @@ auto_class_tests = false
 poll_interval = 2.0
 # Max background jobs; 0 uses build.jobs.
 max_jobs = 0
-# Optional shell command run after each landed, parked, or failed job.
+# Optional shell command run after each proposed, landed, parked, or failed job.
 notify_command = ""
+# Landing mode for green jobs. false (default): park as a reviewable proposal,
+# landed explicitly with `jaunt jobs land`. true: auto-commit on green (pre-1.2.0
+# behavior).
+auto_commit = false
 
 [agent]
 # Code-generation engine. "codex" is the only supported value.
@@ -168,5 +172,9 @@ Notes:
 - `[semantic_gate]` is covered in [Change Detection](/docs/reference/change-detection).
 - `[contract]` is covered in the [Contract Mode guide](/docs/guides/contract-mode).
 - `[daemon]` is covered in the [Background Daemon guide](/docs/guides/daemon).
+- **Changelog (1.2.0):** `[daemon] auto_commit` now defaults to `false` — the
+  daemon parks green jobs as reviewable proposals instead of committing them.
+  This is the one behavior change existing daemon users feel; set
+  `auto_commit = true` to keep auto-commit-on-green.
 
 Next: [Output Locations](/docs/reference/output).

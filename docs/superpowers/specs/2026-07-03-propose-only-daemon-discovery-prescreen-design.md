@@ -181,3 +181,21 @@ unconditionally, preserving today's error messages for typos.
 - **AST prescreen** over `[paths]` exclude globs — fixes the class of problem (imports
   are opt-in by evidence of specs) instead of pushing per-repo configuration onto
   adopters; globs remain a possible future escape hatch if evidence demands.
+
+## Implementation refinements
+
+Recorded during implementation (1.2.0), refining the design above:
+
+- **`jobs land --all` orders by job creation, not an explicit topo sort.** The
+  design said "module-DAG dependency order (reusing the build scheduler's topo
+  order)." In practice the daemon already queues jobs in dependency order, so
+  creation order approximates the DAG order without threading the build scheduler
+  into the land CLI. `land --all` therefore iterates `PROPOSED` jobs in `created`
+  order.
+- **Journal action naming.** The two new uncommitted line kinds are `job-propose`
+  and `job-discard` (plus `job-supersede` when a newer proposal supersedes an
+  older one); they are appended by the daemon/CLI without a commit, are
+  `merge=union`-safe, and are recognized as daemon-authored. A landing does **not**
+  introduce a new `land` journal action — it appends the standard `build` (or
+  `refreeze`, when the proposal came from a re-freeze) line and commits it
+  alongside the provenance commit, exactly as the auto-commit path does.
