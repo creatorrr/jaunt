@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import warnings
 from collections.abc import Generator
 
 import pytest
 
 from jaunt.registry import (
+    ModuleMagicDefaults,
     SpecEntry,
     clear_registries,
     get_magic_registry,
+    get_module_magic_defaults,
     get_specs_by_module,
     get_test_registry,
     register_magic,
+    register_module_magic,
     register_test,
     unregister_magic,
 )
@@ -164,3 +168,44 @@ def test_duplicate_registration_overwrites_decorator_kwargs() -> None:
     got = get_magic_registry()[e1.spec_ref]
     assert got is e2
     assert got.decorator_kwargs == {"a": 2}
+
+
+def _origin_entry(origin: str) -> SpecEntry:
+    return SpecEntry(
+        kind="magic",
+        spec_ref=normalize_spec_ref("m:f"),
+        module="m",
+        qualname="f",
+        source_file="m.py",
+        obj=None,
+        decorator_kwargs={},
+        origin=origin,  # type: ignore[arg-type]
+    )
+
+
+def test_module_magic_defaults_roundtrip_and_clear() -> None:
+    clear_registries()
+    register_module_magic(
+        ModuleMagicDefaults(module="m", source_file="m.py", decorator_kwargs={"prompt": "p"})
+    )
+    got = get_module_magic_defaults("m")
+    assert got is not None
+    assert got.decorator_kwargs == {"prompt": "p"}
+    assert get_module_magic_defaults("other") is None
+    clear_registries()
+    assert get_module_magic_defaults("m") is None
+
+
+def test_register_magic_warns_on_cross_origin_overwrite() -> None:
+    clear_registries()
+    register_magic(_origin_entry("module"))
+    with pytest.warns(UserWarning, match="module scan and a decorator"):
+        register_magic(_origin_entry("decorator"))
+
+
+def test_register_magic_same_origin_overwrite_is_silent() -> None:
+    clear_registries()
+    register_magic(_origin_entry("module"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        register_magic(_origin_entry("module"))
