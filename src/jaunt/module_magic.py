@@ -243,6 +243,15 @@ class _MagicModule(types.ModuleType):
             return types.ModuleType.__getattribute__(self, attr)
         if any(name not in d for name in state.spec_names):
             # Module still executing / circular import: bypass resolution.
+            #
+            # KNOWN LIMITATION: this heuristic only detects a partial module body
+            # by the absence of governed spec names from __dict__. Once every
+            # governed stub is defined but code below them is still executing (e.g.
+            # a trailing circular import), the guard passes and resolution eagerly
+            # imports the generated counterpart. This is more aggressive than the
+            # decorator path (which stays lazy until a wrapper is *called*), so a
+            # circular import that touches a governed attribute — rather than
+            # calling it — can pull generated code in before the module finishes.
             return types.ModuleType.__getattribute__(self, attr)
         _resolve_module(self, state, d)
         return types.ModuleType.__getattribute__(self, attr)
@@ -284,7 +293,12 @@ def _resolve_module(mod: types.ModuleType, state: _ModuleMagicState, d: dict[str
         if gen is _MISSING:
             d[name] = _not_built_binding(name, state.module, spec_ref, is_class=is_class)
             continue
-        if is_class and isinstance(gen, type):
+        if is_class:
+            if not isinstance(gen, type):
+                raise JauntError(
+                    f"Generated symbol {state.module!r}:{name!r} is not a class "
+                    f"(got {type(gen)!r})."
+                )
             cast(Any, gen).__jaunt_spec_ref__ = f"{state.module}:{name}"
             gen.__module__ = state.module
         d[name] = gen
@@ -419,6 +433,9 @@ def finalize_module_magic(module_name: str) -> None:
             continue
 
         is_class = isinstance(obj, type)
+        if is_class and type(obj) is not type:
+            # Parity with decorator mode (runtime.py): custom metaclasses unsupported.
+            raise JauntError("Custom metaclasses are not supported for @magic classes.")
         sealed_members = entry.sealed_members
         base_deps = entry.base_deps
         if is_class:

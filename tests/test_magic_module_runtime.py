@@ -49,6 +49,7 @@ _FIXTURE_MODULES = {
     "zero_mod",
     "capture_mod",
     "sig_mod",
+    "meta_mod",
 }
 
 
@@ -197,6 +198,44 @@ def test_capture_warning_surfaces(tmp_path, monkeypatch):
     monkeypatch.syspath_prepend(str(tmp_path))
     with pytest.warns(UserWarning, match="pre-rebind stub"):
         importlib.import_module("capture_mod")
+
+
+# --- corrupt generated-class parity (codex review P2) ----------------------
+
+
+def test_generated_class_wrong_type_raises(tmp_path, monkeypatch):
+    _write_governed(tmp_path)
+    # __generated__.gm_mod defines Email as a non-type (corrupt artifact).
+    _write_generated(
+        tmp_path,
+        body="Email = 123\n\n\ndef parse_email(raw):\n    return raw\n",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    mod = importlib.import_module("gm_mod")
+
+    with pytest.raises(JauntError, match="is not a class"):
+        _ = mod.Email
+
+
+# --- custom-metaclass parity (codex review P2) -----------------------------
+
+
+def test_custom_metaclass_rejected_at_finalize(tmp_path, monkeypatch):
+    from jaunt.module_magic import finalize_module_magic
+
+    _write(
+        tmp_path / "meta_mod.py",
+        "import jaunt\n"
+        "jaunt.magic_module(__name__)\n"
+        "class Meta(type):\n    pass\n"
+        "class Model(metaclass=Meta):\n"
+        '    """spec"""\n',
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    importlib.import_module("meta_mod")
+
+    with pytest.raises(JauntError, match="Custom metaclasses are not supported"):
+        finalize_module_magic("meta_mod")
 
 
 # --- @jaunt.sig top-level regression ---------------------------------------
