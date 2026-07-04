@@ -917,3 +917,237 @@ def test_standalone_method_magic_unchanged(monkeypatch: pytest.MonkeyPatch, tmp_
         assert refs == [f"{module_name}:Plain.go"]
     finally:
         sys.modules.pop(module_name, None)
+
+
+# ---------------------------------------------------------------------------
+# @jaunt.sig — canonical sealed-method marker (alias of inner bare @magic)
+# ---------------------------------------------------------------------------
+
+
+def test_sig_absorbed_into_whole_class_spec(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def _import(_name: str) -> Any:
+        raise ModuleNotFoundError(_name)
+
+    monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+    clear_registries()
+    module_name = "tmp_sig_basic"
+    src = '''
+    import jaunt
+
+    @jaunt.magic()
+    class Engine:
+        """An engine."""
+
+        @jaunt.sig
+        def start(self, power: int) -> bool: ...
+
+        def helper(self): ...
+    '''
+    try:
+        _import_module_from_source(tmp_path, module_name, src)
+        reg = get_magic_registry()
+        refs = [str(r) for r in reg]
+        # Like inner @magic, @sig is absorbed into the whole-class spec.
+        assert refs == [f"{module_name}:Engine"]
+        entry = reg[normalize_spec_ref(f"{module_name}:Engine")]
+        assert entry.sealed_members == ("start",)
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_sig_called_form_absorbed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def _import(_name: str) -> Any:
+        raise ModuleNotFoundError(_name)
+
+    monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+    clear_registries()
+    module_name = "tmp_sig_called"
+    src = '''
+    import jaunt
+
+    @jaunt.magic()
+    class Engine:
+        """An engine."""
+
+        @jaunt.sig()
+        def start(self, power: int) -> bool: ...
+    '''
+    try:
+        _import_module_from_source(tmp_path, module_name, src)
+        entry = get_magic_registry()[normalize_spec_ref(f"{module_name}:Engine")]
+        assert entry.sealed_members == ("start",)
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_sig_matches_inner_magic_registry_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """@sig and inner bare @magic produce identical whole-class registry state."""
+
+    def _import(_name: str) -> Any:
+        raise ModuleNotFoundError(_name)
+
+    monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+    def _build(module_name: str, marker: str) -> Any:
+        clear_registries()
+        src = f'''
+        import jaunt
+
+        @jaunt.magic()
+        class Engine:
+            """An engine."""
+
+            @{marker}
+            def start(self, power: int) -> bool: ...
+        '''
+        _import_module_from_source(tmp_path, module_name, src)
+        return get_magic_registry()[normalize_spec_ref(f"{module_name}:Engine")]
+
+    try:
+        via_magic = _build("tmp_eq_magic", "jaunt.magic")
+        via_sig = _build("tmp_eq_sig", "jaunt.sig")
+        assert via_sig.kind == via_magic.kind == "magic"
+        assert via_sig.sealed_members == via_magic.sealed_members == ("start",)
+        assert via_sig.class_name is via_magic.class_name is None
+    finally:
+        sys.modules.pop("tmp_eq_magic", None)
+        sys.modules.pop("tmp_eq_sig", None)
+
+
+def test_sig_original_function_restored(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def _import(_name: str) -> Any:
+        raise ModuleNotFoundError(_name)
+
+    monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+    clear_registries()
+    module_name = "tmp_sig_restore"
+    src = '''
+    import jaunt
+
+    @jaunt.magic()
+    class Engine:
+        """An engine."""
+
+        @jaunt.sig
+        def start(self, power: int) -> bool: ...
+    '''
+    try:
+        _import_module_from_source(tmp_path, module_name, src)
+        entry = get_magic_registry()[normalize_spec_ref(f"{module_name}:Engine")]
+        cls_obj = entry.obj
+        assert isinstance(cls_obj, type)
+        member = cls_obj.__dict__["start"]
+        assert not hasattr(member, "__wrapped__")
+        assert member.__name__ == "start"
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_sig_classmethod_descriptor_reconstructed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def _import(_name: str) -> Any:
+        raise ModuleNotFoundError(_name)
+
+    monkeypatch.setattr("jaunt.runtime.importlib.import_module", _import)
+
+    clear_registries()
+    module_name = "tmp_sig_classmethod"
+    src = '''
+    import jaunt
+
+    @jaunt.magic()
+    class Engine:
+        """doc"""
+
+        @classmethod
+        @jaunt.sig
+        def make(cls) -> "Engine": ...
+    '''
+    try:
+        _import_module_from_source(tmp_path, module_name, src)
+        entry = get_magic_registry()[normalize_spec_ref(f"{module_name}:Engine")]
+        cls_obj = entry.obj
+        assert isinstance(cls_obj, type)
+        assert isinstance(cls_obj.__dict__["make"], classmethod)
+        assert entry.sealed_members == ("make",)
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_sig_with_kwargs_rejected(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "jaunt.runtime.importlib.import_module",
+        lambda _n: (_ for _ in ()).throw(ModuleNotFoundError(_n)),
+    )
+    clear_registries()
+    module_name = "tmp_sig_kwargs"
+    src = '''
+    import jaunt
+
+    @jaunt.magic()
+    class Engine:
+        """doc"""
+
+        @jaunt.sig(deps=[])
+        def start(self) -> None: ...
+    '''
+    try:
+        with pytest.raises(TypeError, match="no arguments"):
+            _import_module_from_source(tmp_path, module_name, src)
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_sig_on_property_rejected(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "jaunt.runtime.importlib.import_module",
+        lambda _n: (_ for _ in ()).throw(ModuleNotFoundError(_n)),
+    )
+    clear_registries()
+    module_name = "tmp_sig_property"
+    src = '''
+    import jaunt
+
+    @jaunt.magic()
+    class Engine:
+        """doc"""
+
+        @property
+        @jaunt.sig
+        def value(self) -> int: ...
+    '''
+    try:
+        with pytest.raises(JauntError, match="property"):
+            _import_module_from_source(tmp_path, module_name, src)
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_sig_on_top_level_function_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        "jaunt.runtime.importlib.import_module",
+        lambda _n: (_ for _ in ()).throw(ModuleNotFoundError(_n)),
+    )
+    clear_registries()
+    module_name = "tmp_sig_toplevel"
+    src = """
+    import jaunt
+
+    @jaunt.sig
+    def go(x: int) -> int: ...
+    """
+    try:
+        with pytest.raises(JauntError, match="magic"):
+            _import_module_from_source(tmp_path, module_name, src)
+    finally:
+        sys.modules.pop(module_name, None)

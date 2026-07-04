@@ -61,10 +61,12 @@ def _is_magic_decorator(node: ast.AST) -> bool:
     base = node.func if isinstance(node, ast.Call) else node
 
     if isinstance(base, ast.Name):
-        return base.id == "magic"
+        return base.id in ("magic", "sig")
     if isinstance(base, ast.Attribute):
         return (
-            isinstance(base.value, ast.Name) and base.value.id == "jaunt" and base.attr == "magic"
+            isinstance(base.value, ast.Name)
+            and base.value.id == "jaunt"
+            and base.attr in ("magic", "sig")
         )
     return False
 
