@@ -3886,6 +3886,8 @@ def cmd_specs(args: argparse.Namespace) -> int:
                 "module": entry.module,
                 "qualname": entry.qualname,
                 "source_file": entry.source_file,
+                "origin": entry.origin,
+                "kwargs": entry.decorator_kwargs,
             }
             for ref, entry in sorted(specs.items())
             if not module_filter or entry.module == module_filter
@@ -3909,8 +3911,14 @@ def cmd_specs(args: argparse.Namespace) -> int:
             print(f"specs: {len(spec_list)}")
             for item in spec_list:
                 deps = dep_graph.get(str(item["ref"]), [])
-                suffix = f"  <- {', '.join(deps)}" if deps else ""
-                print(f"- {item['ref']} ({item['source_file']}){suffix}")
+                parts = [f"- {item['ref']} ({item['source_file']})"]
+                if item["origin"] == "module":
+                    parts.append(" [module]")
+                if item["kwargs"]:
+                    parts.append(f" kwargs={item['kwargs']}")
+                if deps:
+                    parts.append(f"  <- {', '.join(deps)}")
+                print("".join(parts))
         return EXIT_OK
     except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError, KeyError) as e:
         _print_error(e)

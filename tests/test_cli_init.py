@@ -85,9 +85,9 @@ def test_cmd_init_creates_example_spec(tmp_path: Path, monkeypatch) -> None:
 
     spec_path = tmp_path / "src" / "specs.py"
     content = spec_path.read_text()
-    assert "@jaunt.magic" in content
-    assert "slugify" in content
-    assert "@jaunt.test" in content
+    assert "jaunt.magic_module(__name__)" in content
+    assert "greet" in content
+    assert "@jaunt.magic" not in content
 
 
 def test_cmd_init_does_not_overwrite_existing_example_spec(tmp_path: Path, monkeypatch) -> None:
@@ -118,6 +118,19 @@ def test_cmd_init_example_spec_is_valid_python(tmp_path: Path, monkeypatch) -> N
 
     spec_path = tmp_path / "src" / "specs.py"
     compile(spec_path.read_text(), str(spec_path), "exec")
+
+
+def test_init_scaffold_classifies_exactly_one_module_spec(tmp_path: Path, monkeypatch) -> None:
+    import ast
+
+    from jaunt.module_magic import scan_module_source
+
+    monkeypatch.chdir(tmp_path)
+    jaunt.cli.cmd_init(jaunt.cli.parse_args(["init"]))
+    src = (tmp_path / "src" / "specs.py").read_text()
+    scan = scan_module_source(ast.parse(src), module="specs")
+    assert [c.name for c in scan.candidates] == ["greet"]
+    assert all(not c.is_class for c in scan.candidates)
 
 
 def test_cmd_init_creates_tests_dir(tmp_path: Path, monkeypatch) -> None:
