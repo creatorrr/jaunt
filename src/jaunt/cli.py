@@ -2338,6 +2338,36 @@ def cmd_status(args: argparse.Namespace) -> int:
         return EXIT_CONFIG_OR_DISCOVERY
 
 
+def _fmt_count(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n // 1000}k"
+    return str(n)
+
+
+def _context_stats_summary_line(module: str, blocks: dict[str, dict[str, int]]) -> str:
+    total_chars = sum(b["chars"] for b in blocks.values())
+    total_tokens = sum(b["est_tokens"] for b in blocks.values())
+    parts: list[str] = []
+    if total_chars > 0:
+        ranked = sorted(blocks.items(), key=lambda kv: kv[1]["chars"], reverse=True)
+        for name, b in ranked:
+            if b["chars"] <= 0:
+                continue
+            pct = round(100 * b["chars"] / total_chars)
+            if pct <= 0:
+                continue
+            parts.append(f"{name} {pct}%")
+            if len(parts) >= 4:
+                break
+    breakdown = ", ".join(parts) if parts else "empty"
+    return (
+        f"{module} context: {_fmt_count(total_chars)} chars "
+        f"(~{_fmt_count(total_tokens)} tok) — {breakdown}"
+    )
+
+
 async def _cmd_build_async(args: argparse.Namespace) -> int:
     json_mode = _is_json_mode(args)
     try:
@@ -2685,6 +2715,10 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             _eprint(cost_tracker.format_summary())
 
         if not json_mode:
+            for mod in sorted(report.generated):
+                blocks = report.context_stats.get(mod)
+                if blocks:
+                    print(_context_stats_summary_line(mod, blocks))
             summary = f"Built {len(report.generated)} module(s), skipped {len(report.skipped)}"
             if report.failed:
                 summary += f", {len(report.failed)} failed"
@@ -2700,6 +2734,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                 "failed": {k: v for k, v in sorted(report.failed.items())},
                 "cost": cost_tracker.summary_dict(),
                 "cache": {"hits": response_cache.hits, "misses": response_cache.misses},
+                "context_stats": {k: v for k, v in sorted(report.context_stats.items())},
             }
             if report.needs_deps:
                 build_payload["needs_deps"] = {k: v for k, v in sorted(report.needs_deps.items())}

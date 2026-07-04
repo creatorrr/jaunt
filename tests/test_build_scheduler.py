@@ -353,6 +353,91 @@ def test_no_needs_dep_marker_leaves_needs_deps_empty(tmp_path: Path) -> None:
     assert report.needs_deps == {}
 
 
+_CONTEXT_BLOCKS = (
+    "preamble",
+    "system",
+    "module_contract",
+    "deps",
+    "package_context",
+    "repo_map",
+    "blueprint",
+    "skills_workspace",
+)
+
+
+def test_context_stats_populated_for_built_module(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    spec_path = tmp_path / "specs.py"
+    _write(spec_path, "def Play():\n    return 1\n")
+    entry = _entry(module="pkg.specs", qualname="Play", source_file=str(spec_path))
+    specs = {entry.spec_ref: entry}
+    spec_graph = build_spec_graph(specs, infer_default=False)
+    module_specs = {"pkg.specs": [entry]}
+    module_dag = {"pkg.specs": set()}
+
+    report = asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"pkg.specs"},
+            backend=SourceBackend("def Play():\n    return 1\n"),
+            repo_map_block="R" * 40,
+            jobs=1,
+        )
+    )
+
+    assert report.generated == {"pkg.specs"}
+    stats = report.context_stats
+    assert "pkg.specs" in stats
+    blocks = stats["pkg.specs"]
+    for name in _CONTEXT_BLOCKS:
+        assert name in blocks, name
+        assert set(blocks[name]) == {"chars", "est_tokens"}
+        assert blocks[name]["chars"] >= 0
+        assert blocks[name]["est_tokens"] == blocks[name]["chars"] // 4
+    # The injected repo map (40 chars, no project overview) is accounted verbatim.
+    assert blocks["repo_map"]["chars"] == 40
+    # The preamble is a non-empty static block.
+    assert blocks["preamble"]["chars"] > 0
+
+
+def test_context_stats_only_for_generated_modules(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    a_path = tmp_path / "a.py"
+    b_path = tmp_path / "b.py"
+    _write(a_path, "def A():\n    return 1\n")
+    _write(b_path, "def B():\n    return 1\n")
+    ea = _entry(module="pkg.a", qualname="A", source_file=str(a_path))
+    eb = _entry(module="pkg.b", qualname="B", source_file=str(b_path))
+    specs = {ea.spec_ref: ea, eb.spec_ref: eb}
+    spec_graph = build_spec_graph(specs, infer_default=False)
+    module_specs = {"pkg.a": [ea], "pkg.b": [eb]}
+    module_dag = {"pkg.a": set(), "pkg.b": set()}
+
+    report = asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"pkg.a"},
+            backend=SourceBackend("def A():\n    return 1\n"),
+            jobs=1,
+        )
+    )
+
+    assert report.generated == {"pkg.a"}
+    assert "pkg.b" in report.skipped
+    # Skipped (non-rebuilt) modules get no context accounting.
+    assert set(report.context_stats) == {"pkg.a"}
+
+
 def test_run_build_revalidates_fresh_generated_import_policy(tmp_path: Path) -> None:
     src = tmp_path / "src"
     spec_path = tmp_path / "specs.py"

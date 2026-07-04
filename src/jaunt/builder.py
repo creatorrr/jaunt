@@ -80,6 +80,27 @@ def _scan_needs_dep_markers(source: str) -> list[str]:
     return markers
 
 
+def _block_size(text: str) -> dict[str, int]:
+    chars = len(text or "")
+    return {"chars": chars, "est_tokens": chars // 4}
+
+
+def _skills_workspace_chars(project_root: Path | None) -> int:
+    """Total chars of SKILL.md files seeded under <project_root>/.agents/skills/."""
+    if project_root is None:
+        return 0
+    skills_root = project_root / ".agents" / "skills"
+    if not skills_root.is_dir():
+        return 0
+    total = 0
+    for path in skills_root.rglob("SKILL.md"):
+        try:
+            total += len(path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+    return total
+
+
 def _tool_version() -> str:
     try:
         return importlib.metadata.version("jaunt")
@@ -579,6 +600,7 @@ class BuildReport:
     skipped: set[str]
     failed: dict[str, list[str]]
     needs_deps: dict[str, list[str]] = field(default_factory=dict)
+    context_stats: dict[str, dict[str, dict[str, int]]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -597,6 +619,49 @@ class BuildModuleContextArtifacts:
     package_context_block: str
     handwritten_names: tuple[str, ...]
     digest: str
+
+
+def _module_context_stats(
+    *,
+    artifacts: BuildModuleContextArtifacts,
+    whole_class_contract_block: str,
+    dep_apis: dict[SpecRef, str],
+    dep_gen: dict[str, str],
+    repo_map_block: str,
+    project_overview_block: str,
+    preamble_chars: int,
+    skills_workspace_chars: int,
+) -> dict[str, dict[str, int]]:
+    """Per-block char / estimated-token accounting for one built module.
+
+    est_tokens is a coarse chars // 4 estimate. Blocks mirror what the build prompt
+    assembles: the static preamble, system/build directives, the module contract,
+    dependency APIs + generated dep sources, package grounding, the repo map (plus any
+    project overview), the blueprint source, and the seeded skills workspace.
+    """
+    deps_text = "".join(dep_apis.values()) + "".join(dep_gen.values())
+    module_contract_text = "".join(
+        [
+            artifacts.module_contract_block,
+            artifacts.base_contract_block,
+            whole_class_contract_block,
+        ]
+    )
+    system_text = artifacts.build_instructions_block + artifacts.attached_test_specs_block
+    repo_map_text = repo_map_block + project_overview_block
+    return {
+        "preamble": {"chars": preamble_chars, "est_tokens": preamble_chars // 4},
+        "system": _block_size(system_text),
+        "module_contract": _block_size(module_contract_text),
+        "deps": _block_size(deps_text),
+        "package_context": _block_size(artifacts.package_context_block),
+        "repo_map": _block_size(repo_map_text),
+        "blueprint": _block_size(artifacts.blueprint_source),
+        "skills_workspace": {
+            "chars": skills_workspace_chars,
+            "est_tokens": skills_workspace_chars // 4,
+        },
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -1623,6 +1688,11 @@ async def run_build(
     # Track generated source for dependency context injection.
     generated_sources: dict[str, str] = {}
     module_needs_deps: dict[str, list[str]] = {}
+    module_context_stats: dict[str, dict[str, dict[str, int]]] = {}
+    from jaunt.generate.shared import load_prompt as _load_prompt
+
+    _preamble_chars = len(_load_prompt("codex_preamble.md", None))
+    _skills_ws_chars = _skills_workspace_chars(project_root)
     failed: dict[str, list[str]] = dict(skipped_failures)
     completed: set[str] = set()
     ty_cmd = _resolve_ty_cmd() if ty_attempts is not None else None
@@ -2090,6 +2160,16 @@ async def run_build(
         markers = _scan_needs_dep_markers(result_source)
         if markers:
             module_needs_deps[module_name] = markers
+        module_context_stats[module_name] = _module_context_stats(
+            artifacts=module_contract,
+            whole_class_contract_block=wcc_module.whole_class_contract_block,
+            dep_apis=dep_apis,
+            dep_gen=dep_gen,
+            repo_map_block=repo_map_block,
+            project_overview_block=project_overview_block,
+            preamble_chars=_preamble_chars,
+            skills_workspace_chars=_skills_ws_chars,
+        )
 
         digest = module_digest(module_name, entries, specs, spec_graph)
         header_fields = {
@@ -2209,4 +2289,5 @@ async def run_build(
         skipped=skipped,
         failed=failed,
         needs_deps=module_needs_deps,
+        context_stats=module_context_stats,
     )

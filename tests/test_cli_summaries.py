@@ -148,3 +148,60 @@ def test_cli_build_json_with_explicit_plain_progress_keeps_stdout_json(
     assert "[build] " in captured.err
     assert "[build] app.specs: generating" in captured.err
     assert "[build] 1/1 ok=1 fail=0 app.specs" in captured.err
+
+
+def test_cli_build_json_includes_context_stats(tmp_path: Path, monkeypatch, capsys) -> None:
+    project, prefix = _make_cli_build_project(tmp_path)
+    before = {
+        prefix: sys.modules.get(prefix),
+        f"{prefix}.specs": sys.modules.get(f"{prefix}.specs"),
+    }
+    orig_sys_path = list(sys.path)
+    monkeypatch.setattr(jaunt.cli, "_build_backend", lambda cfg: GoodBackend())
+
+    try:
+        rc = jaunt.cli.main(["build", "--root", str(project), "--json"])
+    finally:
+        sys.path[:] = orig_sys_path
+        _restore_modules([prefix], before=before)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == jaunt.cli.EXIT_OK
+    assert "context_stats" in payload
+    stats = payload["context_stats"]
+    assert "app.specs" in stats
+    blocks = stats["app.specs"]
+    for name in (
+        "preamble",
+        "system",
+        "module_contract",
+        "deps",
+        "package_context",
+        "repo_map",
+        "blueprint",
+        "skills_workspace",
+    ):
+        assert name in blocks, name
+        assert set(blocks[name]) == {"chars", "est_tokens"}
+        assert blocks[name]["est_tokens"] == blocks[name]["chars"] // 4
+
+
+def test_cli_build_non_json_prints_context_line(tmp_path: Path, monkeypatch, capsys) -> None:
+    project, prefix = _make_cli_build_project(tmp_path)
+    before = {
+        prefix: sys.modules.get(prefix),
+        f"{prefix}.specs": sys.modules.get(f"{prefix}.specs"),
+    }
+    orig_sys_path = list(sys.path)
+    monkeypatch.setattr(jaunt.cli, "_build_backend", lambda cfg: GoodBackend())
+
+    try:
+        rc = jaunt.cli.main(["build", "--root", str(project)])
+    finally:
+        sys.path[:] = orig_sys_path
+        _restore_modules([prefix], before=before)
+
+    out = capsys.readouterr().out
+    assert rc == jaunt.cli.EXIT_OK
+    assert "context:" in out
+    assert "app.specs" in out

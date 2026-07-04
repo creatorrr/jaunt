@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import dataclass, field
+from importlib import metadata
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -8,10 +11,71 @@ from jaunt.external_imports import discover_external_distributions_with_warnings
 from jaunt.pypi import PyPIReadmeError, fetch_readme
 from jaunt.skill_manager import _atomic_write_text
 
+_logger = logging.getLogger("jaunt.skills_auto")
+
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Sequence
 
     from jaunt.config import AgentConfig, CodexConfig, LLMConfig, SkillsConfig
+
+
+def _is_local_install(dist: str) -> bool:
+    """True when `dist` was installed from a local path/editable/VCS, not a PyPI index.
+
+    Uses PEP 610 `direct_url.json`: presence of `dir_info` (local dir / editable) or
+    `vcs_info`, or a `file://` URL, all mean "not a PyPI index install". Index installs
+    have no `direct_url.json` (importlib returns None / raises), so they resolve to False.
+    """
+    try:
+        d = metadata.distribution(dist)
+    except Exception:
+        return False
+    try:
+        raw = d.read_text("direct_url.json")
+    except Exception:
+        raw = None
+    if not raw:
+        return False
+    try:
+        info = json.loads(raw)
+    except Exception:
+        return False
+    if not isinstance(info, dict):
+        return False
+    if "dir_info" in info or "vcs_info" in info:
+        return True
+    url = info.get("url")
+    return isinstance(url, str) and url.startswith("file://")
+
+
+_HEADING_MARKER = "Missing required heading"
+
+
+def _dist_from_generation_warning(warning: str) -> str | None:
+    prefix = "Failed generating skill for "
+    if not warning.startswith(prefix):
+        return None
+    rest = warning[len(prefix) :]
+    token = rest.split("==", 1)[0].split(":", 1)[0].strip()
+    return token or None
+
+
+def _dedupe_heading_warnings(warnings: list[str]) -> list[str]:
+    """Collapse per-dist 'Missing required heading' warnings into one summary line."""
+    kept: list[str] = []
+    affected: list[str] = []
+    for w in warnings:
+        if _HEADING_MARKER in w:
+            affected.append(_dist_from_generation_warning(w) or w)
+        else:
+            kept.append(w)
+    if affected:
+        uniq = sorted(dict.fromkeys(affected))
+        kept.append(
+            f"{len(uniq)} generated skill(s) were missing required section headings: "
+            + ", ".join(uniq)
+        )
+    return kept
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,7 +164,9 @@ async def ensure_pypi_skills(
             warnings=warnings,
         )
     return PyPISkillsResult(
-        warnings=warnings, generation_failures=generation_failures, dists=dict(dists)
+        warnings=_dedupe_heading_warnings(warnings),
+        generation_failures=generation_failures,
+        dists=dict(dists),
     )
 
 
@@ -125,6 +191,12 @@ async def _generate_pypi_skills(
     # Phase 1: identify which dists need (re)generation.
     to_generate: list[tuple[str, str, Path]] = []  # (dist, version, path)
     for dist, version in sorted(dists.items(), key=lambda kv: pep503_normalize(kv[0])):
+        if _is_local_install(dist):
+            _logger.debug(
+                "Skipping skill generation for %r: not a PyPI install (workspace/editable/local).",
+                dist,
+            )
+            continue
         path = skill_md_path(project_root=project_root, dist=dist)
 
         needs_generate = False

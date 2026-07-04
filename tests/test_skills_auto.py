@@ -313,6 +313,128 @@ def test_user_managed_skill_never_overwritten(tmp_path: Path, monkeypatch) -> No
     assert res.dists == {dist: version}
 
 
+def test_is_local_install_detects_dir_info(monkeypatch) -> None:
+    import jaunt.skills_auto as sa
+
+    class FakeDist:
+        def read_text(self, name: str) -> str:
+            assert name == "direct_url.json"
+            return '{"url": "file:///work/pkg", "dir_info": {"editable": true}}'
+
+    monkeypatch.setattr(sa.metadata, "distribution", lambda name: FakeDist())
+    assert sa._is_local_install("memory-store-utils") is True
+
+
+def test_is_local_install_detects_file_url(monkeypatch) -> None:
+    import jaunt.skills_auto as sa
+
+    class FakeDist:
+        def read_text(self, name: str) -> str:
+            return '{"url": "file:///tmp/wheels/foo-1.0-py3-none-any.whl", "archive_info": {}}'
+
+    monkeypatch.setattr(sa.metadata, "distribution", lambda name: FakeDist())
+    assert sa._is_local_install("foo") is True
+
+
+def test_is_local_install_false_for_index_install(monkeypatch) -> None:
+    import jaunt.skills_auto as sa
+
+    class FakeDist:
+        def read_text(self, name: str) -> None:
+            # Index installs have no direct_url.json; importlib returns None.
+            return None
+
+    monkeypatch.setattr(sa.metadata, "distribution", lambda name: FakeDist())
+    assert sa._is_local_install("httpx") is False
+
+
+def test_is_local_install_false_when_distribution_missing(monkeypatch) -> None:
+    import jaunt.skills_auto as sa
+
+    def missing(name: str):
+        raise sa.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(sa.metadata, "distribution", missing)
+    assert sa._is_local_install("nope") is False
+
+
+def test_workspace_internal_dist_skips_pypi_lookup(tmp_path: Path, monkeypatch) -> None:
+    import jaunt.skills_auto as sa
+
+    dist, version = "memory-store-utils", "0.1.0"
+    monkeypatch.setattr(
+        sa,
+        "discover_external_distributions_with_warnings",
+        lambda *_a, **_k: ({dist: version}, []),
+    )
+    monkeypatch.setattr(sa, "_is_local_install", lambda d: d == dist)
+
+    def fail_fetch(*_a, **_k):
+        raise AssertionError("fetch_readme must not run for a workspace-internal dist")
+
+    monkeypatch.setattr(sa, "fetch_readme", fail_fetch)
+
+    res = asyncio.run(
+        ensure_pypi_skills(
+            project_root=tmp_path,
+            source_roots=[],
+            generated_dir="__generated__",
+            llm=LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY"),
+            agent=AgentConfig(engine="codex"),
+        )
+    )
+
+    # Skipped quietly: no warning, no failure, and no skill written.
+    assert res.warnings == []
+    assert res.generation_failures == 0
+    assert res.dists == {dist: version}
+    assert not skill_md_path(project_root=tmp_path, dist=dist).exists()
+
+
+def test_missing_heading_warnings_deduped_into_summary(tmp_path: Path, monkeypatch) -> None:
+    import jaunt.skillgen as sg
+    import jaunt.skills_auto as sa
+
+    dists = {"lib-a": "1.0.0", "lib-b": "2.0.0"}
+    monkeypatch.setattr(
+        sa,
+        "discover_external_distributions_with_warnings",
+        lambda *_a, **_k: (dists, []),
+    )
+    monkeypatch.setattr(sa, "fetch_readme", lambda *_a, **_k: ("README", "text/markdown"))
+    monkeypatch.setattr(sa, "_is_local_install", lambda d: False)
+
+    class HeadingFailGen:
+        def __init__(self, llm, agent, codex):  # noqa: ANN001
+            pass
+
+        async def generate_skill_markdown(self, dist, version, readme, readme_type):  # noqa: ANN001
+            from jaunt.skill_agent import validate_skill_markdown
+
+            errs = validate_skill_markdown("# skill\nno required sections here\n")
+            raise RuntimeError("; ".join(errs))
+
+    monkeypatch.setattr(sg, "CodexSkillGenerator", HeadingFailGen)
+
+    res = asyncio.run(
+        ensure_pypi_skills(
+            project_root=tmp_path,
+            source_roots=[],
+            generated_dir="__generated__",
+            llm=LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY"),
+            agent=AgentConfig(engine="codex"),
+        )
+    )
+
+    heading_warnings = [w for w in res.warnings if "heading" in w.lower()]
+    assert len(heading_warnings) == 1
+    summary = heading_warnings[0]
+    assert "lib-a" in summary
+    assert "lib-b" in summary
+    # Both dists still counted as generation failures.
+    assert res.generation_failures == 2
+
+
 def test_codex_skill_generator_selected_when_agent_engine_is_codex(
     tmp_path: Path, monkeypatch
 ) -> None:
