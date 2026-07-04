@@ -442,3 +442,80 @@ def test_stub_staleness_ignores_hand_authored_stub(tmp_path: Path) -> None:
     stub_path_for_source(source_file).write_text("def greet() -> str: ...\n", encoding="utf-8")
     generated = "def greet() -> str:\n    return 'hi'\n"
     assert stub_staleness(source_file=source_file, generated_source=generated) is None
+
+
+def test_future_imports_never_emitted_in_stub() -> None:
+    """`from __future__ import annotations` must not ride into the stub.
+
+    Future imports are meaningless in .pyi files and, worse, land after the
+    generated-import prelude — mid-file, where they are a syntax error (ruff
+    F404; ty rejects the file). Both harvest paths must filter them: imports
+    copied from the spec module and imports pulled from the generated module
+    by referenced name. (mem-mcp-b adoption feedback, finding 18.)
+    """
+    spec_source = textwrap.dedent(
+        '''
+        from __future__ import annotations
+
+        import jaunt
+
+
+        @jaunt.magic()
+        def load(path: str) -> "Frame":
+            """Load a frame from disk."""
+            raise RuntimeError("spec stub")
+        '''
+    )
+    generated_source = textwrap.dedent(
+        """
+        from __future__ import annotations
+
+        from frames.core import Frame
+
+
+        def load(path: str) -> Frame:
+            return Frame()
+        """
+    )
+    stub = build_stub_source(spec_source, generated_source, {"load"}, _header())
+    assert "__future__" not in stub
+    # The generated-only import needed by the signature still arrives.
+    assert "from frames.core import Frame" in stub
+    # The stub parses (a mid-file future import would be a SyntaxError).
+    import ast
+
+    ast.parse(stub)
+
+
+def test_future_import_referenced_by_name_is_filtered() -> None:
+    """Even a stub signature that references the name `annotations` must not
+    drag the future import in through the by-referenced-name harvest path."""
+    spec_source = textwrap.dedent(
+        '''
+        import jaunt
+
+
+        @jaunt.magic()
+        def dump(x: object) -> dict:
+            """Dump annotations."""
+            raise RuntimeError("spec stub")
+        '''
+    )
+    generated_source = textwrap.dedent(
+        """
+        from __future__ import annotations
+
+
+        def dump(x: object) -> dict:
+            return dict(annotations={})
+
+
+        def helper(mapping: annotations) -> None:
+            return None
+        """
+    )
+    stub = build_stub_source(spec_source, generated_source, {"dump"}, _header())
+    assert "__future__" not in stub
+    import ast
+
+    ast.parse(stub)

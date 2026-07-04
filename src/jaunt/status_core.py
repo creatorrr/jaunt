@@ -224,6 +224,7 @@ def compute_magic_status(
 
     stale_changes = {
         m: _label_change_kind(
+            generation_fingerprint=build_generation_fingerprint,
             module_name=m,
             package_dir=package_dir,
             generated_dir=cfg.paths.generated_dir,
@@ -272,16 +273,21 @@ def _label_change_kind(
     package_dir: Path,
     generated_dir: str,
     module_specs: dict[str, list],
+    generation_fingerprint: str = "",
 ) -> str:
-    """Classify why a stale module changed: "structural" or "prose".
+    """Classify why a stale module changed: "structural", "prose", or "fingerprint".
 
     Structural = a signature/structure change (or never built / missing digests);
-    prose = only docstring contract text changed. Used by `jaunt status` and the
-    semantic gate to decide whether a cheap re-freeze is possible.
+    prose = only docstring contract text changed; fingerprint = the specs are
+    byte-identical but the generation fingerprint (engine, model, prompts,
+    optional codex CLI version) differs — e.g. a check run in an environment
+    without the codex binary while `fingerprint_cli_version` is enabled. Used by
+    `jaunt status` and the semantic gate to decide whether a cheap re-freeze is
+    possible.
     """
     from jaunt import builder
     from jaunt.digest import prose_digest, structural_digest
-    from jaunt.header import extract_spec_digests
+    from jaunt.header import extract_generation_fingerprint, extract_spec_digests
 
     existing = builder._read_generated(package_dir, generated_dir, module_name)
     on_disk = extract_spec_digests(existing) if existing else None
@@ -297,4 +303,10 @@ def _label_change_kind(
             return "structural"
         if _norm_digest(stored.get("p")) != _norm_digest(prose_digest(entry)):
             any_prose = True
-    return "prose" if any_prose else "structural"
+    if any_prose:
+        return "prose"
+    if generation_fingerprint and existing:
+        stored_fp = _norm_digest(extract_generation_fingerprint(existing))
+        if stored_fp is not None and stored_fp != _norm_digest(generation_fingerprint):
+            return "fingerprint"
+    return "structural"

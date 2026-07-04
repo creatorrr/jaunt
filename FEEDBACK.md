@@ -219,3 +219,89 @@ polishing safe.
   `<module>:<qualname>` APIs, package context as anti-hallucination
   grounding) and forbids fabricated paths. Findings 1/7/8 are edge cases
   *of* that design, not arguments against it.
+
+## 2026-07-04 — 1.3.0 upgrade report (same campaign)
+
+Upgraded mem-mcp-b same-day. Verification of the 1.3 fixes, live:
+
+- **Finding 11 fixed and verified**: `jaunt check` exits 4 on a mutated
+  spec, 0 after restore. CI gate is now one line; our status-JSON
+  workaround is deleted.
+- **Finding 1 fixed and verified**: regenerated `timing` has no fallback
+  ladder — zero `except ImportError`, zero `_Fallback*`.
+- **Finding 14 fixed**: `clean && build` regenerated both modules with no
+  sibling-restaling cascade.
+- **Findings 2/5/6/12 fixed and immediately useful**: the package-dir
+  source-root warning fired on our `apps/memory-api/mcp_memory_server`
+  root on first run — the exact latent bug our pilot review had predicted
+  for the next conversion wave.
+
+New findings:
+
+**18. `.pyi` emitter places `from __future__ import annotations` mid-file
+(severity: medium-high; patched locally, needs 1.3.1).** The stub emitter
+harvests imports from the generated module by referenced name, and the
+future import rides along into the prelude after other imports. ruff F404;
+ty rejects the file outright (`invalid-syntax`). Future imports are
+meaningless in stubs — never emit them. Local patch (filter in
+`stub_emitter.py` import collection, jaunt's 43 stub tests pass) is in the
+checkout at src/jaunt/stub_emitter.py; we hand-dropped the line from our
+two emitted stubs once, pending release. Freshness note: `check` stayed
+green after the hand-edit, so stub freshness appears inputs-digest-based —
+good (tolerates lint autofixes), but worth confirming that's intentional.
+
+**19. Requested context numbers (finding 4 follow-up): `skills_workspace`
+is the cost.** Per-module `context_stats` from the 1.3 rebuild:
+json_utils 201k chars (~50k tok) — skills_workspace 95%, repo_map 3%;
+timing 205k chars (~51k tok) — skills_workspace 93%. The workspace-skills
+block is ~19 of every 20 context tokens for a leaf module with zero deps.
+Rebuild of both: $6.22, 9 calls, 2.80M prompt tokens (2.48M cached).
+A skills budget (or relevance filter) for small modules looks like the
+single biggest cost lever for 1.4.
+
+**20. Skillgen can emit double YAML frontmatter (severity: low).** One
+generated skill (`hdbscan`) shipped two consecutive frontmatter blocks —
+first with `x-jaunt-dist`/`x-jaunt-version`, second repeating
+name/description. Last-block-wins parsers drop the jaunt metadata. 1 of
+~25 skills affected, so likely a race or a template branch, not systemic.
+We merged the blocks by hand.
+
+---
+
+## 2026-07-04 — findings from the PR 2 wave (mem-mcp)
+
+**21. `codex.fingerprint_cli_version` default breaks the deterministic CI
+gate (severity: high; the exact failure 1.3 was supposed to prevent).**
+The flag defaults to `true`, so `generation_fingerprint` embeds the local
+`codex --version` output in every committed header. Any CI runner without
+a codex binary resolves it to `"unknown"`, the fingerprint diverges, and
+`jaunt check` exits 4 with both modules `stale (structural)` — on a tree
+that is byte-identical to the one that built green locally. Bit us on the
+first CI run after the 1.3 upgrade; took a clean-room clone + PATH-shadowed
+codex stub to isolate, because `check` is honest about *that* environment,
+not about the committed tree. Two asks: (a) default it to `false` — the
+model + reasoning_effort + sandbox are already runtime_parts, and the CLI
+patch version is a cache-partitioning concern, not a drift concern; (b)
+whatever the default, `jaunt check` should either exclude
+environment-resolved parts from freshness comparison or print which
+fingerprint *part* mismatched (we had to read `generate/fingerprint.py` to
+find it). Workaround shipped: `fingerprint_cli_version = false` in
+jaunt.toml.
+
+**22. No per-module channel for shared constraints → N× duplicated
+`prompt=` blocks (severity: medium; authoring smell).** Our pilot
+timing.py carried the same ~60-word circular-import warning pasted into
+six `@jaunt.magic(prompt=...)` decorators (json_utils had a seventh copy)
+because under 1.2 nothing else enforced "generated module must not
+re-import spec symbols". 1.3's validator now rejects exactly that
+(`_validate_build_contract_only` re-import checks), so we deleted all
+seven blocks — but the general gap stands: guidance that applies to a
+whole module has nowhere to live except (a) repo-wide
+`[build].instructions` or (b) per-decorator `prompt=`. A module-level
+channel (module docstring section, or a `jaunt.module(prompt=...)`
+directive) would have avoided the duplication and kept decorator noise
+down. Related polish: the validator's redefinition error says "Import or
+reuse {name} from {spec_module} instead" — for whole-class specs that
+advice can reintroduce the decorator-time circular import the other
+validator forbids; suggest the message point at call-time/lazy access
+instead.

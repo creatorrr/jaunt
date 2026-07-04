@@ -1862,6 +1862,30 @@ def cmd_clean(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _fingerprint_env_hint(cfg: JauntConfig, stale_changes: dict[str, str]) -> str | None:
+    """One-line diagnosis when staleness is fingerprint-only and codex is absent.
+
+    With `[codex] fingerprint_cli_version = true`, `codex --version` is embedded
+    in the generation fingerprint; an environment without the codex binary
+    resolves it to "unknown" and restales a byte-identical tree. Name the cause
+    instead of leaving the user to bisect fingerprint parts.
+    """
+    if "fingerprint" not in stale_changes.values():
+        return None
+    if not (cfg.agent.engine == "codex" and cfg.codex.fingerprint_cli_version):
+        return None
+    from jaunt.generate.fingerprint import resolve_codex_cli_version
+
+    if resolve_codex_cli_version() != "unknown":
+        return None
+    return (
+        "hint: stale (fingerprint) with no codex binary on PATH — "
+        "[codex] fingerprint_cli_version = true embeds `codex --version` in freshness, "
+        "so environments without codex restale byte-identical trees; set it to false "
+        "for environment-independent checks."
+    )
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     json_mode = _is_json_mode(args)
     try:
@@ -1988,6 +2012,9 @@ def cmd_check(args: argparse.Namespace) -> int:
                         print(f"[BLOCK] {module_name}: unbuilt")
                     for module_name, reason in sorted(magic_stale.items()):
                         print(f"[BLOCK] {module_name}: stale ({reason})")
+                    hint = _fingerprint_env_hint(cfg, magic_stale)
+                    if hint:
+                        print(hint, file=sys.stderr)
                 else:
                     print("Magic freshness: all modules fresh.")
 
@@ -2432,6 +2459,9 @@ def cmd_status(args: argparse.Namespace) -> int:
             print(f"Stale ({len(stale_sorted)}):")
             for mod in stale_sorted:
                 print(f"- {mod} ({stale_changes.get(mod, 'structural')})")
+            hint = _fingerprint_env_hint(cfg, stale_changes)
+            if hint:
+                print(hint, file=sys.stderr)
             print(f"Fresh ({len(fresh_sorted)}):")
             for mod in fresh_sorted:
                 print(f"- {mod}")

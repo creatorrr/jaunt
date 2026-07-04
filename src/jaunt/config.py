@@ -160,7 +160,10 @@ class CodexConfig:
     model: str = "gpt-5.5"
     reasoning_effort: str = "high"
     sandbox: str = "workspace-write"
-    fingerprint_cli_version: bool = True
+    # Off by default: embedding `codex --version` in the generation fingerprint
+    # couples `jaunt check` to environments that have the codex binary (a CI
+    # runner without it resolves "unknown" and restales a byte-identical tree).
+    fingerprint_cli_version: bool = False
     features: list[str] = field(default_factory=list)
     config: dict[str, Any] = field(default_factory=dict)
 
@@ -600,7 +603,7 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             name="codex.fingerprint_cli_version",
         )
     else:
-        codex_fingerprint_cli_version = True
+        codex_fingerprint_cli_version = False
 
     if "features" in codex_tbl:
         codex_features = _as_str_list(codex_tbl["features"], name="codex.features")

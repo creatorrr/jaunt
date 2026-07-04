@@ -31,7 +31,7 @@ def _make_fresh_built_module(
         build_module_context_artifacts,
         write_generated_module,
     )
-    from jaunt.digest import module_digest
+    from jaunt.digest import module_digest, prose_digest, structural_digest
     from jaunt.discovery import discover_modules, import_and_collect
     from jaunt.module_api import module_api_digest
     from jaunt.registry import (
@@ -95,6 +95,9 @@ def _make_fresh_built_module(
             "module_context_digest": ctx_digest,
             "module_api_digest": module_api_digest(entries),
             "spec_refs": [str(e.spec_ref) for e in entries],
+            "spec_digests": {
+                str(e.spec_ref): {"s": structural_digest(e), "p": prose_digest(e)} for e in entries
+            },
         },
     )
     clear_registries()
@@ -277,6 +280,36 @@ def test_missing_stub_ignored_when_emit_stubs_false(tmp_path: Path, monkeypatch)
         _make_fresh_built_module(tmp_path, "stubpkg_off", emit_stubs=False)
         st = _status(tmp_path)
         assert "stubpkg_off.specs" in st.fresh
+    finally:
+        sys.path[:] = orig_path
+        for m in list(sys.modules.keys()):
+            if m not in before:
+                del sys.modules[m]
+
+
+def test_fingerprint_only_mismatch_labeled_fingerprint(tmp_path: Path) -> None:
+    """Byte-identical specs + changed generation fingerprint → "fingerprint".
+
+    Previously this surfaced as "stale (structural)", which sent adopters
+    bisecting spec digests when the actual cause was an environment-dependent
+    fingerprint input (mem-mcp-b adoption feedback, finding 21).
+    """
+    orig_path = list(sys.path)
+    before = set(sys.modules.keys())
+    try:
+        _make_fresh_built_module(tmp_path, "fppkg", emit_stubs=False)
+        st = _status(tmp_path)
+        assert "fppkg.specs" in st.fresh
+
+        # Change a fingerprint input (the codex model) without touching specs.
+        toml = tmp_path / "jaunt.toml"
+        toml.write_text(
+            toml.read_text(encoding="utf-8") + '\n[codex]\nmodel = "gpt-6-test"\n',
+            encoding="utf-8",
+        )
+        st2 = _status(tmp_path)
+        assert "fppkg.specs" in st2.stale
+        assert st2.stale_changes.get("fppkg.specs") == "fingerprint"
     finally:
         sys.path[:] = orig_path
         for m in list(sys.modules.keys()):
