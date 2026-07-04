@@ -393,6 +393,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "check", help="Verify committed contract batteries (deterministic, no model)."
     )
     _add_common_flags(check_p)
+    check_scope = check_p.add_mutually_exclusive_group()
+    check_scope.add_argument(
+        "--contracts-only",
+        action="store_true",
+        dest="contracts_only",
+        help="Gate only contract batteries.",
+    )
+    check_scope.add_argument(
+        "--magic-only",
+        action="store_true",
+        dest="magic_only",
+        help="Gate only @jaunt.magic freshness.",
+    )
 
     reconcile_p = subparsers.add_parser(
         "reconcile", help="Derive/refresh committed contract batteries (calls the model)."
@@ -1856,49 +1869,130 @@ def cmd_check(args: argparse.Namespace) -> int:
         from jaunt.contract import runner
         from jaunt.contract.drift import BLOCKING_MESSAGE, is_blocking
 
-        specs = _discover_contract_specs(root=root, cfg=cfg)
-        if not specs:
-            if json_mode:
-                _emit_json({"command": "check", "ok": True, "blocked": [], "checked": []})
-            else:
-                print("Contract check: 0 contract function(s).")
-            return EXIT_OK
+        contracts_only = bool(getattr(args, "contracts_only", False))
+        magic_only = bool(getattr(args, "magic_only", False))
+        run_contracts = not magic_only
+        run_magic = not contracts_only
 
-        def _run(path: Path) -> bool:
-            return runner.run_battery_file(path, root=root, source_roots=cfg.paths.source_roots)
+        contract_results = []
+        contract_blocked_results = []
+        contract_checked: list[dict[str, str]] = []
+        contract_blocked: list[dict[str, str]] = []
+        specs = {}
 
-        results = [
-            runner.evaluate_entry(
-                root,
-                cfg.contract.battery_dir,
-                cfg.contract.derive,
-                entry,
-                run_battery=_run,
+        if run_contracts:
+            specs = _discover_contract_specs(root=root, cfg=cfg)
+
+            if specs:
+
+                def _run(path: Path) -> bool:
+                    return runner.run_battery_file(
+                        path, root=root, source_roots=cfg.paths.source_roots
+                    )
+
+                contract_results = [
+                    runner.evaluate_entry(
+                        root,
+                        cfg.contract.battery_dir,
+                        cfg.contract.derive,
+                        entry,
+                        run_battery=_run,
+                    )
+                    for entry in sorted(specs.values(), key=lambda e: str(e.spec_ref))
+                ]
+                contract_blocked_results = [r for r in contract_results if is_blocking(r.state)]
+                contract_checked = [
+                    {"ref": str(r.spec_ref), "state": r.state.value} for r in contract_results
+                ]
+                contract_blocked = [
+                    {"ref": str(r.spec_ref), "state": r.state.value}
+                    for r in contract_blocked_results
+                ]
+
+        magic_fresh: list[str] = []
+        magic_stale: dict[str, str] = {}
+        magic_unbuilt: list[str] = []
+        if run_magic:
+            from jaunt import builder
+
+            source_dirs = [root / sr for sr in cfg.paths.source_roots]
+            _prepend_sys_path([*source_dirs, root])
+            include_target_tests = _effective_include_target_tests(cfg, args)
+            build_instructions = _effective_build_instructions(cfg, args)
+            infer_default = bool(cfg.build.infer_deps) and (not bool(args.no_infer_deps))
+            mstatus = compute_magic_status(
+                root=root,
+                cfg=cfg,
+                source_dirs=source_dirs,
+                build_instructions=build_instructions,
+                include_target_tests=include_target_tests,
+                infer_deps=infer_default,
+                force=bool(args.force),
+                target=args.target,
             )
-            for entry in sorted(specs.values(), key=lambda e: str(e.spec_ref))
-        ]
-        blocked = [r for r in results if is_blocking(r.state)]
+
+            if mstatus.total:
+                package_dir = next((d for d in source_dirs if d.exists()), None)
+                for module_name in sorted(mstatus.stale):
+                    generated_missing = (
+                        package_dir is None
+                        or builder._read_generated(
+                            package_dir, cfg.paths.generated_dir, module_name
+                        )
+                        is None
+                    )
+                    if generated_missing:
+                        magic_unbuilt.append(module_name)
+                    else:
+                        magic_stale[module_name] = mstatus.stale_changes.get(
+                            module_name, "structural"
+                        )
+                magic_fresh = sorted(mstatus.fresh)
+
+        magic_blocked = bool(magic_stale or magic_unbuilt)
+        blocked = bool(contract_blocked) or magic_blocked
 
         if json_mode:
-            _emit_json(
-                {
-                    "command": "check",
-                    "ok": not blocked,
-                    "blocked": [{"ref": r.spec_ref, "state": r.state.value} for r in blocked],
-                    "checked": [{"ref": r.spec_ref, "state": r.state.value} for r in results],
+            payload: dict[str, object] = {"command": "check", "ok": not blocked}
+            if run_contracts:
+                payload["blocked"] = contract_blocked
+                payload["checked"] = contract_checked
+            if run_magic:
+                payload["magic"] = {
+                    "fresh": magic_fresh,
+                    "stale": magic_stale,
+                    "unbuilt": sorted(magic_unbuilt),
                 }
-            )
+            _emit_json(payload)
         else:
-            for r in results:
-                mark = "BLOCK" if is_blocking(r.state) else "ok"
-                line = f"[{mark}] {r.spec_ref}: {r.state.value}"
-                if is_blocking(r.state):
-                    line += f" — {BLOCKING_MESSAGE.get(r.state, '')}"
-                print(line)
-            print(f"Contract check: {len(results)} checked, {len(blocked)} blocked.")
+            if run_contracts:
+                if specs:
+                    for r in contract_results:
+                        mark = "BLOCK" if is_blocking(r.state) else "ok"
+                        line = f"[{mark}] {r.spec_ref}: {r.state.value}"
+                        if is_blocking(r.state):
+                            line += f" — {BLOCKING_MESSAGE.get(r.state, '')}"
+                        print(line)
+                    print(
+                        f"Contract check: {len(contract_results)} checked, "
+                        f"{len(contract_blocked_results)} blocked."
+                    )
+                else:
+                    print("Contract check: 0 contract function(s).")
+            if run_magic:
+                if magic_unbuilt or magic_stale:
+                    print(
+                        f"Magic freshness: {len(magic_unbuilt)} unbuilt, {len(magic_stale)} stale."
+                    )
+                    for module_name in sorted(magic_unbuilt):
+                        print(f"[BLOCK] {module_name}: unbuilt")
+                    for module_name, reason in sorted(magic_stale.items()):
+                        print(f"[BLOCK] {module_name}: stale ({reason})")
+                else:
+                    print("Magic freshness: all modules fresh.")
 
         return EXIT_PYTEST_FAILURE if blocked else EXIT_OK
-    except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError) as e:
+    except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError, KeyError) as e:
         _print_error(e)
         if json_mode:
             _emit_json({"command": "check", "ok": False, "error": str(e)})
