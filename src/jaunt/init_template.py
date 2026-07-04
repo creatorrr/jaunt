@@ -28,6 +28,8 @@ include_target_tests = false
 # dependencies, first-party modules, or explicitly allowed extras.
 check_generated_imports = true
 # generated_import_allowlist = ["intentional_extra"]
+# Emit provenance-headed .pyi stubs next to each spec module (opt-out).
+emit_stubs = true
 # Add persistent extra instructions that apply to build generation.
 # instructions = [
 #   "Prefer small composable helpers over monolithic functions.",

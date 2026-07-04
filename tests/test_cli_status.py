@@ -36,9 +36,11 @@ def _write(path: Path, content: str) -> None:
 
 
 def _make_spec_project(tmp_path: Path, *, pkg: str = "statuspkg") -> None:
+    # These fixtures hand-write generated files without going through stub
+    # emission, so they opt out of `.pyi` freshness (covered in test_stub_freshness).
     _write(
         tmp_path / "jaunt.toml",
-        'version = 1\n\n[paths]\nsource_roots = ["src"]\n',
+        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[build]\nemit_stubs = false\n',
     )
     _write(tmp_path / "src" / pkg / "__init__.py", "")
     _write(

@@ -231,6 +231,26 @@ def compute_magic_status(
         )
         for m in sorted(stale)
     }
+    if cfg.build.emit_stubs:
+        from jaunt import stub_emitter
+
+        for module_name in sorted(fresh):
+            entries = module_specs.get(module_name, [])
+            if not entries:
+                continue
+            gen_source = builder._read_generated(package_dir, cfg.paths.generated_dir, module_name)
+            if gen_source is None:
+                continue
+            reason = stub_emitter.stub_staleness(
+                source_file=entries[0].source_file,
+                generated_source=gen_source,
+            )
+            if reason is None:
+                continue
+            stale.add(module_name)
+            stale_changes[module_name] = "stub"
+        fresh = all_mods - stale
+
     return MagicStatus(
         total=len(all_mods),
         stale=stale,

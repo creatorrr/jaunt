@@ -438,6 +438,89 @@ def test_context_stats_only_for_generated_modules(tmp_path: Path) -> None:
     assert set(report.context_stats) == {"pkg.a"}
 
 
+def _single_spec_project(tmp_path: Path):
+    src = tmp_path / "src"
+    spec_path = tmp_path / "specs.py"
+    _write(spec_path, "import jaunt\n\n\n@jaunt.magic()\ndef Play(x: int) -> int:\n    ...\n")
+    entry = _entry(module="pkg.specs", qualname="Play", source_file=str(spec_path))
+    specs = {entry.spec_ref: entry}
+    spec_graph = build_spec_graph(specs, infer_default=False)
+    module_specs = {"pkg.specs": [entry]}
+    module_dag = {"pkg.specs": set()}
+    return src, spec_path, specs, spec_graph, module_specs, module_dag
+
+
+def test_run_build_emits_pyi_stub(tmp_path: Path) -> None:
+    from jaunt.stub_emitter import is_jaunt_stub
+
+    src, spec_path, specs, spec_graph, module_specs, module_dag = _single_spec_project(tmp_path)
+    report = asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"pkg.specs"},
+            backend=SourceBackend("def Play(x: int) -> int:\n    return x * 2\n"),
+            jobs=1,
+            emit_stubs=True,
+        )
+    )
+    assert report.generated == {"pkg.specs"}
+    stub_path = spec_path.with_suffix(".pyi")
+    assert stub_path.exists()
+    assert is_jaunt_stub(stub_path)
+    text = stub_path.read_text(encoding="utf-8")
+    assert "def Play(x: int) -> int:" in text
+    assert "return x * 2" not in text
+    assert report.emitted_stubs.get("pkg.specs") == str(stub_path)
+
+
+def test_run_build_no_stub_when_emit_stubs_disabled(tmp_path: Path) -> None:
+    src, spec_path, specs, spec_graph, module_specs, module_dag = _single_spec_project(tmp_path)
+    asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"pkg.specs"},
+            backend=SourceBackend("def Play(x: int) -> int:\n    return x\n"),
+            jobs=1,
+        )
+    )
+    assert not spec_path.with_suffix(".pyi").exists()
+
+
+def test_run_build_never_overwrites_hand_authored_stub(tmp_path: Path) -> None:
+    src, spec_path, specs, spec_graph, module_specs, module_dag = _single_spec_project(tmp_path)
+    stub_path = spec_path.with_suffix(".pyi")
+    stub_path.write_text("# hand written\ndef Play(x: int) -> int: ...\n", encoding="utf-8")
+
+    report = asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"pkg.specs"},
+            backend=SourceBackend("def Play(x: int) -> int:\n    return x\n"),
+            jobs=1,
+            emit_stubs=True,
+        )
+    )
+    # The hand-authored stub is preserved verbatim.
+    assert stub_path.read_text(encoding="utf-8") == "# hand written\ndef Play(x: int) -> int: ...\n"
+    assert "pkg.specs" not in report.emitted_stubs
+    assert any("pkg.specs" in w for w in report.stub_warnings)
+
+
 def test_run_build_revalidates_fresh_generated_import_policy(tmp_path: Path) -> None:
     src = tmp_path / "src"
     spec_path = tmp_path / "specs.py"

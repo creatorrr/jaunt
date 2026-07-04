@@ -156,6 +156,56 @@ def test_cmd_clean_does_not_remove_unmanaged_generated_dirs(tmp_path: Path, monk
     assert (unmanaged / "keep.txt").exists()
 
 
+def test_cmd_clean_removes_only_jaunt_stubs(tmp_path: Path, monkeypatch) -> None:
+    from jaunt.header import format_stub_header
+    from jaunt.stub_emitter import build_stub_source, generated_content_digest
+
+    monkeypatch.chdir(tmp_path)
+    _make_min_project(tmp_path)
+
+    # A header-marked jaunt stub sibling of a spec module.
+    header = format_stub_header(
+        tool_version="0",
+        source_module="pkg.timing",
+        generated_digest=generated_content_digest("x = 1\n"),
+    )
+    jaunt_stub = tmp_path / "src" / "pkg" / "timing.pyi"
+    jaunt_stub.write_text(build_stub_source("x: int = 1\n", "", set(), header), encoding="utf-8")
+
+    # A hand-authored stub must be preserved.
+    hand_stub = tmp_path / "src" / "pkg" / "hand.pyi"
+    hand_stub.write_text("def f() -> int: ...\n", encoding="utf-8")
+
+    ns = jaunt.cli.parse_args(["clean"])
+    rc = jaunt.cli.cmd_clean(ns)
+    assert rc == 0
+
+    assert not jaunt_stub.exists()
+    assert hand_stub.exists()
+
+
+def test_cmd_clean_json_lists_removed_stubs(tmp_path: Path, monkeypatch, capsys) -> None:
+    from jaunt.header import format_stub_header
+    from jaunt.stub_emitter import build_stub_source, generated_content_digest
+
+    monkeypatch.chdir(tmp_path)
+    _make_min_project(tmp_path)
+    header = format_stub_header(
+        tool_version="0",
+        source_module="pkg.timing",
+        generated_digest=generated_content_digest("x = 1\n"),
+    )
+    jaunt_stub = tmp_path / "src" / "pkg" / "timing.pyi"
+    jaunt_stub.write_text(build_stub_source("x: int = 1\n", "", set(), header), encoding="utf-8")
+
+    ns = jaunt.cli.parse_args(["clean", "--json"])
+    rc = jaunt.cli.cmd_clean(ns)
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["ok"] is True
+    assert str(jaunt_stub) in data["removed"]
+
+
 def test_cmd_clean_missing_config(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     # No jaunt.toml

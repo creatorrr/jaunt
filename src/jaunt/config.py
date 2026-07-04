@@ -79,6 +79,7 @@ _BUILD_KEYS = frozenset(
         "check_generated_imports",
         "generated_import_allowlist",
         "instructions",
+        "emit_stubs",
     }
 )
 _TEST_KEYS = frozenset({"jobs", "infer_deps", "pytest_args", "auto_class_tests"})
@@ -125,6 +126,7 @@ class BuildConfig:
     check_generated_imports: bool = True
     generated_import_allowlist: list[str] = field(default_factory=list)
     instructions: list[str] = field(default_factory=list)
+    emit_stubs: bool = True
 
 
 @dataclass(frozen=True)
@@ -489,6 +491,11 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     else:
         build_instructions = []
 
+    if "emit_stubs" in build_tbl:
+        emit_stubs = _as_bool(build_tbl["emit_stubs"], name="build.emit_stubs")
+    else:
+        emit_stubs = True
+
     if "jobs" in test_tbl:
         test_jobs = _as_int(test_tbl["jobs"], name="test.jobs")
     else:
@@ -798,6 +805,7 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             check_generated_imports=check_generated_imports,
             generated_import_allowlist=generated_import_allowlist,
             instructions=build_instructions,
+            emit_stubs=emit_stubs,
         ),
         test=TestConfig(
             jobs=test_jobs,

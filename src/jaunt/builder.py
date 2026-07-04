@@ -601,6 +601,8 @@ class BuildReport:
     failed: dict[str, list[str]]
     needs_deps: dict[str, list[str]] = field(default_factory=dict)
     context_stats: dict[str, dict[str, dict[str, int]]] = field(default_factory=dict)
+    emitted_stubs: dict[str, str] = field(default_factory=dict)
+    stub_warnings: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1596,6 +1598,7 @@ async def run_build(
     generated_import_allowlist: Sequence[str] | None = None,
     initial_error_context_by_module: dict[str, list[str]] | None = None,
     targeted_test_entries: dict[str, list[SpecEntry]] | None = None,
+    emit_stubs: bool = False,
 ) -> BuildReport:
     jobs = max(1, int(jobs))
     ty_attempts = max(0, int(ty_retry_attempts)) if ty_retry_attempts is not None else None
@@ -1660,8 +1663,77 @@ async def run_build(
     skipped_failures = _validate_skipped_generated_modules(skipped_to_validate)
     skipped -= set(skipped_failures)
 
+    def _emit_stubs(
+        generated_modules: set[str],
+        skipped_modules: set[str],
+    ) -> tuple[dict[str, str], list[str]]:
+        if not emit_stubs:
+            return {}, []
+        from jaunt import stub_emitter
+
+        emitted_stubs: dict[str, str] = {}
+        stub_warnings: list[str] = []
+        for module_name in sorted((generated_modules | skipped_modules) & set(module_specs.keys())):
+            entries = module_specs.get(module_name, [])
+            if not entries:
+                continue
+            source_file = entries[0].source_file
+            gen_source = _read_generated(package_dir, generated_dir, module_name)
+            if gen_source is None:
+                continue
+            expected, _ = _build_expected_names(entries)
+            try:
+                spec_source = Path(source_file).read_text(encoding="utf-8")
+                stub_path = stub_emitter.stub_path_for_source(source_file)
+                if stub_path.exists() and not stub_emitter.is_jaunt_stub(stub_path):
+                    stub_warnings.append(
+                        f"{module_name}: existing hand-authored {stub_path.name} not overwritten"
+                    )
+                    continue
+                stub_header = header.format_stub_header(
+                    tool_version=_tool_version(),
+                    source_module=module_name,
+                    generated_digest=stub_emitter.generated_content_digest(gen_source),
+                )
+                new_stub = stub_emitter.build_stub_source(
+                    spec_source,
+                    gen_source,
+                    set(expected),
+                    stub_header,
+                )
+                if not (stub_path.exists() and stub_path.read_text(encoding="utf-8") == new_stub):
+                    stub_path.parent.mkdir(parents=True, exist_ok=True)
+                    fd, tmp = tempfile.mkstemp(
+                        dir=str(stub_path.parent),
+                        prefix=".jaunt-stub-tmp-",
+                        suffix=".pyi",
+                        text=True,
+                    )
+                    try:
+                        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+                            f.write(new_stub)
+                            f.flush()
+                            os.fsync(f.fileno())
+                        os.replace(tmp, stub_path)
+                    finally:
+                        try:
+                            os.unlink(tmp)
+                        except FileNotFoundError:
+                            pass
+                emitted_stubs[module_name] = str(stub_path)
+            except Exception as e:
+                stub_warnings.append(f"{module_name}: failed to emit stub: {e!r}")
+        return emitted_stubs, stub_warnings
+
     if not stale:
-        return BuildReport(generated=set(), skipped=skipped, failed=skipped_failures)
+        emitted_stubs, stub_warnings = _emit_stubs(set(), skipped)
+        return BuildReport(
+            generated=set(),
+            skipped=skipped,
+            failed=skipped_failures,
+            emitted_stubs=emitted_stubs,
+            stub_warnings=stub_warnings,
+        )
 
     # Induce a subgraph over stale modules.
     deps_in_stale: dict[str, set[str]] = {}
@@ -2284,10 +2356,13 @@ async def run_build(
         except Exception:
             pass
 
+    emitted_stubs, stub_warnings = _emit_stubs(generated, skipped)
     return BuildReport(
         generated=generated,
         skipped=skipped,
         failed=failed,
         needs_deps=module_needs_deps,
         context_stats=module_context_stats,
+        emitted_stubs=emitted_stubs,
+        stub_warnings=stub_warnings,
     )

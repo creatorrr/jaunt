@@ -1717,6 +1717,24 @@ def _find_generated_dirs(roots: Sequence[Path], generated_dir: str) -> list[Path
     return sorted(found)
 
 
+def _find_jaunt_stubs(roots: Sequence[Path], generated_dir: str) -> list[Path]:
+    from jaunt import stub_emitter
+
+    found: set[Path] = set()
+    for root in roots:
+        if not root.exists():
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [name for name in dirnames if name != generated_dir]
+            for filename in filenames:
+                if not filename.endswith(".pyi"):
+                    continue
+                path = Path(dirpath) / filename
+                if stub_emitter.is_jaunt_stub(path):
+                    found.add(path)
+    return sorted(found)
+
+
 def _today() -> str:
     from datetime import date
 
@@ -1796,6 +1814,7 @@ def cmd_clean(args: argparse.Namespace) -> int:
         root / tr for tr in cfg.paths.test_roots
     ]
     found = _find_generated_dirs(scan_roots, generated_dir)
+    stubs = _find_jaunt_stubs(scan_roots, generated_dir)
     dry_run = getattr(args, "dry_run", False)
 
     if dry_run:
@@ -1805,20 +1824,25 @@ def cmd_clean(args: argparse.Namespace) -> int:
                     "command": "clean",
                     "ok": True,
                     "dry_run": True,
-                    "would_remove": [str(p) for p in found],
+                    "would_remove": [str(p) for p in [*found, *stubs]],
                 }
             )
         return EXIT_OK
 
     for d in found:
         shutil.rmtree(d)
+    for stub in stubs:
+        try:
+            stub.unlink()
+        except FileNotFoundError:
+            pass
 
     if json_mode:
         _emit_json(
             {
                 "command": "clean",
                 "ok": True,
-                "removed": [str(p) for p in found],
+                "removed": [str(p) for p in [*found, *stubs]],
             }
         )
 
@@ -2681,6 +2705,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             project_root=root,
             builtin_skill_names=builtin_skill_names,
             skills_digest=build_skills_digest,
+            emit_stubs=cfg.build.emit_stubs,
         )
 
         if report.failed and not json_mode:
@@ -2694,6 +2719,13 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                 )
                 for marker in markers:
                     _eprint(f"  {marker}")
+
+        if report.stub_warnings and not json_mode:
+            for warning in report.stub_warnings:
+                _eprint(warning)
+
+        if report.emitted_stubs and not json_mode:
+            print(f"Emitted {len(report.emitted_stubs)} .pyi stub(s).")
 
         from jaunt import journal as _journal
 
@@ -2738,6 +2770,12 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             }
             if report.needs_deps:
                 build_payload["needs_deps"] = {k: v for k, v in sorted(report.needs_deps.items())}
+            if report.emitted_stubs:
+                build_payload["emitted_stubs"] = {
+                    k: v for k, v in sorted(report.emitted_stubs.items())
+                }
+            if report.stub_warnings:
+                build_payload["stub_warnings"] = report.stub_warnings
             _emit_json(build_payload)
 
         if report.failed:
