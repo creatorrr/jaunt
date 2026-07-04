@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypeAlias, cast
 
 from jaunt.spec_ref import SpecRef
 from jaunt.validation import validate_generated_source
@@ -62,6 +62,18 @@ class GenerationResult:
     source: str | None
     errors: list[str]
     usage: TokenUsage | None = None
+    advisories: tuple[str, ...] = ()
+
+
+GenerationModuleResult: TypeAlias = (
+    tuple[str, TokenUsage | None] | tuple[str, TokenUsage | None, tuple[str, ...]]
+)
+
+
+def _generation_advisories(gen: GenerationModuleResult) -> tuple[str, ...]:
+    if len(gen) != 3:
+        return ()
+    return cast("tuple[str, TokenUsage | None, tuple[str, ...]]", gen)[2]
 
 
 class GeneratorBackend(ABC):
@@ -89,10 +101,11 @@ class GeneratorBackend(ABC):
     @abstractmethod
     async def generate_module(
         self, ctx: ModuleSpecContext, *, extra_error_context: list[str] | None = None
-    ) -> tuple[str, TokenUsage | None]:
+    ) -> GenerationModuleResult:
         """Generate a Python module for the given context.
 
-        Returns (source_code, optional_token_usage).
+        Returns (source_code, optional_token_usage) or
+        (source_code, optional_token_usage, advisories).
         """
 
     async def complete_text(self, *, system: str, user: str) -> str:
@@ -137,7 +150,10 @@ class GeneratorBackend(ABC):
             attempts += 1
             if progress is not None:
                 progress("attempt", f"{attempts}/{max_attempts}")
-            last_source, usage = await self.generate_module(ctx, extra_error_context=extra_ctx)
+            gen = await self.generate_module(ctx, extra_error_context=extra_ctx)
+            last_source = gen[0]
+            usage = gen[1]
+            attempt_advisories = _generation_advisories(gen)
             if usage is not None:
                 total_prompt += usage.prompt_tokens
                 total_completion += usage.completion_tokens
@@ -160,7 +176,13 @@ class GeneratorBackend(ABC):
                     if total_prompt or total_completion
                     else None
                 )
-                return GenerationResult(attempts=attempts, source=last_source, errors=[], usage=agg)
+                return GenerationResult(
+                    attempts=attempts,
+                    source=last_source,
+                    errors=[],
+                    usage=agg,
+                    advisories=attempt_advisories,
+                )
 
             if attempts >= max_attempts:
                 break

@@ -147,7 +147,7 @@ def test_generate_module_returns_written_source_and_writes_seed(monkeypatch) -> 
             stdout=_usage_jsonl("done", input_tokens=10, output_tokens=5),
         )
 
-        source, usage = await backend.generate_module(
+        source, usage, _advisories = await backend.generate_module(
             _ctx(seed_target_content="# previous candidate\n")
         )
 
@@ -256,7 +256,7 @@ def test_generate_module_retries_once_without_offending_config_key(monkeypatch) 
             stdout=lambda _args: failed if len(calls) == 1 else success,
         )
 
-        source, usage = await backend.generate_module(_ctx())
+        source, usage, _advisories = await backend.generate_module(_ctx())
 
         assert len(calls) == 2
         retry_args = calls[1]
@@ -471,7 +471,7 @@ def test_usage_parsed_from_json_and_absent_usage(monkeypatch) -> None:
         ).encode("utf-8")
         _install_fake_exec(monkeypatch, on_run=on_run, stdout=no_usage)
 
-        _source, usage = await backend.generate_module(_ctx())
+        _source, usage, _advisories = await backend.generate_module(_ctx())
         assert usage is None
 
     asyncio.run(run())
@@ -580,7 +580,7 @@ def test_cached_input_tokens_parsed_into_usage(monkeypatch) -> None:
             ),
         )
 
-        _source, usage = await backend.generate_module(_ctx())
+        _source, usage, _advisories = await backend.generate_module(_ctx())
         assert usage == TokenUsage(
             10,
             5,
