@@ -245,3 +245,110 @@ def test_evict_modules_for_import_drops_parent_packages_of_target_modules(
         if had_tests:
             assert orig_tests is not None
             sys.modules["tests"] = orig_tests
+
+
+# ---------------------------------------------------------------------------
+# 1.3.0 layout/naming warnings (findings 6/9/12) — Task 5
+# ---------------------------------------------------------------------------
+
+
+def test_shadow_warning_for_stdlib_top_level_name(tmp_path: Path) -> None:
+    from jaunt.discovery import reset_discovery_warnings
+
+    reset_discovery_warnings()
+    _write(tmp_path / "json.py", "X = 1\n")  # 'json' is in sys.stdlib_module_names
+    with pytest.warns(UserWarning, match="shadow"):
+        mods = discover_modules(
+            roots=[tmp_path],
+            exclude=[],
+            generated_dir="__generated__",
+            spec_prescreen=False,
+        )
+    assert "json" in mods
+
+
+def test_no_shadow_warning_for_package_member(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder
+) -> None:
+    from jaunt.discovery import reset_discovery_warnings
+
+    reset_discovery_warnings()
+    _write(tmp_path / "pkg" / "__init__.py", "")
+    _write(tmp_path / "pkg" / "json.py", "X = 1\n")  # pkg.json is not a top-level name
+    discover_modules(
+        roots=[tmp_path],
+        exclude=[],
+        generated_dir="__generated__",
+        spec_prescreen=False,
+    )
+    assert not any("shadow" in str(w.message) for w in recwarn.list)
+
+
+def test_shadow_warning_emitted_once_per_run(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder
+) -> None:
+    from jaunt.discovery import reset_discovery_warnings
+
+    reset_discovery_warnings()
+    _write(tmp_path / "json.py", "X = 1\n")
+    discover_modules(
+        roots=[tmp_path], exclude=[], generated_dir="__generated__", spec_prescreen=False
+    )
+    discover_modules(
+        roots=[tmp_path], exclude=[], generated_dir="__generated__", spec_prescreen=False
+    )
+    shadow_warnings = [w for w in recwarn.list if "shadow" in str(w.message)]
+    assert len(shadow_warnings) == 1
+
+
+def test_package_root_doctor_warning(tmp_path: Path) -> None:
+    from jaunt.discovery import reset_discovery_warnings
+
+    reset_discovery_warnings()
+    _write(tmp_path / "__init__.py", "")  # the source root itself is a package
+    _write(tmp_path / "mod.py", "X = 1\n")
+    with pytest.warns(UserWarning, match="package directory"):
+        discover_modules(
+            roots=[tmp_path],
+            exclude=[],
+            generated_dir="__generated__",
+            spec_prescreen=False,
+        )
+
+
+def test_no_package_root_warning_for_package_parent(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder
+) -> None:
+    from jaunt.discovery import reset_discovery_warnings
+
+    reset_discovery_warnings()
+    # Root is the package *parent* (no __init__.py at the root); the correct layout.
+    _write(tmp_path / "pkg" / "__init__.py", "")
+    _write(tmp_path / "pkg" / "mod.py", "X = 1\n")
+    discover_modules(
+        roots=[tmp_path],
+        exclude=[],
+        generated_dir="__generated__",
+        spec_prescreen=False,
+    )
+    assert not any("package directory" in str(w.message) for w in recwarn.list)
+
+
+def test_no_layout_warnings_for_prefixed_test_discovery(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder
+) -> None:
+    from jaunt.discovery import reset_discovery_warnings
+
+    reset_discovery_warnings()
+    # Prefixed (test-root) discovery must not emit source-layout warnings even
+    # when the root is a package and a module name would shadow the stdlib.
+    _write(tmp_path / "__init__.py", "")
+    _write(tmp_path / "json.py", "X = 1\n")
+    discover_modules(
+        roots=[tmp_path],
+        exclude=[],
+        generated_dir="__generated__",
+        module_prefix="tests",
+        spec_prescreen=False,
+    )
+    assert not recwarn.list
