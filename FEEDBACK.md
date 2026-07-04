@@ -429,3 +429,30 @@ exact moment accidental governance is cheap to catch.
   annotation (F821 on `"RecursiveChunker | None"`); our scoped per-file
   lint exemptions from the 1.3.1 wave remain in place. Fold into finding 20's
   emitter-hygiene bucket.
+
+---
+
+## 2026-07-04 (night) — 1.4.2 verified; memory-store-utils is 7/7 module-style
+
+- **Finding 23 fix confirmed**: un-reverted timing.py to module style; the
+  `monkeypatch.setenv` + `reload` test passes. The conversion was fully
+  digest-neutral this time (stub bodies were already `raise
+  NotImplementedError`) — build cost $0, exactly the free path the 1.4.0
+  notes promised. The escape-hatch trigger list is back down to two
+  (decorated symbol, import-time consumption).
+- **Emitter fixes confirmed, exemptions deleted**: no more `import jaunt` in
+  stubs; the optional-dep string annotation resolves via `RecursiveChunker =
+  Any`; output is ruff-formatted. We removed both the ruff F401/F821
+  per-file-ignores and the ty `unresolved-reference` override from the 1.3.1
+  wave. The no-rewrite-when-fresh hardening also holds: ruff autofix touched
+  a committed stub and `jaunt check` stayed fresh — the 1.3.1-era
+  ruff-vs-emitter fight loop is dead.
+- **Stub-format migration note was accurate**: `check` exited 4 post-upgrade;
+  one model-free `jaunt build` re-emitted 7 stubs; committed.
+- **One residual emitter nit (low)**: the `X = Any` optional-dependency
+  fallback is emitted *above* the remaining imports, so E402 fires on every
+  import that follows (3 in chunking.pyi). We re-added a narrow
+  E402-only per-file-ignore. Suggest emitting the import block first, then
+  fallback assignments.
+- **tool_version fix confirmed**: re-emitted headers all carry
+  `tool_version=1.4.2`; no blank fields.
