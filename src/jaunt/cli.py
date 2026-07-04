@@ -296,6 +296,13 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Land even if the spec changed since the job parked.",
     )
+    jobs_land_p = jobs_sub.add_parser("land", help="Land a parked proposal as a provenance commit.")
+    jobs_land_p.add_argument("job_id", nargs="?")
+    jobs_land_p.add_argument("--all", action="store_true")
+    jobs_land_p.add_argument("--root", default=argparse.SUPPRESS)
+    jobs_discard_p = jobs_sub.add_parser("discard", help="Discard a parked proposal.")
+    jobs_discard_p.add_argument("job_id")
+    jobs_discard_p.add_argument("--root", default=argparse.SUPPRESS)
     jobs_wait_p = jobs_sub.add_parser("wait", help="Wait for daemon jobs to finish.")
     jobs_wait_p.add_argument("job_id", nargs="?")
     jobs_wait_p.add_argument("--root", default=argparse.SUPPRESS)
@@ -1327,11 +1334,165 @@ def _cmd_jobs_retry(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_jobs_land(args: argparse.Namespace) -> int:
+    from jaunt import jobs as jobs_mod
+    from jaunt import journal as journal_mod
+    from jaunt import landing
+
+    root = Path(args.root).resolve()
+    if args.all or args.job_id is None:
+        _eprint("error: jobs land currently requires one job id")
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    job = jobs_mod.load_job(root, args.job_id)
+    if job is None:
+        _eprint(f"error: job not found: {args.job_id}")
+        return EXIT_CONFIG_OR_DISCOVERY
+    if job.state != jobs_mod.PROPOSED:
+        _eprint(f"error: job {job.id} is {job.state}; only proposed jobs can be landed")
+        return EXIT_CONFIG_OR_DISCOVERY
+    if not job.patch_paths:
+        _eprint(f"error: proposed job {job.id} has no patch paths")
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    try:
+        patch_paths_raw = json.loads(job.patch_paths)
+    except json.JSONDecodeError:
+        _eprint(f"error: proposed job {job.id} has invalid patch paths")
+        return EXIT_CONFIG_OR_DISCOVERY
+    if (
+        not isinstance(patch_paths_raw, list)
+        or not patch_paths_raw
+        or not all(isinstance(path, str) for path in patch_paths_raw)
+    ):
+        _eprint(f"error: proposed job {job.id} has invalid patch paths")
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    patch_file = jobs_mod.jobs_dir(root) / f"{job.id}.patch"
+    if not patch_file.exists():
+        _eprint(f"error: proposed job {job.id} is missing patch file")
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    patch = patch_file.read_text(encoding="utf-8")
+    current_digest = _module_current_digest(root, args, job.module)
+    if current_digest is None or current_digest != job.spec_digest:
+        jobs_mod.mark(root, job, jobs_mod.SUPERSEDED)
+        _eprint(
+            f"superseded: {job.module} spec moved since generation; "
+            "the daemon will propose a fresh build"
+        )
+        return EXIT_PYTEST_FAILURE
+
+    try:
+        current_branch = landing.git_out(root, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        if current_branch != job.branch:
+            _eprint(f"error: on branch {current_branch}; proposal was generated on {job.branch}")
+            return EXIT_PYTEST_FAILURE
+        dirty = landing.git_out(root, "status", "--porcelain", "--", *patch_paths_raw).strip()
+    except landing.LandingError as e:
+        _eprint(str(e))
+        return EXIT_PYTEST_FAILURE
+    if dirty:
+        _eprint(
+            f"error: refusing to land {job.id}; working tree has changes to: "
+            f"{' '.join(patch_paths_raw)}"
+        )
+        return EXIT_PYTEST_FAILURE
+
+    def truncate_journal(path: Path, size: int) -> None:
+        with open(path, "r+", encoding="utf-8") as f:
+            f.truncate(size)
+
+    journal_path = root / journal_mod.JOURNAL_FILE
+    journal_opted_in = journal_path.exists()
+    snapshot_len = 0
+    extra_paths: tuple[str, ...] = ()
+    if journal_opted_in:
+        snapshot_len = journal_path.stat().st_size
+        journal_mod.append_events(
+            root,
+            [
+                journal_mod.JournalEvent(
+                    "refreeze" if job.refrozen else "build",
+                    job.module,
+                    f"{job.cause or 'spec change'}; battery {job.battery or '-'}",
+                    job.id,
+                )
+            ],
+        )
+        extra_paths = (journal_mod.JOURNAL_FILE,)
+
+    try:
+        expected_head = landing.git_out(root, "rev-parse", "HEAD").strip()
+        sha = landing.land(
+            root,
+            patch,
+            patch_paths=patch_paths_raw,
+            message=landing.build_commit_message(
+                job.module,
+                job.cause or "spec change",
+                job.id,
+                job.spec_digest,
+            ),
+            expected_branch=job.branch,
+            expected_head=expected_head,
+            extra_commit_paths=extra_paths,
+        )
+    except landing.LandingError as e:
+        if journal_opted_in:
+            truncate_journal(journal_path, snapshot_len)
+        _eprint(str(e))
+        return EXIT_PYTEST_FAILURE
+
+    if sha == landing.HEAD_MOVED:
+        if journal_opted_in:
+            truncate_journal(journal_path, snapshot_len)
+        _eprint("head moved; re-run jaunt jobs land")
+        return EXIT_PYTEST_FAILURE
+    if sha is None:
+        if journal_opted_in:
+            truncate_journal(journal_path, snapshot_len)
+        jobs_mod.mark(root, job, jobs_mod.SUPERSEDED)
+        _eprint("conflict applying proposal; superseded -- the daemon will rebuild")
+        return EXIT_PYTEST_FAILURE
+
+    jobs_mod.mark(root, job, jobs_mod.LANDED, landed_commit=sha, phase="")
+    print(sha)
+    return EXIT_OK
+
+
+def _cmd_jobs_discard(args: argparse.Namespace) -> int:
+    from jaunt import jobs as jobs_mod
+    from jaunt import journal as journal_mod
+
+    root = Path(args.root).resolve()
+    job = jobs_mod.load_job(root, args.job_id)
+    if job is None:
+        _eprint(f"error: job not found: {args.job_id}")
+        return EXIT_CONFIG_OR_DISCOVERY
+    if job.state != jobs_mod.PROPOSED:
+        _eprint(f"error: job {job.id} is {job.state}; only proposed jobs can be discarded")
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    jobs_mod.mark(root, job, jobs_mod.DISCARDED)
+    (jobs_mod.jobs_dir(root) / f"{job.id}.patch").unlink(missing_ok=True)
+    journal_mod.append_events(
+        root,
+        [journal_mod.JournalEvent("job-discard", job.module, "discarded", job.id)],
+    )
+    print(f"discarded {job.id}")
+    return EXIT_OK
+
+
 def cmd_jobs(args: argparse.Namespace) -> int:
     if args.jobs_command == "show":
         return _cmd_jobs_show(args)
     if args.jobs_command == "retry":
         return _cmd_jobs_retry(args)
+    if args.jobs_command == "land":
+        return _cmd_jobs_land(args)
+    if args.jobs_command == "discard":
+        return _cmd_jobs_discard(args)
     if args.jobs_command == "wait":
         return _cmd_jobs_wait(args)
     return _cmd_jobs_list(args)
