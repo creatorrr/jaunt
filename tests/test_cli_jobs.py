@@ -539,3 +539,70 @@ def test_jobs_discard_wrong_state_exits_2(capsys, monkeypatch, scaffolded_projec
 
     assert rc == 2
     assert "only proposed jobs can be discarded" in capsys.readouterr().err
+
+
+def test_jobs_land_all_no_proposals_exits_0(capsys, monkeypatch, scaffolded_project: Path) -> None:
+    root = scaffolded_project
+    monkeypatch.chdir(root)
+
+    rc = main(["jobs", "land", "--all", "--root", str(root)])
+
+    assert rc == 0
+
+
+def test_jobs_land_all_lands_in_created_order_and_reports(
+    capsys, monkeypatch, scaffolded_project: Path
+) -> None:
+    root = scaffolded_project
+    patch_a, _, paths_a = _patch_for(root, "src/__generated__/a.py", "a = 1\n")
+    job_a = _propose_job(root, patch_a, paths_a, module="a", spec_digest="da")
+    patch_b, _, paths_b = _patch_for(root, "src/__generated__/b.py", "b = 1\n")
+    job_b = _propose_job(root, patch_b, paths_b, module="b", spec_digest="db")
+    digests = {"a": "da", "b": "db"}
+    monkeypatch.setattr(
+        jaunt.cli, "_module_current_digest", lambda root, args, module: digests[module]
+    )
+    expected = [(job.id, job.module) for job in jobs.list_jobs(root, states={jobs.PROPOSED})]
+
+    monkeypatch.chdir(root)
+    rc = main(["jobs", "land", "--all", "--root", str(root)])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    # One sha per landed proposal on stdout.
+    assert len([line for line in out.splitlines() if line.strip()]) == 2
+    for job in (job_a, job_b):
+        reloaded = jobs.load_job(root, job.id)
+        assert reloaded is not None
+        assert reloaded.state == jobs.LANDED
+    # Two provenance commits, applied in created order (oldest of the two first).
+    subjects = _git(root, "log", "--pretty=%s").splitlines()[:2][::-1]
+    assert subjects[0] == f"regen({expected[0][1]}): spec change"
+    assert subjects[1] == f"regen({expected[1][1]}): spec change"
+
+
+def test_jobs_land_all_mixed_fresh_stale(capsys, monkeypatch, scaffolded_project: Path) -> None:
+    root = scaffolded_project
+    patch_a, _, paths_a = _patch_for(root, "src/__generated__/a.py", "a = 1\n")
+    job_fresh = _propose_job(root, patch_a, paths_a, module="a", spec_digest="da")
+    patch_b, _, paths_b = _patch_for(root, "src/__generated__/b.py", "b = 1\n")
+    job_stale = _propose_job(root, patch_b, paths_b, module="b", spec_digest="db")
+    # module "a" digest matches; module "b" has moved since generation.
+    digests = {"a": "da", "b": "moved"}
+    monkeypatch.setattr(
+        jaunt.cli, "_module_current_digest", lambda root, args, module: digests[module]
+    )
+
+    monkeypatch.chdir(root)
+    rc = main(["jobs", "land", "--all", "--root", str(root)])
+    captured = capsys.readouterr()
+
+    assert rc == 4
+    fresh = jobs.load_job(root, job_fresh.id)
+    stale = jobs.load_job(root, job_stale.id)
+    assert fresh is not None and fresh.state == jobs.LANDED
+    assert stale is not None and stale.state == jobs.SUPERSEDED
+    # Both outcomes reported: the fresh sha on stdout, the stale supersede on stderr.
+    assert fresh.landed_commit in captured.out
+    assert "superseded" in captured.err
+    assert "b" in captured.err
