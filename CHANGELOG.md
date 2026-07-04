@@ -3,6 +3,15 @@
 All notable changes to jaunt. Generated from conventional commits by
 [git-cliff](https://git-cliff.org); one section per published PyPI release.
 
+## [1.4.1] - 2026-07-04
+
+### Chores
+
+- Update CHANGELOG.md for v1.4.0 [skip ci]
+
+### Fixes
+
+- 1.4.1 — magic_module post-merge review fixes (#67)
 ## [1.4.0] - 2026-07-04
 
 ### Chores
