@@ -802,6 +802,15 @@ def cmd_daemon(args: argparse.Namespace) -> int:
             else:
                 status = "stopped"
             print(f"Daemon: {status}")
+            try:
+                from jaunt.config import load_config
+
+                landing_mode = (
+                    "auto-commit" if load_config(root=root).daemon.auto_commit else "propose-only"
+                )
+            except Exception:
+                landing_mode = "propose-only"
+            print(f"landing: {landing_mode}")
             for job in records[-10:]:
                 print(f"- {job.id} {job.module}: {_job_state_label(job)}")
         return EXIT_OK

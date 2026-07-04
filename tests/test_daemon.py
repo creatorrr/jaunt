@@ -35,7 +35,7 @@ def repo(tmp_path: Path) -> Path:
     (r / "src" / "app.py").write_text('"""spec v1"""\n', encoding="utf-8")
     (r / ".gitignore").write_text(".jaunt/\n", encoding="utf-8")
     (r / "jaunt.toml").write_text(
-        'version = 1\n\n[paths]\nsource_roots = ["src"]\n',
+        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[daemon]\nauto_commit = true\n',
         encoding="utf-8",
     )
     _git(r, "add", "-A")
@@ -61,6 +61,7 @@ def jaunt_cfg_with_notify(repo: Path, tmp_path: Path) -> JauntConfig:
                 'source_roots = ["src"]',
                 "",
                 "[daemon]",
+                "auto_commit = true",
                 f"notify_command = '{notify_command}'",
                 "",
             ]
