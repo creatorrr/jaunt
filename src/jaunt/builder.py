@@ -917,7 +917,6 @@ def build_module_context_artifacts(
         blueprint_source=blueprint_source,
         build_instructions_block=build_instructions_block,
         attached_test_specs_block=attached_test_specs_block,
-        package_context_block=package_context_block,
         base_contract_block=base_contract_block,
         whole_class_contract_block=whole_class_contract_block,
         inherited_api_block=inherited_api_block,
@@ -940,7 +939,6 @@ def _build_context_digest(
     blueprint_source: str,
     build_instructions_block: str,
     attached_test_specs_block: str,
-    package_context_block: str,
     base_contract_block: str,
     whole_class_contract_block: str = "",
     inherited_api_block: str = "",
@@ -952,7 +950,6 @@ def _build_context_digest(
         blueprint_source,
         build_instructions_block,
         attached_test_specs_block,
-        package_context_block,
     ):
         h.update((block or "").encode("utf-8"))
         h.update(b"\x00")
