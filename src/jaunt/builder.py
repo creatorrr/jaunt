@@ -18,7 +18,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
@@ -68,6 +68,16 @@ from jaunt.validation import (
 )
 
 _TY_CHECK_TIMEOUT_S = 20.0
+NEEDS_DEP_MARKER = "JAUNT-NEEDS-DEP:"
+
+
+def _scan_needs_dep_markers(source: str) -> list[str]:
+    markers: list[str] = []
+    for line in source.splitlines():
+        idx = line.find(NEEDS_DEP_MARKER)
+        if idx != -1:
+            markers.append(line[idx:].strip())
+    return markers
 
 
 def _tool_version() -> str:
@@ -568,6 +578,7 @@ class BuildReport:
     generated: set[str]
     skipped: set[str]
     failed: dict[str, list[str]]
+    needs_deps: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1611,6 +1622,7 @@ async def run_build(
     generated: set[str] = set()
     # Track generated source for dependency context injection.
     generated_sources: dict[str, str] = {}
+    module_needs_deps: dict[str, list[str]] = {}
     failed: dict[str, list[str]] = dict(skipped_failures)
     completed: set[str] = set()
     ty_cmd = _resolve_ty_cmd() if ty_attempts is not None else None
@@ -2075,6 +2087,9 @@ async def run_build(
                 _phase(module_name, "warning", warning)
 
         generated_sources[module_name] = result_source
+        markers = _scan_needs_dep_markers(result_source)
+        if markers:
+            module_needs_deps[module_name] = markers
 
         digest = module_digest(module_name, entries, specs, spec_graph)
         header_fields = {
@@ -2189,4 +2204,9 @@ async def run_build(
         except Exception:
             pass
 
-    return BuildReport(generated=generated, skipped=skipped, failed=failed)
+    return BuildReport(
+        generated=generated,
+        skipped=skipped,
+        failed=failed,
+        needs_deps=module_needs_deps,
+    )

@@ -45,3 +45,5 @@ Corollaries:
   layout and idioms.
 - L11 — Rewrite from the spec, not the code: any prior generated body is disposable
   context, not a contract.
+- No fallback implementations: import failures raise; never define an alternate
+  implementation of a contract symbol.

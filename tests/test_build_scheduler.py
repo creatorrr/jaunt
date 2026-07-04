@@ -290,6 +290,69 @@ def test_run_build_accepts_first_party_import_from_second_source_root(tmp_path: 
     assert report.generated == {"pkg.specs"}
 
 
+def test_needs_dep_marker_surfaces_as_build_warning(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    spec_path = tmp_path / "specs.py"
+    _write(spec_path, "def Play():\n    return 1\n")
+    entry = _entry(module="pkg.specs", qualname="Play", source_file=str(spec_path))
+    specs = {entry.spec_ref: entry}
+    spec_graph = build_spec_graph(specs, infer_default=False)
+    module_specs = {"pkg.specs": [entry]}
+    module_dag = {"pkg.specs": set()}
+
+    source = (
+        "def Play():\n"
+        "    # JAUNT-NEEDS-DEP: util.hashing:stable_hash — inlined a copy\n"
+        "    return 1\n"
+    )
+    report = asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"pkg.specs"},
+            backend=SourceBackend(source),
+            jobs=1,
+        )
+    )
+
+    assert report.generated == {"pkg.specs"}
+    assert "pkg.specs" in report.needs_deps
+    markers = report.needs_deps["pkg.specs"]
+    assert any("util.hashing:stable_hash" in m for m in markers)
+
+
+def test_no_needs_dep_marker_leaves_needs_deps_empty(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    spec_path = tmp_path / "specs.py"
+    _write(spec_path, "def Play():\n    return 1\n")
+    entry = _entry(module="pkg.specs", qualname="Play", source_file=str(spec_path))
+    specs = {entry.spec_ref: entry}
+    spec_graph = build_spec_graph(specs, infer_default=False)
+    module_specs = {"pkg.specs": [entry]}
+    module_dag = {"pkg.specs": set()}
+
+    report = asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"pkg.specs"},
+            backend=SourceBackend("def Play():\n    return 1\n"),
+            jobs=1,
+        )
+    )
+
+    assert report.generated == {"pkg.specs"}
+    assert report.needs_deps == {}
+
+
 def test_run_build_revalidates_fresh_generated_import_policy(tmp_path: Path) -> None:
     src = tmp_path / "src"
     spec_path = tmp_path / "specs.py"

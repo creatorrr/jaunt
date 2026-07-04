@@ -2656,6 +2656,15 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
         if report.failed and not json_mode:
             _eprint(format_build_failures(report.failed))
 
+        if report.needs_deps and not json_mode:
+            for mod, markers in sorted(report.needs_deps.items()):
+                _eprint(
+                    f"warning: {mod} inlined logic for undeclared dependencies "
+                    f"({len(markers)}); declare the dep(s) to reuse them:"
+                )
+                for marker in markers:
+                    _eprint(f"  {marker}")
+
         from jaunt import journal as _journal
 
         events = []
@@ -2682,18 +2691,19 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             print(f"{summary}.")
 
         if json_mode:
-            _emit_json(
-                {
-                    "command": "build",
-                    "ok": not report.failed,
-                    "generated": sorted(report.generated),
-                    "skipped": sorted(report.skipped),
-                    "refrozen": sorted(refrozen_modules),
-                    "failed": {k: v for k, v in sorted(report.failed.items())},
-                    "cost": cost_tracker.summary_dict(),
-                    "cache": {"hits": response_cache.hits, "misses": response_cache.misses},
-                }
-            )
+            build_payload: dict[str, object] = {
+                "command": "build",
+                "ok": not report.failed,
+                "generated": sorted(report.generated),
+                "skipped": sorted(report.skipped),
+                "refrozen": sorted(refrozen_modules),
+                "failed": {k: v for k, v in sorted(report.failed.items())},
+                "cost": cost_tracker.summary_dict(),
+                "cache": {"hits": response_cache.hits, "misses": response_cache.misses},
+            }
+            if report.needs_deps:
+                build_payload["needs_deps"] = {k: v for k, v in sorted(report.needs_deps.items())}
+            _emit_json(build_payload)
 
         if report.failed:
             return EXIT_GENERATION_ERROR
