@@ -188,10 +188,10 @@ _JAUNT_DECORATOR_NAMES = frozenset({"magic", "test", "contract", "preserve"})
 def _has_jaunt_markers(source: str) -> bool:
     """True when the source shows evidence of jaunt specs (import or decorator).
 
-    Cheap textual prefilter first — files without the substring ``jaunt`` are
-    never parsed. Files that fail to parse cannot define importable specs.
+    Cheap textual prefilter first — files without ``jaunt`` or ``magic_module``
+    are never parsed. Files that fail to parse cannot define importable specs.
     """
-    if "jaunt" not in source:
+    if "jaunt" not in source and "magic_module" not in source:
         return False
     try:
         tree = ast.parse(source)
@@ -213,6 +213,11 @@ def _has_jaunt_markers(source: str) -> bool:
                 )
                 if name in _JAUNT_DECORATOR_NAMES:
                     return True
+        elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            func = node.value.func
+            fname = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if fname == "magic_module":
+                return True
     return False
 
 
@@ -335,3 +340,11 @@ def import_and_collect(
             raise JauntDiscoveryError(
                 f"Failed to import {kind} module '{name}': {type(e).__name__}: {e}"
             ) from e
+
+    if kind == "magic":
+        from jaunt.module_magic import finalize_module_magic
+        from jaunt.registry import get_module_magic_registry
+
+        for governed_module in list(get_module_magic_registry()):
+            if governed_module in sys.modules:
+                finalize_module_magic(governed_module)

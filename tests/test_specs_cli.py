@@ -35,6 +35,20 @@ def _make_project_with_specs(root: Path) -> None:
     )
 
 
+def _make_project_with_module_magic(root: Path) -> None:
+    _make_min_project(root)
+    (root / "src" / "gm.py").write_text(
+        "import jaunt\n"
+        "\n"
+        "jaunt.magic_module(__name__, prompt='module prompt')\n"
+        "\n"
+        "def parse(raw: str) -> str:\n"
+        '    """Parse."""\n'
+        "    ...\n",
+        encoding="utf-8",
+    )
+
+
 def _run_json(capsys, argv: list[str]) -> dict:
     exit_code = jaunt.cli.main(argv)
     out = capsys.readouterr().out
@@ -86,6 +100,34 @@ class TestSpecsCommand:
         refs = {s["ref"] for s in data["specs"]}
         assert refs == {"widgets:make_widget", "widgets:make_gadget"}
         assert "widgets:make_widget" in data["dependency_graph"]["widgets:make_gadget"]
+
+    def test_reports_module_origin_and_kwargs_json(self, tmp_path, monkeypatch, capsys) -> None:
+        monkeypatch.chdir(tmp_path)
+        _make_project_with_module_magic(tmp_path)
+        data = _run_json(capsys, ["specs", "--root", str(tmp_path), "--json"])
+        assert data["ok"] is True
+        by_ref = {s["ref"]: s for s in data["specs"]}
+        entry = by_ref["gm:parse"]
+        assert entry["origin"] == "module"
+        assert entry["kwargs"] == {"prompt": "module prompt"}
+
+    def test_reports_decorator_origin_json(self, tmp_path, monkeypatch, capsys) -> None:
+        monkeypatch.chdir(tmp_path)
+        _make_project_with_specs(tmp_path)
+        data = _run_json(capsys, ["specs", "--root", str(tmp_path), "--json"])
+        by_ref = {s["ref"]: s for s in data["specs"]}
+        assert by_ref["widgets:make_widget"]["origin"] == "decorator"
+        assert by_ref["widgets:make_widget"]["kwargs"] == {}
+
+    def test_text_marks_module_origin_and_kwargs(self, tmp_path, monkeypatch, capsys) -> None:
+        monkeypatch.chdir(tmp_path)
+        _make_project_with_module_magic(tmp_path)
+        exit_code = jaunt.cli.main(["specs", "--root", str(tmp_path)])
+        out = capsys.readouterr().out
+        assert exit_code == 0
+        assert "gm:parse" in out
+        assert "[module]" in out
+        assert "kwargs={'prompt': 'module prompt'}" in out
 
     def test_module_filter(self, tmp_path: Path, monkeypatch, capsys) -> None:
         monkeypatch.chdir(tmp_path)

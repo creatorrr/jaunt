@@ -5,6 +5,8 @@ description: "Practical patterns for getting better output from smaller specs."
 
 You don't "use Jaunt" once. You live in a loop: **write spec → build → review → tighten spec → rebuild**.
 
+The examples below decorate a single symbol with `@jaunt.magic` to keep each one in focus. In practice you will usually turn on a whole file with `jaunt.magic_module(__name__)` and drop the decorators; the tips about docstrings, `prompt=`, and iteration apply the same either way. See [Writing Magic Specs](/docs/guides/writing-magic-specs) for both styles.
+
 ## Iterating On Specs
 
 This loop IS the development process:
@@ -25,7 +27,7 @@ Bad (vague):
 @jaunt.magic()
 def parse_user_agent(ua: str) -> dict:
     """Parse a user agent string."""
-    raise RuntimeError("spec stub (generated at build time)")
+    ...
 ```
 
 Better (contract):
@@ -41,7 +43,7 @@ def parse_user_agent(ua: str) -> dict[str, str]:
     - If unknown, use "unknown" (do not raise).
     - Input may be empty or junk; treat as unknown.
     """
-    raise RuntimeError("spec stub (generated at build time)")
+    ...
 ```
 
 The difference: the vague spec leaves every decision to the LLM. The precise spec names the return shape, the failure mode, and the edge case. Better spec → better code → less iteration.
@@ -54,7 +56,7 @@ If a constraint is non-negotiable, say it twice:
 @jaunt.magic(prompt="Use only the standard library. Do not import third-party deps.")
 def stable_hash(text: str) -> str:
     """Return a stable hex sha256 of UTF-8 text."""
-    raise RuntimeError("spec stub (generated at build time)")
+    ...
 ```
 
 Good uses of `prompt=`:
@@ -94,7 +96,7 @@ class TaskBoard:
     @jaunt.magic()
     def add(self, title: str, priority: int) -> dict[str, object]:
         """..."""
-        raise RuntimeError("spec stub (generated at build time)")
+        ...
 ```
 
 Use this when you want to control the class shape — `__init__`, attributes, inheritance, non-generated helper methods — and only generate specific methods. This is natural for service objects, repositories, and classes that mix custom logic with generated glue.

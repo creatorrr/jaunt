@@ -22,6 +22,7 @@ from jaunt.paths import spec_module_to_generated_module
 from jaunt.registry import (
     SpecEntry,
     get_magic_registry,
+    get_module_magic_defaults,
     register_contract,
     register_magic,
     register_test,
@@ -291,6 +292,11 @@ def magic(
             if not isinstance(test, bool):
                 raise JauntError("@magic(test=...) must be a boolean when provided.")
             decorator_kwargs["test"] = test
+
+        if class_name is None:
+            module_defaults = get_module_magic_defaults(module)
+            if module_defaults is not None:
+                decorator_kwargs = {**module_defaults.decorator_kwargs, **decorator_kwargs}
 
         sealed_members: tuple[str, ...] = ()
         base_deps: tuple[SpecRef, ...] = ()

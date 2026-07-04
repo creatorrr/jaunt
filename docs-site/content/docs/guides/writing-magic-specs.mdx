@@ -1,89 +1,143 @@
 ---
-title: "@jaunt.magic Specs"
-description: "How to write implementation specs that generate clean, boring, correct code."
+title: Writing Magic Specs
+description: "Turn a module into specs with one call, then reach for decorators when you need per-symbol control."
 ---
 
-You can describe what a function should do far more precisely than you want to hand-write it. That is the case `@jaunt.magic` is for. Decorate a top-level function or class stub with it and you have a **spec**: at build time Jaunt generates the real implementation into `__generated__/`, and at runtime the decorator forwards your calls there.
+You can describe what a function should do far more precisely than you want to hand-write it. That is the case magic specs are for: you write the signature and the docstring, Jaunt generates the implementation into `__generated__/`, and at runtime your calls forward there.
 
-## The three parts of a spec
+There are two ways to mark a spec. Turning on a whole module is the primary one; the `@jaunt.magic` decorator is the precision layer for a single symbol.
 
-A magic spec carries its whole contract in three places:
+## Turn on a whole module
 
-- **Signature**: type hints are part of the contract.
-- **Docstring**: this is the spec. Be precise about behavior, edge cases, and errors.
-- **Body**: a placeholder Jaunt never runs. A bare `...` or a `raise` both work.
+Call `jaunt.magic_module(__name__)` at the top of a file and every top-level stub below it becomes a spec. No per-function decorator, no repetition.
 
 ```python
-from __future__ import annotations
+import re
 
 import jaunt
 
+jaunt.magic_module(__name__, prompt="All parsers are RFC 5322 strict.")
 
-@jaunt.magic()
-def normalize_email(raw: str) -> str:
+ADDR_RE = re.compile(r"[^@\s]+@[^@\s]+")   # handwritten constant — untouched
+
+
+class Email:
+    """An email message with from_, to, subject, and body string fields.
+
+    Validate on construction: from_ and to must each look like an address.
     """
-    Normalize an email address for stable comparisons.
 
-    Rules:
-    - Strip surrounding whitespace.
-    - Lowercase the whole string.
-    - Must contain exactly one "@".
-    - Local-part and domain must both be non-empty after splitting.
 
-    Errors:
-    - Raise ValueError if `raw` is invalid by the rules above.
-    """
-    raise RuntimeError("spec stub (generated at build time)")
+def parse_email(raw: str) -> Email:
+    """Parse a raw RFC 5322 payload into an Email. Raise ValueError on
+    malformed input."""
+    ...
+
+
+def _render_debug(email: Email) -> str:      # real body → handwritten helper
+    return f"<{email.from_} -> {email.to}>"
 ```
 
-## Anatomy Of A Good Spec
+Jaunt generates `Email` and `parse_email`. It never touches `ADDR_RE` or `_render_debug` — those have real bodies, so they are context the generator can read, not code it regenerates.
 
-### Signature
+### What counts as a spec
 
-If your spec says it returns `str`, the generator should not "helpfully" return `None` or a dict. If it takes `timedelta`, don't leave it as `Any`. Types are leverage.
+Jaunt scans the top-level `def`, `async def`, and `class` statements and classifies each one:
 
-### Docstring
+| Shape | Classification |
+|---|---|
+| Function whose body is a stub: docstring-only, `...`, `pass`, or `raise NotImplementedError` | **spec** |
+| Class with a docstring-only body, or with at least one stub method | **whole-class spec** — members keep the three-tier semantics below |
+| Function with a real body, or a class whose methods are all real | **handwritten** — read as context, never regenerated |
+| Carries a jaunt decorator (`@magic`, `@preserve`, `@sig`, `@test`, `@contract`) | **skipped by the scan** — the decorator governs it |
+| Carries a non-jaunt decorator (`@property`, `@functools.cache`, `@typing.overload`, `@dataclass`, …) | **never governed** — handwritten |
 
-The docstring IS the specification. Write it like a really good ticket, not a code comment:
+Two rules keep the scan from surprising you. A jaunt decorator always wins, so a `@jaunt.magic()` or `@jaunt.preserve` symbol in a governed module is handled by its decorator, not the scan (this recognizes aliased imports like `from jaunt import magic as m`). And any non-jaunt decorator opts a symbol out entirely — an `@typing.overload` stub or a `@property` is left alone, because those ellipsis bodies are not specs. To generate a symbol that carries another decorator, mark it explicitly with `@jaunt.magic`.
 
-- say what the function **must do** (behavior, not implementation)
-- name the **inputs that should fail** and how they fail (ValueError? None? silent fallback?)
-- include 1-3 **examples** if the behavior is subtle
-- be specific about return shape (keys, format, units)
+Only direct top-level statements are scanned. Constants, `if TYPE_CHECKING:` blocks, and imports are ignored, and a `def` nested inside an `if`/`try` branch or another function is out of scope — neither governed nor guaranteed as context.
 
-Jaunt treats the full cleaned docstring as contract text for dependency freshness, not just the first summary line. If later lines describe edge cases or errors, they still count as API.
+### Stub bodies
 
-Think: "If I handed this to a senior developer, would they implement it the same way every time?" If not, add more constraints.
-
-### Body
-
-The body is not used. Keep it obvious:
-
-```python
-raise RuntimeError("spec stub (generated at build time)")
-```
-
-A bare `...` works just as well, which is what the [quickstart](/docs/tutorials/quickstart)
-uses. Pick whichever reads better to you; Jaunt never runs the stub body either way.
-The examples on this page use the `raise` form so a stub that slips past a build
-fails loudly instead of silently returning `None`.
-
-## Dependencies (`deps=...`)
-
-If a spec depends on another spec, declare it. This gives Jaunt a stable build order and correct staleness propagation.
+A stub body is a placeholder Jaunt never runs. Use `...`:
 
 ```python
-from __future__ import annotations
-
-import jaunt
-
-
-@jaunt.magic()
-def normalize_email(raw: str) -> str:
+def parse_email(raw: str) -> Email:
     """..."""
-    raise RuntimeError("spec stub (generated at build time)")
+    ...
+```
 
+`pass`, a bare docstring, and `raise NotImplementedError` all read as stubs too. The older `raise RuntimeError("spec stub")` convention does **not** — in a governed module that body looks like real code, so the function classifies as handwritten. Standardize on `...`.
 
+An intentionally empty function is the one case where you want an empty body left alone. Mark it `@jaunt.preserve` and the scan skips it:
+
+```python
+@jaunt.preserve
+def on_startup() -> None:
+    """Deliberately does nothing yet."""
+    ...
+```
+
+### The capture rule
+
+`magic_module` rebinds each spec name to its generated object the first time something outside the module reads it. Code at module level that runs *before* that — a top-level call, a class that subclasses a governed spec, an assignment that instantiates one — captures the pre-rebind stub and keeps it. So **module-level consumption of a spec belongs inside a function**, where it runs after the module has finished importing.
+
+Jaunt warns you when the scan sees the trap:
+
+```text
+mail: module-level code calls governed spec 'parse_email' before rebinding;
+it will see the pre-rebind stub. Move the call into a function.
+```
+
+```text
+mail: class 'Signed' subclasses governed spec 'Email' at module level; it will
+see the pre-rebind stub. Move the subclass into a function or mark 'Email' with
+an explicit @jaunt.magic.
+```
+
+The escape hatch for a base class is an explicit `@jaunt.magic` on it: the decorator substitutes the generated class at decoration time, so a subclass declared right below it binds to the real thing.
+
+## The docstring is the contract
+
+However you mark a spec, its contract lives in three places:
+
+- **Signature.** Type hints are leverage. If your spec returns `str`, say `str`, not `Any`.
+- **Docstring.** This is the specification. Write it like a sharp ticket: what the function must do, which inputs fail and how (a `ValueError`? a `None`? a silent fallback?), the exact return shape, and a concrete example when the behavior is subtle. Jaunt treats the whole cleaned docstring as contract text, not just the summary line.
+- **Body.** A `...` placeholder. Never run.
+
+Think: if you handed this docstring to a careful developer, would they implement it the same way every time? If not, add constraints.
+
+## Module defaults
+
+The kwargs on `magic_module` are defaults for every spec in the file. They match the decorator's: `prompt=`, `deps=`, `infer_deps=`, and `test=`.
+
+```python
+jaunt.magic_module(__name__, prompt="Prefer the standard library. No third-party deps.")
+```
+
+That `prompt=` reaches both scan-governed specs and any decorated symbol in the same file. A per-symbol decorator wins key by key — `@jaunt.magic(prompt="…")` on one function overrides the module `prompt=` for that function, while a `@jaunt.magic(deps=[…])` symbol still inherits the module `prompt=`. Editing a module default changes the contract of every governed spec, so it restales them on the next build, exactly as a docstring edit would.
+
+## The precision layer: `@jaunt.magic`
+
+Decorate a single function or class with `@jaunt.magic` when you want to govern just that symbol, or pass options that differ from the module. It works with or without a `magic_module` call, so it is also how you adopt one function in a file you do not want to govern wholesale.
+
+```python
+@jaunt.magic(prompt="Use the cryptography library, not hashlib.")
+def stable_hash(text: str) -> str:
+    """Return a stable hex sha256 of UTF-8 text."""
+    ...
+```
+
+The decorator options:
+
+- `deps=...`: explicit dependencies (objects or `"pkg.mod:Qualname"` strings).
+- `prompt="..."`: extra per-symbol context appended to what the model sees.
+- `infer_deps=True|False`: per-spec override of dependency inference.
+
+## Dependencies
+
+If a spec depends on another, declare it. Jaunt gets a stable build order and correct staleness: change the upstream spec's public shape and the dependent restales.
+
+```python
 @jaunt.magic(deps=[normalize_email])
 def is_corporate_email(raw: str, *, domain: str = "example.com") -> bool:
     """
@@ -92,34 +146,16 @@ def is_corporate_email(raw: str, *, domain: str = "example.com") -> bool:
     - If normalize_email raises ValueError, propagate it unchanged.
     - Comparison should be case-insensitive.
     """
-    raise RuntimeError("spec stub (generated at build time)")
+    ...
 ```
 
-See: [Dependencies](/docs/guides/dependencies).
+See [Dependencies](/docs/guides/dependencies).
 
-## Decorator Options
+## Classes
 
-- `deps=...`: explicit dependencies (objects or `"pkg.mod:Qualname"` strings).
-- `prompt="..."`: extra per-symbol context appended to what the LLM sees.
-- `infer_deps=True|False`: per-spec override of dependency inference.
-
-Example `prompt=`:
+A class spec — whether governed by `magic_module` or decorated — can be docstring-only, in which case Jaunt designs the whole surface:
 
 ```python
-@jaunt.magic(prompt="Prefer the standard library. Avoid heavy dependencies.")
-def slugify(title: str) -> str:
-    """..."""
-    raise RuntimeError("spec stub (generated at build time)")
-```
-
-## Classes Work Too
-
-You can decorate top-level classes. At runtime, Jaunt will substitute the generated class (or raise `JauntNotBuiltError` if you haven't built yet).
-
-```python
-import jaunt
-
-
 @jaunt.magic()
 class LRUCache:
     """
@@ -128,29 +164,21 @@ class LRUCache:
     - get(key): return value or None, and mark as most-recently used
     - put(key, value): insert/update and evict least-recently used if needed
     """
-    pass
 ```
 
-This "whole-class" style hands full control to the LLM — it decides `__init__`, internal data structures, and method signatures.
+This hands full control to the model: it decides `__init__`, the internal data structures, and the method signatures.
 
-### Method Tiers In A Whole-Class Spec
+### Method tiers in a whole-class spec
 
-Inside a whole-class spec you can steer how much freedom the generator has per method. Every method falls into exactly one of three tiers:
+Inside a whole-class spec you steer how much freedom the generator has per method. Every method falls into exactly one tier:
 
 | Tier | Marker | Body | The generator may |
 |------|--------|------|-------------------|
 | **Preserved** | `@jaunt.preserve` | hand-written | nothing — the method is emitted verbatim |
-| **Sealed** | `@jaunt.sig` (or inner `@jaunt.magic`) | stub | implement the body only; the signature (params, defaults, annotations, return type) is enforced **exactly** |
-| **Guidepost** | none (default) | stub | adapt the signature, rename/add parameters, split into several methods, or add public methods — the docstring is the contract |
-
-`@jaunt.sig` on a method *inside* a `@jaunt.magic()` class seals it — Jaunt
-writes the body but the declared signature becomes a lock (the inner bare
-`@jaunt.magic` form is a supported alias):
+| **Sealed** | `@jaunt.sig` (or inner `@jaunt.magic`) | stub | implement the body only; the signature is enforced **exactly** |
+| **Guidepost** | none (default) | stub | adapt the signature, rename or add parameters, split into several methods, or add public methods — the docstring is the contract |
 
 ```python
-import jaunt
-
-
 @jaunt.magic()
 class TokenBucket:
     """A token-bucket rate limiter. Design the storage and refill internals."""
@@ -165,22 +193,15 @@ class TokenBucket:
         self._tokens = self.capacity
 ```
 
-Sealed-signature drift is a hard build error; guidepost drift is only a warning. `@jaunt.sig` (and the inner `@jaunt.magic` alias) inside a whole-class spec takes no kwargs and cannot sit under `@property` (v1) — use a guidepost stub or `@jaunt.preserve` instead.
+Sealed-signature drift is a hard build error; guidepost drift is only a warning. `@jaunt.sig` (and the inner `@jaunt.magic` alias) takes no kwargs and cannot sit under `@property` (v1) — use a guidepost stub or `@jaunt.preserve` instead.
 
-For dependency freshness, the exported API of a whole-class spec includes the class signature plus declared members and method signatures. Adding, removing, or changing those members is a downstream contract change.
+The exported API of a whole-class spec is the class signature plus its declared members and method signatures. Adding, removing, or changing those is a downstream contract change. Custom metaclasses are not supported for magic classes.
 
-Current constraint: custom metaclasses are not supported for `@jaunt.magic` classes.
+## Method-level specs
 
-## Method-Level Specs
-
-Instead of decorating the entire class, you can decorate **individual methods** with `@jaunt.magic()`. This lets you keep control of the class structure while generating only the methods you want.
+Instead of governing the whole class, decorate **individual methods**. You keep the class shape — `__init__`, attributes, inheritance — and generate only the methods you mark.
 
 ```python
-from __future__ import annotations
-
-import jaunt
-
-
 class TaskBoard:
     """A simple in-memory task board."""
 
@@ -196,91 +217,51 @@ class TaskBoard:
         - priority must be 1-5 (raise ValueError otherwise).
         - Return {"id": int, "title": str, "priority": int}.
         """
-        raise RuntimeError("spec stub (generated at build time)")
-
-    @jaunt.magic()
-    def list_by_priority(self) -> list[dict[str, object]]:
-        """
-        Return all tasks sorted by priority (1 = highest), then by id.
-        """
-        raise RuntimeError("spec stub (generated at build time)")
+        ...
 ```
 
-Non-decorated members (`__init__`, attributes, plain methods) are preserved as-is in the generated output. Only the `@magic`-decorated methods are implemented by the LLM.
+Non-decorated members are preserved as-is; only the `@magic`-decorated methods are generated.
 
 ### `@classmethod` and `@staticmethod`
 
-Both work with `@magic()`. The rule: **`@magic()` must be the innermost decorator** (closest to `def`). Place `@classmethod` or `@staticmethod` above it:
+Both work. The rule: **`@magic()` must be the innermost decorator**, closest to `def`.
 
 ```python
 class TaskBoard:
-    # ...
-
     @classmethod
     @jaunt.magic()
     def from_dict(cls, data: dict[str, object]) -> TaskBoard:
         """
-        Factory: reconstruct a TaskBoard from a serialized dict.
-
-        Expected shape: {"tasks": [{"id": int, "title": str, "priority": int}, ...]}.
+        Reconstruct a TaskBoard from {"tasks": [{"id", "title", "priority"}, ...]}.
         Raise ValueError if `data` is missing the "tasks" key.
         """
-        raise RuntimeError("spec stub (generated at build time)")
-
-    @staticmethod
-    @jaunt.magic()
-    def validate_priority(value: int) -> int:
-        """
-        Return `value` if it is an int in [1, 5], else raise ValueError.
-        """
-        raise RuntimeError("spec stub (generated at build time)")
+        ...
 ```
 
-Async methods work the same way — just use `async def` inside the class.
+### Whole-class vs method-level
 
-### Whole-Class vs Method-Level
+You cannot mix whole-class `@magic` with standalone method-level `@magic` on the *same* class. Choose one: whole-class when you want the model to decide internals, method-level when you own the structure and generate only some methods. (A `@jaunt.magic` method *inside* a whole-class spec is not the method-level style — it is the [sealed tier](#method-tiers-in-a-whole-class-spec), and it is fully supported.)
 
-You **cannot** mix both styles on the same class. Choose one:
+## Async functions
 
-| Style | When to use |
-|-------|-------------|
-| `@magic` on the class | Simple data structures and algorithms. You want the LLM to decide internals. |
-| `@magic` on methods | You control the class shape — `__init__`, attributes, inheritance. Only specific methods are generated. |
-
-Note: putting `@jaunt.magic` on a method *inside* a `@jaunt.magic()` class is **not** the method-level style — it is the [sealed tier](#method-tiers-in-a-whole-class-spec) of a whole-class spec, and it is fully supported. The rule above only forbids mixing whole-class `@magic` with standalone method-level `@magic` on the *same* class.
-
-## Async Functions
-
-`@jaunt.magic()` also accepts `async def` stubs.
-
-At runtime, Jaunt returns an async wrapper so call sites still `await` the generated implementation. The generated implementation is also emitted as `async def`.
+Async stubs work the same way. Jaunt returns an async wrapper so call sites still `await`, and the generated implementation is `async def`.
 
 ```python
-from __future__ import annotations
-
-import asyncio
-import jaunt
-
-
 @jaunt.magic()
 async def fetch_user_profile(user_id: str) -> dict[str, object]:
     """
-    Return a normalized user profile by id.
-
-    Errors:
-    - Raise ValueError if `user_id` is empty.
+    Return a normalized user profile by id. Raise ValueError if `user_id` is empty.
     """
-    await asyncio.sleep(0)
-    raise RuntimeError("spec stub (generated at build time)")
+    ...
 ```
 
-## If The Output Is Garbage
+## If the output is garbage
 
-Don't "fix the generated file." Fix the spec.
+Don't fix the generated file. Fix the spec.
 
 1. Make the docstring more specific.
-2. Add edge cases + explicit error behavior.
-3. Use `prompt=` for any crucial constraints.
-4. Re-run `jaunt build` (Jaunt will regenerate stale modules only).
+2. Name the edge cases and the exact error behavior.
+3. Use `prompt=` for any crucial constraint.
+4. Re-run `jaunt build` — only stale modules regenerate.
 
 Next: [@jaunt.test Specs](/docs/guides/writing-test-specs).

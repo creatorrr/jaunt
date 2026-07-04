@@ -6,7 +6,7 @@ description: "Spec-driven code generation for Python: write a typed stub with a 
 > *Tyger Tyger, burning bright, / In the forests of the night*
 > -- William Blake, via Alfred Bester's *The Stars My Destination*
 
-Jaunt is a Python library and CLI for spec-driven code generation. You write a **spec** -- a real function or class with types and a docstring, but no body -- mark it with `@jaunt.magic`, and jaunt generates the implementation into an `__generated__/` package next to your source.
+Jaunt is a Python library and CLI for spec-driven code generation. You write a **spec** -- a real function or class with types and a docstring, but no body -- and jaunt generates the implementation into an `__generated__/` package next to your source. Call `jaunt.magic_module(__name__)` once at the top of a file and every typed stub below it is a spec; reach for the `@jaunt.magic` decorator when you want to govern a single symbol or pass per-symbol options.
 
 The spec is the contract. Jaunt reads your signature and docstring, drives the OpenAI Codex CLI to write the code, checks the result against the signature you declared, and stamps each file with a provenance header. Edit a docstring and rebuild: only the specs whose contract actually changed regenerate, because jaunt hashes each spec with its dependencies.
 
@@ -14,22 +14,37 @@ There is a second mode for code you already trust. [`@jaunt.contract`](/docs/gui
 
 ## The gap it closes
 
-You write the stub on the left. Jaunt writes the rest.
+You write the stubs. Jaunt writes the rest. One `magic_module` call governs the whole file: the docstring-only class, the function stub, and nothing else. The handwritten constant and helper stay yours.
 
 ```python
-@jaunt.magic()
-def create_token(user_id: str, secret: str, ttl_seconds: int = 3600) -> str:
-    """
-    Create an HS256-signed JWT for a user.
+import re
 
-    - Sign with HMAC-SHA256 using `secret` as the key.
-    - base64url segments must omit "=" padding.
-    - Raise ValueError if user_id is empty.
+import jaunt
+
+jaunt.magic_module(__name__, prompt="All parsers are RFC 5322 strict.")
+
+ADDR_RE = re.compile(r"[^@\s]+@[^@\s]+")   # handwritten constant
+
+
+class Email:
+    """An email message with from_, to, subject, and body string fields.
+
+    Validate on construction: from_ and to must each look like an address.
     """
+
+
+def parse_email(raw: str) -> Email:
+    """Parse a raw RFC 5322 payload into an Email. Read the From, To, and
+    Subject headers and the body after the first blank line. Raise ValueError
+    on malformed input."""
     ...
+
+
+def _render_debug(email: Email) -> str:      # real body → handwritten helper
+    return f"<{email.from_} -> {email.to}>"
 ```
 
-The [quickstart](/docs/tutorials/quickstart) runs this end to end and shows the generated body, the cost line, and the test jaunt writes for it.
+The [quickstart](/docs/tutorials/quickstart) runs a full module end to end and shows the generated body, the cost line, and the test jaunt writes for it.
 
 ## Find your way around
 

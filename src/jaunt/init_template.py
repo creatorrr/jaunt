@@ -170,19 +170,13 @@ INIT_SPEC_TEMPLATE = '''\
 # Starter spec: `jaunt build` implements this module into `__generated__/`.
 import jaunt
 
+jaunt.magic_module(__name__)
 
-@jaunt.magic()
-def slugify(text: str) -> str:
+
+def greet(name: str) -> str:
+    """Return a friendly greeting for `name`.
+
+    Includes the name verbatim and ends with an exclamation mark.
     """
-    Convert a string to a URL-safe slug: lowercase, spaces and runs of
-    non-alphanumeric chars collapsed to single hyphens, leading/trailing
-    hyphens stripped.
-    """
-    ...
-
-
-@jaunt.test(targets=slugify)
-def test_slugify() -> str:
-    """Generate pytest coverage for words, punctuation runs, and surrounding spaces."""
     ...
 '''
