@@ -12,6 +12,28 @@ built modules — your generated code stays fresh across the upgrade. Anything
 that would restale built modules lands in a minor version and is called out on
 this page.
 
+## 1.4.1
+
+Patch release: three post-merge review fixes for `magic_module`. No built
+module is invalidated.
+
+- **A handwritten helper reached first no longer runs raw stubs.** In 1.4.0,
+  if the first external access to a governed module was a handwritten helper
+  (not a spec name), the helper's calls into sibling specs hit the pre-rebind
+  stubs and silently returned stub results (`None`). Resolution now fires on
+  the first access to *any* non-dunder attribute.
+- **Circular imports are detected exactly.** The mid-execution guard now keys
+  on importlib's `__spec__._initializing` flag, so a circular importer probing
+  the module — even after the last stub is defined — sees plain stubs instead
+  of triggering eager resolution. The 1.4.0 known-limitation window is closed.
+- **A stub shadowed by a later real definition is handwritten.** The scan now
+  classifies the last top-level `def`/`class` per name, matching Python's
+  last-binding-wins semantics. If you relied on an early stub being governed
+  despite a later real redefinition (unlikely), the real definition now wins.
+- **Finalize errors exit structurally.** A governed module that fails
+  post-import finalize (for example a spec class with a custom metaclass) now
+  reports as a discovery error (exit 2) instead of an uncaught traceback.
+
 ## 1.4.0
 
 `jaunt.magic_module(__name__)` — module-level magic — becomes the primary

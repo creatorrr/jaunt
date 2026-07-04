@@ -255,16 +255,16 @@ class _MagicModule(types.ModuleType):
         if state is None or (attr.startswith("__") and attr.endswith("__")):
             return types.ModuleType.__getattribute__(self, attr)
         if any(name not in d for name in state.spec_names):
-            # Module still executing / circular import: bypass resolution.
-            #
-            # KNOWN LIMITATION: this heuristic only detects a partial module body
-            # by the absence of governed spec names from __dict__. Once every
-            # governed stub is defined but code below them is still executing (e.g.
-            # a trailing circular import), the guard passes and resolution eagerly
-            # imports the generated counterpart. This is more aggressive than the
-            # decorator path (which stays lazy until a wrapper is *called*), so a
-            # circular import that touches a governed attribute — rather than
-            # calling it — can pull generated code in before the module finishes.
+            # Module body has not defined every governed stub yet (partial
+            # execution or a module built without importlib): bypass resolution.
+            return types.ModuleType.__getattribute__(self, attr)
+        spec = d.get("__spec__")
+        if spec is not None and getattr(spec, "_initializing", False):
+            # Module body still executing (importlib flips _initializing to
+            # False only after exec_module returns). A circular importer that
+            # probes ANY attribute mid-execution — including trailing code
+            # after the last stub — must see plain stubs, matching Python's
+            # normal circular-import semantics, not trigger eager resolution.
             return types.ModuleType.__getattribute__(self, attr)
         _resolve_module(self, state, d)
         return types.ModuleType.__getattribute__(self, attr)

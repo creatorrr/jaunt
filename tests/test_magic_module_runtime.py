@@ -50,6 +50,7 @@ _FIXTURE_MODULES = {
     "capture_mod",
     "sig_mod",
     "meta_mod",
+    "circ_probe_mod",
 }
 
 
@@ -264,3 +265,46 @@ def test_helper_first_access_resolves_specs_before_helper_runs(tmp_path, monkeyp
     # must fire on the helper access itself or the raw stub runs silently.
     assert mod.helper("x") == "x"
     assert type(mod) is types.ModuleType  # resolution fired and swapped back
+
+
+CIRCULAR_GOVERNED = '''
+import jaunt
+
+jaunt.magic_module(__name__)
+
+
+def parse_email(raw: str) -> str:
+    """Parse."""
+    ...
+
+
+import circ_probe_mod  # noqa: E402 - trailing circular import (the sharp case)
+
+READY = True
+'''
+
+CIRCULAR_PROBE = """
+import gm_mod
+
+PROBED = hasattr(gm_mod, "no_such_attr")
+HELPER_TYPE = type(gm_mod).__name__
+"""
+
+
+def test_circular_probe_mid_execution_does_not_resolve(tmp_path, monkeypatch):
+    _write(tmp_path / "gm_mod.py", CIRCULAR_GOVERNED)
+    _write(tmp_path / "circ_probe_mod.py", CIRCULAR_PROBE)
+    _write_generated(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    sys.modules.pop("circ_probe_mod", None)
+
+    mod = importlib.import_module("gm_mod")
+    # The probe ran while gm_mod was mid-execution (after all stubs were
+    # defined, before READY): it must NOT have triggered resolution.
+    probe = sys.modules["circ_probe_mod"]
+    assert probe.PROBED is False
+    assert probe.HELPER_TYPE == "_MagicModule"  # still intercepting at probe time
+    assert mod.READY is True  # trailing code ran untouched
+    # Post-import, first external access resolves to generated code as usual.
+    assert mod.parse_email("x").subject == "x"
+    sys.modules.pop("circ_probe_mod", None)
