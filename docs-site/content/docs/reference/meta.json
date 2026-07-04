@@ -1,12 +1,4 @@
 {
   "title": "Reference",
-  "pages": [
-    "cli",
-    "config",
-    "output",
-    "codex-engine",
-    "change-detection",
-    "repo-context",
-    "limitations"
-  ]
+  "pages": ["cli", "config", "json-output", "output-layout", "limitations", "upgrading"]
 }

@@ -1,12 +1,4 @@
 {
   "title": "Jaunt",
-  "pages": [
-    "index",
-    "quickstart",
-    "how-it-works",
-    "writing-specs",
-    "guides",
-    "reference",
-    "development"
-  ]
+  "pages": ["index", "tutorials", "guides", "concepts", "reference"]
 }

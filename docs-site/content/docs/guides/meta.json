@@ -1,10 +1,13 @@
 {
   "title": "Guides",
   "pages": [
-    "jwt-walkthrough",
-    "adding-to-your-project",
+    "writing-magic-specs",
+    "writing-test-specs",
+    "dependencies",
+    "spec-tips",
     "contract-mode",
     "daemon",
+    "ci",
     "coding-agents",
     "pypi-skills"
   ]

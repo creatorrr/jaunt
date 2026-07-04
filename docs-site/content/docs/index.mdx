@@ -1,120 +1,47 @@
 ---
-title: jaunt, dont code.
-description: "Spec-driven code generation: write Python stubs, get real implementations from an LLM."
+title: jaunt, don't code.
+description: "Spec-driven code generation for Python: write a typed stub with a docstring, and jaunt writes the implementation."
 ---
-
-<div style={{ float: "right", marginLeft: "1.5rem", marginBottom: "1rem", maxWidth: "180px" }}>
-  <img src="/images/tyger-blake-1794.jpg" alt="William Blake, 'The Tyger' (1794)" style={{ borderRadius: "6px" }} />
-  <p style={{ fontSize: "0.65rem", opacity: 0.6, marginTop: "0.25rem", lineHeight: 1.3 }}>
-    Blake, <em>The Tyger</em>, 1794.{" "}
-    <a href="https://www.metmuseum.org/art/collection/search/347983">Met Open Access.</a>
-  </p>
-</div>
 
 > *Tyger Tyger, burning bright, / In the forests of the night*
 > -- William Blake, via Alfred Bester's *The Stars My Destination*
 
-Jaunt is a Python library + CLI for **spec-driven code generation**.
+Jaunt is a Python library and CLI for spec-driven code generation. You write a **spec** -- a real function or class with types and a docstring, but no body -- mark it with `@jaunt.magic`, and jaunt generates the implementation into an `__generated__/` package next to your source.
 
-Named after *jaunting* -- teleportation by thought alone -- from Bester's
-1956 novel. You think about where you want to be, and you're there.
+The spec is the contract. Jaunt reads your signature and docstring, drives the OpenAI Codex CLI to write the code, checks the result against the signature you declared, and stamps each file with a provenance header. Edit a docstring and rebuild: only the specs whose contract actually changed regenerate, because jaunt hashes each spec with its dependencies.
 
-You write **specs** — real Python stubs with types and docstrings. Jaunt sends them to an LLM and generates real implementations + tests under `__generated__/`. You review, iterate, and ship. The spec is the contract — everything flows from it.
+There is a second mode for code you already trust. [`@jaunt.contract`](/docs/guides/contract-mode) keeps your committed implementation canonical and derives a pytest battery from its docstring, so the docstring stays honest as the code evolves. The name comes from Bester's 1956 novel, where to *jaunt* is to teleport by thinking about where you want to be.
 
-There's a second, inverse mode too: [`@jaunt.contract`](/docs/guides/contract-mode)
-keeps your committed code canonical and derives a committed pytest battery from
-the docstring instead.
+## The gap it closes
 
-## The Wow Gap
-
-A tiny spec on the left. Real code on the right.
-
-<div className="grid gap-4 md:grid-cols-2">
-  <div>
-    <div className="text-sm font-medium opacity-80">Spec (you write)</div>
+You write the stub on the left. Jaunt writes the rest.
 
 ```python
-from datetime import timedelta
-
-import jaunt
-from pydantic import BaseModel
-
-
-class Claims(BaseModel):
-    """Decoded token payload."""
-
-    sub: str
-    iat: float
-    exp: float
-
-
 @jaunt.magic()
-def create_token(user_id: str, secret: str, *, ttl: timedelta = timedelta(hours=1)) -> str:
+def create_token(user_id: str, secret: str, ttl_seconds: int = 3600) -> str:
     """
-    Create an HS256-signed JWT.
+    Create an HS256-signed JWT for a user.
 
-    - base64url encoding must omit "=" padding.
-    - Use HMAC-SHA256 with `secret` as the key.
-    - Raise ValueError if user_id is empty or ttl is not positive.
+    - Sign with HMAC-SHA256 using `secret` as the key.
+    - base64url segments must omit "=" padding.
+    - Raise ValueError if user_id is empty.
     """
-    raise RuntimeError("spec stub (generated at build time)")
+    ...
 ```
-  </div>
 
-  <div>
-    <div className="text-sm font-medium opacity-80">Generated (Jaunt writes)</div>
+The [quickstart](/docs/tutorials/quickstart) runs this end to end and shows the generated body, the cost line, and the test jaunt writes for it.
 
-```python
-import base64
-import hmac
-import hashlib
-import json
-import time
-from datetime import timedelta
-
-
-def _b64url_encode_no_pad(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
-
-
-def create_token(user_id: str, secret: str, *, ttl: timedelta = timedelta(hours=1)) -> str:
-    if not isinstance(user_id, str) or user_id == "":
-        raise ValueError("user_id must not be empty")
-    if ttl.total_seconds() <= 0:
-        raise ValueError("ttl must be positive")
-
-    header_obj = {"alg": "HS256", "typ": "JWT"}
-    now = int(time.time())
-    payload_obj = {"sub": user_id, "iat": now, "exp": now + int(ttl.total_seconds())}
-
-    header_b64 = _b64url_encode_no_pad(json.dumps(header_obj, separators=(",", ":"), sort_keys=True).encode("utf-8"))
-    payload_b64 = _b64url_encode_no_pad(json.dumps(payload_obj, separators=(",", ":"), sort_keys=True).encode("utf-8"))
-
-    signing_input = f"{header_b64}.{payload_b64}"
-    sig = hmac.new(secret.encode("utf-8"), signing_input.encode("utf-8"), hashlib.sha256).digest()
-    sig_b64 = _b64url_encode_no_pad(sig)
-
-    return f"{signing_input}.{sig_b64}"
-```
-  </div>
-</div>
-
-## Why Not Just Prompt An LLM Directly?
-
-- Specs are **versionable**: real Python in your repo, not ephemeral chat history.
-- **Incremental rebuilds**: Jaunt hashes specs and only regenerates what's stale.
-- **Dependency ordering**: specs can depend on other specs; Jaunt builds a DAG and generates in the right order.
-- **Runtime forwarding**: import your spec module and call it like normal Python; the `@jaunt.magic` decorator handles the rest.
-
-## Start Here
+## Find your way around
 
 <Cards>
-  <Card title="Quickstart" href="/docs/quickstart" />
-  <Card title="How It Works" href="/docs/how-it-works" />
-  <Card title="Writing Specs" href="/docs/writing-specs/magic" />
-  <Card title="Contract Mode" href="/docs/guides/contract-mode" />
-  <Card title="For Coding Agents" href="/docs/guides/coding-agents" />
-  <Card title="Codex Engine" href="/docs/reference/codex-engine" />
+  <Card title="Start here" href="/docs/tutorials/quickstart" description="The quickstart: an empty directory to a generated, tested module in about ten minutes." />
+  <Card title="Get things done" href="/docs/guides/writing-magic-specs" description="Task-first guides: writing specs, dependencies, contract mode, the daemon, and CI." />
+  <Card title="Understand it" href="/docs/concepts/how-jaunt-works" description="How runtime forwarding, incremental builds, and the Codex engine actually work." />
+  <Card title="Look it up" href="/docs/reference/cli" description="The CLI, jaunt.toml schema, JSON output, and the generated-file layout." />
 </Cards>
 
-Next: [Quickstart](/docs/quickstart).
+## Two ways in
+
+**Evaluating jaunt?** Start with the [quickstart](/docs/tutorials/quickstart), then read [design philosophy](/docs/concepts/design-philosophy) and the honest [limitations](/docs/reference/limitations) before you commit to it.
+
+**Building an agent that drives jaunt?** The [coding agents guide](/docs/guides/coding-agents) covers `jaunt instructions` -- the canonical machine-readable project primer -- and the `--json` contract that every command speaks.

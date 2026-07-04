@@ -1,0 +1,61 @@
+---
+title: Repo Context
+description: "The treedocs.yaml repo map, `jaunt tree`, optional colgrep retrieval, and the project overview."
+---
+
+A spec rarely lives alone. It calls helpers, imports siblings, and fits into a
+shape the rest of the repo already defines. Jaunt keeps a lightweight map of
+that surrounding code and feeds it to the generator, so the model writing one
+module knows what exists around it. The map is on by default and works offline.
+
+## The repo map
+
+`treedocs.yaml` at the project root holds a one-line description of every
+directory and `.py` file. The descriptions start from an AST baseline — module
+docstrings and top-level symbols, computed offline — and can be enriched by the
+model if you opt in.
+
+```bash
+jaunt tree             # sync the tree incrementally (AST-only by default)
+jaunt tree --check     # CI gate: exit 4 if the tree is stale
+```
+
+`jaunt build` keeps the tree in sync on its own and renders a capped repo-map
+block into every build prompt. Source digests are cached in
+`.jaunt/tree-cache.json`, so a sync only touches what changed. You can turn the
+map off for a single build with `jaunt build --no-repo-map` or for the project
+with the `[context]` config; see the
+[configuration reference](/docs/reference/config) for those keys.
+
+## Semantic retrieval (opt-in)
+
+The repo map tells the model what exists. Semantic retrieval goes one step
+further and shows it the actual neighboring code. Turn it on, put the `colgrep`
+binary (LightOn next-plaid) on your `PATH`, and before each build Jaunt queries
+`colgrep` for code relevant to the spec, then seeds the top hits into the
+workspace as `_context/relevant_*.py`. If `colgrep` is missing, the build still
+runs — retrieval just sits out that round.
+
+The trade-off is real neighboring implementations against an extra tool
+dependency and a bit of build time, which is why it stays off until you ask for
+it.
+
+## Project overview (opt-in)
+
+The repo map is a list of one-liners; a project overview is prose. Switch it on
+and Jaunt asks the model to write an architecture summary of the whole codebase
+and adds it to build prompts. That call runs once, keyed to a digest of the spec
+sources, the repo map, your project docs (README/AGENTS/CLAUDE), and the
+overview prompt. The result is cached to `.jaunt/PROJECT_OVERVIEW.md` and reused
+until one of those inputs changes, so you pay for the prose once, not per build.
+The call counts against your build cost budget and shows up in the cost summary.
+
+## The Jaunt preamble
+
+Every build prompt opens with a static preamble
+(`src/jaunt/prompts/codex_preamble.md`). It frames what Jaunt is, states the
+signature/docstring contract, and lists the core design laws the generator is
+held to. It adds no model call. Its text is part of the build fingerprint, so
+editing it — or overriding it in config — regenerates already-built modules.
+
+Next: [Change Detection](/docs/concepts/change-detection).

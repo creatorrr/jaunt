@@ -1,0 +1,241 @@
+---
+title: Whole-class specs and the daemon
+description: "Design a class from a docstring, split its methods across the three tiers, then let a background daemon rebuild on every commit."
+---
+
+A `@jaunt.magic` on a class lets you describe a type in prose and have Jaunt design the API. You can then take back as much control as you want, method by method. Once the specs settle, the daemon rebuilds them in the background whenever you commit, and parks the result for you to review.
+
+This tutorial builds a small in-memory order book, then wires up the propose-only daemon around it. Everything ran against jaunt 1.3.0.
+
+<Callout type="warning">
+  Each `jaunt build` here drives Codex and spends tokens. The three builds on this page cost about a dollar in total.
+</Callout>
+
+## 1. A class from a docstring
+
+Start with intent only. No methods, no attributes, just the contract in the class docstring. Put this in `src/book.py`:
+
+```python
+from __future__ import annotations
+
+import jaunt
+
+
+@jaunt.magic()
+class OrderBook:
+    """An in-memory limit order book for one instrument.
+
+    Track resting buy and sell limit orders. The book supports:
+
+    - adding a limit order with a side ("buy" or "sell"), a positive price,
+      and a positive integer quantity;
+    - reading the best bid (highest resting buy price) and best ask (lowest
+      resting sell price), each None when that side is empty;
+    - filling a market order for a given side and quantity, consuming the
+      best-priced resting orders on the opposite side and returning the list
+      of (price, quantity) fills.
+
+    Reject a non-positive price or quantity with ValueError.
+    """
+```
+
+Build it:
+
+```bash
+uv run jaunt build --progress plain
+```
+
+```text
+[build] book: generating
+[build] book: done (attempt 1)
+[build] 1/1 ok=1 fail=0 book
+  Estimated cost: $0.3165
+Emitted 1 .pyi stub(s).
+Built 1 module(s), skipped 0.
+```
+
+Jaunt designed the whole surface. The `.pyi` stub at `src/book.pyi` shows the public shape it chose:
+
+```python
+class OrderBook:
+    def __init__(self) -> None: ...
+    def add_limit_order(self, side: str, price: float, quantity: int) -> None: ...
+    def best_bid(self) -> float | None: ...
+    def best_ask(self) -> float | None: ...
+    def fill_market_order(self, side: str, quantity: int) -> list[tuple[float, int]]: ...
+```
+
+It works like any class:
+
+```python
+b = OrderBook()
+b.add_limit_order("sell", 101.0, 5)
+b.add_limit_order("sell", 100.0, 3)
+b.add_limit_order("buy", 99.0, 2)
+
+b.best_bid(), b.best_ask()          # (99.0, 100.0)
+b.fill_market_order("buy", 4)       # [(100.0, 3), (101.0, 1)]
+```
+
+## 2. Take control, method by method
+
+Designing the API is fine for a sketch. For code you will maintain, you want to fix some of it. Each method in a whole-class spec sits in one of three tiers:
+
+- **preserved** with `@jaunt.preserve`: your code, emitted verbatim.
+- **sealed** with `@jaunt.sig`: Jaunt writes the body, but the signature you declared is enforced exactly.
+- **guidepost**: a plain unmarked stub. Jaunt may adapt the signature or split it, as long as the documented behavior arrives.
+
+Rewrite `src/book.py` to use all three:
+
+```python
+@jaunt.magic()
+class OrderBook:
+    """... same class docstring as before ..."""
+
+    @jaunt.preserve
+    def __init__(self) -> None:
+        # Resting orders as {price: total_quantity} per side.
+        self._bids: dict[float, int] = {}
+        self._asks: dict[float, int] = {}
+
+    @jaunt.sig
+    def add_limit_order(self, side: str, price: float, quantity: int) -> None:
+        """Rest a limit order on the given side.
+
+        `side` is "buy" or "sell". Reject a non-positive price or quantity
+        with ValueError. Accumulate quantity when a price level already exists.
+        """
+        ...
+
+    def best_quotes(self) -> tuple[float | None, float | None]:
+        """Return (best_bid, best_ask): the highest resting buy price and the
+        lowest resting sell price, each None when that side is empty."""
+        ...
+```
+
+Rebuild, then read `src/__generated__/book.py`. Each tier did what it promised.
+
+Your `__init__` came through untouched:
+
+```python
+def __init__(self) -> None:
+    self._bids: dict[float, int] = {}
+    self._asks: dict[float, int] = {}
+```
+
+`add_limit_order` kept the exact signature you sealed, and Jaunt filled the body:
+
+```python
+def add_limit_order(self, side: str, price: float, quantity: int) -> None:
+    book = self._book_for_side(side)
+    clean_price = self._validate_price(price)
+    clean_quantity = self._validate_quantity(quantity)
+    book[clean_price] = book.get(clean_price, 0) + clean_quantity
+```
+
+`best_quotes` is a guidepost, so Jaunt was free to shape it. It also pulled `fill_market_order` and a handful of private helpers back out of the class docstring. A sealed method that drifts from its declared signature is a hard build error; a guidepost that drifts only warns. For the full vocabulary, see [writing magic specs](/docs/guides/writing-magic-specs).
+
+## 3. The daemon: rebuild on commit
+
+The daemon watches your git HEAD. On each commit it builds the specs that changed, in an isolated worktree, and parks the result as a proposal for you to land. It does not touch your working tree until you say so.
+
+<Callout type="info">
+  The daemon only lands changes under `__generated__/`. Because `.pyi` stubs are written beside your source, turn them off in a daemon-driven repo with `emit_stubs = false` under `[build]`; otherwise a rebuild's stub write falls outside what the daemon will land.
+</Callout>
+
+Set `emit_stubs = false`, then commit a clean, built baseline:
+
+```bash
+git add -A && git commit -m "orderbook baseline"
+```
+
+Start the daemon. It runs in the foreground, so give it its own terminal:
+
+```bash
+uv run jaunt daemon start
+```
+
+```bash
+uv run jaunt daemon status
+```
+
+```text
+Daemon: running (pid 867872)
+landing: propose-only
+```
+
+Now edit the spec. Add one guidepost method to `OrderBook`:
+
+```python
+    def resting_volume(self, side: str) -> int:
+        """Return the total resting quantity on the given side ("buy" or
+        "sell"). Reject any other side with ValueError."""
+        ...
+```
+
+Commit it. That commit is the trigger:
+
+```bash
+git commit -am "add resting_volume to OrderBook spec"
+```
+
+Within a couple of seconds the daemon picks up the new HEAD, builds `book` in its worktree, and parks a proposal:
+
+```bash
+uv run jaunt jobs
+```
+
+```text
+- 7de8e8fc book: proposed
+  battery -
+would rebuild: book (structural)
+```
+
+Inspect it before landing. The proposal only touches generated paths:
+
+```bash
+uv run jaunt jobs show 7de8e8fc
+```
+
+```text
+id: 7de8e8fc
+module: book
+state: proposed
+patch_paths: ["src/__generated__/book.py", "src/__generated__/book.py.contract.json"]
+cause: spec change
+```
+
+Land it. Jaunt re-validates the patch and commits it as a provenance commit; there is no `--force`:
+
+```bash
+uv run jaunt jobs land 7de8e8fc
+```
+
+```text
+da593e815d1dd78c0bd5f2ef4e6d81fb25c49ca1
+```
+
+The landed commit records which job and spec produced it:
+
+```text
+regen(book): spec change
+
+Jaunt-Job: 7de8e8fc
+Jaunt-Spec: 19213577
+```
+
+Your generated `OrderBook` now has `resting_volume`, and you approved the diff instead of trusting a background process to commit to your branch. Stop the daemon when you are done:
+
+```bash
+uv run jaunt daemon stop
+```
+
+Propose-only is the default. If you would rather have the daemon commit green rebuilds itself, set `auto_commit = true` under `[daemon]`.
+
+## Where to next
+
+<Cards>
+  <Card title="The daemon in depth" href="/docs/guides/daemon" description="Landing modes, jobs land --all, discard, and wait." />
+  <Card title="Writing magic specs" href="/docs/guides/writing-magic-specs" description="The three method tiers and inheritance-aware classes." />
+  <Card title="Gate generated code in CI" href="/docs/guides/ci" description="Make jaunt check the one required check." />
+</Cards>
