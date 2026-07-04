@@ -41,7 +41,7 @@ def test_load_minimal_config_defaults_apply(tmp_path: Path) -> None:
     assert cfg.prompts.test_system == ""
     assert cfg.prompts.test_module == ""
     assert cfg.agent.engine == "codex"
-    assert cfg.codex.fingerprint_cli_version is True
+    assert cfg.codex.fingerprint_cli_version is False
     assert cfg.daemon.poll_interval == 2.0
     assert cfg.daemon.max_jobs == 0
     assert cfg.daemon.notify_command == ""
@@ -165,7 +165,7 @@ def test_codex_config_parsing(tmp_path: Path) -> None:
     assert cfg.codex.model == "gpt-5.2-codex"
     assert cfg.codex.reasoning_effort == "medium"
     assert cfg.codex.sandbox == "workspace-write"
-    assert cfg.codex.fingerprint_cli_version is True
+    assert cfg.codex.fingerprint_cli_version is False
     assert cfg.codex.features == ["multi_agent", "search"]
     assert cfg.codex.config == {
         "model_verbosity": "low",

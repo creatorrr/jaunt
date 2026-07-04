@@ -178,7 +178,9 @@ def _validate_build_contract_only(
             if name in forbidden:
                 errors.append(
                     "Generated source must not redefine handwritten source-module symbol "
-                    f"{name!r}. Import or reuse {name!r} from {spec_module!r} instead."
+                    f"{name!r}. Reuse the existing {name!r} from {spec_module!r} — prefer "
+                    "call-time/lazy access; a module-level import can run while "
+                    f"{spec_module!r} is still mid-import for whole-class specs."
                 )
 
     for node in ast.walk(mod):

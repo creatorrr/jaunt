@@ -80,7 +80,9 @@ engine = "codex"               # the only supported engine
 model = "gpt-5.5"
 reasoning_effort = "high"      # low | medium | high
 sandbox = "workspace-write"
-fingerprint_cli_version = true # include `codex --version` in freshness
+# Opt-in: embed `codex --version` in freshness fingerprints. Couples `jaunt
+# check` to environments that have the codex binary installed.
+fingerprint_cli_version = false
 features = []
 # Raw passthrough to the `codex` CLI (advanced); keys here are not validated.
 [codex.config]

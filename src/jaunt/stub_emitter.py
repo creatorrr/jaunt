@@ -87,6 +87,11 @@ def build_stub_source(
     rendered_nodes: list[ast.AST] = []
     for node in spec_tree.body:
         if isinstance(node, (ast.Import, ast.ImportFrom, ast.Assign, ast.AnnAssign)):
+            # __future__ imports are meaningless in stubs (forward refs are
+            # implicit in .pyi) and land after the generated-import prelude,
+            # where they are a syntax error — never copy them from the spec.
+            if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+                continue
             chunks.append(ast.unparse(copy.deepcopy(node)).strip())
             continue
 
@@ -196,7 +201,10 @@ def _resolve_stub_references(
                 continue
             resolved.add(name)
             if name in gen_imports:
-                import_lines.append(gen_imports[name])
+                # __future__ imports are illegal mid-file and meaningless in
+                # stubs (forward refs are implicit in .pyi) — never emit them.
+                if not gen_imports[name].startswith("from __future__"):
+                    import_lines.append(gen_imports[name])
             elif name in gen_defs:
                 node = gen_defs[name]
                 clone = (

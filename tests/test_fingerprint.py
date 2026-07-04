@@ -194,7 +194,8 @@ def test_codex_fingerprint_uses_project_relative_prompt_overrides(
 
 
 def test_codex_fingerprint_includes_cli_version() -> None:
-    cfg = _config(engine="codex")
+    # Opt-in since 1.3.1: the default no longer embeds the CLI version.
+    cfg = _config(engine="codex", codex=CodexConfig(fingerprint_cli_version=True))
     first = fingerprint.generation_fingerprint_from_config(
         cfg,
         kind="build",

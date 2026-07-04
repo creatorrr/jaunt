@@ -299,3 +299,32 @@ def test_check_magic_free_project_exits_zero(tmp_path: Path, monkeypatch, capsys
     assert out["ok"] is True
     # No magic specs -> empty magic block, never blocking.
     assert out["magic"] == {"fresh": [], "stale": {}, "unbuilt": []}
+
+
+def test_fingerprint_env_hint(monkeypatch) -> None:
+    """The hint names the codex-absent + fingerprint_cli_version cause, and only that."""
+    from dataclasses import replace
+
+    from jaunt import cli
+    from jaunt.config import CodexConfig
+
+    monkeypatch.syspath_prepend("tests")
+    from test_fingerprint import _config
+
+    cfg = _config()
+    cfg_on = replace(cfg, codex=CodexConfig(fingerprint_cli_version=True))
+
+    monkeypatch.setattr("jaunt.generate.fingerprint.resolve_codex_cli_version", lambda: "unknown")
+    hint = cli._fingerprint_env_hint(cfg_on, {"m": "fingerprint"})
+    assert hint is not None and "fingerprint_cli_version" in hint
+
+    # No fingerprint-labeled staleness -> no hint.
+    assert cli._fingerprint_env_hint(cfg_on, {"m": "structural"}) is None
+    # Feature disabled (the new default) -> no hint.
+    assert cli._fingerprint_env_hint(cfg, {"m": "fingerprint"}) is None
+    # Codex resolvable -> not an environment problem -> no hint.
+    monkeypatch.setattr(
+        "jaunt.generate.fingerprint.resolve_codex_cli_version",
+        lambda: "codex-cli 1.0.0",
+    )
+    assert cli._fingerprint_env_hint(cfg_on, {"m": "fingerprint"}) is None

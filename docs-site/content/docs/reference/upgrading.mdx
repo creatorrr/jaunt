@@ -7,6 +7,24 @@ The rest of the reference is versionless. This page collects what changes
 between releases and what you have to do about it. For the complete log, see the
 [GitHub releases](https://github.com/creatorrr/jaunt/releases).
 
+## 1.3.1
+
+Patch release from the second adoption-feedback wave.
+
+- **`[codex] fingerprint_cli_version` now defaults to `false`.** Embedding
+  `codex --version` in the generation fingerprint coupled `jaunt check` to
+  environments with the codex binary installed: a CI runner without it restaled
+  a byte-identical tree. If you relied on CLI-version churn triggering rebuilds,
+  set it back to `true` explicitly. Projects that built with the old default
+  will see a one-time `stale (fingerprint)` on the next build after upgrading.
+- **Fingerprint-only staleness is now labeled.** `status` and `check` report
+  `stale (fingerprint)` instead of `stale (structural)` when specs are
+  byte-identical but the generation fingerprint differs, and print a hint when
+  the cause is a missing codex binary with `fingerprint_cli_version = true`.
+- **`.pyi` stubs no longer contain `from __future__ import annotations`.**
+  The emitter could place a future import mid-file (a syntax error for ruff and
+  ty). Stale stubs re-emit on the next build; no action needed.
+
 ## 1.3.0
 
 Adoption-feedback release: strict config, `.pyi` stubs, a CI-grade `check`, and
