@@ -50,6 +50,12 @@ No built module restales on the upgrade.
   re-stamp path now reads `stale (re-stamp: free)` instead of
   `stale (structural)`, and a module-origin spec with no artifact yet is flagged
   `newly governed by module scan` before you spend anything.
+- **Docs and the `jaunt init` scaffold lead with `...` again.** 1.4.2 had
+  switched the example stub body to `raise NotImplementedError` to satisfy strict
+  type checkers; `...` reads plainer, never runs, and carries no runtime risk, so
+  it is the default once more. All stub forms still digest identically. If ty or
+  Pyright flags `...` under a concrete return annotation, `raise NotImplementedError`
+  works just as well and switching between the two never restales a module.
 
 ## 1.4.2
 
@@ -68,7 +74,8 @@ re-emitted `.pyi` files.
 - **Scaffold and docs lead with `raise NotImplementedError`.** Strict type
   checkers (ty, Pyright) reject a `...` body under a concrete return
   annotation outside stub files. All stub forms digest identically, so
-  switching your existing `...` bodies over is free.
+  switching your existing `...` bodies over is free. (1.5 reverted the scaffold
+  default back to `...`; the type-checker note still holds, and either form works.)
 - **Emitted `.pyi` stubs are lint-clean.** The unused `import jaunt` is no
   longer copied from the spec; names inside string annotations
   (`"Chunker | None"`) resolve like plain ones (from the generated module's
