@@ -58,15 +58,19 @@ Only direct top-level statements are scanned. Constants, `if TYPE_CHECKING:` blo
 
 ### Stub bodies
 
-A stub body is a placeholder Jaunt never runs. For a spec with a concrete return annotation, use `raise NotImplementedError`:
+A stub body is a placeholder Jaunt never runs. Reach for a bare `...`:
 
 ```python
 def parse_email(raw: str) -> Email:
     """..."""
-    raise NotImplementedError
+    ...
 ```
 
-`...`, `pass`, and a bare docstring read as stubs too, and all four forms digest identically — switching between them never restales a module. Prefer `raise NotImplementedError` when the spec has a non-`None` return annotation: strict type checkers (ty, Pyright) reject an empty body that promises a concrete return outside `.pyi` files, and a raise never returns, so it passes both. The older `raise RuntimeError("spec stub")` convention does **not** classify — in a governed module that body looks like real code, so the function is handwritten.
+`pass`, a bare docstring, and `raise NotImplementedError` read as stubs too, and all four forms digest identically — switching between them never restales a module. The older `raise RuntimeError("spec stub")` convention does **not** classify — in a governed module that body looks like real code, so the function is handwritten.
+
+<Callout>
+  A spec body never runs — Jaunt replaces it, and an unbuilt spec raises a clear error the first time you call it, so `...` carries no runtime risk. Some type checkers (ty, Pyright) flag `...` under a concrete return annotation outside `.pyi` files. Two remedies work equally well: relax that rule on your spec roots, or write `raise NotImplementedError` in place of `...` (a raise never returns, so it satisfies the checker). Since the forms digest identically, switching between them never restales. Jaunt does not scaffold type-checker config — the choice is yours.
+</Callout>
 
 An intentionally empty function is the one case where you want an empty body left alone. Mark it `@jaunt.preserve` and the scan skips it:
 
