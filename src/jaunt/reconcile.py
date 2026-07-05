@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+import jaunt
 from jaunt.builder import _read_generated
 from jaunt.header import parse_contract_battery_header, parse_header, parse_stub_header
 from jaunt.registry import SpecEntry
@@ -20,6 +21,7 @@ class OrphanArtifact:
     source_module: str
 
 
+@jaunt.contract
 def find_orphans(
     *,
     package_dir: Path,
@@ -31,6 +33,19 @@ def find_orphans(
     classify_test_orphans: bool = True,
 ) -> list[OrphanArtifact]:
     """Find generated artifacts whose owning spec or contract is no longer governed.
+
+    Scans three artifact families and returns the ones whose owning source is
+    gone: generated ``*.py`` under ``package_dir / generated_dir`` whose header
+    ``source_module`` is not in ``governed_modules``; jaunt-owned ``*.pyi`` stubs
+    under ``source_dirs`` whose header ``source_module`` is not governed; and
+    committed contract batteries (``test_*.py``) under ``battery_dir`` whose
+    header ``derived-from`` is not in ``contract_refs``. Each orphaned generated
+    module also contributes its ``<name>.py.contract.json`` sidecar when present.
+
+    Missing directories are tolerated: a ``package_dir`` / ``battery_dir`` /
+    ``source_dir`` that does not exist yields no matches rather than an error, so
+    an empty project (no such directories on disk) returns an empty list. The
+    result is sorted by path.
 
     `classify_test_orphans=False` disables orphan classification for generated
     TEST modules (header ``kind=test``) — used as a fail-safe when the governed
@@ -102,10 +117,25 @@ def find_orphans(
     return sorted(orphans, key=lambda orphan: str(orphan.path))
 
 
+@jaunt.contract
 def newly_governed_specs(
     entries: Sequence[SpecEntry], *, package_dir: Path | None, generated_dir: str
 ) -> dict[str, list[str]]:
-    """Group module-origin specs that do not yet have a generated module."""
+    """Group module-origin specs that do not yet have a generated module.
+
+    Considers only entries whose ``origin`` is ``"module"`` (a
+    ``jaunt.magic_module`` spec); decorator-origin entries are ignored. A module
+    counts as newly governed when it has no generated output yet: when
+    ``package_dir`` is ``None`` every module-origin entry is treated as absent,
+    otherwise absence is resolved by looking up the generated module on disk
+    (cached per module). Present (already-generated) modules are dropped.
+
+    Returns a mapping of module name to the sorted list of newly-governed
+    qualnames in it. An empty ``entries`` sequence yields an empty mapping.
+
+    Examples:
+    - newly_governed_specs([], package_dir=None, generated_dir="__generated__") == {}
+    """
 
     grouped: dict[str, list[str]] = {}
     generated_cache: dict[str, bool] = {}

@@ -17,6 +17,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Literal
 
+import jaunt
 from jaunt.errors import JauntDiscoveryError
 
 _EMITTED_LAYOUT_WARNINGS: set[str] = set()
@@ -112,18 +113,44 @@ def _is_under_roots(path_str: str, *, roots: list[Path]) -> bool:
     return False
 
 
+@jaunt.contract
 def is_self_module(name: str) -> bool:
-    """True for the running framework's own top package and its submodules."""
+    """True for the running framework's own top package and its submodules.
+
+    A module name belongs to the running framework when it is exactly the top
+    package name (``jaunt``) or a dotted submodule under it (``jaunt.<...>``).
+    A name that merely shares the ``jaunt`` prefix without a dot boundary (for
+    example ``jauntx``) is a different distribution and is not self-owned.
+
+    Examples:
+    - is_self_module("jaunt") == True
+    - is_self_module("jaunt.discovery") == True
+    - is_self_module("jaunt.contract.cases") == True
+    - is_self_module("jauntx") == False
+    - is_self_module("os") == False
+    """
 
     return name == _SELF_PACKAGE or name.startswith(f"{_SELF_PACKAGE}.")
 
 
+@jaunt.contract
 def self_preserved_modules(module_names: Iterable[str]) -> frozenset[str]:
     """Discovered names owned by the running framework that are ALREADY imported.
 
-    Scoped to discovered ∩ imported ∩ self: an adopter's discovery never yields
+    Returns the subset of ``module_names`` that is both self-owned (see
+    :func:`is_self_module`) AND currently present in ``sys.modules``. This is the
+    intersection discovered ∩ imported ∩ self: an adopter's discovery never yields
     ``jaunt.*`` names, so the returned set is empty for them and a subsequent
     ``clear_registries`` stays total (no self-spec leakage into adopter builds).
+
+    Membership in ``sys.modules`` is read at call time, so the result reflects the
+    live interpreter state when the function runs, not import-time state. A
+    non-self name is always excluded regardless of whether it is imported.
+
+    Examples:
+    - self_preserved_modules([]) == frozenset()
+    - self_preserved_modules(["os", "collections"]) == frozenset()
+    - self_preserved_modules(["jaunt.discovery"]) == frozenset({"jaunt.discovery"})
     """
 
     return frozenset(n for n in module_names if is_self_module(n) and n in sys.modules)
