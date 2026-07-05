@@ -168,6 +168,32 @@ def test_guard_runs_jaunt_for_owned_generated_path(tmp_path):
 
 
 @_needs_bash
+def test_guard_falls_back_to_uv_when_path_jaunt_is_stale(tmp_path):
+    # A version-manager shim for a pre-1.3 jaunt has no `guard` subcommand and
+    # exits nonzero; the wrapper must fall back to `uv run --no-sync jaunt`.
+    root = tmp_path / "repo"
+    (root / "__generated__").mkdir(parents=True)
+    (root / "jaunt.toml").write_text("version = 1\n")
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    stale = bin_dir / "jaunt"
+    stale.write_text("#!/usr/bin/env bash\necho 'invalid choice: guard' >&2\nexit 2\n")
+    stale.chmod(0o755)
+    uv = bin_dir / "uv"
+    uv.write_text("#!/usr/bin/env bash\ncat >/dev/null\necho UV_FALLBACK_RAN\n")
+    uv.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "CLAUDE_PROJECT_DIR": str(root),
+    }
+    payload = json.dumps({"tool_input": {"file_path": str(root / "__generated__" / "mod.py")}})
+    result = _run_guard(payload, env=env)
+    assert result.returncode == 0
+    assert "UV_FALLBACK_RAN" in result.stdout
+
+
+@_needs_bash
 def test_guard_fails_open_when_no_owning_jaunt_toml(tmp_path):
     root = tmp_path / "no config here"
     (root / "src").mkdir(parents=True)

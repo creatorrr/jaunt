@@ -51,9 +51,15 @@ done
 [ -f "$dir/jaunt.toml" ] || exit 0
 
 cd "$dir" 2>/dev/null || exit 0
+# A jaunt on PATH may be stale (e.g. a version-manager shim for a pre-1.3
+# install with no `guard` subcommand). Trust it only when it exits 0;
+# otherwise fall back to the project env via uv.
 if command -v jaunt >/dev/null 2>&1; then
-  printf '%s' "$payload" | run_timeout 8 jaunt guard 2>/dev/null || true
-else
-  printf '%s' "$payload" | run_timeout 8 uv run --no-sync jaunt guard 2>/dev/null || true
+  out=$(printf '%s' "$payload" | run_timeout 8 jaunt guard 2>/dev/null)
+  if [ $? -eq 0 ]; then
+    printf '%s' "$out"
+    exit 0
+  fi
 fi
+printf '%s' "$payload" | run_timeout 8 uv run --no-sync jaunt guard 2>/dev/null || true
 exit 0

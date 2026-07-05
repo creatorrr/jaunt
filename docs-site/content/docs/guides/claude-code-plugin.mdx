@@ -51,8 +51,6 @@ Second, the auto-invocable `working-with-jaunt` knowledge skill carries the cost
 
 In shorthand: none / prose (~$0 refreeze) / structural (paid rebuild) / fingerprint (free re-stamp).
 
-This knowledge auto-loads whenever an agent touches a spec module, `__generated__/`, `jaunt.toml`, or a `.pyi`.
-
 ## The guard hook
 
 If an agent tries to edit `src/app/__generated__/billing.py`, the PreToolUse hook (`scripts/guard.sh`) resolves the owning Jaunt project from the tool-call payload path first, `cd`s there, and runs `jaunt guard`:
@@ -184,4 +182,4 @@ The deliverable is always spec docstring edits, never `__generated__/` patches. 
 - Owning-project resolution routes guard and build against the right config in multi-project repos.
 - Duplicate hand-rolled `jaunt guard` hooks should be deleted once the plugin loads.
 
-Next: [For Coding Agents](/docs/guides/coding-agents).
+Next: [PyPI Skills](/docs/guides/pypi-skills).
