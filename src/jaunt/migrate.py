@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+import jaunt
+
+jaunt.magic_module(__name__)
+
 LEGACY_STUB_MIGRATION_ID = "legacy-stub-body"
 STUB_REEMIT_MIGRATION_ID = "stub-reemit"
 
@@ -28,29 +32,44 @@ type FunctionNode = ast.FunctionDef | ast.AsyncFunctionDef
 def plan_legacy_stub_rewrites(
     *, source_file: Path, module: str, governed_symbols: set[str]
 ) -> list[MigrationAction]:
-    source = source_file.read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(source_file))
+    """Plan the rewrite of every legacy ``raise RuntimeError("spec stub")`` body
+    in one source file to a bare ``...`` ellipsis body.
 
-    actions: list[MigrationAction] = []
-    for symbol, _node in _iter_rewritable_nodes(tree):
-        classification: Literal["re-stamp", "newly-governs"]
-        governed = _symbol_is_governed(symbol, governed_symbols)
-        classification = "re-stamp" if governed else "newly-governs"
-        label = "re-stamp (free)" if classification == "re-stamp" else "newly-governs"
-        actions.append(
-            MigrationAction(
-                migration_id=LEGACY_STUB_MIGRATION_ID,
-                path=source_file,
-                module=module,
-                symbol=symbol,
-                kind="rewrite-stub-body",
-                classification=classification,
-                description=(
-                    f"{module}.{symbol}: raise RuntimeError('spec stub') -> ... [{label}]"
-                ),
-            )
-        )
-    return actions
+    Signature is fixed: keyword-only ``source_file`` (a ``pathlib.Path``),
+    ``module`` (the dotted module name the file belongs to), and
+    ``governed_symbols`` (the set of qualnames Jaunt already governs in that
+    module — top-level function/class names, and dotted ``Class.method`` names).
+
+    Procedure:
+
+    1. Read ``source_file`` as UTF-8 text and parse it with ``ast.parse``
+       (passing ``filename=str(source_file)``).
+    2. Enumerate the rewritable legacy stub nodes with the module-level helper
+       ``_iter_rewritable_nodes(tree)``. It returns a ``list`` of
+       ``(symbol, node)`` pairs, in this order: each top-level function / async
+       function whose body is a legacy stub, then — for each top-level class in
+       body order — each of that class's method stubs, whose ``symbol`` is the
+       dotted ``ClassName.method`` qualname. Only nodes recognized as legacy
+       stubs appear (a body of exactly one ``raise RuntimeError("spec stub")``
+       statement, optionally preceded by a docstring; single- or double-quoted,
+       but the string value must equal ``"spec stub"`` exactly — a different
+       message such as ``"spec  stub"`` or a real runtime error is excluded).
+    3. For each ``(symbol, node)`` pair, classify it: it is already governed when
+       ``_symbol_is_governed(symbol, governed_symbols)`` is true (the qualname is
+       in ``governed_symbols``, or — for a dotted ``Class.method`` — its
+       enclosing class name is). Set ``classification`` to ``"re-stamp"`` when
+       governed, else ``"newly-governs"``. Build a human ``label``:
+       ``"re-stamp (free)"`` for a re-stamp, else ``"newly-governs"``.
+    4. Append a ``MigrationAction`` for the pair, preserving the pair order, with
+       ``migration_id=LEGACY_STUB_MIGRATION_ID``, ``path=source_file``,
+       ``module=module``, ``symbol=symbol``, ``kind="rewrite-stub-body"``, the
+       ``classification`` from step 3, and
+       ``description=f"{module}.{symbol}: raise RuntimeError('spec stub') -> ... [{label}]"``.
+    5. Return the list of actions (empty when the file has no legacy stubs).
+
+    ``source_file`` is read at call time.
+    """
+    raise NotImplementedError
 
 
 def _symbol_is_governed(symbol: str, governed_symbols: set[str]) -> bool:
@@ -66,61 +85,78 @@ def _symbol_is_governed(symbol: str, governed_symbols: set[str]) -> bool:
 def plan_stub_reemissions(
     *, module_specs: dict[str, list], package_dir: Path, generated_dir: str
 ) -> list[MigrationAction]:
-    from jaunt import builder, stub_emitter
+    """Plan re-emission of ``.pyi`` stubs whose format/version has drifted from
+    the committed generated body.
 
-    actions: list[MigrationAction] = []
-    for module in sorted(module_specs):
-        entries = module_specs[module]
-        if not entries:
-            continue
-        gen_source = builder._read_generated(package_dir, generated_dir, module)
-        if gen_source is None:
-            continue
-        source_file = entries[0].source_file
-        if (
-            stub_emitter.stub_staleness(source_file=source_file, generated_source=gen_source)
-            is None
-        ):
-            continue
-        actions.append(
-            MigrationAction(
-                migration_id=STUB_REEMIT_MIGRATION_ID,
-                path=stub_emitter.stub_path_for_source(source_file),
-                module=module,
-                symbol="",
-                kind="reemit-stub",
-                classification="re-stamp",
-                description=f"{module}: re-emit .pyi stub (format/version drift) [re-stamp (free)]",
-            )
-        )
-    return actions
+    Signature is fixed: keyword-only ``module_specs`` (a mapping of dotted module
+    name -> a non-empty list of spec entry objects, each exposing a
+    ``.source_file`` ``Path`` attribute), ``package_dir`` (the package root
+    ``Path``), and ``generated_dir`` (the generated-directory name, e.g.
+    ``"__generated__"``).
+
+    Import ``builder`` and ``stub_emitter`` lazily from the ``jaunt`` package
+    inside the function (``from jaunt import builder, stub_emitter``).
+
+    Iterate module names in ``sorted(module_specs)`` order and, for each:
+
+    1. Let ``entries = module_specs[module]``. Skip the module when ``entries``
+       is empty/falsy.
+    2. Read the committed generated source with
+       ``builder._read_generated(package_dir, generated_dir, module)``. Skip the
+       module when it returns ``None`` (no generated body on disk).
+    3. Let ``source_file = entries[0].source_file``.
+    4. Ask ``stub_emitter.stub_staleness(source_file=source_file,
+       generated_source=gen_source)`` (both keyword arguments, where
+       ``gen_source`` is the value from step 2) whether the stub is stale. Skip
+       the module when it returns ``None`` (the stub is fresh).
+    5. Otherwise append a ``MigrationAction`` with
+       ``migration_id=STUB_REEMIT_MIGRATION_ID``,
+       ``path=stub_emitter.stub_path_for_source(source_file)``,
+       ``module=module``, ``symbol=""`` (empty — a stub re-emission targets no
+       single symbol), ``kind="reemit-stub"``, ``classification="re-stamp"``, and
+       ``description=f"{module}: re-emit .pyi stub (format/version drift) [re-stamp (free)]"``.
+
+    Return the list of actions in the sorted-module order they were appended
+    (empty when every stub is fresh).
+    """
+    raise NotImplementedError
 
 
 def apply_stub_rewrite(action: MigrationAction) -> None:
-    with action.path.open(encoding="utf-8", newline="") as f:
-        source = f.read()
-    tree = ast.parse(source, filename=str(action.path))
+    """Rewrite exactly the one legacy stub body named by ``action`` to ``...``,
+    editing ``action.path`` in place and preserving the file's existing line
+    endings and the target's indentation and docstring.
 
-    targets: list[ast.Raise] = []
-    for symbol, node in _iter_rewritable_nodes(tree):
-        if symbol == action.symbol:
-            targets.append(_stub_raise(node))
+    Signature is fixed: a single positional ``action: MigrationAction``. Only
+    ``action.path`` (the source file) and ``action.symbol`` (the target
+    qualname; a dotted ``Class.method`` for a method) are consulted.
 
-    if not targets:
-        return
+    Procedure:
 
-    lines = source.splitlines(keepends=True)
-    for raise_node in sorted(targets, key=lambda node: node.lineno, reverse=True):
-        start = raise_node.lineno - 1
-        end = raise_node.end_lineno or raise_node.lineno
-        original_line = lines[start]
-        ending = _line_ending(original_line)
-        content = original_line[: -len(ending)] if ending else original_line
-        indent = content[: len(content) - len(content.lstrip())]
-        lines[start:end] = [f"{indent}...{ending}"]
-
-    with action.path.open("w", encoding="utf-8", newline="") as f:
-        f.write("".join(lines))
+    1. Open ``action.path`` for reading with ``encoding="utf-8"`` and
+       ``newline=""`` (so line endings are preserved verbatim) and read the full
+       text. Parse it with ``ast.parse`` (``filename=str(action.path)``).
+    2. Collect target ``raise`` nodes: for every ``(symbol, node)`` from the
+       module-level ``_iter_rewritable_nodes(tree)`` whose ``symbol`` equals
+       ``action.symbol``, append ``_stub_raise(node)`` (that helper returns the
+       node's single ``raise`` statement, skipping a leading docstring). This
+       matches at most the one named symbol, never sibling methods or functions.
+    3. If no targets were found, return without modifying the file.
+    4. Split the source into lines with ``str.splitlines(keepends=True)``.
+    5. For each collected target ``raise`` node, processed in DESCENDING
+       ``lineno`` order (so an earlier edit does not shift later line numbers):
+       let ``start = raise_node.lineno - 1`` and
+       ``end = raise_node.end_lineno or raise_node.lineno``. Take
+       ``original_line = lines[start]``; determine its line ending with the
+       module-level ``_line_ending(original_line)`` helper (one of ``"\r\n"``,
+       ``"\n"``, ``"\r"``, or ``""``); strip that ending off the end to get the
+       line content; the indentation is the content's leading-whitespace prefix.
+       Replace the slice ``lines[start:end]`` with the single line
+       ``f"{indent}...{ending}"``.
+    6. Write the joined lines back to ``action.path`` with ``encoding="utf-8"``
+       and ``newline=""``.
+    """
+    raise NotImplementedError
 
 
 def _iter_rewritable_nodes(tree: ast.Module) -> list[tuple[str, FunctionNode]]:
