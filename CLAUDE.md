@@ -296,6 +296,11 @@ jaunt init --force            # Overwrite existing jaunt.toml
 
 jaunt clean                   # Remove all __generated__ directories
 jaunt clean --dry-run         # Show what would be removed
+jaunt clean --orphans         # Remove only orphaned artifacts (spec gone); journals one line per removal; honors --dry-run
+
+jaunt migrate                 # Plan mechanical spec-source migrations (legacy stub bodies -> ..., stale .pyi re-emit); exits 0, no model call
+jaunt migrate --apply         # Write the planned changes (refuses on a dirty git tree unless --force)
+jaunt migrate --apply --allow-newly-governed  # Also rewrite legacy bodies that would newly govern an ungoverned symbol
 
 jaunt status                  # Show which modules are stale, including upstream API fallout
 jaunt status --json           # Machine-readable status
@@ -334,10 +339,12 @@ Common flags: `--root`, `--config`, `--jobs N`, `--force`, `--target`,
 `--no-infer-deps`, `--progress {auto,rich,plain,none}`, `--no-progress`, `--json`.
 
 Note: `jaunt check` returns exit code `4` on any blocking drift state —
-contract drift (unbuilt / stale-prose / signature-drift / behavior-drift) or
+contract drift (unbuilt / stale-prose / signature-drift / behavior-drift),
 magic-mode drift (any unbuilt or stale `@jaunt.magic` module, including a
-missing/stale `.pyi` stub). A project with no magic specs and no contract drift
-exits 0.
+missing/stale `.pyi` stub), or an orphaned artifact (a generated file, `.pyi`,
+or contract battery whose spec no longer exists — fix with `jaunt clean
+--orphans` or restore the spec). A project with no magic specs and no contract
+drift exits 0.
 
 ## Exit Codes
 
@@ -380,3 +387,10 @@ Progress bars are suppressed in JSON mode.
 jaunt build --json
 # {"command": "build", "ok": true, "generated": ["mymod"], "skipped": [], "failed": {}}
 ```
+
+1.5 adds three JSON keys, each present only when non-empty: `"advisories"`
+(`{module: [text, ...]}` from fresh build/test generations), `"orphans"` (paths
+on `status` and under the `magic` block on `check`), and `"newly_governed"` (a
+per-spec boolean on `jaunt specs`). The `context_stats` seeded-skills block is
+keyed `skills_workspace_seeded`, with the legacy `skills_workspace` alias kept
+for this release.

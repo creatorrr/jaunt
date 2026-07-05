@@ -71,7 +71,11 @@ marker:
 |------|--------|
 | `--module MODULE` | Restrict output to one module. |
 | `--no-infer-deps` | Explicit deps only. |
-| `--json` | Emits `specs` and `dependency_graph`. Each spec carries `"origin"` (`"module"` or `"decorator"`) and `"kwargs"` (the merged effective kwargs). |
+| `--json` | Emits `specs` and `dependency_graph`. Each spec carries `"origin"` (`"module"` or `"decorator"`), `"kwargs"` (the merged effective kwargs), and `"newly_governed"` (a module-origin spec with no artifact yet). |
+
+Module-origin specs that have never been built print with a
+`[newly governed — first build]` marker, so the first build a `magic_module`
+scan commissions is never a surprise.
 
 ### `jaunt instructions`
 
@@ -120,8 +124,12 @@ jaunt build --jobs 16
 | `--no-semantic-gate` | Rebuild on every real change; skip the Layer B gate (Layer A still applies). See [Change Detection](/docs/concepts/change-detection). |
 
 `--json` reports `generated`, `skipped`, `refrozen`, `failed`, `cost`, and
-`context_stats`, plus `needs_deps` and `emitted_stubs` when present — see
-[JSON Output](/docs/reference/json-output#build).
+`context_stats`, plus `needs_deps`, `emitted_stubs`, and `advisories` when
+present — see [JSON Output](/docs/reference/json-output#build). The
+`context_stats` seeded-skills block is keyed `skills_workspace_seeded` (with the
+legacy `skills_workspace` alias for this release). The build plan flags any
+module-origin spec with no artifact yet as `newly governed by module scan`
+before generation starts.
 
 ### `jaunt watch`
 
@@ -152,6 +160,12 @@ jaunt status --magic-only
 |------|--------|
 | `--magic-only` | Probe only `@jaunt.magic` freshness; skip contract and repo-map checks. |
 
+A module the next build resolves through the free re-stamp path reads
+`stale (re-stamp: free)` rather than `stale (structural)`; when that module also
+carries legacy `raise RuntimeError("spec stub")` bodies, status hints
+`jaunt migrate`. Orphaned artifacts (a generated file whose spec is gone) list
+in their own section, reported under `"orphans"` in `--json`.
+
 ### `jaunt clean`
 
 Remove `__generated__` directories and header-marked `.pyi` stubs under the
@@ -160,12 +174,21 @@ configured roots.
 ```bash
 jaunt clean
 jaunt clean --dry-run
+jaunt clean --orphans
 ```
 
 | Flag | Effect |
 |------|--------|
 | `--dry-run` | List what would be removed without deleting. |
+| `--orphans` | Remove only orphaned artifacts, not the whole generated tree. |
 | `--json` | Emits `would_remove`. |
+
+Plain `jaunt clean` wipes every generated directory and stub. `--orphans`
+narrows the sweep to artifacts whose spec no longer exists: the generated
+module, its `.contract.json` sidecar, its `.pyi`, and its generated tests or
+contract battery. It leaves fresh, still-governed output alone, and writes one
+`orphan removed` line to the journal per deletion. Combine with `--dry-run` to
+preview without deleting or journaling.
 
 ## Testing
 
@@ -241,8 +264,14 @@ jaunt check --magic-only
 | `--contracts-only` | Gate only contract batteries. |
 | `--magic-only` | Gate only `@jaunt.magic` freshness. |
 
+`check` also blocks on orphaned artifacts. A generated module, `.pyi`, or
+contract battery whose spec no longer exists exits `4` with a message naming the
+fix — `jaunt clean --orphans`, or restore the spec. A mid-refactor rename shows
+one orphan and one newly-governed spec and holds CI red until you rebuild, which
+is intentional.
+
 `--contracts-only` and `--magic-only` are mutually exclusive. `--json` reports a
-`magic` block (`fresh` / `stale` / `unbuilt`); see
+`magic` block (`fresh` / `stale` / `unbuilt`, plus `orphans`); see
 [JSON Output](/docs/reference/json-output#check). A project with no magic specs
 and no contract drift exits `0`.
 
@@ -404,6 +433,43 @@ Two subcommands generate content through the Codex engine: `skill build <name>`
 expands a user-managed checked-in skill (it must already exist with `--lib`
 metadata, usually from `skill add <name> --lib <package>`), and `skill refresh`
 regenerates Jaunt-managed auto skills. Both drive `codex exec` under the hood.
+
+### `jaunt migrate`
+
+Apply pending mechanical migrations to your spec source. This is the one jaunt
+command that edits files you wrote, so it plans by default: `jaunt migrate`
+prints what it would change and exits `0`, and `jaunt migrate --apply` writes the
+changes. Neither mode calls the model.
+
+```bash
+jaunt migrate
+jaunt migrate --apply
+jaunt migrate --apply --allow-newly-governed
+```
+
+1.5 ships two migrations:
+
+- **Legacy stub bodies.** A `raise RuntimeError("spec stub")` body — the form the
+  old scaffold emitted — is rewritten to `...`, and the generated header is
+  re-stamped over the untouched body, so the conversion is free. For a symbol
+  that is already a spec this is a `re-stamp`. For a currently ungoverned
+  function in a `magic_module` file, rewriting its body would newly govern it and
+  commission a first build, so `migrate` lists it as `would newly govern` and
+  skips it unless you pass `--allow-newly-governed`.
+- **Stub re-emission.** When a committed `.pyi` is stale only because
+  `_STUB_FORMAT_VERSION` bumped in a past release, `migrate --apply` re-renders
+  it without a build. This retires the 1.4.2 wart where `jaunt check` reported
+  stubs stale until you ran `jaunt build` once.
+
+| Flag | Effect |
+|------|--------|
+| `--apply` | Write the planned changes. Refuses on a dirty git tree unless `--force`. |
+| `--force` | Apply despite uncommitted changes. |
+| `--allow-newly-governed` | Also rewrite legacy bodies that would newly govern a symbol. |
+| `--json` | Emit `{applied, actions: [...]}`; each action carries `migration`, `path`, `module`, `symbol`, `kind`, `classification`, and `description`. |
+
+Every applied change is printed file by file. After an apply on a legacy-body
+project, `jaunt status` reports the module fresh with no model call.
 
 ### `jaunt eval`
 
