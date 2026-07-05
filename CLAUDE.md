@@ -409,3 +409,65 @@ on `status` and under the `magic` block on `check`), and `"newly_governed"` (a
 per-spec boolean on `jaunt specs`). The `context_stats` seeded-skills block is
 keyed `skills_workspace_seeded`, with the legacy `skills_workspace` alias kept
 for this release.
+
+## Self-hosting
+
+As of 1.5.2 Jaunt builds part of itself. The root `jaunt.toml`
+(`source_roots=["src"]`) governs a subset of the framework's own modules, and
+`jaunt check` gates spec-vs-generated drift in CI like any adopter project.
+
+**Magic-mode modules** (docstring is canonical; Jaunt generates the body):
+
+- `jaunt.guard`, `jaunt.heldout`, `jaunt.migrate`
+- `jaunt.contract.strength`, `jaunt.contract.cases`, `jaunt.contract.drift`,
+  `jaunt.contract.edits`
+
+Their generated bodies live under `src/jaunt/__generated__/` and their `.pyi`
+stubs sit next to each spec (`src/jaunt/*.pyi`, `src/jaunt/contract/*.pyi`).
+Both are committed — the wheel ships them, and runtime resolution is by module
+name, so an installed Jaunt loads the generated code without needing
+`jaunt.toml`. `.gitignore` un-ignores `src/jaunt/__generated__/` specifically;
+everywhere else `**/__generated__/` stays ignored.
+
+**Contract-mode modules** (committed code is canonical; Jaunt derives a pytest
+battery): `digest`, `deps`, `header`, `module_api`, `module_contract`,
+`change_detection`, `validation`, `stub_emitter`, `cost`, `cache`, `config`,
+`parse_cache`, `discovery`, `generate.fingerprint`, `reconcile`. Their derived
+batteries are committed under `tests/contract/jaunt/`. `jaunt reconcile` is the
+only command that rewrites them (it calls the model); `jaunt check` verifies
+them offline.
+
+**Committed self-hosting artifacts:** `src/jaunt/__generated__/**`, the `.pyi`
+stubs above, `tests/contract/jaunt/**`, and the `JAUNT_LOG` change journal
+(`.gitattributes` sets `merge=union` on it).
+
+**Build-critical modules can never be magic.** The builder imports and runs
+these modules to build anything at all, so a magic stub for one of them would
+be circular — the builder would need the generated body it is trying to
+generate. Build-critical modules get contract mode instead: real committed code
+plus a derived battery.
+
+**Cascade exclusion.** These eight modules execute during `import jaunt` itself,
+before `jaunt.magic_module` and `jaunt.contract` are bound, so they can carry no
+jaunt decorator of any kind: `errors`, `runtime`, `module_magic`,
+`decorator_analysis`, `class_analysis`, `registry`, `spec_ref`, `paths`. They
+stay plain handwritten Python. `contract.derive` is also handwritten by choice:
+its rendered battery bytes feed the deterministic `check` gate, so regenerating
+it would restale every committed battery.
+
+**Iron rules apply to us too** (see
+`jaunt-claude-plugin/skills/working-with-jaunt/SKILL.md`): never hand-edit
+anything under `__generated__/**` or any `.pyi`, and never edit an existing test
+to accommodate generated code. To change a magic-mode framework module, edit its
+docstring contract and rebuild (`jaunt build --target jaunt.<module>`); to change
+a contract-mode module, edit the real code and re-derive with `jaunt reconcile`.
+Fix a failing self-hosted build or battery forward through the docstring, never
+through the artifact.
+
+**Limitation — long-lived processes.** Discovery preserves the running
+framework's own already-imported modules rather than evicting and re-importing
+them (evicting the live `jaunt` package forks the registry). A one-shot CLI run
+and each daemon job subprocess start fresh, so they see current specs. But
+`jaunt watch` and in-process daemon previews hold a single interpreter: edits to
+an already-imported framework spec module do not take effect until the process
+restarts.

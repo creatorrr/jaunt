@@ -110,6 +110,18 @@ Jaunt has two authoring modes that coexist in the same project:
 
 See `examples/contract_slugify/` for a Contract-mode walkthrough.
 
+## Jaunt builds itself
+
+Since 1.5.2, Jaunt uses both modes on its own source. Seven framework modules
+are magic-mode specs — `jaunt.guard`, `jaunt.heldout`, `jaunt.migrate`, and the
+four `jaunt.contract` helpers (`strength`, `cases`, `drift`, `edits`) — with
+their generated bodies and `.pyi` stubs committed and shipped in the wheel.
+Fifteen more core modules are in contract mode, with committed pytest batteries
+under `tests/contract/jaunt/`. `jaunt check` runs in CI and gates Jaunt's own
+spec-vs-generated drift, deterministically and without an API key. Modules that
+run during `import jaunt` (the runtime, registry, and decorator internals) stay
+plain handwritten Python — the builder needs them to build anything.
+
 ## Installation
 
 ```bash
