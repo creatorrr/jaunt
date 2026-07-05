@@ -456,3 +456,204 @@ exact moment accidental governance is cheap to catch.
   fallback assignments.
 - **tool_version fix confirmed**: re-emitted headers all carry
   `tool_version=1.4.2`; no blank fields.
+
+---
+
+## 2026-07-05 — 1.5.0 verified; the exemption count hits zero
+
+- **Zero restales on upgrade** (fifth consecutive release). Orphan gate:
+  clean here (we've never deleted a spec), so no `clean --orphans` needed;
+  the "only blocks if you already have orphans" caveat framing was accurate.
+- **E402 fix confirmed the low-friction way**: deleted `chunking.pyi`, ran a
+  model-free build, re-emitted stub has `X = Any` after the import block.
+  Deleted the E402 per-file-ignore — **we now carry zero jaunt-related lint
+  or type-checker exemptions**, down from a peak of a local source patch +
+  fingerprint workaround + three scoped exemptions in the 1.3.0 era.
+- **Finding 19 resolution — accepted, and a correction on our side**: our
+  "skills_workspace is ~95% of every prompt" line treated seeded-on-disk
+  bytes as consumption; the lazy-load probe (3 of 13 SKILL.md bodies opened)
+  settles it. Glad the answer was instrumentation rather than pruning
+  machinery. The honest rename (`skills_workspace_seeded`) is the right fix.
+- **Finding 25 (`jaunt migrate`) — moot for us** (we paid the rebuild before
+  it existed) but plan-by-default + dirty-tree refusal + the
+  `--allow-newly-governed` guard is exactly the shape we asked for. The
+  format-version stub re-emit folded in kills the "run build once" dance —
+  good.
+- **Finding 26 + orphan lifecycle — adopted into our docs** (AGENTS.md and
+  the adoption guide now teach `clean --orphans` and the newly-governed
+  flag). The pre-spend placement of the newly-governed warning is the part
+  that matters; that was the whole hazard.
+- **Advisories**: none emitted on our (model-free) 1.5.0 builds yet; we'll
+  report the first real ones from the temporal.py conversion (PR 3b), which
+  is the most ambiguity-prone contract in the campaign — a good first test.
+
+---
+
+## 2026-07-04 (PR 3b attempt) — temporal.py conversion blocked; findings 27–28
+
+First conversion outside the utils package (`mcp_memory_server.temporal`,
+apps/memory-api source root — date parsing + Pacific-display formatting,
+the campaign's densest contract). The generation itself eventually
+converged and passed validation; a path-routing bug then put the artifact
+where Python can't import it. Spend: $22.29 across 3 builds (9 failed
+attempts + 1 success). We reverted to the human implementation; the
+characterization suite (33 tests, committed first per the hardening
+policy) is what caught both problems. Artifacts preserved locally for a
+free-ish resume: spec, .pyi, generated body + contract sidecar.
+
+### 27. No sanctioned third-party import channel in the build prompt (severity: high; cost multiplier)
+
+`build_module.md` says "Only import dependencies listed above — do not
+guess or fabricate module paths", where "above" is the Dependency APIs
+block (spec-registry modules only). There is no rule for installed
+third-party distributions. Our spec's public signatures use
+`whenever.Instant` — declared in the app's pyproject, skill seeded, and
+imported by the spec module itself — and gpt-5.5 refused to write
+`from whenever import Instant` across NINE attempts / $9.80: it copied the
+annotations, then contorted (string annotations, `# noqa`, duck-typed
+`py_datetime()` shims, delegation stubs), failing ty's
+`unresolved-reference` every time. An explicit per-module
+`magic_module(prompt="whenever is an installed dependency; import it")`
+did NOT override the Rules section — the round-2 advisory says so
+verbatim: "whenever is not an allowed declared import in this generation
+context". (numpy in our mmr build worked only because that attempt ignored
+the rule — model-boldness variance, not policy.) The retry loop cannot
+escape this class of failure because the root cause is prompt policy, not
+model error; ty output fed back N times just produces N contortions.
+**Ask**: an explicit rule — stdlib and installed third-party distributions
+that the *spec module itself imports* (or that the owning package declares)
+are importable from their real modules; keep JAUNT-NEEDS-DEP for
+everything else. Workaround that converged for us ($12.49): instruct
+`from __future__ import annotations` + call-time
+`importlib.import_module('<spec_module>').Instant` — the handwritten-reuse
+idiom — but that's contortion nobody should need for a declared dep.
+
+### 28. Multi-root repos: generated bodies are routed to the FIRST source root (severity: critical for multi-root; blocks PR 3b)
+
+`cli.py:2159` (and the same pattern at ~2684, ~2701, ~3504):
+`package_dir = next((d for d in source_dirs if d.exists()), None)` — one
+package_dir for every module, the first existing source root. With
+`source_roots = ["packages/python/memory-store-utils/src",
+"apps/memory-api"]`, the generated body for `mcp_memory_server.temporal`
+was written to
+`packages/python/memory-store-utils/src/mcp_memory_server/__generated__/`
+— a bogus package grafted into the *other* workspace member (it would
+ship in the utils wheel if committed). Runtime resolves
+`mcp_memory_server` to the real package under apps/memory-api, finds no
+generated module, and every call raises JauntNotBuiltError. Worse:
+`status`/`check` read through the same wrong path, so the tree is
+**fresh-and-green while runtime is broken** — CI's `jaunt check` cannot
+catch it; only our characterization tests did. The `.pyi` stub landed
+correctly next to the spec, which shows the right pattern: resolve
+per-module from the spec's own `source_file` (the root that contains it),
+not per-project. ~110 `package_dir` uses across builder/status/check/
+orphans/migrate share the assumption — we didn't attempt a local patch.
+This is the actual blocker for our memory-api wave; everything before it
+(discovery, prescreen, validation, generation) handled the second root
+fine.
+
+### Advisories: verdict after first real exercise — keep them, they paid rent immediately
+
+- Round 2's advisory stated the model's own reasoning ("whenever is not an
+  allowed declared import...") — that one line ended an hour of guessing
+  and sent us to the prompt template. Exactly the observability findings
+  27 needed.
+- Round 1's advisory revealed sibling spec contracts are not in a
+  symbol's generation context (our `_coerce_utc_datetime` docstring
+  cross-referenced `parse_temporal_reference` step 1; the generator said
+  it wasn't visible). Worth either including same-module sibling
+  docstrings in context or documenting "inline shared rules in the
+  magic_module prompt" as the pattern — we did the latter and it worked.
+- The success-run advisory flagged genuine contract noise: our "no `may`
+  abbreviation" rule is unobservable (identical token to the full name).
+  A generator that reviews the spec back at you is a feature; consider
+  surfacing advisories in `jaunt jobs`/PR-comment form for daemon runs.
+
+---
+
+## 2026-07-05 — PR 3 landed: temporal.py converted (mem-mcp-b); finding 28 workaround, finding 29
+
+Fresh conversion in the mem-mcp-b checkout (not a resume of the blocked
+attempt above): 16 module-style stubs, constants handwritten, converged and
+**shipped** — characterization suite (now 38 tests incl. parsing/display
+files) passed unchanged, full unit suite showed zero regressions vs a
+clean-tree baseline, ruff/ty/check green. Spend: $53.69 over 3 builds
+($12.32 fail, $21.24 fail, $20.14 success — 2 attempts). Context: 259k
+chars (~64k tok), `skills(seeded)` 91%.
+
+### Finding 28 update — the workaround that works: one jaunt project per adopted package
+
+No local patch; adopter-side fix verified end-to-end. Give each adopted
+package its own `jaunt.toml` (`source_roots = ["."]` at the package's
+sys.path root) and run jaunt from that directory. Everything that resolves
+against `source_roots[0]`/config root then resolves correctly: output
+placement, `check`, the ty sandbox, pyproject discovery (see finding 29).
+CI runs `jaunt check` once per project dir. Residuals worth knowing:
+
+- `[codex]` and `[build].instructions` must stay **byte-identical** across
+  the configs — both feed the generation fingerprint, so drift restales
+  (re-bills) every module in that project. Split configs turn "guidance
+  lives once" into "guidance lives once per project"; a config `include` or
+  shared-fragment mechanism would remove the footgun.
+- `treedocs.yaml` splits per project (541 entries migrated from the root
+  index to the new project's on first `jaunt tree`). Coherent, but
+  surprising if you expected one repo index.
+- Verified the split is fingerprint-neutral: the freshly built module and
+  all 7 utils modules stayed fresh across the config split, $0.
+
+Ask unchanged: resolve per-module from the spec's own `source_file`. Interim
+ask sharpened: until that lands, `len(source_roots) > 1` should be a hard
+config error (exit 2) — 1.5.0's silent half-working multi-root is the
+fresh-and-green-while-runtime-is-broken trap from finding 28, and the config
+schema actively invites it.
+
+### 29. Undeclared-import validator resolves deps from the config-root pyproject (severity: high; second layer of finding 27)
+
+`validation.py` `_validate_generated_import_provenance` →
+`_declared_project_dependencies(_find_pyproject(project_dir))`:
+`project_dir` is the jaunt project root, and `_find_pyproject` walks *up*
+from there. In a uv workspace with the config at repo root, that finds the
+workspace-root pyproject (ours declares only `openai`) — never the owning
+package's pyproject where the dep actually lives. Net effect: **every**
+third-party import in generated code is rejected as undeclared, however
+correctly declared the package is. This is the second layer under finding
+27's nine-attempt loop: round 1 here failed on prompt policy (model
+refused the import), round 2 failed on this validator (the advisory quoted
+it verbatim: "importing `whenever.Instant` is also rejected as undeclared
+by the provided previous-attempt errors"), and mmr's numpy import passed
+under 1.4.0 only because this validation didn't exist yet — under 1.5.0 it
+would be rejected too. Escape hatches, both verified: (a)
+`build.generated_import_allowlist = ["whenever"]` — the error message
+advertises it, it works, and the message is the only place it's
+documented; (b) per-package projects (finding 28 workaround), which make
+`_find_pyproject` land on the right file so declared deps resolve
+naturally. Ask: resolve declared deps from the pyproject that *owns the
+spec's source root* (walk up from the spec file, not the project dir) —
+same per-module resolution principle as finding 28.
+
+### Finding 27 partial confirmation — with the validator unblocked, prompt guidance lands
+
+Once `whenever` was allowlisted, a `magic_module(prompt="import Instant
+directly at module scope; no duck-typed stand-ins; no dynamic imports")`
+converged in 2 attempts. The final module imports `from whenever import
+Instant` at top level like any human-written file. So the finding-27 ask
+stands for the *default* behavior, but prompt-level guidance does work once
+the rejection layer stops contradicting it.
+
+### Contract-silence data point (for the "validation can't check semantics" file)
+
+Generated `parse_temporal_reference` wraps the year/year-range constructors
+in `try/ValueError → None`; the human code let `datetime(0, ...)` raise on
+degenerate inputs like `"0000"` (`\d{4}` admits year 0). Spec was silent,
+tests don't cover it, both behaviors defensible — generation chose the more
+defensive one. Harmless here, but it's a clean example of the class:
+divergence invisible to every gate, caught only by line-review of the first
+build. Mentioning since advisories flagged nothing (correctly — the spec
+really was silent).
+
+### Advisories: second real exercise, paid rent again
+
+The round-2 advisory named the exact rejection ("...rejected as undeclared
+by the provided previous-attempt errors") — that one line is what sent us
+into `validation.py` and turned a mystery retry loop into finding 29 in
+about ten minutes. Two-for-two on advisories ending archaeology sessions.
