@@ -667,6 +667,12 @@ def _module_context_stats(
         "package_context": _block_size(artifacts.package_context_block),
         "repo_map": _block_size(repo_map_text),
         "blueprint": _block_size(artifacts.blueprint_source),
+        "skills_workspace_seeded": {
+            "chars": skills_workspace_chars,
+            "est_tokens": skills_workspace_chars // 4,
+        },
+        # Back-compat alias for one release; see docs/reference. Seeded-on-disk
+        # bytes AVAILABLE to the agent, not necessarily read.
         "skills_workspace": {
             "chars": skills_workspace_chars,
             "est_tokens": skills_workspace_chars // 4,

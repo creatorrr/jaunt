@@ -644,3 +644,50 @@ def test_jaunt_public_names_in_annotations_still_resolve() -> None:
     import ast as _ast
 
     _ast.parse(stub)
+
+
+def test_any_fallback_assignments_emitted_after_imports() -> None:
+    """`X = Any` optional-dependency fallbacks must follow the FULL import block,
+    so ruff E402 never fires on a spec-copied import that trails them. (wave-5
+    emitter-hygiene feedback.)"""
+    spec_source = textwrap.dedent(
+        '''
+        import jaunt
+        from collections.abc import Mapping
+
+        jaunt.magic_module(__name__)
+
+
+        def chunker(m: Mapping) -> "RecursiveChunker | None":
+            """Get a chunker."""
+            raise NotImplementedError
+        '''
+    )
+    generated_source = textwrap.dedent(
+        """
+        from collections.abc import Mapping
+
+        try:
+            from chonkie import RecursiveChunker
+        except ImportError:
+            RecursiveChunker = None
+
+
+        def chunker(m: Mapping) -> "RecursiveChunker | None":
+            return None
+        """
+    )
+    stub = build_stub_source(spec_source, generated_source, {"chunker"}, _header())
+    lines = stub.splitlines()
+    import_idxs = [
+        i for i, ln in enumerate(lines) if ln.startswith("import ") or ln.startswith("from ")
+    ]
+    any_idxs = [
+        i for i, ln in enumerate(lines) if "= Any" in ln and not ln.startswith("from typing")
+    ]
+    assert import_idxs and any_idxs
+    assert max(import_idxs) < min(any_idxs)
+    assert "RecursiveChunker = Any" in stub
+    import ast as _ast
+
+    _ast.parse(stub)

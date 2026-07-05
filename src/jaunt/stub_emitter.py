@@ -6,6 +6,7 @@ import ast
 import builtins
 import copy
 import hashlib
+from dataclasses import dataclass
 from pathlib import Path
 
 from jaunt.header import parse_stub_header
@@ -113,10 +114,11 @@ def build_stub_source(
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
     }
 
-    chunks: list[str] = []
+    import_chunks: list[str] = []
+    body_chunks: list[str] = []
     rendered_nodes: list[ast.AST] = []
     for node in spec_tree.body:
-        if isinstance(node, (ast.Import, ast.ImportFrom, ast.Assign, ast.AnnAssign)):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
             # __future__ imports are meaningless in stubs (forward refs are
             # implicit in .pyi) and land after the generated-import prelude,
             # where they are a syntax error — never copy them from the spec.
@@ -135,7 +137,11 @@ def build_stub_source(
                 if not kept:
                     continue
                 node = ast.Import(names=kept)
-            chunks.append(ast.unparse(copy.deepcopy(node)).strip())
+            import_chunks.append(ast.unparse(copy.deepcopy(node)).strip())
+            continue
+
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            body_chunks.append(ast.unparse(copy.deepcopy(node)).strip())
             continue
 
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -144,7 +150,7 @@ def build_stub_source(
                 chosen = node
             clone = _function_stub_clone(chosen)
             rendered_nodes.append(clone)
-            chunks.append(ast.unparse(clone).strip())
+            body_chunks.append(ast.unparse(clone).strip())
             continue
 
         if isinstance(node, ast.ClassDef):
@@ -153,7 +159,7 @@ def build_stub_source(
                 chosen = node
             clone = _class_stub_clone(chosen)
             rendered_nodes.append(clone)
-            chunks.append(ast.unparse(clone).strip())
+            body_chunks.append(ast.unparse(clone).strip())
 
     # A stub's signatures come from the *generated* module, but its imports were
     # copied only from the spec module — so a generated-only import used in a
@@ -161,13 +167,15 @@ def build_stub_source(
     # such referenced-but-unprovided names from the generated module. Names bound
     # only by jaunt imports are NOT provided — those imports were skipped above,
     # so a legitimate reference (`-> JauntError`) must resolve like any other.
-    prelude = _resolve_stub_references(
+    resolved = _resolve_stub_references(
         rendered_nodes=rendered_nodes,
         provided=_module_bound_names(spec_tree) - _jaunt_import_bound_names(spec_tree),
         generated_tree=generated_tree,
         generated_module=generated_module,
     )
-    chunks = prelude + chunks
+    import_block = "\n".join(dict.fromkeys([*import_chunks, *resolved.imports]))
+    fallback_block = "\n".join(dict.fromkeys(resolved.fallbacks))
+    chunks = [import_block, fallback_block, *resolved.supporting, *body_chunks]
 
     body = "\n\n\n".join(chunk for chunk in chunks if chunk).rstrip()
     if not body:
@@ -208,19 +216,26 @@ def stub_staleness(*, source_file: str | Path, generated_source: str) -> str | N
 _MAX_RESOLVE_ITERATIONS = 10
 
 
+@dataclass(frozen=True)
+class _ResolvedStubReferences:
+    imports: list[str]
+    fallbacks: list[str]
+    supporting: list[str]
+
+
 def _resolve_stub_references(
     *,
     rendered_nodes: list[ast.AST],
     provided: set[str],
     generated_tree: ast.Module,
     generated_module: str | None,
-) -> list[str]:
+) -> _ResolvedStubReferences:
     referenced: set[str] = set()
     for node in rendered_nodes:
         referenced |= _referenced_load_names(node)
     queue = sorted(referenced - provided - _BUILTIN_NAMES)
     if not queue:
-        return []
+        return _ResolvedStubReferences(imports=[], fallbacks=[], supporting=[])
 
     gen_imports = _import_bindings(generated_tree, generated_module=generated_module)
     gen_defs = {
@@ -267,15 +282,14 @@ def _resolve_stub_references(
                 any_fallbacks.append(name)
         queue = sorted(next_queue - resolved)
 
-    prelude: list[str] = []
-    if import_lines:
-        prelude.append("\n".join(dict.fromkeys(import_lines)))
     if any_fallbacks:
         # Never emit an unresolved name: bind it to `Any` as a last resort.
-        prelude.append("from typing import Any")
-        prelude.append("\n".join(f"{name} = Any" for name in dict.fromkeys(any_fallbacks)))
-    prelude.extend(supporting)
-    return prelude
+        import_lines.append("from typing import Any")
+    return _ResolvedStubReferences(
+        imports=list(dict.fromkeys(import_lines)),
+        fallbacks=[f"{name} = Any" for name in dict.fromkeys(any_fallbacks)],
+        supporting=supporting,
+    )
 
 
 def _jaunt_import_bound_names(tree: ast.Module) -> set[str]:

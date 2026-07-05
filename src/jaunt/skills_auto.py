@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from jaunt.external_imports import discover_external_distributions_with_warnings, pep503_normalize
 from jaunt.pypi import PyPIReadmeError, fetch_readme
+from jaunt.skill_agent import strip_leading_frontmatter
 from jaunt.skill_manager import _atomic_write_text
 
 _logger = logging.getLogger("jaunt.skills_auto")
@@ -121,7 +122,7 @@ def parse_generated_skill_meta(text: str) -> tuple[str, str] | None:
 
 def _format_generated_skill_file(*, dist: str, version: str, body_md: str) -> str:
     description = f"Use when generating Python code that imports or uses the {dist} library."
-    body = (body_md or "").strip()
+    body = strip_leading_frontmatter((body_md or "").strip()).strip()
     fm = (
         "---\n"
         f'name: "{dist}"\n'

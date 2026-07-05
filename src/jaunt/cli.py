@@ -2495,6 +2495,15 @@ def _fmt_count(n: int) -> str:
 
 
 def _context_stats_summary_line(module: str, blocks: dict[str, dict[str, int]]) -> str:
+    # The seeded-skills block is emitted under both `skills_workspace_seeded` and the
+    # legacy `skills_workspace` alias (same value). Render only the seeded key — as
+    # `skills(seeded)` — and never total or print the number twice.
+    if "skills_workspace_seeded" in blocks:
+        blocks = {
+            ("skills(seeded)" if k == "skills_workspace_seeded" else k): v
+            for k, v in blocks.items()
+            if k != "skills_workspace"
+        }
     total_chars = sum(b["chars"] for b in blocks.values())
     total_tokens = sum(b["est_tokens"] for b in blocks.values())
     parts: list[str] = []

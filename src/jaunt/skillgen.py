@@ -4,7 +4,11 @@ from jaunt.agent_runtime import AgentFile, AgentTask
 from jaunt.codex_executor import CodexExecutor
 from jaunt.config import AgentConfig, CodexConfig, LLMConfig
 from jaunt.generate.shared import load_prompt, render_template
-from jaunt.skill_agent import strip_markdown_fences, validate_skill_markdown
+from jaunt.skill_agent import (
+    strip_leading_frontmatter,
+    strip_markdown_fences,
+    validate_skill_markdown,
+)
 
 
 class CodexSkillGenerator:
@@ -64,7 +68,7 @@ class CodexSkillGenerator:
             ],
         )
         result = await self._executor.run_task(task)
-        stripped = strip_markdown_fences(result.output)
+        stripped = strip_leading_frontmatter(strip_markdown_fences(result.output))
         errs = validate_skill_markdown(stripped)
         if errs:
             raise RuntimeError("; ".join(errs))
