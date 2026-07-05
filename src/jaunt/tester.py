@@ -913,6 +913,7 @@ class TestGenerationReport:
     skipped: set[str]
     failed: dict[str, list[str]]
     generated_files: list[Path]
+    advisories: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -946,6 +947,7 @@ class PytestResult:
     generation_failed: dict[str, list[str]] = field(default_factory=dict)
     generated: set[str] = field(default_factory=set)
     skipped: set[str] = field(default_factory=set)
+    advisories: dict[str, list[str]] = field(default_factory=dict)
 
 
 def _compact_failure_context(stdout: str, stderr: str, *, max_lines: int = 28) -> list[str]:
@@ -1077,6 +1079,7 @@ async def run_test_generation(
     generated: set[str] = set()
     failed: dict[str, list[str]] = {}
     generated_files: list[Path] = []
+    module_advisories: dict[str, list[str]] = {}
     completed: set[str] = set()
 
     def _phase(module_name: str, stage: str, detail: str = "") -> None:
@@ -1203,6 +1206,9 @@ async def run_test_generation(
             errors = _validate_candidate(result.source)
             if errors:
                 return False, errors, None
+
+            if result.advisories:
+                module_advisories.setdefault(module_name, []).extend(result.advisories)
 
             result_source = result.source
 
@@ -1346,6 +1352,7 @@ async def run_test_generation(
         skipped=skipped,
         failed=failed,
         generated_files=sorted(generated_files, key=lambda p: str(p)),
+        advisories=module_advisories,
     )
 
 
@@ -1384,6 +1391,7 @@ async def run_tests(
     gen_failed: dict[str, list[str]] = {}
     generated: set[str] = set()
     skipped: set[str] = set()
+    test_advisories: dict[str, list[str]] = {}
 
     if not no_generate:
         if (
@@ -1425,6 +1433,7 @@ async def run_tests(
         generated = report.generated
         skipped = report.skipped
         gen_failed = report.failed
+        test_advisories = report.advisories
     elif module_specs is not None:
         generated_files = _collect_existing_generated_test_files(
             project_dir=project_dir,
@@ -1444,6 +1453,7 @@ async def run_tests(
             generation_failed=gen_failed,
             generated=generated,
             skipped=skipped,
+            advisories=test_advisories,
         )
 
     with tempfile.NamedTemporaryFile(prefix="jaunt-heldout-", suffix=".json", delete=False) as f:
@@ -1605,6 +1615,7 @@ async def run_tests(
             generation_failed=gen_failed,
             generated=generated,
             skipped=skipped,
+            advisories=test_advisories,
         )
     finally:
         if previous_heldout_report is None:

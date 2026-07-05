@@ -1281,6 +1281,18 @@ def _cmd_jobs_show(args: argparse.Namespace) -> int:
             print(f"state: {_job_state_label(job)}")
         elif key == "phase" and job.phase:
             continue
+        elif key == "advisories":
+            if not value:
+                continue
+            try:
+                items = json.loads(value)
+            except json.JSONDecodeError:
+                items = []
+            if not items:
+                continue
+            print("advisories:")
+            for item in items:
+                print(f"  - {item}")
         else:
             print(f"{key}: {value}")
     if args.full and job.detail_log:
@@ -2854,6 +2866,12 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                 for marker in markers:
                     _eprint(f"  {marker}")
 
+        if report.advisories and not json_mode:
+            print("Advisories (from the generation agent — informational):")
+            for mod, items in sorted(report.advisories.items()):
+                for item in items:
+                    print(f"  {mod}: {item}")
+
         if report.stub_warnings and not json_mode:
             for warning in report.stub_warnings:
                 _eprint(warning)
@@ -2875,6 +2893,13 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
         for mod, err in sorted(report.failed.items()):
             first = str(err).splitlines()[0][:120] if str(err) else "generation failed"
             events.append(_journal.JournalEvent(action="build-fail", module=mod, detail=first))
+        for mod, items in sorted(report.advisories.items()):
+            for item in items:
+                events.append(
+                    _journal.JournalEvent(
+                        action="advisory", module=mod, detail=" ".join(item.split())
+                    )
+                )
         _journal.append_events(root, events)
 
         if not json_mode and (cost_tracker.api_calls > 0 or cost_tracker.cache_hits > 0):
@@ -2904,6 +2929,10 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             }
             if report.needs_deps:
                 build_payload["needs_deps"] = {k: v for k, v in sorted(report.needs_deps.items())}
+            if report.advisories:
+                build_payload["advisories"] = {
+                    k: list(v) for k, v in sorted(report.advisories.items())
+                }
             if report.emitted_stubs:
                 build_payload["emitted_stubs"] = {
                     k: v for k, v in sorted(report.emitted_stubs.items())
@@ -3297,17 +3326,36 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             print(
                 f"Generated {len(result.generated)} test module(s), skipped {len(result.skipped)}."
             )
+            if getattr(result, "advisories", {}):
+                print("Advisories (from the generation agent — informational):")
+                for mod, items in sorted(result.advisories.items()):
+                    for item in items:
+                        print(f"  {mod}: {item}")
+
+        from jaunt import journal as _journal
+
+        _journal.append_events(
+            root,
+            [
+                _journal.JournalEvent(action="advisory", module=mod, detail=" ".join(item.split()))
+                for mod, items in sorted(getattr(result, "advisories", {}).items())
+                for item in items
+            ],
+        )
 
         if json_mode:
-            _emit_json(
-                {
-                    "command": "test",
-                    "ok": exit_code == 0 and not gen_failed,
-                    "exit_code": exit_code,
-                    "refrozen": sorted(test_refrozen_modules),
-                    "generation_failed": {k: v for k, v in sorted(gen_failed.items())},
+            test_payload: dict[str, object] = {
+                "command": "test",
+                "ok": exit_code == 0 and not gen_failed,
+                "exit_code": exit_code,
+                "refrozen": sorted(test_refrozen_modules),
+                "generation_failed": {k: v for k, v in sorted(gen_failed.items())},
+            }
+            if getattr(result, "advisories", None):
+                test_payload["advisories"] = {
+                    k: list(v) for k, v in sorted(result.advisories.items())
                 }
-            )
+            _emit_json(test_payload)
 
         if gen_failed or exit_code == EXIT_GENERATION_ERROR:
             return EXIT_GENERATION_ERROR

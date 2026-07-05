@@ -45,6 +45,7 @@ class JobRecord:
     patch_paths: str = ""  # JSON-encoded list; set when a job parks so retry can re-land
     cause: str = ""  # human cause recorded at green time; reused for the landing commit
     refrozen: str = ""  # "1" when the green result was a re-freeze (journal action "refreeze")
+    advisories: str = ""  # JSON-encoded list; set at green time
 
     @classmethod
     def new(cls, *, module: str, spec_digest: str, base_commit: str, branch: str) -> JobRecord:
