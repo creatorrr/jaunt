@@ -10,9 +10,12 @@ import asyncio
 import hashlib
 import json
 import os
+import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -245,6 +248,39 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Remove only orphaned generated artifacts (spec no longer exists).",
     )
     clean_p.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Emit structured JSON output to stdout.",
+    )
+
+    migrate_p = subparsers.add_parser(
+        "migrate", help="Plan/apply mechanical source migrations (no model calls)."
+    )
+    migrate_p.add_argument(
+        "--root",
+        type=str,
+        default=None,
+        help="Project root (defaults to searching upward for jaunt.toml).",
+    )
+    migrate_p.add_argument("--config", type=str, default=None, help="Path to jaunt.toml.")
+    migrate_p.add_argument(
+        "--apply",
+        action="store_true",
+        help="Execute the migrations (default: plan only).",
+    )
+    migrate_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Apply even when the git working tree is dirty.",
+    )
+    migrate_p.add_argument(
+        "--allow-newly-governed",
+        action="store_true",
+        dest="allow_newly_governed",
+        help="Also rewrite ungoverned legacy stub bodies that would create new specs.",
+    )
+    migrate_p.add_argument(
         "--json",
         action="store_true",
         dest="json_output",
@@ -1997,6 +2033,399 @@ def cmd_clean(args: argparse.Namespace) -> int:
             }
         )
 
+    return EXIT_OK
+
+
+@dataclass(frozen=True, slots=True)
+class _BuildDiscoveryContext:
+    package_dir: Path
+    specs: dict["SpecRef", "SpecEntry"]
+    spec_graph: dict["SpecRef", set["SpecRef"]]
+    module_dag: dict[str, set[str]]
+    module_specs: dict[str, list["SpecEntry"]]
+    header_fields_by_module: dict[str, dict[str, object]]
+
+
+def _discover_build_context(
+    root: Path, cfg: JauntConfig, args: argparse.Namespace
+) -> _BuildDiscoveryContext:
+    _maybe_load_dotenv(root)
+    _sync_generated_dir_env(cfg)
+    include_target_tests = _effective_include_target_tests(cfg, args)
+    build_instructions = _effective_build_instructions(cfg, args)
+    source_dirs = [root / sr for sr in cfg.paths.source_roots]
+    package_dir = next((d for d in source_dirs if d.exists()), None)
+    if package_dir is None:
+        raise JauntConfigError("No existing source_roots to build into.")
+
+    _prepend_sys_path([*source_dirs, root])
+
+    from jaunt import builder, discovery, registry
+    from jaunt.deps import build_spec_graph, collapse_to_module_dag, find_cycles
+    from jaunt.digest import legacy_module_digest
+    from jaunt.generation_fingerprint import generation_fingerprint
+    from jaunt.module_api import module_api_digest
+    from jaunt.module_contract import group_test_entries_by_target_module
+
+    registry.clear_registries()
+    modules = discovery.discover_modules(
+        roots=[d for d in source_dirs if d.exists()],
+        exclude=[],
+        generated_dir=cfg.paths.generated_dir,
+    )
+    discovery.evict_modules_for_import(
+        module_names=modules,
+        roots=[d for d in source_dirs if d.exists()],
+    )
+    discovery.import_and_collect(modules, kind="magic")
+    static_targeted_test_entries = (
+        _discover_static_targeted_test_entries(root=root, cfg=cfg) if include_target_tests else []
+    )
+
+    specs = dict(registry.get_magic_registry())
+    infer_default = bool(cfg.build.infer_deps) and not bool(getattr(args, "no_infer_deps", False))
+    spec_graph = build_spec_graph(specs, infer_default=infer_default)
+    cycles = find_cycles(spec_graph)
+    if cycles:
+        raise JauntDependencyCycleError(
+            "Dependency cycle detected: "
+            + ", ".join(" -> ".join(str(s) for s in c) for c in cycles)
+        )
+    module_dag = collapse_to_module_dag(spec_graph)
+    module_specs = registry.get_specs_by_module("magic")
+
+    build_generation_fingerprint = generation_fingerprint(
+        cfg,
+        kind="build",
+        build_instructions=build_instructions,
+        include_target_tests=include_target_tests,
+    )
+    targeted_test_entries = group_test_entries_by_target_module(static_targeted_test_entries)
+
+    try:
+        module_digest_fn = builder.module_digest
+    except AttributeError:
+        from jaunt.digest import module_digest as module_digest_fn
+
+    header_fields_by_module: dict[str, dict[str, object]] = {}
+    for module_name, entries in sorted(module_specs.items()):
+        expected, _errs = builder._build_expected_names(entries)
+        wcc = builder._whole_class_context(
+            entries,
+            specs=specs,
+            package_dir=package_dir,
+            generated_dir=cfg.paths.generated_dir,
+        )
+        module_context = builder.build_module_context_artifacts(
+            module_name=module_name,
+            entries=entries,
+            expected_names=expected,
+            module_specs=module_specs,
+            module_dag=module_dag,
+            package_dir=package_dir,
+            generated_dir=cfg.paths.generated_dir,
+            build_instructions=build_instructions,
+            targeted_test_entries=targeted_test_entries,
+            base_contract_block=wcc.base_contract_block,
+            whole_class_contract_block=wcc.whole_class_contract_block,
+            inherited_api_block=wcc.inherited_api_block,
+        )
+        fields: dict[str, object] = {
+            "tool_version": builder._tool_version(),
+            "kind": "build",
+            "source_module": module_name,
+            "module_digest": module_digest_fn(module_name, entries, specs, spec_graph),
+            "legacy_module_digest": legacy_module_digest(module_name, entries, specs, spec_graph),
+            "generation_fingerprint": build_generation_fingerprint,
+            "module_context_digest": module_context.digest,
+            "module_api_digest": module_api_digest(entries),
+            "spec_refs": [str(e.spec_ref) for e in entries],
+        }
+        if wcc.base_api_digest:
+            fields["base_api_digest"] = wcc.base_api_digest
+        header_fields_by_module[module_name] = fields
+
+    return _BuildDiscoveryContext(
+        package_dir=package_dir,
+        specs=specs,
+        spec_graph=spec_graph,
+        module_dag=module_dag,
+        module_specs=module_specs,
+        header_fields_by_module=header_fields_by_module,
+    )
+
+
+def _action_json(action, root: Path) -> dict[str, str]:
+    try:
+        path = str(action.path.resolve().relative_to(root.resolve()))
+    except ValueError:
+        path = str(action.path)
+    return {
+        "migration": action.migration_id,
+        "path": path,
+        "module": action.module,
+        "symbol": action.symbol,
+        "kind": action.kind,
+        "classification": action.classification,
+        "description": action.description,
+    }
+
+
+def _is_dirty_worktree(root: Path) -> bool:
+    try:
+        proc = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return False
+    if proc.returncode != 0:
+        return False
+    return bool(proc.stdout.strip())
+
+
+def _reemit_stub_for_module(
+    *,
+    module_name: str,
+    entries: list["SpecEntry"],
+    package_dir: Path,
+    generated_dir: str,
+    tool_version: str,
+) -> str | None:
+    from jaunt import builder, header, paths, stub_emitter
+
+    gen_source = builder._read_generated(package_dir, generated_dir, module_name)
+    if gen_source is None:
+        return None
+    expected, _ = builder._build_expected_names(entries)
+    spec_source = Path(entries[0].source_file).read_text(encoding="utf-8")
+    stub_path = stub_emitter.stub_path_for_source(entries[0].source_file)
+    if stub_path.exists() and not stub_emitter.is_jaunt_stub(stub_path):
+        return None
+    stub_header = header.format_stub_header(
+        tool_version=tool_version,
+        source_module=module_name,
+        generated_digest=stub_emitter.generated_content_digest(gen_source),
+        inputs_digest=stub_emitter.stub_inputs_digest(spec_source, gen_source),
+    )
+    new_stub = stub_emitter.format_stub_best_effort(
+        stub_emitter.build_stub_source(
+            spec_source,
+            gen_source,
+            set(expected),
+            stub_header,
+            generated_module=paths.spec_module_to_generated_module(
+                module_name, generated_dir=generated_dir
+            ),
+        )
+    )
+    if stub_path.exists() and stub_path.read_text(encoding="utf-8") == new_stub:
+        return str(stub_path)
+    stub_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        dir=str(stub_path.parent),
+        prefix=".jaunt-stub-tmp-",
+        suffix=".pyi",
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(new_stub)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, stub_path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+    return str(stub_path)
+
+
+def cmd_migrate(args: argparse.Namespace) -> int:
+    json_mode = _is_json_mode(args)
+    try:
+        root, cfg = _load_config(args)
+        ctx = _discover_build_context(root, cfg, args)
+    except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError, KeyError) as e:
+        _print_error(e)
+        if json_mode:
+            _emit_json({"command": "migrate", "ok": False, "error": str(e)})
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    from jaunt import migrate
+
+    governed_symbols_by_module = {
+        module: {entry.qualname.split(".", 1)[0] for entry in entries}
+        for module, entries in ctx.module_specs.items()
+    }
+    source_modules: dict[Path, set[str]] = {}
+    source_governed: dict[Path, set[str]] = {}
+    for module, entries in ctx.module_specs.items():
+        for entry in entries:
+            source_file = Path(entry.source_file)
+            source_modules.setdefault(source_file, set()).add(module)
+            source_governed.setdefault(source_file, set()).update(
+                governed_symbols_by_module[module]
+            )
+
+    legacy_actions = []
+    for source_file in sorted(source_modules, key=lambda p: str(p)):
+        module = sorted(source_modules[source_file])[0]
+        legacy_actions.extend(
+            migrate.plan_legacy_stub_rewrites(
+                source_file=source_file,
+                module=module,
+                governed_symbols=source_governed[source_file],
+            )
+        )
+    stub_actions = migrate.plan_stub_reemissions(
+        module_specs=ctx.module_specs,
+        package_dir=ctx.package_dir,
+        generated_dir=cfg.paths.generated_dir,
+    )
+    migration_order = {
+        migrate.LEGACY_STUB_MIGRATION_ID: 0,
+        migrate.STUB_REEMIT_MIGRATION_ID: 1,
+    }
+    actions = sorted(
+        [*legacy_actions, *stub_actions],
+        key=lambda a: (migration_order.get(a.migration_id, 99), str(a.path), a.module, a.symbol),
+    )
+
+    if not bool(getattr(args, "apply", False)):
+        if json_mode:
+            _emit_json(
+                {
+                    "command": "migrate",
+                    "ok": True,
+                    "applied": False,
+                    "actions": [_action_json(a, root) for a in actions],
+                }
+            )
+        elif not actions:
+            print("No pending migrations.")
+        else:
+            print("Pending migrations:")
+            for action in actions:
+                print(action.description)
+        return EXIT_OK
+
+    if not bool(getattr(args, "force", False)) and _is_dirty_worktree(root):
+        _eprint("error: refusing to migrate; git working tree is dirty (use --force)")
+        if json_mode:
+            _emit_json(
+                {
+                    "command": "migrate",
+                    "ok": False,
+                    "applied": False,
+                    "error": "dirty working tree",
+                }
+            )
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    applied_actions = []
+    skipped_actions = []
+    restamp_rewrite_modules: set[str] = set()
+    newly_governed_rewrite_modules: set[str] = set()
+    for action in actions:
+        if action.migration_id == migrate.LEGACY_STUB_MIGRATION_ID:
+            if action.classification == "newly-governs" and not bool(
+                getattr(args, "allow_newly_governed", False)
+            ):
+                skipped_actions.append(action)
+                if not json_mode:
+                    print(
+                        "SKIPPED (would newly govern; pass --allow-newly-governed): "
+                        f"{action.description}"
+                    )
+                continue
+            migrate.apply_stub_rewrite(action)
+            applied_actions.append(action)
+            if not json_mode:
+                rel = _action_json(action, root)["path"]
+                print(f"rewrote {rel}: {action.module}.{action.symbol}")
+            if action.classification == "newly-governs":
+                newly_governed_rewrite_modules.add(action.module)
+            else:
+                restamp_rewrite_modules.add(action.module)
+        elif action.migration_id == migrate.STUB_REEMIT_MIGRATION_ID:
+            applied_actions.append(action)
+
+    try:
+        ctx_after = _discover_build_context(root, cfg, args)
+    except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError, KeyError) as e:
+        _print_error(e)
+        if json_mode:
+            _emit_json({"command": "migrate", "ok": False, "applied": True, "error": str(e)})
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    from jaunt import builder
+
+    restamped_modules: set[str] = set()
+    needs_rebuild_modules: set[str] = set()
+    for module in sorted(restamp_rewrite_modules - newly_governed_rewrite_modules):
+        entries = ctx_after.module_specs.get(module)
+        header_fields = ctx_after.header_fields_by_module.get(module)
+        if not entries or header_fields is None:
+            needs_rebuild_modules.add(module)
+            continue
+        outcome = builder.refreeze_module(
+            package_dir=ctx_after.package_dir,
+            generated_dir=cfg.paths.generated_dir,
+            module_name=module,
+            header_fields=builder._header_fields_with_spec_digests(header_fields, entries),
+            snapshots=builder._compute_snapshots(entries),
+        )
+        if outcome.needs_rebuild:
+            needs_rebuild_modules.add(module)
+            if not json_mode:
+                print(f"needs build {module}")
+        else:
+            restamped_modules.add(module)
+            if not json_mode:
+                print(f"re-stamped {module}")
+
+    reemitted_paths: list[str] = []
+    if cfg.build.emit_stubs:
+        reemit_modules = restamped_modules | {
+            action.module
+            for action in applied_actions
+            if action.migration_id == migrate.STUB_REEMIT_MIGRATION_ID
+        }
+        for module in sorted(reemit_modules):
+            entries = ctx_after.module_specs.get(module)
+            if not entries:
+                continue
+            stub = _reemit_stub_for_module(
+                module_name=module,
+                entries=entries,
+                package_dir=ctx_after.package_dir,
+                generated_dir=cfg.paths.generated_dir,
+                tool_version=builder._tool_version(),
+            )
+            if stub is None:
+                continue
+            reemitted_paths.append(stub)
+            if not json_mode:
+                try:
+                    rel = str(Path(stub).resolve().relative_to(root.resolve()))
+                except ValueError:
+                    rel = stub
+                print(f"re-emitted {rel}")
+
+    if json_mode:
+        _emit_json(
+            {
+                "command": "migrate",
+                "ok": True,
+                "applied": True,
+                "actions": [_action_json(a, root) for a in applied_actions],
+                "skipped": [_action_json(a, root) for a in skipped_actions],
+            }
+        )
     return EXIT_OK
 
 
@@ -4279,6 +4708,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_init(args)
     if args.command == "clean":
         return cmd_clean(args)
+    if args.command == "migrate":
+        return cmd_migrate(args)
     if args.command == "status":
         return cmd_status(args)
     if args.command == "log":

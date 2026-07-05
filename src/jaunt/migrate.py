@@ -52,6 +52,39 @@ def plan_legacy_stub_rewrites(
     return actions
 
 
+def plan_stub_reemissions(
+    *, module_specs: dict[str, list], package_dir: Path, generated_dir: str
+) -> list[MigrationAction]:
+    from jaunt import builder, stub_emitter
+
+    actions: list[MigrationAction] = []
+    for module in sorted(module_specs):
+        entries = module_specs[module]
+        if not entries:
+            continue
+        gen_source = builder._read_generated(package_dir, generated_dir, module)
+        if gen_source is None:
+            continue
+        source_file = entries[0].source_file
+        if (
+            stub_emitter.stub_staleness(source_file=source_file, generated_source=gen_source)
+            is None
+        ):
+            continue
+        actions.append(
+            MigrationAction(
+                migration_id=STUB_REEMIT_MIGRATION_ID,
+                path=stub_emitter.stub_path_for_source(source_file),
+                module=module,
+                symbol="",
+                kind="reemit-stub",
+                classification="re-stamp",
+                description=f"{module}: re-emit .pyi stub (format/version drift) [re-stamp (free)]",
+            )
+        )
+    return actions
+
+
 def apply_stub_rewrite(action: MigrationAction) -> None:
     with action.path.open(encoding="utf-8", newline="") as f:
         source = f.read()
