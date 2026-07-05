@@ -288,16 +288,33 @@ def _evaluate_mutant_killed(pure: "CaseBlocks", ns: dict[str, object]) -> bool:
     mutation can turn a terminating body into one that never returns (e.g.
     dropping ``if cur.parent == cur: break`` from a filesystem-walk). Evaluating
     such a mutant in-process with no bound would hang ``jaunt reconcile``
-    indefinitely (observed: 100% CPU, no output, no model call). To defend the
-    reconcile loop, when this runs on the interpreter's main thread the whole
-    ``evaluate_cases`` call is bounded by a ``_MUTANT_EVAL_TIMEOUT_S``-second
-    wall-clock alarm (``signal.setitimer(ITIMER_REAL, ...)``). A mutant that
+    indefinitely (observed: 100% CPU, no output, no model call).
+
+    To defend the reconcile loop, the ``evaluate_cases`` call is bounded by a
+    ``_MUTANT_EVAL_TIMEOUT_S``-second wall-clock alarm
+    (``signal.setitimer(ITIMER_REAL, ...)``) — but ONLY when the alarm is
+    actually available: ``hasattr(signal, "SIGALRM")`` (false on Windows, where
+    ``SIGALRM``/``ITIMER_REAL`` do not exist) AND the call runs on the
+    interpreter's main thread (``signal.setitimer`` and signal handlers are
+    main-thread-only). When either condition fails, evaluation runs UNBOUNDED —
+    the pre-branch behavior — so non-main-thread and Windows callers lose the
+    runaway-mutant bound and a non-terminating mutant can hang them. Reconcile
+    drives strength scoring on the main thread of a POSIX process, so it keeps
+    the bound.
+
+    In the bounded path the timeout counts the mutant as killed: a mutant that
     exceeds the budget diverges observably from the original (which terminates
-    promptly), so a timeout counts as killed. The timeout signal is raised as a
-    ``BaseException`` subclass so ``evaluate_cases``'s per-case ``except
-    Exception`` cannot swallow it and let a later hanging case escape the bound.
-    Off the main thread the alarm is unavailable, so evaluation runs unbounded
-    (best effort) — reconcile drives strength scoring on the main thread.
+    promptly). The trade-off is that a merely slow-but-surviving mutant (one the
+    cases would NOT detect, but whose evaluation happens to exceed the budget)
+    is also scored as killed — this is a deliberate defense against
+    non-terminating mutants, accepting a small over-count over an unbounded
+    hang. The timeout signal is raised as a ``BaseException`` subclass so
+    ``evaluate_cases``'s per-case ``except Exception`` cannot swallow it and let
+    a later hanging case escape the bound.
+
+    Both the previous ``SIGALRM`` handler and the previous ``ITIMER_REAL``
+    interval-timer state are saved before arming and restored in a ``finally``,
+    so bounding one mutant never clobbers an alarm a caller had already armed.
     """
     import signal
     import threading
@@ -307,7 +324,7 @@ def _evaluate_mutant_killed(pure: "CaseBlocks", ns: dict[str, object]) -> bool:
     def _killed() -> bool:
         return bool(evaluate_cases(pure, namespace=dict(ns)))
 
-    if threading.current_thread() is not threading.main_thread():
+    if not hasattr(signal, "SIGALRM") or threading.current_thread() is not threading.main_thread():
         return _killed()
 
     class _MutantTimeout(BaseException):
@@ -316,7 +333,8 @@ def _evaluate_mutant_killed(pure: "CaseBlocks", ns: dict[str, object]) -> bool:
     def _on_alarm(_signum: int, _frame: object) -> None:
         raise _MutantTimeout()
 
-    previous = signal.getsignal(signal.SIGALRM)
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
     signal.signal(signal.SIGALRM, _on_alarm)
     signal.setitimer(signal.ITIMER_REAL, _MUTANT_EVAL_TIMEOUT_S)
     try:
@@ -324,8 +342,8 @@ def _evaluate_mutant_killed(pure: "CaseBlocks", ns: dict[str, object]) -> bool:
     except _MutantTimeout:
         return True
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous)
+        signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+        signal.signal(signal.SIGALRM, previous_handler)
 
 
 def compute_case_strength(
