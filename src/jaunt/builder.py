@@ -525,29 +525,40 @@ async def plan_refreeze_or_rebuild(
             header_fields_by_module.get(module_name, {}),
             entries,
         )
-        snapshots = _compute_snapshots(entries)
         existing = _read_generated(package_dir, generated_dir, module_name)
         if existing is None:
             rebuild.add(module_name)
             continue
 
+        # Both deterministic re-stamp routes below only *classify* here -- they
+        # never write. The header re-stamp is deferred to the post-expansion
+        # loop at the bottom so a module pulled back into the final rebuild set
+        # (e.g. a dependent of a meaningfully-changed upstream) is never left
+        # wearing a fresh header over a stale body when that rebuild later
+        # fails. Writing before dependent expansion produced exactly that
+        # fresh-and-green-while-broken hazard (post-review: refreeze write
+        # ordering). The gate-equivalent route already deferred this way; these
+        # two now match it.
         scheme = extract_digest_scheme(existing)
-        if scheme is None or scheme < 2:
-            if _migration_header_matches(existing, header_fields):
-                outcome = refreeze_module(
-                    package_dir=package_dir,
-                    generated_dir=generated_dir,
-                    module_name=module_name,
-                    header_fields=header_fields,
-                    snapshots=snapshots,
-                    validate_body=validators.get(module_name),
-                )
-                if outcome.needs_rebuild:
-                    failed_refreeze.add(module_name)
-                    rebuild.add(module_name)
-                elif outcome.refrozen:
-                    refrozen.add(module_name)
-                continue
+        if (scheme is None or scheme < 2) and _migration_header_matches(existing, header_fields):
+            # Legacy header over a byte-identical body: a deterministic scheme-2
+            # re-stamp. Defer the write (see above).
+            continue
+
+        # Fingerprint-only drift (e.g. a build-prompt template edit) restales
+        # the module without touching any spec. When every spec snapshot is
+        # unchanged (`classify_change == "none"`), the new generation
+        # fingerprint can be re-stamped over the untouched body deterministically
+        # -- no semantic-gate/model call and no backend rebuild (finding 27).
+        # Defer the write (see above).
+        relpath = _generated_relpath(module_name, generated_dir=generated_dir)
+        old_snapshots = read_contract_sidecar(sidecar_path(package_dir / relpath))
+        if entries and all(
+            classify_change(old_snapshots.get(str(entry.spec_ref)), entry) == "none"
+            for entry in entries
+        ):
+            continue
+
         gate_modules.add(module_name)
 
     meaningful_modules: set[str] = set()
@@ -1643,6 +1654,8 @@ async def run_build(
         for module_name in sorted(modules):
             relpath = _generated_relpath(module_name, generated_dir=generated_dir)
             gen_path = package_dir / relpath
+            module_entries = module_specs.get(module_name, [])
+            spec_source_file = Path(module_entries[0].source_file) if module_entries else None
             try:
                 source = gen_path.read_text(encoding="utf-8")
             except FileNotFoundError:
@@ -1663,6 +1676,7 @@ async def run_build(
                 first_party_modules=first_party_modules,
                 check_imports=True,
                 import_allowlist=generated_import_allowlist,
+                spec_source_file=spec_source_file,
             )
             if errs:
                 failures[module_name] = errs
@@ -2070,6 +2084,7 @@ async def run_build(
             generated_module = paths.spec_module_to_generated_module(
                 module_name, generated_dir=generated_dir
             )
+            spec_source_file = Path(component_entries[0].source_file) if component_entries else None
 
             def _validate_imports(source: str) -> list[str]:
                 if not check_generated_imports:
@@ -2085,6 +2100,7 @@ async def run_build(
                     first_party_modules=first_party_modules,
                     check_imports=True,
                     import_allowlist=generated_import_allowlist,
+                    spec_source_file=spec_source_file,
                 )
 
             def _validate_candidate(source: str) -> list[str]:
@@ -2099,6 +2115,7 @@ async def run_build(
                     first_party_modules=first_party_modules,
                     check_imports=check_generated_imports,
                     import_allowlist=generated_import_allowlist,
+                    spec_source_file=spec_source_file,
                 )
                 if errs:
                     return errs
@@ -2174,6 +2191,7 @@ async def run_build(
                 first_party_modules=first_party_modules,
                 check_imports=check_generated_imports,
                 import_allowlist=generated_import_allowlist,
+                spec_source_file=(Path(entries[0].source_file) if entries else None),
             )
             if errs:
                 return errs

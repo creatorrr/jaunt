@@ -126,7 +126,10 @@ max_hits = 8
 Notes on a few keys:
 
 - `paths.source_roots`: the CLI picks the *first existing* source root as the
-  output base for generated build modules.
+  output base for generated build modules. If your governed specs live under a
+  later root, or span more than one root, `jaunt build`/`check` stop with a
+  config error (exit `2`) rather than route output to the wrong package — see
+  [Upgrading 1.5.1](/docs/reference/upgrading#151).
 - `prompts.*` are treated as *file paths* read at runtime, not inline text. Copy
   a default from `src/jaunt/prompts/` and point at your edited copy.
 - `[llm]` is informational under the Codex engine. Codex handles its own
@@ -140,6 +143,33 @@ Deeper coverage lives with each feature: [`[context]`](/docs/concepts/repo-conte
 [`[contract]`](/docs/guides/contract-mode), and
 [`[daemon]`](/docs/guides/daemon). Version-to-version defaults changes are
 collected in [Upgrading](/docs/reference/upgrading).
+
+## The generated-import allowlist
+
+`[build] check_generated_imports` (on by default) rejects any top-level import
+in generated code that is not the standard library, a first-party module, or a
+declared project dependency. It catches the model reaching for a package you
+never installed. `generated_import_allowlist` is the escape hatch: distribution
+names on this list are permitted even when no pyproject declares them.
+
+```toml
+[build]
+generated_import_allowlist = ["whenever"]
+```
+
+Before 1.5.1 you needed this more often than you should have. In a uv workspace
+with `jaunt.toml` at the repo root, the validator resolved declared dependencies
+only from the root pyproject. A dependency declared in the *owning package's*
+pyproject — the normal place to declare it — was invisible, so a correct
+`import whenever` was rejected as undeclared and the allowlist was the only way
+through. 1.5.1 fixes the resolution: Jaunt now reads the pyproject that owns the
+spec's own source file as well as the config-root pyproject, so a dependency
+declared at either level resolves on its own.
+
+So you rarely need the allowlist now. Reach for it only when a real import
+belongs to a distribution that no pyproject declares — a namespace package, a
+vendored module, an implicit transitive dep you import on purpose. The error
+message names it as one of the fixes when generation trips the check.
 
 ## Strict validation
 

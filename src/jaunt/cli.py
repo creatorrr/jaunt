@@ -2195,6 +2195,9 @@ def _discover_build_context(
         )
     module_dag = collapse_to_module_dag(spec_graph)
     module_specs = registry.get_specs_by_module("magic")
+    from jaunt.status_core import enforce_source_root_routing
+
+    enforce_source_root_routing(source_dirs=source_dirs, module_specs=module_specs)
 
     build_generation_fingerprint = generation_fingerprint(
         cfg,
@@ -3479,6 +3482,9 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             )
 
         module_specs = registry.get_specs_by_module("magic")
+        from jaunt.status_core import enforce_source_root_routing
+
+        enforce_source_root_routing(source_dirs=source_dirs, module_specs=module_specs)
 
         from jaunt.cost import CostTracker
 
@@ -3886,6 +3892,12 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
                 infer_default=bool(cfg.build.infer_deps) and (not bool(args.no_infer_deps)),
             )
             build_magic_module_dag = collapse_to_module_dag(build_magic_spec_graph)
+            # `--no-build` imports specs directly and reads artifacts through the
+            # first-existing source root -- the same multi-root routing trap the
+            # build path gates. Apply the identical gate here (finding 28).
+            from jaunt.status_core import enforce_source_root_routing
+
+            enforce_source_root_routing(source_dirs=source_dirs, module_specs=build_module_specs)
         else:
             # cmd_build() already imported and registered magic specs.
             build_magic_specs = dict(registry.get_magic_registry())
