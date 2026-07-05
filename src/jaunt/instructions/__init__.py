@@ -49,7 +49,9 @@ COMMANDS: list[tuple[str, str]] = [
 # Real subcommands intentionally NOT surfaced in the primer (advanced / rare).
 # The drift-guard test requires every real subcommand to be in COMMANDS or here,
 # so adding a new command forces an explicit decision.
-OMITTED_COMMANDS: frozenset[str] = frozenset({"tree", "eval", "cache", "skill", "skills"})
+OMITTED_COMMANDS: frozenset[str] = frozenset(
+    {"tree", "eval", "cache", "skill", "skills", "install-claude-plugin"}
+)
 
 EXIT_CODES: list[tuple[int, str]] = [
     (0, "Success."),

@@ -7,6 +7,15 @@ For Claude Code specifically, Jaunt has a first-party 1.0.0 plugin that packages
 
 ## Install
 
+The one-liner runs both steps for you (add `--local` from a clone's repo root):
+
+```bash
+uvx jaunt install-claude-plugin
+# or, inside the project: uv run jaunt install-claude-plugin
+```
+
+It is idempotent — a re-run reports the marketplace and plugin as already present rather than failing. Both underlying commands are also available directly.
+
 Install from the GitHub marketplace first:
 
 ```bash

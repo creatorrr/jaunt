@@ -346,6 +346,8 @@ jaunt jobs wait               # Block until daemon jobs finish (0 green incl. PR
 jaunt log                     # Tail the JAUNT_LOG change journal (-n N, --module X)
 jaunt guard                   # PreToolUse hook: warn when agents touch __generated__ (see docs/hooks.md)
 
+jaunt install-claude-plugin   # Install the first-party Jaunt plugin into Claude Code (--local to add from this clone; --json)
+
 jaunt watch                   # Auto-rebuild on file changes
 jaunt watch --test            # Build + test on change
 ```
