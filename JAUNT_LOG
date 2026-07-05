@@ -1,3 +1,9 @@
 2026-07-05 20:15Z build    jaunt.migrate — rebuilt
 2026-07-05 20:15Z advisory jaunt.migrate — No `_context/dep_*.pyi` files were present in this trimmed workspace, so dependency API usage was derived from the spec text.
 2026-07-05 20:16Z build    jaunt.heldout — rebuilt
+2026-07-05 20:26Z build    jaunt.contract.cases — rebuilt
+2026-07-05 20:26Z advisory jaunt.contract.cases — Raises-form spec says to strip a single trailing "." but specifies `exc.strip().rstrip(".")`, which strips all trailing periods; implementation follows the specified expression.
+2026-07-05 20:33Z build    jaunt.contract.strength — rebuilt
+2026-07-05 20:33Z advisory jaunt.contract.strength — iter_mutants spec is slightly ambiguous: it says to yield every helper-produced string, but also says every yielded value is distinct; the implementation preserves phase order while de-duplicating exact duplicate source strings.
+2026-07-05 20:37Z refreeze jaunt.contract.cases — cosmetic (gate: EQUIVALENT)
+2026-07-05 20:38Z refreeze jaunt.contract.strength — cosmetic (gate: EQUIVALENT)
