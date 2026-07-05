@@ -259,6 +259,43 @@ async def fetch_user_profile(user_id: str) -> dict[str, object]:
     ...
 ```
 
+## Cross-referencing siblings: inline the shared rule
+
+A spec is generated with its own source and its declared dependencies in
+context — not the docstrings of its neighbors in the same file. So if one
+spec's docstring leans on another's ("does step 1 of `parse_temporal_reference`
+first"), the model never sees that referenced text and has to guess. Two fixes:
+declare the neighbor as a dep so its generated API comes along, or, for a rule
+that spans several specs, lift it into the module default:
+
+```python
+jaunt.magic_module(
+    __name__,
+    prompt="All timestamps are UTC. Reject naive datetimes with ValueError.",
+)
+```
+
+The `prompt=` reaches every governed spec in the file, so a rule that would
+otherwise live in one docstring and be invisible to the rest now applies
+everywhere. This is the pattern to prefer over cross-referencing prose.
+
+## Workspaces: one jaunt project per package
+
+In a uv workspace, give each adopted package its own `jaunt.toml` with
+`source_roots = ["."]` at that package's import root, and run jaunt from there.
+Everything that resolves against the first source root then lands correctly:
+where generated files are written, what `jaunt check` reads, and which pyproject
+the undeclared-import validator consults. A single root config that lists more
+than one source root is a hard error as of 1.5.1 — jaunt used to route all
+output to the first existing root and silently break the others.
+
+One thing to watch across split configs: keep the `[codex]` block and
+`[build] instructions` byte-identical in every package's `jaunt.toml`. Both feed
+the generation fingerprint, so a stray difference restales — and re-bills —
+every module in that project. Shared guidance now lives once per project rather
+than once per repo; a config include would remove the footgun, but it does not
+exist yet.
+
 ## If the output is garbage
 
 Don't fix the generated file. Fix the spec.

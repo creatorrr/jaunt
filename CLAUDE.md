@@ -247,6 +247,20 @@ like `[gate]` or key like `reasoning-effort` fails loudly instead of being
 silently ignored. `jaunt instructions` (run before a `jaunt.toml` exists) prints
 the full annotated config schema.
 
+**Multi-root routing gate (1.5.1).** Jaunt routes generated output to the first
+existing `source_roots` entry. If governed specs span more than one root, or all
+live under a root that is not the first existing one, `build`/`check`/`status`/
+`migrate` fail with a `JauntConfigError` (exit 2) rather than build into the
+wrong package (FEEDBACK finding 28). Owning root is resolved by longest-path
+containment, so nested defaults (`["src", "."]`) with specs under `src/` pass.
+The fix is one jaunt project per package (`jaunt.toml` with `source_roots=["."]`
+at the package's import root). **Generated-import policy (1.5.1):** the build
+prompt sanctions the stdlib and any installed distribution the spec module
+imports or the owning package declares (imported from its real module), and the
+undeclared-import validator resolves declared deps from the pyproject owning the
+spec's source file as well as the config-root one. `build.generated_import_allowlist`
+is the escape hatch for a dep no pyproject declares (rarely needed post-1.5.1).
+
 Every build prompt opens with a static **Jaunt preamble** (`src/jaunt/prompts/codex_preamble.md`)
 that frames what Jaunt is and states the signature/docstring contract. It is always-on and
 adds no model call. Its content is part of the build freshness fingerprint (like

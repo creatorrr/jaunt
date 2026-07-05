@@ -12,6 +12,41 @@ built modules — your generated code stays fresh across the upgrade. Anything
 that would restale built modules lands in a minor version and is called out on
 this page.
 
+## 1.5.1
+
+Patch release from the sixth adoption-feedback wave, focused on uv workspaces.
+No generated body changes, and the one restale it causes costs nothing to clear.
+
+- **Modules read `stale (fingerprint)` after the upgrade — the next build
+  re-stamps them all for free.** The build prompt's import rule changed, and the
+  prompt is a fingerprint input, so every built module reports stale once. Their
+  spec sources are unchanged, so `jaunt build` resolves each through the
+  re-stamp path: it writes the new fingerprint over the existing body with no
+  semantic-gate call and no `gpt-5.5` call. `jaunt check` counts fingerprint
+  staleness as drift and exits `4` until you run that one build and commit the
+  re-stamped headers. `--json` lists the modules under `refrozen`.
+- **Specs that span source roots now stop at a config error instead of building
+  into the wrong package.** Under 1.5.0, a multi-root project (`source_roots`
+  with more than one entry) routed every generated file to the first existing
+  root, which quietly broke packages under the others — `status` and `check`
+  read through the same wrong path, so the tree looked fresh while runtime was
+  broken. 1.5.1 makes that a hard config error (exit `2`) on `build`, `check`,
+  `status`, and `migrate`: it fires when governed specs span more than one root,
+  or when they all live under a root that is not the first existing one (the
+  message tells you to reorder). The adopter-verified fix is one jaunt project
+  per package: put a `jaunt.toml` with `source_roots = ["."]` at each package's
+  import root and run jaunt from there. Nested default roots (`["src", "."]`)
+  with specs under `src/` resolve by longest path and pass untouched.
+- **Generated code may import third-party packages plainly.** The build prompt
+  now sanctions the standard library and any installed distribution that the
+  spec module imports or the owning package declares — imported from its real
+  module, not smuggled in through a duck-typed stand-in or a dynamic import.
+  Paired with it, the undeclared-import validator resolves declared dependencies
+  from the pyproject that owns the spec's source file, not just the config-root
+  one. A workspace dependency declared in its own package's pyproject now passes
+  without an entry in `build.generated_import_allowlist`; see
+  [the allowlist](/docs/reference/config#the-generated-import-allowlist).
+
 ## 1.5
 
 Minor release that closes the adoption-feedback backlog: a codex advisories
