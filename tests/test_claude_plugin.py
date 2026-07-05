@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -12,6 +13,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 PLUGIN = REPO / "jaunt-claude-plugin"
+GUARD = PLUGIN / "scripts" / "guard.sh"
 
 
 def _frontmatter(text: str) -> dict[str, str]:
@@ -59,7 +61,12 @@ def test_hooks_reference_existing_executable_scripts():
     ]
     assert commands, "hooks.json defines no commands"
     for command in commands:
-        for ref in re.findall(r"\$\{CLAUDE_PLUGIN_ROOT\}([^\"' ]+)", command):
+        assert "${CLAUDE_PLUGIN_ROOT}/scripts/" in command, (
+            f"hook command must reference ${{CLAUDE_PLUGIN_ROOT}}/scripts/: {command}"
+        )
+        refs = re.findall(r"\$\{CLAUDE_PLUGIN_ROOT\}(/scripts/[^\"' ]+)", command)
+        assert refs, f"no script reference found in: {command}"
+        for ref in refs:
             script = PLUGIN / ref.lstrip("/")
             assert script.is_file(), f"missing {ref}"
             assert script.stat().st_mode & 0o111, f"not executable: {ref}"
@@ -87,3 +94,74 @@ def test_skills_and_agents_have_frontmatter():
 def test_convert_skill_is_user_invoked_only():
     fields = _frontmatter((PLUGIN / "skills" / "convert" / "SKILL.md").read_text())
     assert fields.get("disable-model-invocation") == "true"
+
+
+_needs_bash = pytest.mark.skipif(shutil.which("bash") is None, reason="bash unavailable")
+
+
+def _fake_jaunt_bin(tmp_path):
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    jaunt = bin_dir / "jaunt"
+    # Consumes the replayed stdin payload and prints a marker so the test can
+    # assert the guard both found jaunt AND piped the payload through.
+    jaunt.write_text("#!/usr/bin/env bash\ncat >/dev/null\necho GUARD_RAN\n")
+    jaunt.chmod(0o755)
+    return bin_dir
+
+
+def _run_guard(payload, *, env=None):
+    return subprocess.run(
+        ["bash", str(GUARD)],
+        input=payload,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+@_needs_bash
+def test_guard_fails_open_on_empty_stdin():
+    result = _run_guard("")
+    assert result.returncode == 0
+    assert result.stdout == ""
+
+
+@_needs_bash
+def test_guard_fails_open_on_garbage_stdin():
+    result = _run_guard("this is not json {[")
+    assert result.returncode == 0
+
+
+@_needs_bash
+def test_guard_runs_jaunt_for_owned_generated_path(tmp_path):
+    # Root dir name contains a space to exercise the word-splitting fix.
+    root = tmp_path / "repo with space"
+    (root / "__generated__").mkdir(parents=True)
+    (root / "jaunt.toml").write_text("version = 1\n")
+    bin_dir = _fake_jaunt_bin(tmp_path)
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "CLAUDE_PROJECT_DIR": str(root),
+    }
+    payload = json.dumps({"tool_input": {"file_path": str(root / "__generated__" / "billing.py")}})
+    result = _run_guard(payload, env=env)
+    assert result.returncode == 0
+    assert "GUARD_RAN" in result.stdout
+
+
+@_needs_bash
+def test_guard_fails_open_when_no_owning_jaunt_toml(tmp_path):
+    root = tmp_path / "no config here"
+    (root / "src").mkdir(parents=True)
+    bin_dir = _fake_jaunt_bin(tmp_path)  # jaunt present but must never be invoked
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "CLAUDE_PROJECT_DIR": str(root),
+    }
+    payload = json.dumps({"tool_input": {"file_path": str(root / "src" / "foo.py")}})
+    result = _run_guard(payload, env=env)
+    assert result.returncode == 0
+    assert "GUARD_RAN" not in result.stdout

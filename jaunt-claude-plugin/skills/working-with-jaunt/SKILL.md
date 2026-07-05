@@ -62,8 +62,9 @@ Until per-module root resolution lands (queued for jaunt 1.6), one jaunt
 project per adopted package — specs spanning multiple source roots are a
 hard exit-2 error (≥1.5.1). The `[codex]` and `[build].instructions` blocks
 must stay **byte-identical** across the repo's jaunt.toml files: both feed
-the generation fingerprint, and drift restales (re-bills) every module in
-that project.
+the generation fingerprint, and drift restales the project — but it
+re-stamps free on the next build when specs are unchanged (only a paired
+structural/prose edit bills).
 
 ## Command cheat sheet
 

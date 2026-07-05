@@ -4,6 +4,26 @@
 # the RIGHT config. Fail-open: any env problem exits 0 (never blocks editing).
 set -u
 
+# Resolve an available timeout wrapper: GNU `timeout`, Homebrew `gtimeout`, or
+# neither (stock macOS) — in which case run the command with no timeout at all
+# rather than 127ing and mis-reporting the tool as missing.
+if command -v timeout >/dev/null 2>&1; then
+  _timeout_bin=timeout
+elif command -v gtimeout >/dev/null 2>&1; then
+  _timeout_bin=gtimeout
+else
+  _timeout_bin=""
+fi
+run_timeout() {
+  local secs="$1"
+  shift
+  if [ -n "$_timeout_bin" ]; then
+    "$_timeout_bin" "$secs" "$@"
+  else
+    "$@"
+  fi
+}
+
 payload=$(cat 2>/dev/null) || exit 0
 [ -z "$payload" ] && exit 0
 
@@ -32,8 +52,8 @@ done
 
 cd "$dir" 2>/dev/null || exit 0
 if command -v jaunt >/dev/null 2>&1; then
-  printf '%s' "$payload" | timeout 8 jaunt guard 2>/dev/null || true
+  printf '%s' "$payload" | run_timeout 8 jaunt guard 2>/dev/null || true
 else
-  printf '%s' "$payload" | timeout 8 uv run --no-sync jaunt guard 2>/dev/null || true
+  printf '%s' "$payload" | run_timeout 8 uv run --no-sync jaunt guard 2>/dev/null || true
 fi
 exit 0

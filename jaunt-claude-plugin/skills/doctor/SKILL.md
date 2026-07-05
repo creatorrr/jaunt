@@ -30,7 +30,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/doctor.sh"
 | `jaunt: unavailable` | Jaunt is not runnable from the project env. | `uv sync` in that project. |
 | `== projects` shows STALE | Classify the bill: structural/stub = paid rebuild, prose = ~$0 refreeze, fingerprint = free re-stamp. | Run `/jaunt:build` from the owning dir. |
 | orphans | Generated artifacts exist for specs that are gone. | `uv run jaunt clean --orphans`. |
-| `== config drift` DRIFT | `[codex]` or `build.instructions` differs; drift restales/re-bills every module in the drifted project. | Make the `[codex]` and `build.instructions` blocks byte-identical BEFORE building. |
+| `== config drift` DRIFT | `[codex]` or `build.instructions` differs; drift restales the project but re-stamps free on the next build when specs are unchanged (only a paired structural/prose edit bills). | Make the `[codex]` and `build.instructions` blocks byte-identical BEFORE building. |
 | duplicate guard hook | The plugin ships the PreToolUse guard prewired. | Delete the hand-rolled `jaunt guard` entry from `.claude/settings.json`. |
 
 Doctor never spends money; it tells you what a build would bill. Fix drift and orphans first, then build deliberately.

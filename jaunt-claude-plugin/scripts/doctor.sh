@@ -4,16 +4,36 @@
 set -u
 root="${CLAUDE_PROJECT_DIR:-$PWD}"
 
+# Resolve an available timeout wrapper: GNU `timeout`, Homebrew `gtimeout`, or
+# neither (stock macOS) — in which case run the command with no timeout at all
+# rather than 127ing and mis-reporting the tool as missing.
+if command -v timeout >/dev/null 2>&1; then
+  _timeout_bin=timeout
+elif command -v gtimeout >/dev/null 2>&1; then
+  _timeout_bin=gtimeout
+else
+  _timeout_bin=""
+fi
+run_timeout() {
+  local secs="$1"
+  shift
+  if [ -n "$_timeout_bin" ]; then
+    "$_timeout_bin" "$secs" "$@"
+  else
+    "$@"
+  fi
+}
+
 echo "== environment"
 if command -v codex >/dev/null 2>&1; then
-  codex_version=$(timeout 30 codex --version 2>&1)
+  codex_version=$(run_timeout 30 codex --version 2>&1)
   codex_version_status=$?
   if [ "$codex_version_status" -eq 0 ] && [ -n "$codex_version" ]; then
     echo "- codex: $codex_version"
   else
     echo "- codex: unavailable"
   fi
-  codex_auth=$(timeout 30 codex login status 2>&1)
+  codex_auth=$(run_timeout 30 codex login status 2>&1)
   codex_auth_status=$?
   codex_auth_line=$(printf '%s\n' "$codex_auth" | python3 -c '
 import sys
@@ -33,7 +53,7 @@ else
   echo "- codex auth: not authenticated (run 'codex login')"
 fi
 
-jaunt_version=$(cd "$root" 2>/dev/null && timeout 30 uv run --no-sync jaunt --version 2>&1)
+jaunt_version=$(cd "$root" 2>/dev/null && run_timeout 30 uv run --no-sync jaunt --version 2>&1)
 jaunt_version_status=$?
 if [ "$jaunt_version_status" -eq 0 ] && [ -n "$jaunt_version" ]; then
   echo "- jaunt: $jaunt_version"
@@ -54,7 +74,7 @@ else
   total=$(printf '%s\n' "$configs" | wc -l | tr -d ' ')
   limit=12
   count=0
-  for cfg in $configs; do
+  while IFS= read -r cfg; do
     count=$((count + 1))
     if [ "$count" -gt "$limit" ]; then
       remaining=$((total - limit))
@@ -63,7 +83,7 @@ else
     fi
     dir=$(dirname "$cfg")
     rel="${dir#"$root"}"; rel="${rel#/}"; [ -z "$rel" ] && rel="."
-    out=$(cd "$dir" && timeout 30 uv run --no-sync jaunt status --json --progress none 2>/dev/null || true)
+    out=$(cd "$dir" && run_timeout 30 uv run --no-sync jaunt status --json --progress none 2>/dev/null || true)
     if [ -z "$out" ]; then
       echo "- $rel: status unavailable (run 'uv run jaunt status' there manually)"
       continue
@@ -111,20 +131,20 @@ print(line)
     else
       echo "- $rel: status unavailable (run 'uv run jaunt status' there manually)"
     fi
-  done
+  done <<<"$configs"
 fi
 
 echo
 echo "== config drift"
-python3 - "$root" $configs <<'PY' || echo "- config drift check unavailable"
+JAUNT_ROOT="$root" JAUNT_CONFIGS="$configs" python3 - <<'PY' || echo "- config drift check unavailable"
 import json
 import os
 import sys
 import tomllib
 
 try:
-    root = sys.argv[1]
-    configs = sys.argv[2:]
+    root = os.environ.get("JAUNT_ROOT", "")
+    configs = [c for c in os.environ.get("JAUNT_CONFIGS", "").splitlines() if c]
     groups: dict[str, list[str]] = {}
     values: dict[str, dict[str, object]] = {}
 
@@ -159,7 +179,8 @@ try:
     else:
         print(
             "- DRIFT: [codex]/build.instructions differ across projects — this restales "
-            "(re-bills) every module in the drifted project."
+            "the drifted project; it re-stamps free on the next build when specs are "
+            "unchanged (only a paired structural/prose edit bills)."
         )
         differing: list[str] = []
         codex_values = {json.dumps(v["codex"], sort_keys=True) for v in values.values()}

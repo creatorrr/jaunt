@@ -40,7 +40,7 @@ jaunt projects in this repo — run jaunt build/check/status from the OWNING dir
 - packages/canonical: 8 fresh, 1 orphans (jaunt clean --orphans)
 ```
 
-Second, the always-on `working-with-jaunt` knowledge skill loads the cost taxonomy:
+Second, the auto-invocable `working-with-jaunt` knowledge skill carries the cost taxonomy. Its body loads when you touch a spec module, `__generated__/`, `jaunt.toml`, or a `.pyi` — not preloaded into every session:
 
 | what you change | digest class | consequence |
 |---|---|---|
@@ -65,7 +65,7 @@ Owning-project resolution means `generated_dir` comes from the right `jaunt.toml
 
 ## `/jaunt:build`
 
-The build skill follows a four-step, plan-first protocol: resolve the owning project, classify staleness before spending, build, then gate.
+The build skill follows a four-step, plan-first protocol: resolve the owning project, classify staleness before spending, build, then gate. The `--json` payloads below are trimmed excerpts showing only the keys the skill reads; the real `jaunt status --json` also emits `command`, `ok`, `digests`, `orphans`, and contract/tree blocks, and `jaunt build --json` also emits `skipped`, `failed`, `cost`, `cache`, and `context_stats`.
 
 ```console
 $ bash "${CLAUDE_PLUGIN_ROOT}/scripts/resolve-project.sh" packages/billing/invoices.py
@@ -127,7 +127,7 @@ $ bash "${CLAUDE_PLUGIN_ROOT}/scripts/doctor.sh"
 - packages/canonical: 8 fresh, 1 orphans (run 'uv run jaunt clean --orphans')
 
 == config drift
-- DRIFT: [codex]/build.instructions differ across projects — this restales (re-bills) every module in the drifted project.
+- DRIFT: [codex]/build.instructions differ across projects — this restales the drifted project; it re-stamps free on the next build when specs are unchanged (only a paired structural/prose edit bills).
   - group: packages/billing, packages/email
   - group: packages/canonical
   differing blocks: [codex]

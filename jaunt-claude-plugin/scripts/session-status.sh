@@ -5,6 +5,26 @@ set -u
 
 root="${CLAUDE_PROJECT_DIR:-$PWD}"
 
+# Resolve an available timeout wrapper: GNU `timeout`, Homebrew `gtimeout`, or
+# neither (stock macOS) — in which case run the command with no timeout at all
+# rather than 127ing and mis-reporting the tool as missing.
+if command -v timeout >/dev/null 2>&1; then
+  _timeout_bin=timeout
+elif command -v gtimeout >/dev/null 2>&1; then
+  _timeout_bin=gtimeout
+else
+  _timeout_bin=""
+fi
+run_timeout() {
+  local secs="$1"
+  shift
+  if [ -n "$_timeout_bin" ]; then
+    "$_timeout_bin" "$secs" "$@"
+  else
+    "$@"
+  fi
+}
+
 configs=$(find "$root" -maxdepth 5 -name jaunt.toml \
   -not -path '*/.venv/*' -not -path '*/node_modules/*' \
   -not -path '*/.jaunt/*' -not -path '*/.git/*' 2>/dev/null | sort)
@@ -14,7 +34,7 @@ limit=12
 count=0
 
 echo "jaunt projects in this repo — run jaunt build/check/status from the OWNING directory:"
-for cfg in $configs; do
+while IFS= read -r cfg; do
   count=$((count + 1))
   if [ "$count" -gt "$limit" ]; then
     remaining=$((total - limit))
@@ -23,7 +43,7 @@ for cfg in $configs; do
   fi
   dir=$(dirname "$cfg")
   rel="${dir#"$root"}"; rel="${rel#/}"; [ -z "$rel" ] && rel="."
-  out=$(cd "$dir" && timeout 30 uv run --no-sync jaunt status --json --progress none 2>/dev/null)
+  out=$(cd "$dir" && run_timeout 8 uv run --no-sync jaunt status --json --progress none 2>/dev/null)
   if [ -z "$out" ]; then
     echo "- $rel: status unavailable (run 'uv run jaunt status' there manually)"
     continue
@@ -49,5 +69,5 @@ if orphans:
     line += f", {len(orphans)} orphans (jaunt clean --orphans)"
 print(line)
 ' "$rel"
-done
+done <<<"$configs"
 exit 0
