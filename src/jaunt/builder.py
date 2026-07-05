@@ -548,6 +548,33 @@ async def plan_refreeze_or_rebuild(
                 elif outcome.refrozen:
                     refrozen.add(module_name)
                 continue
+
+        # Fingerprint-only drift (e.g. a build-prompt template edit) restales
+        # the module without touching any spec. When every spec snapshot is
+        # unchanged (`classify_change == "none"`), re-stamp the new generation
+        # fingerprint over the untouched body deterministically -- no
+        # semantic-gate/model call and no backend rebuild (finding 27).
+        relpath = _generated_relpath(module_name, generated_dir=generated_dir)
+        old_snapshots = read_contract_sidecar(sidecar_path(package_dir / relpath))
+        if entries and all(
+            classify_change(old_snapshots.get(str(entry.spec_ref)), entry) == "none"
+            for entry in entries
+        ):
+            outcome = refreeze_module(
+                package_dir=package_dir,
+                generated_dir=generated_dir,
+                module_name=module_name,
+                header_fields=header_fields,
+                snapshots=snapshots,
+                validate_body=validators.get(module_name),
+            )
+            if outcome.needs_rebuild:
+                failed_refreeze.add(module_name)
+                rebuild.add(module_name)
+            elif outcome.refrozen:
+                refrozen.add(module_name)
+            continue
+
         gate_modules.add(module_name)
 
     meaningful_modules: set[str] = set()

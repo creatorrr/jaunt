@@ -142,6 +142,18 @@ def test_build_module_import_guidance(monkeypatch) -> None:
     assert "<module>" in text or "module" in text
 
 
+def test_build_module_sanctions_third_party_imports(monkeypatch) -> None:
+    """Build user prompt should permit stdlib + declared third-party imports (finding 27)."""
+    _system, user = _render(_build_ctx())
+    text = user.lower()
+    # Spec-registry deps are still constrained to their declared paths...
+    assert "spec-registry" in text
+    # ...but stdlib and installed third-party distributions are fair game.
+    assert "stdlib" in text
+    assert "third-party" in text
+    assert "fair game" in text
+
+
 def test_build_module_decorator_api_guidance(monkeypatch) -> None:
     """Build user prompt should explain decorator-derived API context."""
     _system, user = _render(_build_ctx())

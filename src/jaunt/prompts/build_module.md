@@ -31,7 +31,9 @@ Base class contract (inherited/overridable methods and required abstractmethods)
 
 How to use dependencies:
 - Each Dependency API entry key is like `<module>:<qualname>`. Import the name from `<module>`.
-- Only import dependencies listed above — do not guess or fabricate module paths.
+- Import spec-registry dependencies ONLY from the declared paths listed above — do not guess or fabricate module paths.
+- The Python stdlib, and installed third-party distributions that the spec module itself imports or the owning package declares, are fair game: import them plainly from their real modules (no duck-typed stand-ins, no dynamic-import contortions).
+- For anything else, inline the logic and mark it with JAUNT-NEEDS-DEP as instructed.
 - Decorator Dependency APIs are extra typing/behavior context; do not import those keys directly.
 - If a spec includes `effective_signature[...]`, treat that as the strongest signature guidance.
 - If the contract implies behavior from a module NOT listed in Dependency APIs, do not invent an import. Inline the minimal logic and mark the site with a comment: `# JAUNT-NEEDS-DEP: <module>:<name> — <one-line reason>`.
