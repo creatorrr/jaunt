@@ -198,6 +198,17 @@ current project (resolved paths, engine/model, and which modules are stale). It
 ships with the package, so the briefing always matches the installed version. Run
 it before you start working.
 
+### Claude Code plugin
+
+The first-party Claude Code plugin packages the guard hook, session freshness map, and build/convert/doctor skills:
+
+```bash
+claude plugin marketplace add creatorrr/jaunt
+claude plugin install jaunt@jaunt-plugins
+```
+
+Docs: https://jaunt.ing/docs/guides/claude-code-plugin.
+
 ## Background Daemon
 
 `jaunt daemon start` runs background codegen with commit-triggered isolated jobs
