@@ -32,9 +32,10 @@ def plan_legacy_stub_rewrites(
     tree = ast.parse(source, filename=str(source_file))
 
     actions: list[MigrationAction] = []
-    for symbol, display_name, _node in _iter_rewritable_nodes(tree):
+    for symbol, _node in _iter_rewritable_nodes(tree):
         classification: Literal["re-stamp", "newly-governs"]
-        classification = "re-stamp" if symbol in governed_symbols else "newly-governs"
+        governed = _symbol_is_governed(symbol, governed_symbols)
+        classification = "re-stamp" if governed else "newly-governs"
         label = "re-stamp (free)" if classification == "re-stamp" else "newly-governs"
         actions.append(
             MigrationAction(
@@ -45,11 +46,21 @@ def plan_legacy_stub_rewrites(
                 kind="rewrite-stub-body",
                 classification=classification,
                 description=(
-                    f"{module}.{display_name}: raise RuntimeError('spec stub') -> ... [{label}]"
+                    f"{module}.{symbol}: raise RuntimeError('spec stub') -> ... [{label}]"
                 ),
             )
         )
     return actions
+
+
+def _symbol_is_governed(symbol: str, governed_symbols: set[str]) -> bool:
+    """A candidate is already governed when its own qualname is in the governed
+    set, or (for a method) its enclosing class is a governed whole-class spec."""
+    if symbol in governed_symbols:
+        return True
+    if "." in symbol:
+        return symbol.split(".", 1)[0] in governed_symbols
+    return False
 
 
 def plan_stub_reemissions(
@@ -91,7 +102,7 @@ def apply_stub_rewrite(action: MigrationAction) -> None:
     tree = ast.parse(source, filename=str(action.path))
 
     targets: list[ast.Raise] = []
-    for symbol, _display_name, node in _iter_rewritable_nodes(tree):
+    for symbol, node in _iter_rewritable_nodes(tree):
         if symbol == action.symbol:
             targets.append(_stub_raise(node))
 
@@ -112,18 +123,23 @@ def apply_stub_rewrite(action: MigrationAction) -> None:
         f.write("".join(lines))
 
 
-def _iter_rewritable_nodes(tree: ast.Module) -> list[tuple[str, str, FunctionNode]]:
-    nodes: list[tuple[str, str, FunctionNode]] = []
+def _iter_rewritable_nodes(tree: ast.Module) -> list[tuple[str, FunctionNode]]:
+    """Yield (symbol, node) for each rewritable legacy stub.
+
+    Methods carry their dotted `Class.method` qualname so classification and
+    relocation target one method exactly, never every method in the class.
+    """
+    nodes: list[tuple[str, FunctionNode]] = []
     for top in tree.body:
         if isinstance(top, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if _is_legacy_stub_node(top):
-                nodes.append((top.name, top.name, top))
+                nodes.append((top.name, top))
         elif isinstance(top, ast.ClassDef):
             for item in top.body:
                 if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and (
                     _is_legacy_stub_node(item)
                 ):
-                    nodes.append((top.name, f"{top.name}.{item.name}", item))
+                    nodes.append((f"{top.name}.{item.name}", item))
     return nodes
 
 

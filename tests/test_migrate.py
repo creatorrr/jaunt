@@ -82,15 +82,76 @@ class Widget:
 '''
     f = tmp_path / "cls.py"
     f.write_text(src)
+    # A whole-class @magic governs its declared method stubs: the class name in
+    # governed_symbols makes each method a re-stamp. Method actions carry the
+    # dotted qualname as their symbol.
     actions = plan_legacy_stub_rewrites(source_file=f, module="cls", governed_symbols={"Widget"})
     by_symbol = {a.symbol: a for a in actions}
-    assert "Widget" in by_symbol
-    assert by_symbol["Widget"].classification == "re-stamp"
-    apply_stub_rewrite(by_symbol["Widget"])
+    assert "Widget.render" in by_symbol
+    assert by_symbol["Widget.render"].classification == "re-stamp"
+    apply_stub_rewrite(by_symbol["Widget.render"])
     text = f.read_text()
     assert '"""Render it."""' in text
     assert 'raise RuntimeError("spec stub")' not in text
     ast.parse(text)
+
+
+def test_mixed_class_only_governed_method_restamps(tmp_path):
+    # One method governed directly (dotted qualname), a sibling plain helper method
+    # that is NOT governed. Only the governed one may re-stamp; the helper is
+    # newly-governs and must be left alone by a default apply.
+    src = '''
+import jaunt
+
+class Repo:
+    def fetch(self) -> int:
+        """Governed method."""
+        raise RuntimeError("spec stub")
+
+    def helper(self) -> int:
+        """Plain legacy helper — rewriting would newly govern it."""
+        raise RuntimeError("spec stub")
+'''
+    f = tmp_path / "repo.py"
+    f.write_text(src)
+    actions = plan_legacy_stub_rewrites(
+        source_file=f, module="repo", governed_symbols={"Repo.fetch"}
+    )
+    by_symbol = {a.symbol: a for a in actions}
+    assert by_symbol["Repo.fetch"].classification == "re-stamp"
+    assert by_symbol["Repo.helper"].classification == "newly-governs"
+
+    # Applying only the governed action rewrites exactly that one method.
+    apply_stub_rewrite(by_symbol["Repo.fetch"])
+    text = f.read_text()
+    assert text.count('raise RuntimeError("spec stub")') == 1
+    tree = ast.parse(text)
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Repo")
+    fetch = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "fetch")
+    helper = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "helper")
+    assert isinstance(fetch.body[-1], ast.Expr) and fetch.body[-1].value.value is Ellipsis
+    assert isinstance(helper.body[-1], ast.Raise)
+
+
+def test_whole_class_governs_all_method_stubs(tmp_path):
+    # A whole-class governed spec (class name in governed_symbols) makes every
+    # declared method stub a re-stamp.
+    src = """
+import jaunt
+
+class Widget:
+    def a(self) -> int:
+        raise RuntimeError("spec stub")
+
+    def b(self) -> int:
+        raise RuntimeError("spec stub")
+"""
+    f = tmp_path / "w.py"
+    f.write_text(src)
+    actions = plan_legacy_stub_rewrites(source_file=f, module="w", governed_symbols={"Widget"})
+    by_symbol = {a.symbol: a for a in actions}
+    assert by_symbol["Widget.a"].classification == "re-stamp"
+    assert by_symbol["Widget.b"].classification == "re-stamp"
 
 
 def test_single_quoted_and_whitespace_variants_detected(tmp_path):

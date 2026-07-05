@@ -8,7 +8,7 @@ from pathlib import Path
 
 import jaunt.cli as cli
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
-from jaunt.header import format_header
+from jaunt.header import format_contract_battery_header, format_header
 
 
 def _write(path: Path, content: str) -> None:
@@ -27,7 +27,10 @@ def _run(argv: list[str]):
         clear_registries()
         sys.path[:] = orig_path
         for name in list(sys.modules.keys()):
-            if name not in before:
+            # Evict freshly-imported PROJECT modules, but never framework modules:
+            # dropping e.g. jaunt.contract.drift would split its enum identity for
+            # later tests that call cmd_check directly (leaving is_blocking stale).
+            if name not in before and not (name == "jaunt" or name.startswith("jaunt.")):
                 del sys.modules[name]
 
 
@@ -129,6 +132,91 @@ def _module_spec_project(tmp_path: Path, *, pkg: str = "modspec") -> str:
         ),
     )
     return f"{pkg}.specs"
+
+
+def _generated_test_project(tmp_path: Path, *, with_spec: bool = True) -> Path:
+    """A project with a generated test under the test-root's __generated__ dir.
+
+    Uses default roots (source_roots = ["src", "."], test_roots = ["tests"]), the
+    configuration under which the test-root generated dir nests inside the "."
+    source root — the case that used to misclassify valid generated tests.
+    """
+    _write(tmp_path / "jaunt.toml", "version = 1\n")
+    test_module = "tests.test_greet"
+    if with_spec:
+        _write(
+            tmp_path / "tests" / "test_greet.py",
+            (
+                "import jaunt\n\n\n"
+                "@jaunt.test\n"
+                "def test_greet_says_hello():\n"
+                '    """Greeting works."""\n'
+                "    ...\n"
+            ),
+        )
+    gen = tmp_path / "tests" / "__generated__"
+    gen.mkdir(parents=True, exist_ok=True)
+    header = format_header(
+        tool_version="0",
+        kind="test",
+        source_module=test_module,
+        module_digest="deadbeef",
+        spec_refs=[f"{test_module}:test_greet_says_hello"],
+    )
+    gen_test = gen / "test_greet.py"
+    gen_test.write_text(header + "\n\ndef test_greet_says_hello():\n    assert True\n", "utf-8")
+    return gen_test
+
+
+def test_valid_generated_test_not_orphaned_default_roots(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    gen_test = _generated_test_project(tmp_path, with_spec=True)
+    monkeypatch.chdir(tmp_path)
+    rc = _run(["clean", "--orphans", "--dry-run", "--json", "--root", str(tmp_path)])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == cli.EXIT_OK
+    rel = str(gen_test.relative_to(tmp_path))
+    assert rel not in out["would_remove"], out["would_remove"]
+
+
+def test_orphaned_generated_test_detected_and_removed(tmp_path: Path, monkeypatch, capsys) -> None:
+    gen_test = _generated_test_project(tmp_path, with_spec=False)
+    monkeypatch.chdir(tmp_path)
+    rc = _run(["clean", "--orphans", "--root", str(tmp_path)])
+    assert rc == cli.EXIT_OK
+    assert not gen_test.exists()
+
+
+def _battery_orphan_project(tmp_path: Path) -> Path:
+    """A contract battery whose derived-from spec no longer exists."""
+    _write(
+        tmp_path / "jaunt.toml",
+        'version = 1\n\n[paths]\nsource_roots = ["src"]\n',
+    )
+    _write(tmp_path / "src" / "app" / "__init__.py", "")
+    battery = tmp_path / "tests" / "contract"
+    battery.mkdir(parents=True, exist_ok=True)
+    header = format_contract_battery_header(
+        derived_from="app.gone:vanished",
+        prose_digest="aa",
+        signature="() -> None",
+        body_digest="bb",
+        strength="0",
+        tool_version="0",
+    )
+    path = battery / "test_vanished.py"
+    path.write_text(header + "\n\ndef test_x():\n    assert True\n", encoding="utf-8")
+    return path
+
+
+def test_check_contracts_only_gates_orphaned_battery(tmp_path: Path, monkeypatch, capsys) -> None:
+    _battery_orphan_project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    rc = _run(["check", "--contracts-only", "--root", str(tmp_path)])
+    text = capsys.readouterr().out
+    assert rc == cli.EXIT_PYTEST_FAILURE
+    assert "orphaned artifact" in text
 
 
 def test_specs_json_newly_governed_flag(tmp_path: Path, monkeypatch, capsys) -> None:

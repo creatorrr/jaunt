@@ -90,9 +90,10 @@ tooling that shells out to Jaunt. The payloads below are trimmed from real runs.
 }
 ```
 
-`stale_changes` classifies why each stale module changed — `"structural"`, or
-`"re-stamp: free"` when the next build resolves the module through the free
-re-stamp path. `orphans` lists generated artifacts whose spec no longer exists.
+`stale_changes` classifies why each stale module changed — `"structural"`,
+`"prose"`, `"fingerprint"`, or `"re-stamp"` when the next build resolves the
+module through the free re-stamp path (text output renders this value as
+`re-stamp: free`). `orphans` lists generated artifacts whose spec no longer exists.
 `tree` reports repo-map drift, or is `null` when the tree is in sync.
 
 ## check

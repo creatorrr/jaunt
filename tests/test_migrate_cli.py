@@ -92,6 +92,43 @@ def _module_mode_project(tmp_path: Path, *, pkg: str = "modpkg") -> str:
     return f"{pkg}.specs"
 
 
+def _pure_legacy_module_project(tmp_path: Path, *, pkg: str = "purepkg") -> str:
+    """A module-mode file where EVERY candidate is a legacy `raise RuntimeError`
+    body — so it has zero currently-governed specs (module mode does not treat
+    that body as a stub)."""
+    _write(tmp_path / "jaunt.toml", _JAUNT_TOML)
+    _write(tmp_path / "src" / pkg / "__init__.py", "")
+    _write(
+        tmp_path / "src" / pkg / "specs.py",
+        (
+            "import jaunt\n\n"
+            "jaunt.magic_module(__name__)\n\n\n"
+            "def alpha(x: int) -> int:\n"
+            '    """Alpha."""\n'
+            '    raise RuntimeError("spec stub")\n\n\n'
+            "def beta(x: int) -> int:\n"
+            '    """Beta."""\n'
+            '    raise RuntimeError("spec stub")\n'
+        ),
+    )
+    return f"{pkg}.specs"
+
+
+def test_plan_covers_pure_legacy_module_file(tmp_path: Path, monkeypatch, capsys) -> None:
+    # A module-mode file whose every symbol is a legacy body has no governed
+    # specs yet, but migrate must still plan it (newly-governs entries) instead
+    # of reporting "No pending migrations".
+    module = _pure_legacy_module_project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    rc = _run(["migrate", "--json", "--root", str(tmp_path)])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == cli.EXIT_OK
+    symbols = {a["symbol"]: a for a in out["actions"] if a["module"] == module}
+    assert symbols, "pure-legacy module file should produce plan entries"
+    assert symbols["alpha"]["classification"] == "newly-governs"
+    assert symbols["beta"]["classification"] == "newly-governs"
+
+
 def test_plan_mode_lists_actions_and_exits_zero(tmp_path: Path, monkeypatch, capsys) -> None:
     module = _legacy_decorator_project(tmp_path)
     _build(tmp_path, monkeypatch)
