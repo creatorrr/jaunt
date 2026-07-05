@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from jaunt.config import JauntConfig
+    from jaunt.registry import SpecEntry
 
 
 def prepend_sys_path(dirs: Sequence[Path]) -> None:
@@ -30,6 +31,81 @@ def prepend_sys_path(dirs: Sequence[Path]) -> None:
             continue
         sys.path.insert(0, s)
         seen.add(s)
+
+
+def enforce_source_root_routing(
+    *,
+    source_dirs: Sequence[Path],
+    module_specs: dict[str, list[SpecEntry]],
+) -> None:
+    """Hard gate for the multi-root output-routing trap (FEEDBACK finding 28).
+
+    jaunt 1.5 routes ALL generated output to the first *existing* configured
+    source root. When governed specs live under a different or additional root,
+    output silently lands in the wrong package while ``status``/``check`` read
+    the same wrong path and stay green. Until per-module routing lands, refuse
+    the ambiguous configuration with a ``JauntConfigError`` (CLI exit 2).
+
+    The owning root of a spec is the most-specific (longest-path) configured
+    source root that contains its ``source_file``, so nested defaults
+    (``["src", "."]``) with specs under ``src`` resolve to ``src`` and pass.
+    No governed specs -> no gate.
+    """
+    from jaunt.errors import JauntConfigError
+
+    existing = [d for d in source_dirs if d.exists()]
+    if not existing or not module_specs:
+        return
+    package_dir = existing[0]
+
+    def _owning_root(source_file: str) -> Path | None:
+        try:
+            spec_path = Path(source_file).resolve()
+        except OSError:
+            return None
+        best: Path | None = None
+        for root in source_dirs:
+            try:
+                rp = root.resolve()
+            except OSError:
+                continue
+            if spec_path == rp or rp in spec_path.parents:
+                if best is None or len(rp.parts) > len(best.parts):
+                    best = rp
+        return best
+
+    # resolved owning root -> the configured (display) path of the first spec
+    owners: dict[Path, Path] = {}
+    for entries in module_specs.values():
+        for entry in entries:
+            resolved = _owning_root(entry.source_file)
+            if resolved is None:
+                continue
+            display = next((d for d in source_dirs if d.resolve() == resolved), resolved)
+            owners.setdefault(resolved, display)
+            break
+
+    if not owners:
+        return
+
+    if len(owners) > 1:
+        a, b = sorted(str(d) for d in owners.values())[:2]
+        raise JauntConfigError(
+            f"governed specs span multiple source_roots ({a}, {b}): jaunt 1.5 "
+            "routes all generated output to the first existing root, which "
+            "breaks packages under the others (FEEDBACK finding 28). Give each "
+            "adopted package its own jaunt project (jaunt.toml with "
+            'source_roots=["."] at the package root), or keep all specs under '
+            "one root."
+        )
+
+    resolved_owner, display_owner = next(iter(owners.items()))
+    if resolved_owner != package_dir.resolve():
+        raise JauntConfigError(
+            f"your specs live under {display_owner} but generated output would "
+            f"be routed to {package_dir}; reorder source_roots so "
+            f"{display_owner} comes first."
+        )
 
 
 def iter_target_modules(targets: Iterable[str]) -> set[str]:
@@ -148,6 +224,7 @@ def compute_magic_status(
     package_dir = next((d for d in existing), None)
     if package_dir is None:
         raise JauntConfigError("No existing source_roots to check.")
+    enforce_source_root_routing(source_dirs=source_dirs, module_specs=module_specs)
 
     build_generation_fingerprint = generation_fingerprint(
         cfg,
