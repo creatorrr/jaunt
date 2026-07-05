@@ -104,6 +104,7 @@ module through the free re-stamp path (text output renders this value as
   "ok": true,
   "blocked": [],
   "checked": [],
+  "orphans": [],
   "magic": {
     "fresh": ["demo.specs"],
     "stale": {},
@@ -113,11 +114,15 @@ module through the free re-stamp path (text output renders this value as
 }
 ```
 
-`blocked`/`checked` cover contract batteries; the `magic` block covers
-`@jaunt.magic` freshness and lists orphaned artifacts under `orphans`. Any
-blocking drift — including an orphan — sets `ok: false` and exits `4`.
-Before the first build the same project reports `"unbuilt": ["demo.specs"]` and
-exits `4`.
+`blocked`/`checked` cover contract batteries. Orphaned artifacts are split by
+kind: contract-battery orphans are listed at the top-level `orphans` key
+(present whenever contracts are in scope), while generated-module, stub, and
+sidecar orphans are listed under `magic.orphans` (present whenever magic is in
+scope). A combined `jaunt check` emits both keys; `--contracts-only` emits only
+the top-level `orphans`, and `--magic-only` emits only `magic.orphans`. Any
+blocking drift — including an orphan of either kind — sets `ok: false` and exits
+`4`. Before the first build the same project reports `"unbuilt": ["demo.specs"]`
+and exits `4`.
 
 ## specs
 

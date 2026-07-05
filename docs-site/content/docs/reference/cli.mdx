@@ -271,7 +271,8 @@ one orphan and one newly-governed spec and holds CI red until you rebuild, which
 is intentional.
 
 `--contracts-only` and `--magic-only` are mutually exclusive. `--json` reports a
-`magic` block (`fresh` / `stale` / `unbuilt`, plus `orphans`); see
+`magic` block (`fresh` / `stale` / `unbuilt`, plus generated/stub/sidecar
+`orphans`) and a top-level `orphans` key for contract-battery orphans; see
 [JSON Output](/docs/reference/json-output#check). A project with no magic specs
 and no contract drift exits `0`.
 

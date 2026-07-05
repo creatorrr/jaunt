@@ -219,6 +219,106 @@ def test_check_contracts_only_gates_orphaned_battery(tmp_path: Path, monkeypatch
     assert "orphaned artifact" in text
 
 
+def test_marker_only_test_module_orphans_its_generated_test(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    # tests/test_foo.py keeps `import jaunt` but has NO @jaunt.test spec: marker
+    # presence is not governance, so its stale generated test IS an orphan.
+    _write(tmp_path / "jaunt.toml", "version = 1\n")
+    _write(
+        tmp_path / "tests" / "test_foo.py",
+        "import jaunt\n\n\ndef helper():\n    return 1\n",
+    )
+    gen = tmp_path / "tests" / "__generated__"
+    gen.mkdir(parents=True, exist_ok=True)
+    header = format_header(
+        tool_version="0",
+        kind="test",
+        source_module="tests.test_foo",
+        module_digest="deadbeef",
+        spec_refs=["tests.test_foo:test_helper"],
+    )
+    gen_test = gen / "test_foo.py"
+    gen_test.write_text(header + "\n\ndef test_helper():\n    assert True\n", "utf-8")
+    monkeypatch.chdir(tmp_path)
+    rc = _run(["clean", "--orphans", "--dry-run", "--json", "--root", str(tmp_path)])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == cli.EXIT_OK
+    assert str(gen_test.relative_to(tmp_path)) in out["would_remove"], out["would_remove"]
+
+
+def test_synthesis_failure_disables_test_orphan_classification(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    # A generated test that WOULD be orphaned (no surviving spec). If the
+    # auto-class synthesis pass raises, the governed test set is incomplete, so we
+    # must not delete any generated test this run.
+    gen_test = _generated_test_project(tmp_path, with_spec=False)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("synthesis exploded")
+
+    monkeypatch.setattr("jaunt.module_contract.synthesize_auto_class_test_entries", _boom)
+    monkeypatch.chdir(tmp_path)
+    rc = _run(["clean", "--orphans", "--root", str(tmp_path)])
+    assert rc == cli.EXIT_OK
+    assert gen_test.exists(), "must not delete a generated test with an incomplete governed set"
+
+
+def _combined_orphan_project(tmp_path: Path) -> tuple[Path, Path]:
+    """A project with both a generated-module orphan and a contract-battery orphan."""
+    _write(tmp_path / "jaunt.toml", 'version = 1\n\n[paths]\nsource_roots = ["src"]\n')
+    _write(tmp_path / "src" / "app" / "__init__.py", "")
+    gen = tmp_path / "src" / "app" / "__generated__"
+    gen.mkdir(parents=True, exist_ok=True)
+    (gen / "__init__.py").write_text("", encoding="utf-8")
+    header = format_header(
+        tool_version="0",
+        kind="build",
+        source_module="app.specs",
+        module_digest="deadbeef",
+        spec_refs=["app.specs:greet"],
+    )
+    gen_module = gen / "specs.py"
+    gen_module.write_text(header + "\n\ndef greet(name):\n    return name\n", encoding="utf-8")
+
+    battery = tmp_path / "tests" / "contract"
+    battery.mkdir(parents=True, exist_ok=True)
+    bat_header = format_contract_battery_header(
+        derived_from="app.gone:vanished",
+        prose_digest="aa",
+        signature="() -> None",
+        body_digest="bb",
+        strength="0",
+        tool_version="0",
+    )
+    bat = battery / "test_vanished.py"
+    bat.write_text(bat_header + "\n\ndef test_x():\n    assert True\n", encoding="utf-8")
+    return gen_module, bat
+
+
+def test_check_json_splits_orphans_by_kind(tmp_path: Path, monkeypatch, capsys) -> None:
+    gen_module, bat = _combined_orphan_project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    # Combined check: battery orphan top-level, generated orphan under magic.
+    rc = _run(["check", "--json", "--root", str(tmp_path)])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == cli.EXIT_PYTEST_FAILURE
+    assert str(bat.relative_to(tmp_path)) in out["orphans"]
+    assert str(gen_module.relative_to(tmp_path)) in out["magic"]["orphans"]
+    assert str(bat.relative_to(tmp_path)) not in out["magic"]["orphans"]
+
+
+def test_check_contracts_only_json_orphans_top_level(tmp_path: Path, monkeypatch, capsys) -> None:
+    _gen_module, bat = _combined_orphan_project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    rc = _run(["check", "--contracts-only", "--json", "--root", str(tmp_path)])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == cli.EXIT_PYTEST_FAILURE
+    assert str(bat.relative_to(tmp_path)) in out["orphans"]
+    assert "magic" not in out
+
+
 def test_specs_json_newly_governed_flag(tmp_path: Path, monkeypatch, capsys) -> None:
     module = _module_spec_project(tmp_path)
     monkeypatch.chdir(tmp_path)

@@ -28,8 +28,15 @@ def find_orphans(
     source_dirs: Sequence[Path],
     battery_dir: Path | None,
     contract_refs: set[str],
+    classify_test_orphans: bool = True,
 ) -> list[OrphanArtifact]:
-    """Find generated artifacts whose owning spec or contract is no longer governed."""
+    """Find generated artifacts whose owning spec or contract is no longer governed.
+
+    `classify_test_orphans=False` disables orphan classification for generated
+    TEST modules (header ``kind=test``) — used as a fail-safe when the governed
+    test-module set could not be enumerated completely, so a partial set never
+    removes a valid generated test.
+    """
 
     orphans: list[OrphanArtifact] = []
     orphaned_generated: list[OrphanArtifact] = []
@@ -41,6 +48,8 @@ def find_orphans(
             continue
         header = parse_header(text)
         if header is None:
+            continue
+        if not classify_test_orphans and header.get("kind") == "test":
             continue
         source_module = header.get("source_module")
         if source_module is None or source_module in governed_modules:
