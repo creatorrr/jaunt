@@ -374,6 +374,59 @@ def discover_modules(
     ]
 
 
+def _source_calls_magic_module(source: str) -> bool:
+    """True when the module's source has a module-level ``magic_module(...)`` call.
+
+    Deliberately stricter than :func:`_has_jaunt_markers`: it requires an actual
+    top-level ``magic_module`` call expression (a governing self spec module),
+    not a mere ``import jaunt`` — so framework infrastructure that only imports
+    jaunt (``cli``, ``registry``, ``discovery`` itself) never qualifies for the
+    reload path below.
+    """
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    for node in tree.body:
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            func = node.value.func
+            fname = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if fname == "magic_module":
+                return True
+    return False
+
+
+def _reregister_cleared_self_module(name: str) -> None:
+    """Re-run a cached self spec module's ``magic_module`` registration.
+
+    The self-package eviction carve-out (see :func:`evict_modules_for_import`)
+    keeps the running framework's own modules in ``sys.modules``, so a later
+    ``import_module`` of one is a no-op that does NOT re-execute its top-level
+    ``magic_module(...)`` call. If a prior registry clear dropped that module's
+    spec registration (e.g. an already-imported self spec module discovered again
+    in a long-lived process), the specs would be lost forever. Force a reload so
+    the governing call re-runs and re-registers; scoped to genuine self spec
+    modules only (never infrastructure), so reloading is safe.
+    """
+
+    from jaunt.registry import get_module_magic_defaults
+
+    if not is_self_module(name) or get_module_magic_defaults(name) is not None:
+        return
+    module = sys.modules.get(name)
+    source_file = getattr(module, "__file__", None)
+    if module is None or not isinstance(source_file, str) or not source_file:
+        return
+    try:
+        source = Path(source_file).read_text(encoding="utf-8")
+    except OSError:
+        return
+    if not _source_calls_magic_module(source):
+        return
+    importlib.reload(module)
+
+
 def import_and_collect(
     module_names: list[str], *, kind: Literal["magic", "test", "contract"]
 ) -> None:
@@ -382,6 +435,8 @@ def import_and_collect(
     for name in module_names:
         try:
             importlib.import_module(name)
+            if kind == "magic":
+                _reregister_cleared_self_module(name)
         except Exception as e:  # noqa: BLE001 - caller needs a single error type
             raise JauntDiscoveryError(
                 f"Failed to import {kind} module '{name}': {type(e).__name__}: {e}"

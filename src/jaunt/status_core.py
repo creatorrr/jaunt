@@ -204,13 +204,18 @@ def compute_magic_status(
     existing = [d for d in source_dirs if d.exists()]
     prepend_sys_path([*existing, root])
 
-    registry.clear_registries()
+    # Discover first, then reset the import environment through the shared entry
+    # point: clearing the registries while preserving the running framework's own
+    # already-imported specs. A raw clear_registries() would wipe self specs that
+    # a self-package carve-out then refuses to re-register (the cached self module
+    # re-import is a no-op), leaving the magic registry empty when jaunt builds
+    # jaunt — the split-brain bug 1 in its status/check form.
     modules = discovery.discover_modules(
         roots=existing,
         exclude=[],
         generated_dir=cfg.paths.generated_dir,
     )
-    discovery.evict_modules_for_import(module_names=modules, roots=existing)
+    discovery.prepare_import_environment(module_names=modules, roots=existing)
     discovery.import_and_collect(modules, kind="magic")
 
     specs = dict(registry.get_magic_registry())
