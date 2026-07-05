@@ -2,8 +2,8 @@
 # jaunt:tool_version=1.5.1
 # jaunt:kind=stub
 # jaunt:source_module=jaunt.contract.strength
-# jaunt:generated_digest=sha256:e9d7efb84cccb707d6e974eeee986b148781cbc471c9b7ea57d0a33ba144d8c4
-# jaunt:inputs_digest=sha256:c33034d2734e39f47c8c7500ed3924ba76e472963a1bffe00286850b5a8c98b8
+# jaunt:generated_digest=sha256:01c019bd69539cf8b1640d5426dbb9869d399ede838a0c66b84e5ac09f912323
+# jaunt:inputs_digest=sha256:da59f1f336bd7119e13150a7fe7a2b8e9b012d82864b3c813c00f38941d0077e
 
 import ast
 from collections.abc import Iterator
@@ -44,6 +44,10 @@ def _swap_binop(t: ast.AST) -> bool: ...
 def _mutate_const(t: ast.AST) -> bool: ...
 def _default_return(t: ast.AST) -> bool: ...
 def format_strength(killed: int, applicable: int) -> str: ...
+
+_MUTANT_EVAL_TIMEOUT_S: float = 2.0
+
+def _evaluate_mutant_killed(pure: "CaseBlocks", ns: dict[str, object]) -> bool: ...
 def compute_case_strength(
     source: str, target: str, blocks: "CaseBlocks", namespace: dict[str, object]
 ) -> tuple[int, int, int]: ...

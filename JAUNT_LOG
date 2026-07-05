@@ -13,3 +13,6 @@
 2026-07-05 21:01Z advisory jaunt.contract.edits — The provided `_ensure_import_jaunt` helper comment says it handles module docstrings, but the shown implementation only accounts for `from __future__` lines before otherwise inserting at the top.
 2026-07-05 21:01Z advisory jaunt.contract.edits — The provided `_ensure_import_jaunt` treats `import jaunt as ...` as sufficient, but the inserted decorator uses the unaliased name `jaunt`.
 2026-07-05 21:03Z refreeze jaunt.contract.edits — cosmetic (gate: EQUIVALENT)
+2026-07-05 22:34Z build    jaunt.contract.strength — rebuilt
+2026-07-05 22:34Z advisory jaunt.contract.strength — The spec says to yield every helper-produced string, but also says every yielded value is distinct; if helpers produce duplicates, those requirements conflict, so the implementation preserves first-seen order and de-duplicates.
+2026-07-05 22:34Z advisory jaunt.contract.strength — iter_mutants requires yielding helper-produced strings while also requiring every yielded value to be distinct; if handwritten helpers emit duplicate source strings, those requirements conflict.

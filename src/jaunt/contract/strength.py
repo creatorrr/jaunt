@@ -30,17 +30,20 @@ jaunt.magic_module(
         "every deletable statement, never a function docstring, never one that "
         "would empty a body); and _emit_stmt_deletion(base: ast.Module, "
         "walk_index: int, stmt_index: int) -> str | None (unparsed source with "
-        "that statement removed, or None if the deletion is not emittable). "
-        "compute_case_strength must import CaseBlocks from jaunt.contract.cases "
-        "and evaluate_cases from jaunt.contract.derive lazily inside the function "
-        "body (module-level import would create an import cycle). CaseBlocks is a "
+        "that statement removed, or None if the deletion is not emittable); and "
+        "_evaluate_mutant_killed(pure: CaseBlocks, ns: dict[str, object]) -> bool "
+        "(runs the pure derived cases against the mutant namespace under a "
+        "wall-clock timeout and returns True when the mutant is killed — including "
+        "when a mutation left the body non-terminating). compute_case_strength "
+        "must import CaseBlocks from jaunt.contract.cases lazily inside the "
+        "function body (module-level import would create an import cycle) and must "
+        "decide whether each mutant is killed by calling _evaluate_mutant_killed, "
+        "never by calling evaluate_cases directly (a bare evaluate_cases call would "
+        "hang reconcile on a non-terminating mutant). CaseBlocks is a "
         "frozen dataclass with fields examples: tuple[CallCase, ...], raises: "
         "tuple[CallCase, ...], and fixtures_declared: tuple[str, ...]; it exposes "
         "is_empty() -> bool (True when both examples and raises are empty); each "
-        "CallCase has a .fixtures: tuple[str, ...] attribute. evaluate_cases("
-        "blocks: CaseBlocks, *, namespace: dict[str, object]) -> list[str] runs "
-        "the pure derived cases in-process against namespace and returns a list of "
-        "failure descriptions (empty list == every case passed)."
+        "CallCase has a .fixtures: tuple[str, ...] attribute."
     ),
 )
 
@@ -272,6 +275,59 @@ def format_strength(killed: int, applicable: int) -> str:
     raise NotImplementedError
 
 
+_MUTANT_EVAL_TIMEOUT_S: float = 2.0
+
+
+def _evaluate_mutant_killed(pure: "CaseBlocks", ns: dict[str, object]) -> bool:
+    """Return True when the pure derived cases KILL this mutant.
+
+    Runs ``jaunt.contract.derive.evaluate_cases(pure, namespace=dict(ns))`` and
+    reports the mutant as killed when that call surfaces at least one failure.
+
+    Mutation targets include the exit guards of unbounded loops, so a single
+    mutation can turn a terminating body into one that never returns (e.g.
+    dropping ``if cur.parent == cur: break`` from a filesystem-walk). Evaluating
+    such a mutant in-process with no bound would hang ``jaunt reconcile``
+    indefinitely (observed: 100% CPU, no output, no model call). To defend the
+    reconcile loop, when this runs on the interpreter's main thread the whole
+    ``evaluate_cases`` call is bounded by a ``_MUTANT_EVAL_TIMEOUT_S``-second
+    wall-clock alarm (``signal.setitimer(ITIMER_REAL, ...)``). A mutant that
+    exceeds the budget diverges observably from the original (which terminates
+    promptly), so a timeout counts as killed. The timeout signal is raised as a
+    ``BaseException`` subclass so ``evaluate_cases``'s per-case ``except
+    Exception`` cannot swallow it and let a later hanging case escape the bound.
+    Off the main thread the alarm is unavailable, so evaluation runs unbounded
+    (best effort) — reconcile drives strength scoring on the main thread.
+    """
+    import signal
+    import threading
+
+    from jaunt.contract.derive import evaluate_cases
+
+    def _killed() -> bool:
+        return bool(evaluate_cases(pure, namespace=dict(ns)))
+
+    if threading.current_thread() is not threading.main_thread():
+        return _killed()
+
+    class _MutantTimeout(BaseException):
+        pass
+
+    def _on_alarm(_signum: int, _frame: object) -> None:
+        raise _MutantTimeout()
+
+    previous = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, _on_alarm)
+    signal.setitimer(signal.ITIMER_REAL, _MUTANT_EVAL_TIMEOUT_S)
+    try:
+        return _killed()
+    except _MutantTimeout:
+        return True
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
 def compute_case_strength(
     source: str,
     target: str,
@@ -284,9 +340,8 @@ def compute_case_strength(
     scoring (mutating and re-running pytest per mutant is unbounded for DB
     fixtures); the excluded count is surfaced in the battery header.
 
-    Import ``CaseBlocks`` from ``jaunt.contract.cases`` and ``evaluate_cases``
-    from ``jaunt.contract.derive`` lazily inside this function (a module-level
-    import would create an import cycle).
+    Import ``CaseBlocks`` from ``jaunt.contract.cases`` lazily inside this
+    function (a module-level import would create an import cycle).
 
     Procedure:
 
@@ -306,10 +361,14 @@ def compute_case_strength(
          non-applicable mutant — skip it (continue) without counting.
        - Look up ``ns.get(target)``; if it is not callable, skip it (continue)
          without counting.
-       - The mutant is applicable: increment ``applicable``. Evaluate the pure
-         cases against a fresh copy ``dict(ns)`` via ``evaluate_cases(pure,
-         namespace=<that copy>)``; if the result is truthy (a non-empty list of
-         failures), the mutant was detected — increment ``killed``.
+       - The mutant is applicable: increment ``applicable``. Decide whether the
+         mutant is killed with the handwritten helper
+         ``_evaluate_mutant_killed(pure, ns)`` (reach it the way the other
+         handwritten helpers are reached — import the source module
+         ``jaunt.contract.strength`` and read the helper off it — never
+         reimplement it or call ``evaluate_cases`` directly, so mutants that do
+         not terminate stay bounded). If it returns ``True`` the mutant was
+         detected — increment ``killed``.
     5. Return ``(killed, applicable, excluded)``.
 
     ``blocks`` and ``namespace`` are read at call time; the function does not read
