@@ -12,3 +12,4 @@
 2026-07-05 21:01Z advisory jaunt.contract.edits — `_ensure_import_jaunt` has an inline comment saying it handles module docstrings, but the provided implementation only handles `from __future__` lines; the generated code calls the helper as specified.
 2026-07-05 21:01Z advisory jaunt.contract.edits — The provided `_ensure_import_jaunt` helper comment says it handles module docstrings, but the shown implementation only accounts for `from __future__` lines before otherwise inserting at the top.
 2026-07-05 21:01Z advisory jaunt.contract.edits — The provided `_ensure_import_jaunt` treats `import jaunt as ...` as sufficient, but the inserted decorator uses the unaliased name `jaunt`.
+2026-07-05 21:03Z refreeze jaunt.contract.edits — cosmetic (gate: EQUIVALENT)
