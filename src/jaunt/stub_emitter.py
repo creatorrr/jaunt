@@ -9,6 +9,7 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
+import jaunt
 from jaunt.header import parse_stub_header
 
 _JAUNT_DECORATORS = {"magic", "sig", "test", "contract", "preserve"}
@@ -19,7 +20,19 @@ _STUB_FORMAT_VERSION = "2"
 _BUILTIN_NAMES = frozenset(dir(builtins))
 
 
+@jaunt.contract
 def stub_path_for_source(source_file: str | Path) -> Path:
+    """Return the ``.pyi`` stub path that sits beside a spec ``source_file``.
+
+    Replaces the final path suffix with ``.pyi`` via :meth:`Path.with_suffix`,
+    so the stub lands next to the spec module in the same directory. The input
+    may be a ``str`` or a ``Path``; the result is always a ``Path``. Only the
+    final suffix is replaced — earlier dots in a name are left untouched.
+
+    Examples:
+    - stub_path_for_source("pkg/mod.py") == Path("pkg/mod.pyi")
+    - stub_path_for_source(Path("a/b.py")) == Path("a/b.pyi")
+    """
     return Path(source_file).with_suffix(".pyi")
 
 
@@ -91,7 +104,18 @@ def format_stub_best_effort(stub_source: str) -> str:
     return proc.stdout
 
 
+@jaunt.contract
 def is_jaunt_stub(path: Path) -> bool:
+    """Return whether ``path`` is a jaunt-emitted ``.pyi`` stub.
+
+    Reads ``path`` and returns ``True`` only when its text carries a parseable
+    jaunt stub provenance header (via :func:`parse_stub_header`). Fail-soft: a
+    missing or unreadable file returns ``False`` rather than raising, and a file
+    without a recognizable header also returns ``False``.
+
+    Examples:
+    - is_jaunt_stub(Path("/nonexistent/does-not-exist.pyi")) == False
+    """
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:

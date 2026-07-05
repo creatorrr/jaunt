@@ -13,6 +13,7 @@ from collections.abc import Iterable, Sequence
 from importlib import metadata
 from pathlib import Path
 
+import jaunt
 from jaunt.class_analysis import is_stub_body
 from jaunt.external_imports import pep503_normalize
 
@@ -48,15 +49,28 @@ def _syntax_error_to_str(err: SyntaxError) -> str:
     return f"SyntaxError: {msg}{loc}"
 
 
+@jaunt.contract
 def validate_generated_source(source: str, expected_names: list[str]) -> list[str]:
-    """Validate generated Python source.
+    """Validate generated Python source and report top-level shape problems.
 
-    Checks:
-    - parses via `ast.parse` (syntax errors)
-    - verifies required *top-level* names exist:
-      - function defs (sync + async)
-      - class defs
-      - simple assignments (`NAME = ...` and `NAME: T = ...`)
+    Parses ``source`` with :func:`ast.parse` and confirms that every name in
+    ``expected_names`` is defined at module top level. A definition counts when
+    it is a function def (sync or async), a class def, or a simple assignment
+    (``NAME = ...`` or ``NAME: T = ...``). Returns a list of human-readable
+    error strings; the list is empty when the source parses and every expected
+    name is present.
+
+    A syntax error short-circuits every other check: the returned list holds a
+    single ``"SyntaxError: ..."`` string and nothing else. Each missing name
+    yields one ``"Missing top-level definition: <name>"`` string, in the order
+    the names appear in ``expected_names``. This function never raises; a
+    malformed input is reported through the returned list.
+
+    Examples:
+    - validate_generated_source("x = 1", ["x"]) == []
+    - validate_generated_source("def foo(): return 1", ["foo"]) == []
+    - validate_generated_source("y = 2", ["foo"]) == ["Missing top-level definition: foo"]
+    - validate_generated_source("x = 1", []) == []
     """
 
     if expected_names is None:
@@ -1018,8 +1032,22 @@ def _resolve_forbidden_target_module(
     return None
 
 
+@jaunt.contract
 def compile_check(source: str, filename: str) -> list[str]:
-    """Attempt to compile source for syntax-level errors (empty list means ok)."""
+    """Attempt to compile ``source`` and report syntax-level errors.
+
+    Compiles ``source`` with ``compile(source, filename, "exec")`` purely to
+    surface syntax problems. Returns an empty list when the source compiles
+    cleanly. A ``SyntaxError`` is formatted as a single ``"SyntaxError: ..."``
+    string; any other compile-time exception is returned as a single
+    ``"CompileError: ..."`` string. ``filename`` only labels the compile; it is
+    not read from disk. This function never raises.
+
+    Examples:
+    - compile_check("x = 1", "f.py") == []
+    - compile_check("", "f.py") == []
+    - compile_check("def foo(): return 1", "f.py") == []
+    """
 
     try:
         compile(source or "", filename, "exec")

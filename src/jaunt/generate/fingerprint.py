@@ -9,12 +9,14 @@ from collections.abc import Callable, Sequence
 from functools import lru_cache
 from typing import Literal
 
+import jaunt
 from jaunt.config import JauntConfig
 from jaunt.generate.shared import load_prompt
 
 _CODEX_VERSION_UNKNOWN = "unknown"
 
 
+@jaunt.contract
 def build_generation_fingerprint(
     *,
     engine: str,
@@ -25,6 +27,25 @@ def build_generation_fingerprint(
     reasoning_effort: str = "",
     runtime_parts: list[str] | None = None,
 ) -> str:
+    """Hash the generation inputs into a stable 64-char hex fingerprint.
+
+    Builds a JSON payload from the supplied fields and returns its SHA-256 hex
+    digest. The payload always carries ``engine``, ``kind``, ``mode``, and
+    ``prompt_parts``. Optional fields are included only when meaningful so that
+    absent inputs never perturb the hash:
+
+    - ``runtime_parts`` is included only when the list is non-empty.
+    - ``editor_model`` is included only when ``mode == "architect"`` and the
+      stripped value is non-empty.
+    - ``reasoning_effort`` is included only when its stripped value is non-empty.
+
+    The payload is serialized with sorted keys, so the digest is deterministic
+    for a given set of inputs and independent of argument order: two calls with
+    identical inputs return the same string, and changing any included field
+    (for example ``kind`` from ``"build"`` to ``"test"``) changes the digest. The
+    return value is always a lowercase 64-character hex string.
+    """
+
     payload = {
         "engine": engine,
         "kind": kind,

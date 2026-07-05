@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -401,6 +402,28 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Generated dir override (defaults to jaunt.toml or __generated__).",
     )
 
+    plugin_p = subparsers.add_parser(
+        "install-claude-plugin",
+        help="Install the first-party Jaunt plugin into Claude Code.",
+    )
+    plugin_p.add_argument(
+        "--local",
+        action="store_true",
+        help="Add the marketplace from this local clone instead of GitHub.",
+    )
+    plugin_p.add_argument(
+        "--root",
+        type=str,
+        default=None,
+        help="Project root for --local (defaults to cwd).",
+    )
+    plugin_p.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Emit structured JSON output to stdout.",
+    )
+
     instructions_p = subparsers.add_parser(
         "instructions",
         help="Print a project-aware agent primer for using Jaunt.",
@@ -721,13 +744,12 @@ def _discover_contract_specs(*, root: Path, cfg: JauntConfig) -> dict[SpecRef, S
 
     source_dirs = [root / sr for sr in cfg.paths.source_roots]
     _prepend_sys_path([*source_dirs, root])
-    registry.clear_registries()
     modules = discovery.discover_modules(
         roots=[d for d in source_dirs if d.exists()],
         exclude=[],
         generated_dir=cfg.paths.generated_dir,
     )
-    discovery.evict_modules_for_import(
+    discovery.prepare_import_environment(
         module_names=modules, roots=[d for d in source_dirs if d.exists()]
     )
     discovery.import_and_collect(modules, kind="contract")
@@ -1888,8 +1910,7 @@ def _discover_governed_test_modules(root: Path, cfg: JauntConfig) -> tuple[set[s
     test_dirs, test_modules = _discover_test_spec_modules(root=root, cfg=cfg)
     if test_modules:
         _prepend_sys_path([root, *[root / sr for sr in cfg.paths.source_roots]])
-        registry.clear_registries()
-        discovery.evict_modules_for_import(module_names=test_modules, roots=test_dirs)
+        discovery.prepare_import_environment(module_names=test_modules, roots=test_dirs)
         for module in test_modules:
             try:
                 importlib.import_module(module)
@@ -1909,11 +1930,10 @@ def _discover_governed_test_modules(root: Path, cfg: JauntConfig) -> tuple[set[s
         from jaunt.module_contract import synthesize_auto_class_test_entries
 
         _prepend_sys_path([*source_dirs, root])
-        registry.clear_registries()
         mods = discovery.discover_modules(
             roots=source_dirs, exclude=[], generated_dir=cfg.paths.generated_dir
         )
-        discovery.evict_modules_for_import(module_names=mods, roots=source_dirs)
+        discovery.prepare_import_environment(module_names=mods, roots=source_dirs)
         discovery.import_and_collect(mods, kind="magic")
         auto = synthesize_auto_class_test_entries(
             registry.get_magic_registry(),
@@ -1938,11 +1958,10 @@ def _discover_reconcile_sets(root: Path, cfg: JauntConfig) -> tuple[set[str], se
     source_dirs = [root / sr for sr in cfg.paths.source_roots]
     existing = [d for d in source_dirs if d.exists()]
     _prepend_sys_path([*existing, root])
-    registry.clear_registries()
     mods = discovery.discover_modules(
         roots=existing, exclude=[], generated_dir=cfg.paths.generated_dir
     )
-    discovery.evict_modules_for_import(module_names=mods, roots=existing)
+    discovery.prepare_import_environment(module_names=mods, roots=existing)
     discovery.import_and_collect(mods, kind="magic")
     governed = set(registry.get_specs_by_module("magic").keys())
     contract_specs = _discover_contract_specs(root=root, cfg=cfg)
@@ -2169,13 +2188,12 @@ def _discover_build_context(
     from jaunt.module_api import module_api_digest
     from jaunt.module_contract import group_test_entries_by_target_module
 
-    registry.clear_registries()
     modules = discovery.discover_modules(
         roots=[d for d in source_dirs if d.exists()],
         exclude=[],
         generated_dir=cfg.paths.generated_dir,
     )
-    discovery.evict_modules_for_import(
+    discovery.prepare_import_environment(
         module_names=modules,
         roots=[d for d in source_dirs if d.exists()],
     )
@@ -3432,13 +3450,12 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
         from jaunt import discovery, registry
         from jaunt.deps import build_spec_graph, collapse_to_module_dag, find_cycles
 
-        registry.clear_registries()
         modules = discovery.discover_modules(
             roots=[d for d in source_dirs if d.exists()],
             exclude=[],
             generated_dir=cfg.paths.generated_dir,
         )
-        discovery.evict_modules_for_import(
+        discovery.prepare_import_environment(
             module_names=modules,
             roots=[d for d in source_dirs if d.exists()],
         )
@@ -3874,13 +3891,12 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
         build_magic_spec_graph: dict[SpecRef, set[SpecRef]] = {}
         build_magic_module_dag: dict[str, set[str]] = {}
         if bool(args.no_build):
-            registry.clear_registries()
             src_mods = discovery.discover_modules(
                 roots=[d for d in source_dirs if d.exists()],
                 exclude=[],
                 generated_dir=cfg.paths.generated_dir,
             )
-            discovery.evict_modules_for_import(
+            discovery.prepare_import_environment(
                 module_names=src_mods,
                 roots=[d for d in source_dirs if d.exists()],
             )
@@ -3958,7 +3974,6 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             except Exception:
                 continue
 
-        registry.clear_registries()
         modules_set: set[str] = set()
         existing_test_dirs = [d for d in test_dirs if d.exists()]
         first_test_root = Path(cfg.paths.test_roots[0]) if cfg.paths.test_roots else Path("tests")
@@ -3975,7 +3990,7 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             )
             modules_set.update(mods)
         modules = sorted(modules_set)
-        discovery.evict_modules_for_import(module_names=modules, roots=existing_test_dirs)
+        discovery.prepare_import_environment(module_names=modules, roots=existing_test_dirs)
         discovery.import_and_collect(modules, kind="test")
 
         specs = dict(registry.get_test_registry())
@@ -4785,13 +4800,12 @@ def cmd_specs(args: argparse.Namespace) -> int:
         from jaunt import discovery, registry
         from jaunt.deps import build_spec_graph
 
-        registry.clear_registries()
         modules = discovery.discover_modules(
             roots=[d for d in source_dirs if d.exists()],
             exclude=[],
             generated_dir=cfg.paths.generated_dir,
         )
-        discovery.evict_modules_for_import(
+        discovery.prepare_import_environment(
             module_names=modules,
             roots=[d for d in source_dirs if d.exists()],
         )
@@ -4891,6 +4905,87 @@ def cmd_guard(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_install_claude_plugin(args: argparse.Namespace) -> int:
+    from jaunt import claude_plugin
+
+    json_mode = _is_json_mode(args)
+    local = bool(getattr(args, "local", False))
+
+    def _fail(msg: str, code: int) -> int:
+        _eprint(f"error: {msg}")
+        if json_mode:
+            _emit_json({"command": "install-claude-plugin", "ok": False, "error": msg})
+        return code
+
+    if shutil.which("claude") is None:
+        return _fail(claude_plugin.missing_cli_message(), EXIT_CONFIG_OR_DISCOVERY)
+
+    local_path: str | None = None
+    if local:
+        root = Path(args.root).resolve() if args.root else Path.cwd().resolve()
+        manifest = root / ".claude-plugin" / "marketplace.json"
+        if not manifest.is_file():
+            return _fail(
+                f"No .claude-plugin/marketplace.json under {root}. Run from a Jaunt "
+                "clone's repo root, or drop --local to install from GitHub.",
+                EXIT_CONFIG_OR_DISCOVERY,
+            )
+        local_path = str(root)
+
+    def _run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            stdin=subprocess.DEVNULL,
+        )
+
+    def _step(argv: list[str], *, ok_label: str) -> tuple[str | None, str | None]:
+        """Run one claude command; return (status_label, error_message).
+
+        ``status_label`` is ``ok_label`` on a clean run or ``"already"`` for an
+        idempotent no-op; on failure it is ``None`` and the message is set.
+        """
+        try:
+            proc = _run(argv)
+        except (subprocess.TimeoutExpired, OSError) as e:
+            return None, str(e)
+        status = claude_plugin.classify_result(proc.returncode, proc.stdout, proc.stderr)
+        if status == "error":
+            detail = proc.stderr.strip() or proc.stdout.strip() or f"exit code {proc.returncode}"
+            return None, detail
+        return (ok_label if status == "ok" else "already"), None
+
+    market_status, err = _step(
+        claude_plugin.marketplace_add_command(local_path=local_path), ok_label="added"
+    )
+    if err is not None:
+        return _fail(err, 1)
+
+    plugin_status, err = _step(claude_plugin.plugin_install_command(), ok_label="installed")
+    if err is not None:
+        return _fail(err, 1)
+
+    if json_mode:
+        _emit_json(
+            {
+                "command": "install-claude-plugin",
+                "ok": True,
+                "marketplace": market_status,
+                "plugin": plugin_status,
+                "local": local,
+            }
+        )
+    else:
+        market_line = "added" if market_status == "added" else "already present"
+        plugin_line = "installed" if plugin_status == "installed" else "already installed"
+        print(f"Marketplace jaunt-plugins: {market_line}.")
+        print(f"Plugin jaunt: {plugin_line}.")
+        print(f"See {claude_plugin.DOCS_URL} for what the plugin adds.")
+    return EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_args(list(sys.argv[1:] if argv is None else argv))
@@ -4919,6 +5014,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_jobs(args)
     if args.command == "guard":
         return cmd_guard(args)
+    if args.command == "install-claude-plugin":
+        return cmd_install_claude_plugin(args)
     if args.command == "instructions":
         return cmd_instructions(args)
     if args.command == "tree":

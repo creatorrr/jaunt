@@ -13,14 +13,20 @@ import importlib
 import importlib.metadata
 import sys
 import warnings
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Literal
 
+import jaunt
 from jaunt.errors import JauntDiscoveryError
 
 _EMITTED_LAYOUT_WARNINGS: set[str] = set()
 _PACKAGES_DISTRIBUTIONS: Mapping[str, list[str]] | None = None
+
+# Top-level package name of the RUNNING framework. When jaunt self-hosts (its own
+# ``src`` is a configured source_root), discovered specs are ``jaunt.*`` names and
+# the running package must never be evicted/forked out from under the CLI.
+_SELF_PACKAGE: str = __package__ or "jaunt"
 
 
 def reset_discovery_warnings() -> None:
@@ -107,8 +113,57 @@ def _is_under_roots(path_str: str, *, roots: list[Path]) -> bool:
     return False
 
 
+@jaunt.contract
+def is_self_module(name: str) -> bool:
+    """True for the running framework's own top package and its submodules.
+
+    A module name belongs to the running framework when it is exactly the top
+    package name (``jaunt``) or a dotted submodule under it (``jaunt.<...>``).
+    A name that merely shares the ``jaunt`` prefix without a dot boundary (for
+    example ``jauntx``) is a different distribution and is not self-owned.
+
+    Examples:
+    - is_self_module("jaunt") == True
+    - is_self_module("jaunt.discovery") == True
+    - is_self_module("jaunt.contract.cases") == True
+    - is_self_module("jauntx") == False
+    - is_self_module("os") == False
+    """
+
+    return name == _SELF_PACKAGE or name.startswith(f"{_SELF_PACKAGE}.")
+
+
+@jaunt.contract
+def self_preserved_modules(module_names: Iterable[str]) -> frozenset[str]:
+    """Discovered names owned by the running framework that are ALREADY imported.
+
+    Returns the subset of ``module_names`` that is both self-owned (see
+    :func:`is_self_module`) AND currently present in ``sys.modules``. This is the
+    intersection discovered ∩ imported ∩ self: an adopter's discovery never yields
+    ``jaunt.*`` names, so the returned set is empty for them and a subsequent
+    ``clear_registries`` stays total (no self-spec leakage into adopter builds).
+
+    Membership in ``sys.modules`` is read at call time, so the result reflects the
+    live interpreter state when the function runs, not import-time state. A
+    non-self name is always excluded regardless of whether it is imported.
+
+    Examples:
+    - self_preserved_modules([]) == frozenset()
+    - self_preserved_modules(["os", "collections"]) == frozenset()
+    - self_preserved_modules(["jaunt.discovery"]) == frozenset({"jaunt.discovery"})
+    """
+
+    return frozenset(n for n in module_names if is_self_module(n) and n in sys.modules)
+
+
 def evict_modules_for_import(*, module_names: list[str], roots: list[Path]) -> None:
-    """Drop cached modules that would interfere with fresh project imports."""
+    """Drop cached modules that would interfere with fresh project imports.
+
+    The running framework's own package is never evicted, regardless of which
+    rule (exact, prefix, or ``__file__``-under-roots) matched it. Evicting the
+    live jaunt package re-executes ``jaunt/__init__.py`` and forks the registry
+    the CLI already holds a reference to — the self-hosting split-brain bug.
+    """
 
     resolved_roots: list[Path] = []
     for root in roots:
@@ -154,9 +209,27 @@ def evict_modules_for_import(*, module_names: list[str], roots: list[Path]) -> N
                 break
 
     for name in to_delete:
+        if is_self_module(name):
+            continue
         sys.modules.pop(name, None)
 
     importlib.invalidate_caches()
+
+
+def prepare_import_environment(*, module_names: list[str], roots: list[Path]) -> None:
+    """Reset registries + sys.modules for a fresh discovery import pass.
+
+    The one shared entry point for CLI discovery sites: clears the registries
+    (preserving the running framework's own already-imported specs) and then
+    evicts stale cached modules (carving out the self package). Call
+    ``discover_modules(...)`` FIRST so ``module_names`` reflects the current tree,
+    then hand those names here before ``import_and_collect``.
+    """
+
+    from jaunt.registry import clear_registries
+
+    clear_registries(preserve_modules=self_preserved_modules(module_names))
+    evict_modules_for_import(module_names=module_names, roots=roots)
 
 
 def _module_name_for_file(
@@ -328,6 +401,59 @@ def discover_modules(
     ]
 
 
+def _source_calls_magic_module(source: str) -> bool:
+    """True when the module's source has a module-level ``magic_module(...)`` call.
+
+    Deliberately stricter than :func:`_has_jaunt_markers`: it requires an actual
+    top-level ``magic_module`` call expression (a governing self spec module),
+    not a mere ``import jaunt`` — so framework infrastructure that only imports
+    jaunt (``cli``, ``registry``, ``discovery`` itself) never qualifies for the
+    reload path below.
+    """
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    for node in tree.body:
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            func = node.value.func
+            fname = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if fname == "magic_module":
+                return True
+    return False
+
+
+def _reregister_cleared_self_module(name: str) -> None:
+    """Re-run a cached self spec module's ``magic_module`` registration.
+
+    The self-package eviction carve-out (see :func:`evict_modules_for_import`)
+    keeps the running framework's own modules in ``sys.modules``, so a later
+    ``import_module`` of one is a no-op that does NOT re-execute its top-level
+    ``magic_module(...)`` call. If a prior registry clear dropped that module's
+    spec registration (e.g. an already-imported self spec module discovered again
+    in a long-lived process), the specs would be lost forever. Force a reload so
+    the governing call re-runs and re-registers; scoped to genuine self spec
+    modules only (never infrastructure), so reloading is safe.
+    """
+
+    from jaunt.registry import get_module_magic_defaults
+
+    if not is_self_module(name) or get_module_magic_defaults(name) is not None:
+        return
+    module = sys.modules.get(name)
+    source_file = getattr(module, "__file__", None)
+    if module is None or not isinstance(source_file, str) or not source_file:
+        return
+    try:
+        source = Path(source_file).read_text(encoding="utf-8")
+    except OSError:
+        return
+    if not _source_calls_magic_module(source):
+        return
+    importlib.reload(module)
+
+
 def import_and_collect(
     module_names: list[str], *, kind: Literal["magic", "test", "contract"]
 ) -> None:
@@ -336,6 +462,8 @@ def import_and_collect(
     for name in module_names:
         try:
             importlib.import_module(name)
+            if kind == "magic":
+                _reregister_cleared_self_module(name)
         except Exception as e:  # noqa: BLE001 - caller needs a single error type
             raise JauntDiscoveryError(
                 f"Failed to import {kind} module '{name}': {type(e).__name__}: {e}"

@@ -2,11 +2,38 @@
 
 from __future__ import annotations
 
-import json
-import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+import jaunt
+
+jaunt.magic_module(
+    __name__,
+    prompt=(
+        "This module classifies pytest failure records into two tiers — "
+        '"example" and "derived" (the module constants TIER_EXAMPLE and '
+        "TIER_DERIVED) — and produces repair feedback that withholds all "
+        "detail for derived-tier failures (the held-out barrier). The governed "
+        "functions reuse handwritten module-level helpers that live in this same "
+        "source module (jaunt.heldout); reach them exactly as the guard module "
+        "does — import the source module (import_module('jaunt.heldout')) and read "
+        "the helper off it — do not reimplement them. Those handwritten helpers "
+        "are: _item_records(report) -> list[dict] (report['items'] with non-dicts "
+        "dropped, [] if items is not a list), _collection_error_records(report) -> "
+        "list[dict] (same for report['collection_errors']), _normalize_tier(value) "
+        "-> str (returns 'example' only when value == 'example', else 'derived'), "
+        "_string_or_empty(value) -> str (value if it is a str, else ''), "
+        "_string_or_none(value) -> str | None (value if it is a non-empty str, "
+        "else None), _safe_exception_class(value) -> str (value if it is a "
+        "non-empty str, else 'error'), _full_item_feedback(record) -> list[str] "
+        "(unredacted per-item feedback lines), _full_collection_feedback(record) -> "
+        "list[str] (unredacted collection-error feedback lines), and "
+        "_assert_no_derived_detail_leaks(report, lines) -> None (asserts no derived "
+        "longrepr/capstdout/capstderr/collection-longrepr substring appears in "
+        "lines). Never weaken or skip the leak assertion when redacting."
+    ),
+)
 
 JAUNT_TIER_MARK = "jaunt_tier"
 TIER_EXAMPLE = "example"
@@ -215,6 +242,9 @@ def pytest_collectreport(report: Any) -> None:
 
 def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
     """Write the held-out JSON report when JAUNT_HELDOUT_REPORT is set."""
+    import json
+    import os
+
     del session, exitstatus
     path = os.environ.get(REPORT_ENV)
     if not path:
@@ -226,66 +256,136 @@ def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
 
 
 def load_report(path: str | Path) -> dict:
-    """Load a held-out JSON report, returning an empty dict for unusable input."""
-    try:
-        content = Path(path).read_text(encoding="utf-8")
-        if not content.strip():
-            return {}
-        parsed = json.loads(content)
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(parsed, dict):
-        return {}
-    return parsed
+    """Load a held-out JSON report from ``path``, returning ``{}`` for unusable input.
+
+    Signature is fixed: ``load_report(path: str | Path) -> dict``.
+
+    Procedure:
+
+    1. Read the file text at ``path`` (coerce through ``pathlib.Path`` first) using
+       UTF-8 encoding.
+    2. If the text is empty or contains only whitespace, return ``{}``.
+    3. Otherwise parse it as JSON.
+    4. If the parsed value is not a ``dict`` (e.g. a JSON list, string, or number),
+       return ``{}``. Otherwise return the parsed dict unchanged.
+
+    This function never raises for bad input. Any ``OSError`` (missing/unreadable
+    file) or ``ValueError`` (which includes ``json.JSONDecodeError``) raised while
+    reading or parsing is caught and turned into a ``{}`` return.
+
+    ``path`` is read at call time; nothing here depends on module-level mutable state.
+
+    Examples:
+    - A path to a file containing ``{"items": []}`` returns ``{"items": []}``.
+    - A path to a file containing ``"{not json"`` returns ``{}``.
+    - A path to a missing file returns ``{}``.
+    - A path to a file containing ``[]`` (a JSON list, not a dict) returns ``{}``.
+    - A path to an empty or whitespace-only file returns ``{}``.
+    """
+    raise NotImplementedError
 
 
 def assign_opaque_ids(report: dict) -> dict[str, str]:
-    """Assign stable derived#N identifiers to derived-tier item nodeids."""
-    nodeids = {
-        item["nodeid"]
-        for item in _item_records(report)
-        if isinstance(item.get("nodeid"), str) and _normalize_tier(item.get("tier")) == TIER_DERIVED
-    }
-    return {nodeid: f"derived#{index}" for index, nodeid in enumerate(sorted(nodeids), start=1)}
+    """Assign stable ``derived#N`` identifiers to derived-tier item nodeids.
+
+    Signature is fixed: ``assign_opaque_ids(report: dict) -> dict[str, str]``.
+
+    Collect the set of distinct ``nodeid`` values from the report's item records —
+    obtained via the handwritten helper ``_item_records(report)`` — keeping only
+    records where ``record.get("nodeid")`` is a ``str`` AND the record's tier
+    (``_normalize_tier(record.get("tier"))``) is the derived tier (the module
+    constant ``TIER_DERIVED`` == ``"derived"``). Example-tier items and items with a
+    non-string nodeid are excluded entirely.
+
+    Sort those nodeids in ascending (lexicographic) order and enumerate them
+    starting at 1. Return a dict mapping each nodeid to ``f"derived#{index}"``.
+    Because a ``set`` is used, duplicate nodeids collapse to one entry, and the
+    result is deterministic and stable across repeated calls with the same report.
+
+    ``report`` is read at call time; nothing here depends on module-level mutable
+    state.
+
+    Examples:
+    - A report whose derived-tier items have nodeids ``"t.py::test_b"`` and
+      ``"t.py::test_a"`` (plus an ``example``-tier ``"t.py::test_ex"``) returns
+      ``{"t.py::test_a": "derived#1", "t.py::test_b": "derived#2"}`` — sorted, and
+      the example-tier item is omitted.
+    - An empty or item-less report returns ``{}``.
+    """
+    raise NotImplementedError
 
 
 def build_repair_feedback(report: dict, *, redact: bool = True) -> list[str]:
-    """Build human-readable repair feedback, redacting derived-tier details by default."""
-    opaque_ids = assign_opaque_ids(report)
-    lines: list[str] = []
-    emitted_derived: set[str] = set()
+    """Build human-readable repair feedback, redacting derived-tier detail by default.
 
-    for record in _item_records(report):
-        if record.get("outcome") != "failed":
-            continue
-        if not redact:
-            lines.extend(_full_item_feedback(record))
-            continue
+    Signature is fixed:
+    ``build_repair_feedback(report: dict, *, redact: bool = True) -> list[str]``.
 
-        tier = _normalize_tier(record.get("tier"))
-        nodeid = _string_or_empty(record.get("nodeid"))
-        if tier == TIER_EXAMPLE:
-            lines.extend(_full_item_feedback(record))
-            continue
-        if nodeid in emitted_derived:
-            continue
-        emitted_derived.add(nodeid)
-        opaque_id = opaque_ids.get(nodeid, "derived#unknown")
-        exception_class = _safe_exception_class(record.get("exception_class"))
-        lines.append(f"{opaque_id}: {exception_class}")
+    This is the held-out barrier: with ``redact=True`` (the default), full failure
+    detail is emitted only for ``example``-tier failures, while ``derived``-tier
+    failures (the held-out battery) are collapsed to an opaque
+    ``derived#N: <ExceptionClass>`` line that leaks none of their longrepr / captured
+    output. With ``redact=False`` every failure gets its full detail (debug mode).
 
-    for record in _collection_error_records(report):
-        if not redact:
-            lines.extend(_full_collection_feedback(record))
-            continue
-        module = _string_or_empty(record.get("module")) or "<unknown module>"
-        exception_class = _safe_exception_class(record.get("exception_class"))
-        lines.append(f"collection error in {module}: {exception_class}")
+    First compute ``opaque_ids = assign_opaque_ids(report)`` (the derived-tier
+    nodeid -> ``derived#N`` mapping). Build an ordered list of feedback ``lines`` and
+    track a set of derived nodeids already emitted (``emitted_derived``).
 
-    if not lines:
-        lines = ["tests failed; details withheld (held-out tier)"]
+    Item records (iterate ``_item_records(report)`` in order):
 
-    if redact:
-        _assert_no_derived_detail_leaks(report, lines)
+    - Skip any record whose ``record.get("outcome")`` is not exactly ``"failed"``.
+    - If NOT redacting: append ``_full_item_feedback(record)`` (the handwritten
+      helper producing the full unredacted lines) and move on.
+    - If redacting: compute ``tier = _normalize_tier(record.get("tier"))`` and
+      ``nodeid = _string_or_empty(record.get("nodeid"))``.
+      - If the tier is the example tier (``TIER_EXAMPLE`` == ``"example"``), append
+        ``_full_item_feedback(record)`` (example failures are shown in full).
+      - Otherwise (derived tier): if this ``nodeid`` is already in
+        ``emitted_derived``, skip it (one opaque line per derived nodeid, so the
+        setup/call/teardown phases of one test do not each emit a line). Otherwise
+        add it to ``emitted_derived`` and append a single line
+        ``f"{opaque_id}: {exception_class}"`` where ``opaque_id`` is
+        ``opaque_ids.get(nodeid, "derived#unknown")`` and ``exception_class`` is
+        ``_safe_exception_class(record.get("exception_class"))``.
 
-    return lines
+    Collection-error records (iterate ``_collection_error_records(report)`` in
+    order, after all item records):
+
+    - If NOT redacting: append ``_full_collection_feedback(record)``.
+    - If redacting: append a single line
+      ``f"collection error in {module}: {exception_class}"`` where ``module`` is
+      ``_string_or_empty(record.get("module")) or "<unknown module>"`` and
+      ``exception_class`` is ``_safe_exception_class(record.get("exception_class"))``.
+
+    If after all of the above ``lines`` is empty (no failures at all), set it to the
+    single redacted fallback line ``["tests failed; details withheld (held-out
+    tier)"]``.
+
+    Finally, when redacting, call ``_assert_no_derived_detail_leaks(report, lines)``
+    as a defensive check that no derived-tier longrepr/captured-output substring
+    leaked into the returned lines (never skip or weaken this). Return ``lines``.
+
+    ``report`` is read at call time; nothing here depends on module-level mutable
+    state.
+
+    Examples:
+    - An ``example``-tier failed item with longrepr ``"E       assert 41 == 42"``
+      and ``capstdout="stdout-here"`` yields lines that contain its full nodeid,
+      exception class, the ``assert 41 == 42`` text, and ``stdout-here``.
+    - A single ``derived``-tier failed item (nodeid ``"t.py::test_derived_01"``,
+      ``AssertionError``, longrepr ``"E   assert 41 == 42"``,
+      ``capstdout="secret-stdout"``) yields exactly ``["derived#1:
+      AssertionError"]`` — none of ``41``, ``42``, ``assert``, ``secret-stdout``, or
+      the raw nodeid appear.
+    - Items with a missing tier and with tier ``"weird"`` are both treated as
+      derived, yielding e.g. ``["derived#1: ValueError", "derived#2:
+      AssertionError"]`` with no longrepr text leaked.
+    - A redacted collection error (module ``"t.py"``, ``ImportError``, longrepr
+      ``"Traceback ... secret-import-detail"``) yields exactly ``["collection error
+      in t.py: ImportError"]`` — no ``Traceback`` or ``secret-import-detail``.
+    - The same single derived item with ``redact=False`` yields lines that DO
+      contain the full ``assert 41 == 42`` detail.
+    - An empty report ``{}`` or a report with only passed (non-``"failed"``) items
+      returns ``["tests failed; details withheld (held-out tier)"]``.
+    """
+    raise NotImplementedError

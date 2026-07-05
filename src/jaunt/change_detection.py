@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+import jaunt
 from jaunt.registry import SpecEntry
 from jaunt.spec_ref import SpecRef
 
@@ -21,13 +22,35 @@ ExecFn = Callable[..., Awaitable[Any]]
 _DEFAULT = object()
 
 
+@jaunt.contract
 def sidecar_path(module_file: Path) -> Path:
-    """Return the contract sidecar path for a generated module file."""
+    """Return the contract sidecar path for a generated module file.
+
+    Appends the literal suffix ``".contract.json"`` to the file *name* — this
+    is not a suffix replacement, so the module's own ``.py`` extension is kept
+    and the sidecar stays in the same directory. ``foo.py`` therefore maps to
+    ``foo.py.contract.json``.
+
+    Examples:
+    - sidecar_path(Path("gen/mod.py")) == Path("gen/mod.py.contract.json")
+    - sidecar_path(Path("x.py")) == Path("x.py.contract.json")
+    """
     return module_file.with_name(module_file.name + ".contract.json")
 
 
+@jaunt.contract
 def read_contract_sidecar(path: Path) -> dict[str, dict]:
-    """Read a fail-soft contract sidecar mapping spec refs to snapshot dicts."""
+    """Read a fail-soft contract sidecar mapping spec refs to snapshot dicts.
+
+    Reads ``path`` and JSON-parses it into a mapping of spec-ref string to
+    snapshot dict. Fail-soft in every degenerate case: a missing or unreadable
+    file, invalid JSON, or a top-level payload that is not a dict all yield an
+    empty dict, and any non-dict values inside a dict payload are dropped. This
+    function never raises for I/O or parse errors.
+
+    Examples:
+    - read_contract_sidecar(Path("/nonexistent/does-not-exist.json")) == {}
+    """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:

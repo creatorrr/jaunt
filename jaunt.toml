@@ -1,0 +1,32 @@
+version = 1
+
+[agent]
+engine = "codex"
+
+[codex]
+model = "gpt-5.5"
+reasoning_effort = "high"
+sandbox = "workspace-write"
+
+[paths]
+source_roots = ["src"]
+test_roots = []
+
+[build]
+emit_stubs = true
+
+[skills]
+auto = false
+
+[context]
+repo_map = false
+
+[contract]
+battery_dir = "tests/contract"
+derive = ["examples", "errors"]
+strength = true
+
+[semantic_gate]
+enabled = true
+model = "gpt-5.4-mini"
+reasoning_effort = "high"

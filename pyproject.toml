@@ -1,6 +1,6 @@
 [project]
 name = "jaunt"
-version = "1.5.1"
+version = "1.5.2"
 description = "Spec-driven code generation framework: write intent as decorated Python stubs, generate implementations and tests with LLMs."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -58,11 +58,11 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-exclude = ["examples/**"]
+exclude = ["examples/**", "src/jaunt/__generated__/**", "tests/contract/**"]
 
 [tool.ruff.lint]
 select = ["E", "F", "B"]
 ignore = ["E741"]
 
 [tool.ty.src]
-exclude = ["examples/**"]
+exclude = ["examples/**", "src/jaunt/__generated__/**", "tests/contract/**"]

@@ -6,6 +6,12 @@ __pycache__/
 *.py[cod]
 
 **/__generated__/
+!src/jaunt/__generated__/
+!src/jaunt/__generated__/**
+# ...but never track bytecode under the committed self-hosted generated dir
+# (the negation above would otherwise re-include __pycache__).
+src/jaunt/__generated__/**/__pycache__/
+src/jaunt/__generated__/**/*.py[cod]
 
 .agents/
 

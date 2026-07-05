@@ -112,5 +112,18 @@ class C:
     assert skipped_values == {"CLASSDOC.", "ASYNCDOC."}
 
 
+def test_iter_mutants_yields_duplicate_mutants_without_dedup() -> None:
+    # Two identical `x = 1` statements: deleting either one produces the exact
+    # same source. iter_mutants must yield EVERY helper-produced mutant, including
+    # such collisions (origin/main parity) — de-duplicating would shrink the
+    # strength denominator for adopters. The deduped body yields this source once
+    # (count == 1, no repeats); the parity body yields it twice.
+    src = "def f(x: int) -> int:\n    x = 1\n    x = 1\n    return x\n"
+    mutants = list(iter_mutants(src))
+    expected_dup = ast.unparse(ast.parse("def f(x: int) -> int:\n    x = 1\n    return x\n"))
+    assert mutants.count(expected_dup) == 2
+    assert len(mutants) > len(set(mutants))
+
+
 def test_format_strength_exact() -> None:
     assert format_strength(2, 5) == "2/5"
