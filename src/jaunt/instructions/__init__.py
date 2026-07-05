@@ -37,6 +37,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("watch", "Rebuild (and optionally test) on file changes."),
     ("init", "Scaffold `jaunt.toml` + source/test directories."),
     ("clean", "Remove `__generated__/` directories."),
+    ("migrate", "Plan/apply mechanical source migrations without model calls."),
     ("instructions", "Print this agent primer (project-aware)."),
     ("adopt", "Track existing code with `@jaunt.contract` and derive its battery."),
     ("reconcile", "Derive/refresh committed contract batteries (calls the model)."),

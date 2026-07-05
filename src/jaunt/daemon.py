@@ -31,6 +31,8 @@ class BuildOutcome:
     ok: bool
     refrozen: bool
     error: str = ""
+    advisories: tuple[str, ...] = ()
+    newly_governed: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -167,10 +169,12 @@ class CliRunner:
         self, worktree: Path, module: str, heartbeat: Heartbeat | None = None
     ) -> BuildOutcome:
         _, payload = self._run_build(worktree, module, heartbeat)
+        adv = tuple(payload.get("advisories", {}).get(module, ()))
+        ng = tuple(payload.get("newly_governed", {}).get(module, ()))
         if module in payload.get("refrozen", []):
-            return BuildOutcome(ok=True, refrozen=True)
+            return BuildOutcome(ok=True, refrozen=True, advisories=adv, newly_governed=ng)
         if module in payload.get("generated", []):
-            return BuildOutcome(ok=True, refrozen=False)
+            return BuildOutcome(ok=True, refrozen=False, advisories=adv, newly_governed=ng)
         error = str(payload.get("failed", {}).get(module, payload.get("error", "build failed")))
         return BuildOutcome(ok=False, refrozen=False, error=error.splitlines()[0][:200])
 
@@ -496,7 +500,14 @@ def _collect_finished(state: DaemonState, root: Path, cfg: JauntConfig) -> None:
         job = jobs_mod.load_job(root, job_id)
         green = result.build.ok and (result.gate is None or result.gate.ok)
         if job is not None and job.state == jobs_mod.RUNNING and green:
-            jobs_mod.mark(root, job, jobs_mod.GREEN, phase="")
+            jobs_mod.mark(
+                root,
+                job,
+                jobs_mod.GREEN,
+                phase="",
+                advisories=_json.dumps(list(result.build.advisories)),
+                newly_governed=_json.dumps(list(result.build.newly_governed)),
+            )
         state.pending[job_id] = result
 
 
@@ -551,6 +562,8 @@ def _land_pending(root: Path, cfg: JauntConfig, state: DaemonState) -> None:
         cause = "cosmetic (gate: EQUIVALENT)" if result.build.refrozen else "spec change"
         action = "refreeze" if result.build.refrozen else "build"
         battery = result.gate.battery if result.gate else "-"
+        n_adv = len(result.build.advisories)
+        detail = f"{cause}; battery {battery}" + (f"; {n_adv} advisories" if n_adv else "")
         message = landing.build_commit_message(job.module, cause, job.id, job.spec_digest)
         if not cfg.daemon.auto_commit:
             (jobs_mod.jobs_dir(root) / f"{job.id}.patch").write_text(result.patch, encoding="utf-8")
@@ -577,11 +590,7 @@ def _land_pending(root: Path, cfg: JauntConfig, state: DaemonState) -> None:
             )
             journal_mod.append_events(
                 root,
-                [
-                    journal_mod.JournalEvent(
-                        "job-propose", job.module, f"{cause}; battery {battery}", job.id
-                    )
-                ],
+                [journal_mod.JournalEvent("job-propose", job.module, detail, job.id)],
             )
             _notify(cfg, updated)
             del state.pending[job_id]
@@ -600,11 +609,7 @@ def _land_pending(root: Path, cfg: JauntConfig, state: DaemonState) -> None:
             snapshot_len = journal_path.stat().st_size
             journal_mod.append_events(
                 root,
-                [
-                    journal_mod.JournalEvent(
-                        action, job.module, f"{cause}; battery {battery}", job.id
-                    )
-                ],
+                [journal_mod.JournalEvent(action, job.module, detail, job.id)],
             )
             extra_paths = (journal_mod.JOURNAL_FILE,)
         try:

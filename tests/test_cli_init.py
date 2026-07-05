@@ -88,6 +88,8 @@ def test_cmd_init_creates_example_spec(tmp_path: Path, monkeypatch) -> None:
     assert "jaunt.magic_module(__name__)" in content
     assert "greet" in content
     assert "@jaunt.magic" not in content
+    assert "raise NotImplementedError" not in content
+    assert content.rstrip().endswith("...")
 
 
 def test_cmd_init_does_not_overwrite_existing_example_spec(tmp_path: Path, monkeypatch) -> None:

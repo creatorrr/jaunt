@@ -608,6 +608,7 @@ class BuildReport:
     skipped: set[str]
     failed: dict[str, list[str]]
     needs_deps: dict[str, list[str]] = field(default_factory=dict)
+    advisories: dict[str, list[str]] = field(default_factory=dict)
     context_stats: dict[str, dict[str, dict[str, int]]] = field(default_factory=dict)
     emitted_stubs: dict[str, str] = field(default_factory=dict)
     stub_warnings: list[str] = field(default_factory=list)
@@ -667,6 +668,12 @@ def _module_context_stats(
         "package_context": _block_size(artifacts.package_context_block),
         "repo_map": _block_size(repo_map_text),
         "blueprint": _block_size(artifacts.blueprint_source),
+        "skills_workspace_seeded": {
+            "chars": skills_workspace_chars,
+            "est_tokens": skills_workspace_chars // 4,
+        },
+        # Back-compat alias for one release; see docs/reference. Seeded-on-disk
+        # bytes AVAILABLE to the agent, not necessarily read.
         "skills_workspace": {
             "chars": skills_workspace_chars,
             "est_tokens": skills_workspace_chars // 4,
@@ -1790,6 +1797,7 @@ async def run_build(
     # Track generated source for dependency context injection.
     generated_sources: dict[str, str] = {}
     module_needs_deps: dict[str, list[str]] = {}
+    module_advisories: dict[str, list[str]] = {}
     module_context_stats: dict[str, dict[str, dict[str, int]]] = {}
     from jaunt.generate.shared import load_prompt as _load_prompt
 
@@ -1887,6 +1895,9 @@ async def run_build(
             validation_errors = validate_candidate(result_source)
             if validation_errors:
                 return False, None, validation_errors
+
+            if result.advisories:
+                module_advisories.setdefault(module_name, []).extend(result.advisories)
 
             if cost_tracker is not None and result.usage is not None:
                 cost_tracker.record(module_name, result.usage)
@@ -2393,6 +2404,7 @@ async def run_build(
         skipped=skipped,
         failed=failed,
         needs_deps=module_needs_deps,
+        advisories=module_advisories,
         context_stats=module_context_stats,
         emitted_stubs=emitted_stubs,
         stub_warnings=stub_warnings,

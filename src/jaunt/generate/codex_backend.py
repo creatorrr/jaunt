@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import tempfile
 from collections.abc import Iterable
 from pathlib import Path
@@ -21,6 +22,39 @@ from jaunt.errors import JauntGenerationError
 from jaunt.generate.base import GeneratorBackend, ModuleSpecContext, TokenUsage
 from jaunt.generate.shared import load_prompt
 from jaunt.skill_seed import seed_skills_into_workspace
+
+
+ADVISORIES_INSTRUCTION = (
+    "After the code is complete, end your FINAL message with a line `ADVISORIES:` "
+    "followed by one line per logical issue you noticed while implementing: spec "
+    "ambiguities, contradictions between a spec and a dependency's documented API, "
+    "or suspected bugs in dependency code you read. Write `ADVISORIES: none` if "
+    "there is nothing to report. Do not list routine implementation choices."
+)
+_ADVISORY_HEADING_RE = re.compile(r"^\s*#{0,6}\s*ADVISORIES\s*:?\s*(?P<rest>.*)$")
+
+
+def parse_advisories(final_message: str) -> tuple[str, ...]:
+    lines = (final_message or "").splitlines()
+    start = None
+    inline_rest = ""
+    for i, line in enumerate(lines):
+        m = _ADVISORY_HEADING_RE.match(line)
+        if m:
+            start, inline_rest = i, (m.group("rest") or "").strip()
+    if start is None:
+        return ()
+    items: list[str] = []
+    if inline_rest and inline_rest.lower() != "none":
+        items.append(inline_rest)
+    for line in lines[start + 1 :]:
+        text = line.strip().lstrip("-*").strip()
+        if not text:
+            continue
+        if text.lower() == "none":
+            continue
+        items.append(text)
+    return tuple(items)
 
 
 class CodexExecResult:
@@ -320,7 +354,7 @@ class CodexBackend(GeneratorBackend):
         ctx: ModuleSpecContext,
         *,
         extra_error_context: list[str] | None = None,
-    ) -> tuple[str, TokenUsage | None]:
+    ) -> tuple[str, TokenUsage | None, tuple[str, ...]]:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             target = root / (ctx.generated_module.replace(".", "/") + ".py")
@@ -387,7 +421,8 @@ class CodexBackend(GeneratorBackend):
                 )
             source = target.read_text(encoding="utf-8")
             usage = self._usage_from(result)
-            return source, usage
+            advisories = parse_advisories(result.final_message) if result is not None else ()
+            return source, usage, advisories
 
     def _build_prompt(
         self,
@@ -428,6 +463,7 @@ class CodexBackend(GeneratorBackend):
             "Edit ONLY the target file. Do not create other files, run tests, or modify "
             "anything else. Output the full module - no placeholders."
         )
+        blocks.append(ADVISORIES_INSTRUCTION)
         # This is the load-bearing prompt path; prompts/*.md are not rendered by Codex.
         if ctx.kind == "test":
             blocks.append(

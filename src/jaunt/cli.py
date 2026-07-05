@@ -10,9 +10,12 @@ import asyncio
 import hashlib
 import json
 import os
+import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -240,6 +243,44 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Show what would be removed without deleting.",
     )
     clean_p.add_argument(
+        "--orphans",
+        action="store_true",
+        help="Remove only orphaned generated artifacts (spec no longer exists).",
+    )
+    clean_p.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Emit structured JSON output to stdout.",
+    )
+
+    migrate_p = subparsers.add_parser(
+        "migrate", help="Plan/apply mechanical source migrations (no model calls)."
+    )
+    migrate_p.add_argument(
+        "--root",
+        type=str,
+        default=None,
+        help="Project root (defaults to searching upward for jaunt.toml).",
+    )
+    migrate_p.add_argument("--config", type=str, default=None, help="Path to jaunt.toml.")
+    migrate_p.add_argument(
+        "--apply",
+        action="store_true",
+        help="Execute the migrations (default: plan only).",
+    )
+    migrate_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Apply even when the git working tree is dirty.",
+    )
+    migrate_p.add_argument(
+        "--allow-newly-governed",
+        action="store_true",
+        dest="allow_newly_governed",
+        help="Also rewrite ungoverned legacy stub bodies that would create new specs.",
+    )
+    migrate_p.add_argument(
         "--json",
         action="store_true",
         dest="json_output",
@@ -1281,6 +1322,18 @@ def _cmd_jobs_show(args: argparse.Namespace) -> int:
             print(f"state: {_job_state_label(job)}")
         elif key == "phase" and job.phase:
             continue
+        elif key == "advisories":
+            if not value:
+                continue
+            try:
+                items = json.loads(value)
+            except json.JSONDecodeError:
+                items = []
+            if not items:
+                continue
+            print("advisories:")
+            for item in items:
+                print(f"  - {item}")
         else:
             print(f"{key}: {value}")
     if args.full and job.detail_log:
@@ -1730,6 +1783,173 @@ def _find_generated_dirs(roots: Sequence[Path], generated_dir: str) -> list[Path
     return sorted(found)
 
 
+def _find_project_orphans(
+    *,
+    root: Path,
+    cfg: JauntConfig,
+    source_dirs: Sequence[Path],
+    test_dirs: Sequence[Path],
+    governed_modules: set[str],
+    contract_refs: set[str] | None,
+    include_artifacts: bool = True,
+    classify_test_orphans: bool = True,
+):
+    """Collect orphaned jaunt artifacts across (possibly nested) generated dirs.
+
+    - `governed_modules` is the union set: magic spec modules PLUS test spec
+      modules, so generated tests (whose header `source_module` is the TEST spec
+      module) are judged against the modules that still exist.
+    - Generated dirs are scanned under BOTH the source roots and the test roots
+      (deduplicated): the tester writes generated tests under the test roots'
+      `__generated__`, which is invisible when a project's source roots do not
+      nest them.
+    - `include_artifacts=False` skips generated/stub/sidecar scanning (used when
+      the magic side of a check is out of scope).
+    - `contract_refs=None` skips contract-battery scanning (e.g. --magic-only, or
+      when the contract side of a check is out of scope).
+    - `classify_test_orphans=False` never flags generated TEST modules (fail-safe
+      when the governed test-module set is incomplete).
+    """
+    from jaunt.reconcile import OrphanArtifact, find_orphans
+
+    seen: dict[Path, OrphanArtifact] = {}
+    existing_source = [d for d in source_dirs if d.exists()]
+    existing_test = [d for d in test_dirs if d.exists()]
+
+    if include_artifacts:
+        # Generated modules + their sidecars live under each generated dir; the
+        # generated dir's PARENT is the package_dir find_orphans scans. Scan under
+        # source AND test roots (deduplicated by _find_generated_dirs).
+        scan_dirs = [*existing_source, *existing_test]
+        for gen_root in _find_generated_dirs(scan_dirs, cfg.paths.generated_dir):
+            for o in find_orphans(
+                package_dir=gen_root.parent,
+                generated_dir=cfg.paths.generated_dir,
+                governed_modules=governed_modules,
+                source_dirs=[],
+                battery_dir=None,
+                contract_refs=set(),
+                classify_test_orphans=classify_test_orphans,
+            ):
+                seen.setdefault(o.path, o)
+        # Stubs live next to spec sources under the source roots.
+        if existing_source:
+            for o in find_orphans(
+                package_dir=existing_source[0],
+                generated_dir="__jaunt_no_such_generated__",
+                governed_modules=governed_modules,
+                source_dirs=existing_source,
+                battery_dir=None,
+                contract_refs=set(),
+                classify_test_orphans=classify_test_orphans,
+            ):
+                seen.setdefault(o.path, o)
+
+    if contract_refs is not None:
+        battery_dir = root / cfg.contract.battery_dir
+        if battery_dir.exists():
+            for o in find_orphans(
+                package_dir=root,
+                generated_dir="__jaunt_no_such_generated__",
+                governed_modules=governed_modules,
+                source_dirs=[],
+                battery_dir=battery_dir,
+                contract_refs=contract_refs,
+            ):
+                seen.setdefault(o.path, o)
+
+    return sorted(seen.values(), key=lambda o: str(o.path))
+
+
+def _discover_governed_test_modules(root: Path, cfg: JauntConfig) -> tuple[set[str], bool]:
+    """Governed test-module names and whether generated-test orphan detection is safe.
+
+    The returned set holds the module names that appear as `source_module` in
+    generated test headers:
+
+    - Explicit `@jaunt.test` specs, read from the test registry after importing
+      the marker-discovered test modules (keyed exactly as the tester keys
+      generated-test headers). A per-module import failure fails safe by treating
+      only THAT module as governed — marker PRESENCE alone is never governance,
+      so a module that kept `import jaunt` but lost its last `@jaunt.test` spec
+      correctly orphans its stale generated tests.
+    - Synthesized auto-class-test module names (`test=True` / `auto_class_tests`).
+
+    The returned bool is False when the auto-class synthesis pass raised: the
+    governed set is then incomplete, so callers must NOT classify generated-test
+    orphans this run (never delete against a partial set).
+    """
+    import importlib
+
+    from jaunt import discovery, registry
+
+    governed: set[str] = set()
+
+    test_dirs, test_modules = _discover_test_spec_modules(root=root, cfg=cfg)
+    if test_modules:
+        _prepend_sys_path([root, *[root / sr for sr in cfg.paths.source_roots]])
+        registry.clear_registries()
+        discovery.evict_modules_for_import(module_names=test_modules, roots=test_dirs)
+        for module in test_modules:
+            try:
+                importlib.import_module(module)
+            except Exception:  # noqa: BLE001 - per-module fail-safe: keep its tests non-orphan
+                governed.add(module)
+        governed |= set(registry.get_specs_by_module("test").keys())
+
+    # Auto-class test modules require magic specs. If the synthesis pass fails we
+    # cannot know the auto module names, so disable test-orphan classification
+    # entirely rather than judge against a partial set.
+    source_dirs = [root / sr for sr in cfg.paths.source_roots if (root / sr).exists()]
+    if not source_dirs:
+        return governed, True
+    first_test_root = Path(cfg.paths.test_roots[0]) if cfg.paths.test_roots else Path("tests")
+    tests_package = ".".join(first_test_root.parts) or "tests"
+    try:
+        from jaunt.module_contract import synthesize_auto_class_test_entries
+
+        _prepend_sys_path([*source_dirs, root])
+        registry.clear_registries()
+        mods = discovery.discover_modules(
+            roots=source_dirs, exclude=[], generated_dir=cfg.paths.generated_dir
+        )
+        discovery.evict_modules_for_import(module_names=mods, roots=source_dirs)
+        discovery.import_and_collect(mods, kind="magic")
+        auto = synthesize_auto_class_test_entries(
+            registry.get_magic_registry(),
+            default_on=bool(cfg.test.auto_class_tests),
+            tests_package=tests_package,
+            generated_dir=cfg.paths.generated_dir,
+        )
+        governed |= set(auto.keys())
+    except Exception as exc:  # noqa: BLE001 - fail safe: skip test-orphan detection this run
+        _eprint(
+            f"warning: could not enumerate auto-class test modules "
+            f"({type(exc).__name__}: {exc}); skipping generated-test orphan detection this run"
+        )
+        return governed, False
+    return governed, True
+
+
+def _discover_reconcile_sets(root: Path, cfg: JauntConfig) -> tuple[set[str], set[str]]:
+    """Discover currently-governed magic module names and contract refs."""
+    from jaunt import discovery, registry
+
+    source_dirs = [root / sr for sr in cfg.paths.source_roots]
+    existing = [d for d in source_dirs if d.exists()]
+    _prepend_sys_path([*existing, root])
+    registry.clear_registries()
+    mods = discovery.discover_modules(
+        roots=existing, exclude=[], generated_dir=cfg.paths.generated_dir
+    )
+    discovery.evict_modules_for_import(module_names=mods, roots=existing)
+    discovery.import_and_collect(mods, kind="magic")
+    governed = set(registry.get_specs_by_module("magic").keys())
+    contract_specs = _discover_contract_specs(root=root, cfg=cfg)
+    contract_refs = {str(e.spec_ref) for e in contract_specs.values()}
+    return governed, contract_refs
+
+
 def _find_jaunt_stubs(roots: Sequence[Path], generated_dir: str) -> list[Path]:
     from jaunt import stub_emitter
 
@@ -1822,6 +2042,62 @@ def cmd_clean(args: argparse.Namespace) -> int:
             _emit_json({"command": "clean", "ok": False, "error": str(e)})
         return EXIT_CONFIG_OR_DISCOVERY
 
+    if getattr(args, "orphans", False):
+        governed_modules, contract_refs = _discover_reconcile_sets(root, cfg)
+        test_governed, classify_test_orphans = _discover_governed_test_modules(root, cfg)
+        governed_modules = governed_modules | test_governed
+        source_dirs = [root / sr for sr in cfg.paths.source_roots]
+        test_dirs = [root / tr for tr in cfg.paths.test_roots]
+        orphans = _find_project_orphans(
+            root=root,
+            cfg=cfg,
+            source_dirs=source_dirs,
+            test_dirs=test_dirs,
+            governed_modules=governed_modules,
+            contract_refs=contract_refs,
+            classify_test_orphans=classify_test_orphans,
+        )
+        orphan_rels = [str(o.path.relative_to(root)) for o in orphans]
+        if getattr(args, "dry_run", False):
+            if json_mode:
+                _emit_json(
+                    {
+                        "command": "clean",
+                        "ok": True,
+                        "dry_run": True,
+                        "orphans": True,
+                        "would_remove": orphan_rels,
+                    }
+                )
+            return EXIT_OK
+
+        for orphan in orphans:
+            orphan.path.unlink(missing_ok=True)
+
+        from jaunt import journal
+
+        journal.append_events(
+            root,
+            [
+                journal.JournalEvent(
+                    action="orphan-removed",
+                    module=o.source_module,
+                    detail=str(o.path.relative_to(root)),
+                )
+                for o in orphans
+            ],
+        )
+        if json_mode:
+            _emit_json(
+                {
+                    "command": "clean",
+                    "ok": True,
+                    "orphans": True,
+                    "removed": orphan_rels,
+                }
+            )
+        return EXIT_OK
+
     generated_dir = cfg.paths.generated_dir
     scan_roots = [root / sr for sr in cfg.paths.source_roots] + [
         root / tr for tr in cfg.paths.test_roots
@@ -1862,6 +2138,446 @@ def cmd_clean(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+@dataclass(frozen=True, slots=True)
+class _BuildDiscoveryContext:
+    package_dir: Path
+    specs: dict["SpecRef", "SpecEntry"]
+    spec_graph: dict["SpecRef", set["SpecRef"]]
+    module_dag: dict[str, set[str]]
+    module_specs: dict[str, list["SpecEntry"]]
+    header_fields_by_module: dict[str, dict[str, object]]
+
+
+def _discover_build_context(
+    root: Path, cfg: JauntConfig, args: argparse.Namespace
+) -> _BuildDiscoveryContext:
+    _maybe_load_dotenv(root)
+    _sync_generated_dir_env(cfg)
+    include_target_tests = _effective_include_target_tests(cfg, args)
+    build_instructions = _effective_build_instructions(cfg, args)
+    source_dirs = [root / sr for sr in cfg.paths.source_roots]
+    package_dir = next((d for d in source_dirs if d.exists()), None)
+    if package_dir is None:
+        raise JauntConfigError("No existing source_roots to build into.")
+
+    _prepend_sys_path([*source_dirs, root])
+
+    from jaunt import builder, discovery, registry
+    from jaunt.deps import build_spec_graph, collapse_to_module_dag, find_cycles
+    from jaunt.digest import legacy_module_digest
+    from jaunt.generation_fingerprint import generation_fingerprint
+    from jaunt.module_api import module_api_digest
+    from jaunt.module_contract import group_test_entries_by_target_module
+
+    registry.clear_registries()
+    modules = discovery.discover_modules(
+        roots=[d for d in source_dirs if d.exists()],
+        exclude=[],
+        generated_dir=cfg.paths.generated_dir,
+    )
+    discovery.evict_modules_for_import(
+        module_names=modules,
+        roots=[d for d in source_dirs if d.exists()],
+    )
+    discovery.import_and_collect(modules, kind="magic")
+    static_targeted_test_entries = (
+        _discover_static_targeted_test_entries(root=root, cfg=cfg) if include_target_tests else []
+    )
+
+    specs = dict(registry.get_magic_registry())
+    infer_default = bool(cfg.build.infer_deps) and not bool(getattr(args, "no_infer_deps", False))
+    spec_graph = build_spec_graph(specs, infer_default=infer_default)
+    cycles = find_cycles(spec_graph)
+    if cycles:
+        raise JauntDependencyCycleError(
+            "Dependency cycle detected: "
+            + ", ".join(" -> ".join(str(s) for s in c) for c in cycles)
+        )
+    module_dag = collapse_to_module_dag(spec_graph)
+    module_specs = registry.get_specs_by_module("magic")
+
+    build_generation_fingerprint = generation_fingerprint(
+        cfg,
+        kind="build",
+        build_instructions=build_instructions,
+        include_target_tests=include_target_tests,
+    )
+    targeted_test_entries = group_test_entries_by_target_module(static_targeted_test_entries)
+
+    try:
+        module_digest_fn = builder.module_digest
+    except AttributeError:
+        from jaunt.digest import module_digest as module_digest_fn
+
+    header_fields_by_module: dict[str, dict[str, object]] = {}
+    for module_name, entries in sorted(module_specs.items()):
+        expected, _errs = builder._build_expected_names(entries)
+        wcc = builder._whole_class_context(
+            entries,
+            specs=specs,
+            package_dir=package_dir,
+            generated_dir=cfg.paths.generated_dir,
+        )
+        module_context = builder.build_module_context_artifacts(
+            module_name=module_name,
+            entries=entries,
+            expected_names=expected,
+            module_specs=module_specs,
+            module_dag=module_dag,
+            package_dir=package_dir,
+            generated_dir=cfg.paths.generated_dir,
+            build_instructions=build_instructions,
+            targeted_test_entries=targeted_test_entries,
+            base_contract_block=wcc.base_contract_block,
+            whole_class_contract_block=wcc.whole_class_contract_block,
+            inherited_api_block=wcc.inherited_api_block,
+        )
+        fields: dict[str, object] = {
+            "tool_version": builder._tool_version(),
+            "kind": "build",
+            "source_module": module_name,
+            "module_digest": module_digest_fn(module_name, entries, specs, spec_graph),
+            "legacy_module_digest": legacy_module_digest(module_name, entries, specs, spec_graph),
+            "generation_fingerprint": build_generation_fingerprint,
+            "module_context_digest": module_context.digest,
+            "module_api_digest": module_api_digest(entries),
+            "spec_refs": [str(e.spec_ref) for e in entries],
+        }
+        if wcc.base_api_digest:
+            fields["base_api_digest"] = wcc.base_api_digest
+        header_fields_by_module[module_name] = fields
+
+    return _BuildDiscoveryContext(
+        package_dir=package_dir,
+        specs=specs,
+        spec_graph=spec_graph,
+        module_dag=module_dag,
+        module_specs=module_specs,
+        header_fields_by_module=header_fields_by_module,
+    )
+
+
+def _action_json(action, root: Path) -> dict[str, str]:
+    try:
+        path = str(action.path.resolve().relative_to(root.resolve()))
+    except ValueError:
+        path = str(action.path)
+    return {
+        "migration": action.migration_id,
+        "path": path,
+        "module": action.module,
+        "symbol": action.symbol,
+        "kind": action.kind,
+        "classification": action.classification,
+        "description": action.description,
+    }
+
+
+def _is_dirty_worktree(root: Path) -> bool:
+    try:
+        proc = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return False
+    if proc.returncode != 0:
+        return False
+    return bool(proc.stdout.strip())
+
+
+def _reemit_stub_for_module(
+    *,
+    module_name: str,
+    entries: list["SpecEntry"],
+    package_dir: Path,
+    generated_dir: str,
+    tool_version: str,
+) -> str | None:
+    from jaunt import builder, header, paths, stub_emitter
+
+    gen_source = builder._read_generated(package_dir, generated_dir, module_name)
+    if gen_source is None:
+        return None
+    expected, _ = builder._build_expected_names(entries)
+    spec_source = Path(entries[0].source_file).read_text(encoding="utf-8")
+    stub_path = stub_emitter.stub_path_for_source(entries[0].source_file)
+    if stub_path.exists() and not stub_emitter.is_jaunt_stub(stub_path):
+        return None
+    stub_header = header.format_stub_header(
+        tool_version=tool_version,
+        source_module=module_name,
+        generated_digest=stub_emitter.generated_content_digest(gen_source),
+        inputs_digest=stub_emitter.stub_inputs_digest(spec_source, gen_source),
+    )
+    new_stub = stub_emitter.format_stub_best_effort(
+        stub_emitter.build_stub_source(
+            spec_source,
+            gen_source,
+            set(expected),
+            stub_header,
+            generated_module=paths.spec_module_to_generated_module(
+                module_name, generated_dir=generated_dir
+            ),
+        )
+    )
+    if stub_path.exists() and stub_path.read_text(encoding="utf-8") == new_stub:
+        return str(stub_path)
+    stub_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        dir=str(stub_path.parent),
+        prefix=".jaunt-stub-tmp-",
+        suffix=".pyi",
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(new_stub)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, stub_path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+    return str(stub_path)
+
+
+def _migrate_candidate_files(root: Path, cfg: JauntConfig) -> dict[Path, str]:
+    """Spec-marker source files eligible for legacy-stub rewrites.
+
+    Every `.py` under the configured source roots that carries a jaunt marker,
+    excluding generated dirs, hidden dirs, and files under the test roots.
+    Returns a mapping of resolved path -> discovered module name, deduplicated by
+    path (a file reachable under overlapping roots is planned once).
+
+    Test roots and top-level hidden dirs (`.venv`, `.git`, …) are pruned from the
+    walk itself via `exclude` globs so a large test tree is never read; the
+    post-filter still guards nested hidden dirs and non-root test trees.
+    """
+    from jaunt import discovery
+
+    source_dirs = [root / sr for sr in cfg.paths.source_roots if (root / sr).exists()]
+    test_dirs = [(root / tr).resolve() for tr in cfg.paths.test_roots]
+    found: dict[Path, str] = {}
+    for source_dir in source_dirs:
+        resolved_root = source_dir.resolve()
+        # Prune top-level hidden dirs, and any test root nested under this source
+        # dir, before discover_module_files reads files for marker detection.
+        exclude = [".*", ".*/*"]
+        for test_dir in test_dirs:
+            if test_dir.is_relative_to(resolved_root) and test_dir != resolved_root:
+                rel_test = test_dir.relative_to(resolved_root).as_posix()
+                exclude += [rel_test, f"{rel_test}/*"]
+        for module_name, path in discovery.discover_module_files(
+            roots=[source_dir], exclude=exclude, generated_dir=cfg.paths.generated_dir
+        ):
+            resolved = path.resolve()
+            try:
+                rel = resolved.relative_to(resolved_root)
+            except ValueError:
+                continue
+            if any(part.startswith(".") for part in rel.parts):
+                continue
+            if any(resolved.is_relative_to(test_dir) for test_dir in test_dirs):
+                continue
+            found.setdefault(resolved, module_name)
+    return found
+
+
+def cmd_migrate(args: argparse.Namespace) -> int:
+    json_mode = _is_json_mode(args)
+    try:
+        root, cfg = _load_config(args)
+        ctx = _discover_build_context(root, cfg, args)
+    except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError, KeyError) as e:
+        _print_error(e)
+        if json_mode:
+            _emit_json({"command": "migrate", "ok": False, "error": str(e)})
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    from jaunt import migrate
+
+    # Governed qualnames per source file, keyed by resolved path. Full qualnames
+    # (not collapsed to the class name) so a single governed C.method does not
+    # make every legacy-bodied method in C look already-governed.
+    source_governed: dict[Path, set[str]] = {}
+    module_by_path: dict[Path, str] = {}
+    for module, entries in ctx.module_specs.items():
+        for entry in entries:
+            resolved = Path(entry.source_file).resolve()
+            source_governed.setdefault(resolved, set()).add(entry.qualname)
+            module_by_path.setdefault(resolved, module)
+
+    # Candidates are ALL spec-marker source files, not only files with a current
+    # governed spec: a module-mode file whose every body is a legacy
+    # `raise RuntimeError("spec stub")` has zero governed specs yet still needs a
+    # plan (newly-governs entries).
+    candidate_module_by_path = _migrate_candidate_files(root, cfg)
+    for resolved, module in module_by_path.items():
+        candidate_module_by_path.setdefault(resolved, module)
+
+    legacy_actions = []
+    for resolved in sorted(candidate_module_by_path, key=lambda p: str(p)):
+        module = module_by_path.get(resolved, candidate_module_by_path[resolved])
+        legacy_actions.extend(
+            migrate.plan_legacy_stub_rewrites(
+                source_file=resolved,
+                module=module,
+                governed_symbols=source_governed.get(resolved, set()),
+            )
+        )
+    stub_actions = migrate.plan_stub_reemissions(
+        module_specs=ctx.module_specs,
+        package_dir=ctx.package_dir,
+        generated_dir=cfg.paths.generated_dir,
+    )
+    migration_order = {
+        migrate.LEGACY_STUB_MIGRATION_ID: 0,
+        migrate.STUB_REEMIT_MIGRATION_ID: 1,
+    }
+    actions = sorted(
+        [*legacy_actions, *stub_actions],
+        key=lambda a: (migration_order.get(a.migration_id, 99), str(a.path), a.module, a.symbol),
+    )
+
+    if not bool(getattr(args, "apply", False)):
+        if json_mode:
+            _emit_json(
+                {
+                    "command": "migrate",
+                    "ok": True,
+                    "applied": False,
+                    "actions": [_action_json(a, root) for a in actions],
+                }
+            )
+        elif not actions:
+            print("No pending migrations.")
+        else:
+            print("Pending migrations:")
+            for action in actions:
+                print(action.description)
+        return EXIT_OK
+
+    if not bool(getattr(args, "force", False)) and _is_dirty_worktree(root):
+        _eprint("error: refusing to migrate; git working tree is dirty (use --force)")
+        if json_mode:
+            _emit_json(
+                {
+                    "command": "migrate",
+                    "ok": False,
+                    "applied": False,
+                    "error": "dirty working tree",
+                }
+            )
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    applied_actions = []
+    skipped_actions = []
+    restamp_rewrite_modules: set[str] = set()
+    newly_governed_rewrite_modules: set[str] = set()
+    for action in actions:
+        if action.migration_id == migrate.LEGACY_STUB_MIGRATION_ID:
+            if action.classification == "newly-governs" and not bool(
+                getattr(args, "allow_newly_governed", False)
+            ):
+                skipped_actions.append(action)
+                if not json_mode:
+                    print(
+                        "SKIPPED (would newly govern; pass --allow-newly-governed): "
+                        f"{action.description}"
+                    )
+                continue
+            migrate.apply_stub_rewrite(action)
+            applied_actions.append(action)
+            if not json_mode:
+                rel = _action_json(action, root)["path"]
+                print(f"rewrote {rel}: {action.module}.{action.symbol}")
+            if action.classification == "newly-governs":
+                newly_governed_rewrite_modules.add(action.module)
+            else:
+                restamp_rewrite_modules.add(action.module)
+        elif action.migration_id == migrate.STUB_REEMIT_MIGRATION_ID:
+            applied_actions.append(action)
+
+    try:
+        ctx_after = _discover_build_context(root, cfg, args)
+    except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError, KeyError) as e:
+        _print_error(e)
+        if json_mode:
+            _emit_json({"command": "migrate", "ok": False, "applied": True, "error": str(e)})
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    from jaunt import builder
+
+    restamped_modules: set[str] = set()
+    needs_rebuild_modules: set[str] = set()
+    for module in sorted(restamp_rewrite_modules - newly_governed_rewrite_modules):
+        entries = ctx_after.module_specs.get(module)
+        header_fields = ctx_after.header_fields_by_module.get(module)
+        if not entries or header_fields is None:
+            needs_rebuild_modules.add(module)
+            continue
+        outcome = builder.refreeze_module(
+            package_dir=ctx_after.package_dir,
+            generated_dir=cfg.paths.generated_dir,
+            module_name=module,
+            header_fields=builder._header_fields_with_spec_digests(header_fields, entries),
+            snapshots=builder._compute_snapshots(entries),
+        )
+        if outcome.needs_rebuild:
+            needs_rebuild_modules.add(module)
+            if not json_mode:
+                print(f"needs build {module}")
+        else:
+            restamped_modules.add(module)
+            if not json_mode:
+                print(f"re-stamped {module}")
+
+    reemitted_paths: list[str] = []
+    if cfg.build.emit_stubs:
+        reemit_modules = restamped_modules | {
+            action.module
+            for action in applied_actions
+            if action.migration_id == migrate.STUB_REEMIT_MIGRATION_ID
+        }
+        for module in sorted(reemit_modules):
+            entries = ctx_after.module_specs.get(module)
+            if not entries:
+                continue
+            stub = _reemit_stub_for_module(
+                module_name=module,
+                entries=entries,
+                package_dir=ctx_after.package_dir,
+                generated_dir=cfg.paths.generated_dir,
+                tool_version=builder._tool_version(),
+            )
+            if stub is None:
+                continue
+            reemitted_paths.append(stub)
+            if not json_mode:
+                try:
+                    rel = str(Path(stub).resolve().relative_to(root.resolve()))
+                except ValueError:
+                    rel = stub
+                print(f"re-emitted {rel}")
+
+    if json_mode:
+        _emit_json(
+            {
+                "command": "migrate",
+                "ok": True,
+                "applied": True,
+                "actions": [_action_json(a, root) for a in applied_actions],
+                "skipped": [_action_json(a, root) for a in skipped_actions],
+            }
+        )
+    return EXIT_OK
+
+
 def _fingerprint_env_hint(cfg: JauntConfig, stale_changes: dict[str, str]) -> str | None:
     """One-line diagnosis when staleness is fingerprint-only and codex is absent.
 
@@ -1884,6 +2600,11 @@ def _fingerprint_env_hint(cfg: JauntConfig, stale_changes: dict[str, str]) -> st
         "so environments without codex restale byte-identical trees; set it to false "
         "for environment-independent checks."
     )
+
+
+def _render_stale_reason(reason: str) -> str:
+    """Human-facing stale label; the free re-stamp case is called out as such."""
+    return "re-stamp: free" if reason == "re-stamp" else reason
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -1936,10 +2657,14 @@ def cmd_check(args: argparse.Namespace) -> int:
         magic_fresh: list[str] = []
         magic_stale: dict[str, str] = {}
         magic_unbuilt: list[str] = []
+        artifact_orphan_objs: list = []
+        battery_orphan_objs: list = []
+        newly_governed_modules: dict[str, list[str]] = {}
+        source_dirs = [root / sr for sr in cfg.paths.source_roots]
+        test_dirs = [root / tr for tr in cfg.paths.test_roots]
         if run_magic:
             from jaunt import builder
 
-            source_dirs = [root / sr for sr in cfg.paths.source_roots]
             _prepend_sys_path([*source_dirs, root])
             include_target_tests = _effective_include_target_tests(cfg, args)
             build_instructions = _effective_build_instructions(cfg, args)
@@ -1973,22 +2698,81 @@ def cmd_check(args: argparse.Namespace) -> int:
                         )
                 magic_fresh = sorted(mstatus.fresh)
 
-        magic_blocked = bool(magic_stale or magic_unbuilt)
-        blocked = bool(contract_blocked) or magic_blocked
+            package_dir = next((d for d in source_dirs if d.exists()), None)
+            if package_dir is not None:
+                from jaunt import registry
+                from jaunt.reconcile import newly_governed_specs
+
+                governed_modules = set(registry.get_specs_by_module("magic").keys())
+                entries = list(registry.get_magic_registry().values())
+                newly_governed_modules = newly_governed_specs(
+                    entries,
+                    package_dir=package_dir,
+                    generated_dir=cfg.paths.generated_dir,
+                )
+                # Judge generated artifacts (impl + tests + stubs + sidecars)
+                # against the union of magic and test spec modules. Contract
+                # batteries are handled on the contract side below.
+                test_governed, classify_test_orphans = _discover_governed_test_modules(root, cfg)
+                governed_union = governed_modules | test_governed
+                artifact_orphan_objs = _find_project_orphans(
+                    root=root,
+                    cfg=cfg,
+                    source_dirs=source_dirs,
+                    test_dirs=test_dirs,
+                    governed_modules=governed_union,
+                    contract_refs=None,
+                    include_artifacts=True,
+                    classify_test_orphans=classify_test_orphans,
+                )
+
+        # Contract-battery orphans gate whenever contracts are in scope — including
+        # --contracts-only, where the magic block above did not run.
+        if run_contracts:
+            battery_orphan_objs = _find_project_orphans(
+                root=root,
+                cfg=cfg,
+                source_dirs=source_dirs,
+                test_dirs=test_dirs,
+                governed_modules=set(),
+                contract_refs={str(e.spec_ref) for e in specs.values()},
+                include_artifacts=False,
+            )
+
+        magic_orphans = [str(o.path.relative_to(root)) for o in artifact_orphan_objs]
+        battery_orphans_rel = [str(o.path.relative_to(root)) for o in battery_orphan_objs]
+
+        magic_blocked = bool(magic_stale or magic_unbuilt or artifact_orphan_objs)
+        contracts_blocked = bool(contract_blocked) or bool(battery_orphan_objs)
+        blocked = (run_contracts and contracts_blocked) or (run_magic and magic_blocked)
 
         if json_mode:
             payload: dict[str, object] = {"command": "check", "ok": not blocked}
             if run_contracts:
                 payload["blocked"] = contract_blocked
                 payload["checked"] = contract_checked
+                # Contract-battery orphans always live at the top level; a
+                # combined check emits both this and magic.orphans.
+                payload["orphans"] = sorted(battery_orphans_rel)
             if run_magic:
                 payload["magic"] = {
                     "fresh": magic_fresh,
                     "stale": magic_stale,
                     "unbuilt": sorted(magic_unbuilt),
+                    # Generated/stub/sidecar orphans only; batteries are top-level.
+                    "orphans": sorted(magic_orphans),
                 }
             _emit_json(payload)
         else:
+
+            def _print_orphan(orphan) -> None:
+                relpath = str(orphan.path.relative_to(root))
+                print(
+                    f"[BLOCK] orphaned artifact: {relpath} "
+                    f"(spec {orphan.source_module} no longer exists) — "
+                    "run 'jaunt clean --orphans' or restore the spec"
+                )
+
             if run_contracts:
                 if specs:
                     for r in contract_results:
@@ -2003,15 +2787,26 @@ def cmd_check(args: argparse.Namespace) -> int:
                     )
                 else:
                     print("Contract check: 0 contract function(s).")
+                # Contract-battery orphans are reported on the contract side.
+                for orphan in sorted(battery_orphan_objs, key=lambda o: str(o.path)):
+                    _print_orphan(orphan)
             if run_magic:
-                if magic_unbuilt or magic_stale:
+                if magic_unbuilt or magic_stale or artifact_orphan_objs:
                     print(
                         f"Magic freshness: {len(magic_unbuilt)} unbuilt, {len(magic_stale)} stale."
                     )
                     for module_name in sorted(magic_unbuilt):
-                        print(f"[BLOCK] {module_name}: unbuilt")
+                        if module_name in newly_governed_modules:
+                            print(
+                                f"[BLOCK] {module_name}: unbuilt "
+                                "(newly governed by module scan — first build)"
+                            )
+                        else:
+                            print(f"[BLOCK] {module_name}: unbuilt")
                     for module_name, reason in sorted(magic_stale.items()):
-                        print(f"[BLOCK] {module_name}: stale ({reason})")
+                        print(f"[BLOCK] {module_name}: stale ({_render_stale_reason(reason)})")
+                    for orphan in sorted(artifact_orphan_objs, key=lambda o: str(o.path)):
+                        _print_orphan(orphan)
                     hint = _fingerprint_env_hint(cfg, magic_stale)
                     if hint:
                         print(hint, file=sys.stderr)
@@ -2394,6 +3189,27 @@ def cmd_status(args: argparse.Namespace) -> int:
         if not magic_only:
             contract_rows, review_refs = _contract_rows(infer_default)
 
+        from jaunt import registry as _registry
+
+        _governed = set(_registry.get_specs_by_module("magic").keys())
+        _pkg_dir = next((d for d in source_dirs if d.exists()), None)
+        _test_dirs = [root / tr for tr in cfg.paths.test_roots]
+        _test_governed, _classify_test_orphans = _discover_governed_test_modules(root, cfg)
+        orphan_objs = (
+            _find_project_orphans(
+                root=root,
+                cfg=cfg,
+                source_dirs=source_dirs,
+                test_dirs=_test_dirs,
+                governed_modules=_governed | _test_governed,
+                contract_refs=(None if magic_only else {str(r["ref"]) for r in contract_rows}),
+                classify_test_orphans=_classify_test_orphans,
+            )
+            if _pkg_dir is not None
+            else []
+        )
+        orphan_rels = [str(o.path.relative_to(root)) for o in orphan_objs]
+
         if mstatus.total == 0:
             if json_mode:
                 payload: dict[str, object] = {
@@ -2403,6 +3219,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                     "stale_changes": {},
                     "fresh": [],
                     "digests": mstatus.digests,
+                    "orphans": orphan_rels,
                 }
                 if not magic_only:
                     payload.update(
@@ -2428,6 +3245,11 @@ def cmd_status(args: argparse.Namespace) -> int:
                         )
                 if tree_drift is not None:
                     print(f"tree: {tree_drift} (run jaunt tree)")
+                if orphan_rels:
+                    print(f"Orphaned artifacts ({len(orphan_rels)}):")
+                    for orphan in sorted(orphan_objs, key=lambda o: str(o.path)):
+                        relpath = str(orphan.path.relative_to(root))
+                        print(f"- {relpath} (spec {orphan.source_module} no longer exists)")
             return EXIT_OK
 
         stale = mstatus.stale
@@ -2442,6 +3264,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                 "stale_changes": stale_changes,
                 "fresh": sorted(fresh),
                 "digests": mstatus.digests,
+                "orphans": orphan_rels,
             }
             if not magic_only:
                 payload.update(
@@ -2458,13 +3281,43 @@ def cmd_status(args: argparse.Namespace) -> int:
             print(f"Status: {mstatus.total} module(s) total")
             print(f"Stale ({len(stale_sorted)}):")
             for mod in stale_sorted:
-                print(f"- {mod} ({stale_changes.get(mod, 'structural')})")
+                print(f"- {mod} ({_render_stale_reason(stale_changes.get(mod, 'structural'))})")
+            restamp_legacy = 0
+            module_entries = _registry.get_specs_by_module("magic")
+            for mod in stale_sorted:
+                if stale_changes.get(mod) != "re-stamp":
+                    continue
+                try:
+                    if any(
+                        (
+                            'raise RuntimeError("spec stub")'
+                            in Path(entry.source_file).read_text(encoding="utf-8")
+                        )
+                        or (
+                            "raise RuntimeError('spec stub')"
+                            in Path(entry.source_file).read_text(encoding="utf-8")
+                        )
+                        for entry in module_entries.get(mod, [])
+                    ):
+                        restamp_legacy += 1
+                except Exception:  # noqa: BLE001 - best-effort hint; status must not fail
+                    continue
+            if restamp_legacy:
+                print(
+                    f"hint: {restamp_legacy} module(s) are stale (re-stamp: free) "
+                    "with legacy stub bodies — run 'jaunt migrate' to re-stamp them"
+                )
             hint = _fingerprint_env_hint(cfg, stale_changes)
             if hint:
                 print(hint, file=sys.stderr)
             print(f"Fresh ({len(fresh_sorted)}):")
             for mod in fresh_sorted:
                 print(f"- {mod}")
+            if orphan_rels:
+                print(f"Orphaned artifacts ({len(orphan_rels)}):")
+                for orphan in sorted(orphan_objs, key=lambda o: str(o.path)):
+                    relpath = str(orphan.path.relative_to(root))
+                    print(f"- {relpath} (spec {orphan.source_module} no longer exists)")
             if contract_rows:
                 print(f"Contracts ({len(contract_rows)}):")
                 for row in contract_rows:
@@ -2495,6 +3348,15 @@ def _fmt_count(n: int) -> str:
 
 
 def _context_stats_summary_line(module: str, blocks: dict[str, dict[str, int]]) -> str:
+    # The seeded-skills block is emitted under both `skills_workspace_seeded` and the
+    # legacy `skills_workspace` alias (same value). Render only the seeded key — as
+    # `skills(seeded)` — and never total or print the number twice.
+    if "skills_workspace_seeded" in blocks:
+        blocks = {
+            ("skills(seeded)" if k == "skills_workspace_seeded" else k): v
+            for k, v in blocks.items()
+            if k != "skills_workspace"
+        }
     total_chars = sum(b["chars"] for b in blocks.values())
     total_tokens = sum(b["est_tokens"] for b in blocks.values())
     parts: list[str] = []
@@ -2798,6 +3660,16 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
 
             rc_search.ensure_index(package_dir)
 
+        from jaunt.reconcile import newly_governed_specs
+
+        newly_governed = newly_governed_specs(
+            list(specs.values()), package_dir=package_dir, generated_dir=cfg.paths.generated_dir
+        )
+        if newly_governed and not json_mode:
+            for mod in sorted(newly_governed):
+                for sym in newly_governed[mod]:
+                    print(f"newly governed by module scan: {mod}.{sym} — first build")
+
         jobs = int(args.jobs) if args.jobs is not None else int(cfg.build.jobs)
         report = await builder.run_build(
             package_dir=package_dir,
@@ -2845,6 +3717,12 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                 for marker in markers:
                     _eprint(f"  {marker}")
 
+        if report.advisories and not json_mode:
+            print("Advisories (from the generation agent — informational):")
+            for mod, items in sorted(report.advisories.items()):
+                for item in items:
+                    print(f"  {mod}: {item}")
+
         if report.stub_warnings and not json_mode:
             for warning in report.stub_warnings:
                 _eprint(warning)
@@ -2866,6 +3744,13 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
         for mod, err in sorted(report.failed.items()):
             first = str(err).splitlines()[0][:120] if str(err) else "generation failed"
             events.append(_journal.JournalEvent(action="build-fail", module=mod, detail=first))
+        for mod, items in sorted(report.advisories.items()):
+            for item in items:
+                events.append(
+                    _journal.JournalEvent(
+                        action="advisory", module=mod, detail=" ".join(item.split())
+                    )
+                )
         _journal.append_events(root, events)
 
         if not json_mode and (cost_tracker.api_calls > 0 or cost_tracker.cache_hits > 0):
@@ -2895,12 +3780,18 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             }
             if report.needs_deps:
                 build_payload["needs_deps"] = {k: v for k, v in sorted(report.needs_deps.items())}
+            if report.advisories:
+                build_payload["advisories"] = {
+                    k: list(v) for k, v in sorted(report.advisories.items())
+                }
             if report.emitted_stubs:
                 build_payload["emitted_stubs"] = {
                     k: v for k, v in sorted(report.emitted_stubs.items())
                 }
             if report.stub_warnings:
                 build_payload["stub_warnings"] = report.stub_warnings
+            if newly_governed:
+                build_payload["newly_governed"] = {k: v for k, v in sorted(newly_governed.items())}
             _emit_json(build_payload)
 
         if report.failed:
@@ -3288,17 +4179,36 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             print(
                 f"Generated {len(result.generated)} test module(s), skipped {len(result.skipped)}."
             )
+            if getattr(result, "advisories", {}):
+                print("Advisories (from the generation agent — informational):")
+                for mod, items in sorted(result.advisories.items()):
+                    for item in items:
+                        print(f"  {mod}: {item}")
+
+        from jaunt import journal as _journal
+
+        _journal.append_events(
+            root,
+            [
+                _journal.JournalEvent(action="advisory", module=mod, detail=" ".join(item.split()))
+                for mod, items in sorted(getattr(result, "advisories", {}).items())
+                for item in items
+            ],
+        )
 
         if json_mode:
-            _emit_json(
-                {
-                    "command": "test",
-                    "ok": exit_code == 0 and not gen_failed,
-                    "exit_code": exit_code,
-                    "refrozen": sorted(test_refrozen_modules),
-                    "generation_failed": {k: v for k, v in sorted(gen_failed.items())},
+            test_payload: dict[str, object] = {
+                "command": "test",
+                "ok": exit_code == 0 and not gen_failed,
+                "exit_code": exit_code,
+                "refrozen": sorted(test_refrozen_modules),
+                "generation_failed": {k: v for k, v in sorted(gen_failed.items())},
+            }
+            if getattr(result, "advisories", None):
+                test_payload["advisories"] = {
+                    k: list(v) for k, v in sorted(result.advisories.items())
                 }
-            )
+            _emit_json(test_payload)
 
         if gen_failed or exit_code == EXIT_GENERATION_ERROR:
             return EXIT_GENERATION_ERROR
@@ -3878,20 +4788,31 @@ def cmd_specs(args: argparse.Namespace) -> int:
         specs = dict(registry.get_magic_registry())
         infer_default = bool(cfg.build.infer_deps) and not bool(args.no_infer_deps)
         spec_graph = build_spec_graph(specs, infer_default=infer_default)
+        from jaunt.reconcile import newly_governed_specs
+
+        pkg_dir = next((d for d in source_dirs if d.exists()), None)
+        newly = newly_governed_specs(
+            list(specs.values()), package_dir=pkg_dir, generated_dir=cfg.paths.generated_dir
+        )
 
         module_filter = args.module
-        spec_list = [
-            {
-                "ref": str(ref),
-                "module": entry.module,
-                "qualname": entry.qualname,
-                "source_file": entry.source_file,
-                "origin": entry.origin,
-                "kwargs": entry.decorator_kwargs,
-            }
-            for ref, entry in sorted(specs.items())
-            if not module_filter or entry.module == module_filter
-        ]
+        spec_list = []
+        for ref, entry in sorted(specs.items()):
+            if module_filter and entry.module != module_filter:
+                continue
+            spec_list.append(
+                {
+                    "ref": str(ref),
+                    "module": entry.module,
+                    "qualname": entry.qualname,
+                    "source_file": entry.source_file,
+                    "origin": entry.origin,
+                    "kwargs": entry.decorator_kwargs,
+                    "newly_governed": bool(
+                        entry.origin == "module" and entry.qualname in newly.get(entry.module, [])
+                    ),
+                }
+            )
         dep_graph = {
             str(ref): sorted(str(d) for d in deps)
             for ref, deps in sorted(spec_graph.items())
@@ -3914,6 +4835,8 @@ def cmd_specs(args: argparse.Namespace) -> int:
                 parts = [f"- {item['ref']} ({item['source_file']})"]
                 if item["origin"] == "module":
                     parts.append(" [module]")
+                if item["newly_governed"]:
+                    parts.append(" [newly governed — first build]")
                 if item["kwargs"]:
                     parts.append(f" kwargs={item['kwargs']}")
                 if deps:
@@ -3972,6 +4895,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_init(args)
     if args.command == "clean":
         return cmd_clean(args)
+    if args.command == "migrate":
+        return cmd_migrate(args)
     if args.command == "status":
         return cmd_status(args)
     if args.command == "log":

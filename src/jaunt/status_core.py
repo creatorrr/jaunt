@@ -275,15 +275,16 @@ def _label_change_kind(
     module_specs: dict[str, list],
     generation_fingerprint: str = "",
 ) -> str:
-    """Classify why a stale module changed: "structural", "prose", or "fingerprint".
+    """Classify why a stale module changed: structural, prose, fingerprint, or re-stamp.
 
     Structural = a signature/structure change (or never built / missing digests);
     prose = only docstring contract text changed; fingerprint = the specs are
     byte-identical but the generation fingerprint (engine, model, prompts,
     optional codex CLI version) differs — e.g. a check run in an environment
-    without the codex binary while `fingerprint_cli_version` is enabled. Used by
-    `jaunt status` and the semantic gate to decide whether a cheap re-freeze is
-    possible.
+    without the codex binary while `fingerprint_cli_version` is enabled;
+    re-stamp = stale but byte-identical to the stored header digests, resolvable
+    by the deterministic free refreeze/re-stamp path without a model. Used by
+    `jaunt status` and the semantic gate to decide whether a cheap re-freeze is possible.
     """
     from jaunt import builder
     from jaunt.digest import prose_digest, structural_digest
@@ -309,4 +310,4 @@ def _label_change_kind(
         stored_fp = _norm_digest(extract_generation_fingerprint(existing))
         if stored_fp is not None and stored_fp != _norm_digest(generation_fingerprint):
             return "fingerprint"
-    return "structural"
+    return "re-stamp"

@@ -12,6 +12,51 @@ built modules — your generated code stays fresh across the upgrade. Anything
 that would restale built modules lands in a minor version and is called out on
 this page.
 
+## 1.5
+
+Minor release that closes the adoption-feedback backlog: a codex advisories
+channel, `jaunt migrate`, an orphaned-artifact gate, and clearer status labels.
+No built module restales on the upgrade.
+
+- **Nothing restales when you upgrade.** The advisories prompt instruction lives
+  in backend code, outside the generation fingerprint, so it cannot invalidate a
+  built module. `_STUB_FORMAT_VERSION` is unchanged, so committed `.pyi` stubs
+  stay fresh. Upgrade, run `jaunt status`, and every module reports fresh.
+- **`jaunt check` now blocks on orphaned artifacts.** An orphan is a generated
+  module, `.pyi` stub, or contract battery whose spec no longer exists. `check`
+  exits `4` and names the fix. On upgrade this fires only if you already have
+  orphans on disk from a deleted or renamed spec. Clear them once with
+  `jaunt clean --orphans` (preview with `--dry-run`), or restore the spec.
+  Hand-authored files are never candidates: only files carrying a jaunt
+  provenance header, plus the `.contract.json` sidecar next to an orphaned
+  module, can be classified.
+- **`jaunt migrate` retires two upgrade chores.** It rewrites legacy
+  `raise RuntimeError("spec stub")` bodies to `...` and re-stamps the header so
+  the change costs no model call, and it re-emits `.pyi` stubs left stale by a
+  past `_STUB_FORMAT_VERSION` bump. It plans by default and prints what it would
+  change; pass `--apply` to write. This closes the 1.4.2 caveat where
+  `jaunt check` stayed red until you ran a full `jaunt build`.
+- **Advisories are additive.** Codex ends its final message with any logical
+  issues it noticed while implementing: a spec ambiguity, a spec that
+  contradicts a dependency's documented API, or a suspected bug in code it read.
+  Fresh builds and test runs print them, `--json` carries an `advisories` map,
+  and `jaunt log` replays them. They never touch digests, staleness, or exit
+  codes.
+- **The `context_stats` skills key is renamed.** `skills_workspace` becomes
+  `skills_workspace_seeded` to say what it measures: the bytes of skill files
+  seeded on disk and *available* to the agent, not bytes the agent read. The old
+  `skills_workspace` key stays as a `--json` alias for this release.
+- **Two new status labels.** A module the next build resolves through the free
+  re-stamp path now reads `stale (re-stamp: free)` instead of
+  `stale (structural)`, and a module-origin spec with no artifact yet is flagged
+  `newly governed by module scan` before you spend anything.
+- **Docs and the `jaunt init` scaffold lead with `...` again.** 1.4.2 had
+  switched the example stub body to `raise NotImplementedError` to satisfy strict
+  type checkers; `...` reads plainer, never runs, and carries no runtime risk, so
+  it is the default once more. All stub forms still digest identically. If ty or
+  Pyright flags `...` under a concrete return annotation, `raise NotImplementedError`
+  works just as well and switching between the two never restales a module.
+
 ## 1.4.2
 
 Patch release from the fourth adoption-feedback wave. No built module is
@@ -29,7 +74,8 @@ re-emitted `.pyi` files.
 - **Scaffold and docs lead with `raise NotImplementedError`.** Strict type
   checkers (ty, Pyright) reject a `...` body under a concrete return
   annotation outside stub files. All stub forms digest identically, so
-  switching your existing `...` bodies over is free.
+  switching your existing `...` bodies over is free. (1.5 reverted the scaffold
+  default back to `...`; the type-checker note still holds, and either form works.)
 - **Emitted `.pyi` stubs are lint-clean.** The unused `import jaunt` is no
   longer copied from the spec; names inside string annotations
   (`"Chunker | None"`) resolve like plain ones (from the generated module's
