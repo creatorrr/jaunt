@@ -721,13 +721,12 @@ def _discover_contract_specs(*, root: Path, cfg: JauntConfig) -> dict[SpecRef, S
 
     source_dirs = [root / sr for sr in cfg.paths.source_roots]
     _prepend_sys_path([*source_dirs, root])
-    registry.clear_registries()
     modules = discovery.discover_modules(
         roots=[d for d in source_dirs if d.exists()],
         exclude=[],
         generated_dir=cfg.paths.generated_dir,
     )
-    discovery.evict_modules_for_import(
+    discovery.prepare_import_environment(
         module_names=modules, roots=[d for d in source_dirs if d.exists()]
     )
     discovery.import_and_collect(modules, kind="contract")
@@ -1888,8 +1887,7 @@ def _discover_governed_test_modules(root: Path, cfg: JauntConfig) -> tuple[set[s
     test_dirs, test_modules = _discover_test_spec_modules(root=root, cfg=cfg)
     if test_modules:
         _prepend_sys_path([root, *[root / sr for sr in cfg.paths.source_roots]])
-        registry.clear_registries()
-        discovery.evict_modules_for_import(module_names=test_modules, roots=test_dirs)
+        discovery.prepare_import_environment(module_names=test_modules, roots=test_dirs)
         for module in test_modules:
             try:
                 importlib.import_module(module)
@@ -1909,11 +1907,10 @@ def _discover_governed_test_modules(root: Path, cfg: JauntConfig) -> tuple[set[s
         from jaunt.module_contract import synthesize_auto_class_test_entries
 
         _prepend_sys_path([*source_dirs, root])
-        registry.clear_registries()
         mods = discovery.discover_modules(
             roots=source_dirs, exclude=[], generated_dir=cfg.paths.generated_dir
         )
-        discovery.evict_modules_for_import(module_names=mods, roots=source_dirs)
+        discovery.prepare_import_environment(module_names=mods, roots=source_dirs)
         discovery.import_and_collect(mods, kind="magic")
         auto = synthesize_auto_class_test_entries(
             registry.get_magic_registry(),
@@ -1938,11 +1935,10 @@ def _discover_reconcile_sets(root: Path, cfg: JauntConfig) -> tuple[set[str], se
     source_dirs = [root / sr for sr in cfg.paths.source_roots]
     existing = [d for d in source_dirs if d.exists()]
     _prepend_sys_path([*existing, root])
-    registry.clear_registries()
     mods = discovery.discover_modules(
         roots=existing, exclude=[], generated_dir=cfg.paths.generated_dir
     )
-    discovery.evict_modules_for_import(module_names=mods, roots=existing)
+    discovery.prepare_import_environment(module_names=mods, roots=existing)
     discovery.import_and_collect(mods, kind="magic")
     governed = set(registry.get_specs_by_module("magic").keys())
     contract_specs = _discover_contract_specs(root=root, cfg=cfg)
@@ -2169,13 +2165,12 @@ def _discover_build_context(
     from jaunt.module_api import module_api_digest
     from jaunt.module_contract import group_test_entries_by_target_module
 
-    registry.clear_registries()
     modules = discovery.discover_modules(
         roots=[d for d in source_dirs if d.exists()],
         exclude=[],
         generated_dir=cfg.paths.generated_dir,
     )
-    discovery.evict_modules_for_import(
+    discovery.prepare_import_environment(
         module_names=modules,
         roots=[d for d in source_dirs if d.exists()],
     )
@@ -3432,13 +3427,12 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
         from jaunt import discovery, registry
         from jaunt.deps import build_spec_graph, collapse_to_module_dag, find_cycles
 
-        registry.clear_registries()
         modules = discovery.discover_modules(
             roots=[d for d in source_dirs if d.exists()],
             exclude=[],
             generated_dir=cfg.paths.generated_dir,
         )
-        discovery.evict_modules_for_import(
+        discovery.prepare_import_environment(
             module_names=modules,
             roots=[d for d in source_dirs if d.exists()],
         )
@@ -3874,13 +3868,12 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
         build_magic_spec_graph: dict[SpecRef, set[SpecRef]] = {}
         build_magic_module_dag: dict[str, set[str]] = {}
         if bool(args.no_build):
-            registry.clear_registries()
             src_mods = discovery.discover_modules(
                 roots=[d for d in source_dirs if d.exists()],
                 exclude=[],
                 generated_dir=cfg.paths.generated_dir,
             )
-            discovery.evict_modules_for_import(
+            discovery.prepare_import_environment(
                 module_names=src_mods,
                 roots=[d for d in source_dirs if d.exists()],
             )
@@ -3958,7 +3951,6 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             except Exception:
                 continue
 
-        registry.clear_registries()
         modules_set: set[str] = set()
         existing_test_dirs = [d for d in test_dirs if d.exists()]
         first_test_root = Path(cfg.paths.test_roots[0]) if cfg.paths.test_roots else Path("tests")
@@ -3975,7 +3967,7 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             )
             modules_set.update(mods)
         modules = sorted(modules_set)
-        discovery.evict_modules_for_import(module_names=modules, roots=existing_test_dirs)
+        discovery.prepare_import_environment(module_names=modules, roots=existing_test_dirs)
         discovery.import_and_collect(modules, kind="test")
 
         specs = dict(registry.get_test_registry())
@@ -4785,13 +4777,12 @@ def cmd_specs(args: argparse.Namespace) -> int:
         from jaunt import discovery, registry
         from jaunt.deps import build_spec_graph
 
-        registry.clear_registries()
         modules = discovery.discover_modules(
             roots=[d for d in source_dirs if d.exists()],
             exclude=[],
             generated_dir=cfg.paths.generated_dir,
         )
-        discovery.evict_modules_for_import(
+        discovery.prepare_import_environment(
             module_names=modules,
             roots=[d for d in source_dirs if d.exists()],
         )

@@ -130,13 +130,30 @@ def get_test_registry() -> dict[SpecRef, SpecEntry]:
     return _TEST_REGISTRY
 
 
-def clear_registries() -> None:
-    """Clear all global registries (intended for tests)."""
+def clear_registries(*, preserve_modules: frozenset[str] = frozenset()) -> None:
+    """Clear all global registries (intended for tests and discovery re-scans).
 
-    _MAGIC_REGISTRY.clear()
-    _TEST_REGISTRY.clear()
-    _CONTRACT_REGISTRY.clear()
-    _MODULE_MAGIC_REGISTRY.clear()
+    With the default empty ``preserve_modules`` this clears every registry
+    completely — byte-for-byte the historical behavior. When ``preserve_modules``
+    is non-empty, entries whose ``.module`` is in the set are kept in the magic,
+    test, and contract registries, and ``_MODULE_MAGIC_REGISTRY`` keys in the set
+    are kept. This is how discovery preserves the running framework's own
+    import-time registrations, which a total clear + carved-out (cache-no-op)
+    re-import could never recreate (self-hosting bug 1).
+    """
+
+    if not preserve_modules:
+        _MAGIC_REGISTRY.clear()
+        _TEST_REGISTRY.clear()
+        _CONTRACT_REGISTRY.clear()
+        _MODULE_MAGIC_REGISTRY.clear()
+        return
+
+    for spec_registry in (_MAGIC_REGISTRY, _TEST_REGISTRY, _CONTRACT_REGISTRY):
+        for ref in [r for r, e in spec_registry.items() if e.module not in preserve_modules]:
+            del spec_registry[ref]
+    for module in [m for m in _MODULE_MAGIC_REGISTRY if m not in preserve_modules]:
+        del _MODULE_MAGIC_REGISTRY[module]
 
 
 def get_specs_by_module(kind: Literal["magic", "test", "contract"]) -> dict[str, list[SpecEntry]]:

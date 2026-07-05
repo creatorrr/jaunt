@@ -263,6 +263,32 @@ def test_evict_modules_for_import_drops_parent_packages_of_target_modules(
             sys.modules["tests"] = orig_tests
 
 
+def test_evict_modules_for_import_never_evicts_running_jaunt_package(tmp_path: Path) -> None:
+    """Self-hosting bug 1: the running framework is carved out of eviction even
+    when its source dir is a configured root."""
+    import types
+
+    import jaunt
+    import jaunt.discovery as jd  # noqa: F401
+
+    src_root = Path(jaunt.__file__).resolve().parent
+
+    planted = types.ModuleType("planted_under_jaunt_root")
+    planted.__file__ = str(src_root / "planted_under_jaunt_root.py")
+    sys.modules["planted_under_jaunt_root"] = planted
+
+    saved = {k: v for k, v in sys.modules.items() if k == "jaunt" or k.startswith("jaunt.")}
+    try:
+        evict_modules_for_import(module_names=["jaunt"], roots=[src_root])
+        assert "jaunt" in sys.modules
+        assert "jaunt.discovery" in sys.modules
+        assert "planted_under_jaunt_root" not in sys.modules
+    finally:
+        for k, v in saved.items():
+            sys.modules.setdefault(k, v)
+        sys.modules.pop("planted_under_jaunt_root", None)
+
+
 # ---------------------------------------------------------------------------
 # 1.3.0 layout/naming warnings (findings 6/9/12) — Task 5
 # ---------------------------------------------------------------------------

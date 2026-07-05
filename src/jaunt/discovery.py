@@ -13,7 +13,7 @@ import importlib
 import importlib.metadata
 import sys
 import warnings
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Literal
 
@@ -21,6 +21,11 @@ from jaunt.errors import JauntDiscoveryError
 
 _EMITTED_LAYOUT_WARNINGS: set[str] = set()
 _PACKAGES_DISTRIBUTIONS: Mapping[str, list[str]] | None = None
+
+# Top-level package name of the RUNNING framework. When jaunt self-hosts (its own
+# ``src`` is a configured source_root), discovered specs are ``jaunt.*`` names and
+# the running package must never be evicted/forked out from under the CLI.
+_SELF_PACKAGE: str = __package__ or "jaunt"
 
 
 def reset_discovery_warnings() -> None:
@@ -107,8 +112,31 @@ def _is_under_roots(path_str: str, *, roots: list[Path]) -> bool:
     return False
 
 
+def is_self_module(name: str) -> bool:
+    """True for the running framework's own top package and its submodules."""
+
+    return name == _SELF_PACKAGE or name.startswith(f"{_SELF_PACKAGE}.")
+
+
+def self_preserved_modules(module_names: Iterable[str]) -> frozenset[str]:
+    """Discovered names owned by the running framework that are ALREADY imported.
+
+    Scoped to discovered ∩ imported ∩ self: an adopter's discovery never yields
+    ``jaunt.*`` names, so the returned set is empty for them and a subsequent
+    ``clear_registries`` stays total (no self-spec leakage into adopter builds).
+    """
+
+    return frozenset(n for n in module_names if is_self_module(n) and n in sys.modules)
+
+
 def evict_modules_for_import(*, module_names: list[str], roots: list[Path]) -> None:
-    """Drop cached modules that would interfere with fresh project imports."""
+    """Drop cached modules that would interfere with fresh project imports.
+
+    The running framework's own package is never evicted, regardless of which
+    rule (exact, prefix, or ``__file__``-under-roots) matched it. Evicting the
+    live jaunt package re-executes ``jaunt/__init__.py`` and forks the registry
+    the CLI already holds a reference to — the self-hosting split-brain bug.
+    """
 
     resolved_roots: list[Path] = []
     for root in roots:
@@ -154,9 +182,27 @@ def evict_modules_for_import(*, module_names: list[str], roots: list[Path]) -> N
                 break
 
     for name in to_delete:
+        if is_self_module(name):
+            continue
         sys.modules.pop(name, None)
 
     importlib.invalidate_caches()
+
+
+def prepare_import_environment(*, module_names: list[str], roots: list[Path]) -> None:
+    """Reset registries + sys.modules for a fresh discovery import pass.
+
+    The one shared entry point for CLI discovery sites: clears the registries
+    (preserving the running framework's own already-imported specs) and then
+    evicts stale cached modules (carving out the self package). Call
+    ``discover_modules(...)`` FIRST so ``module_names`` reflects the current tree,
+    then hand those names here before ``import_and_collect``.
+    """
+
+    from jaunt.registry import clear_registries
+
+    clear_registries(preserve_modules=self_preserved_modules(module_names))
+    evict_modules_for_import(module_names=module_names, roots=roots)
 
 
 def _module_name_for_file(
