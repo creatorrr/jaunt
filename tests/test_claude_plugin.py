@@ -168,6 +168,37 @@ def test_guard_runs_jaunt_for_owned_generated_path(tmp_path):
 
 
 @_needs_bash
+def test_guard_rewrites_payload_cwd_to_owning_project(tmp_path):
+    # `jaunt guard` resolves generated_dir from the payload's `cwd` (Claude
+    # Code sets it to the session cwd); the wrapper must rewrite it to the
+    # owning project or a nested custom generated_dir is checked against the
+    # wrong config (codex review P2 on PR #71).
+    root = tmp_path / "repo"
+    nested = root / "packages" / "billing"
+    (nested / "__generated__").mkdir(parents=True)
+    (nested / "jaunt.toml").write_text("version = 1\n")
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    echo_jaunt = bin_dir / "jaunt"
+    echo_jaunt.write_text("#!/usr/bin/env bash\ncat\n")  # echo payload back
+    echo_jaunt.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "CLAUDE_PROJECT_DIR": str(root),
+    }
+    payload = json.dumps(
+        {
+            "cwd": str(root),  # session cwd = repo root, NOT the owning project
+            "tool_input": {"file_path": str(nested / "__generated__" / "mod.py")},
+        }
+    )
+    result = _run_guard(payload, env=env)
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["cwd"] == str(nested)
+
+
+@_needs_bash
 def test_guard_falls_back_to_uv_when_path_jaunt_is_stale(tmp_path):
     # A version-manager shim for a pre-1.3 jaunt has no `guard` subcommand and
     # exits nonzero; the wrapper must fall back to `uv run --no-sync jaunt`.

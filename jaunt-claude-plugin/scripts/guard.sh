@@ -51,6 +51,16 @@ done
 [ -f "$dir/jaunt.toml" ] || exit 0
 
 cd "$dir" 2>/dev/null || exit 0
+# `jaunt guard` resolves generated_dir from the payload's `cwd` when present
+# (Claude Code sets it to the SESSION cwd), which would defeat the owning-
+# project cd above. Rewrite cwd to the owning project so the right config wins.
+payload=$(printf '%s' "$payload" | python3 -c '
+import json, sys
+p = json.load(sys.stdin)
+p["cwd"] = sys.argv[1]
+print(json.dumps(p))
+' "$dir" 2>/dev/null) || exit 0
+[ -z "$payload" ] && exit 0
 # A jaunt on PATH may be stale (e.g. a version-manager shim for a pre-1.3
 # install with no `guard` subcommand). Trust it only when it exits 0;
 # otherwise fall back to the project env via uv.
