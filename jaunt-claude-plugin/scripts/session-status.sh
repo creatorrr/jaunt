@@ -9,12 +9,21 @@ configs=$(find "$root" -maxdepth 5 -name jaunt.toml \
   -not -path '*/.venv/*' -not -path '*/node_modules/*' \
   -not -path '*/.jaunt/*' -not -path '*/.git/*' 2>/dev/null | sort)
 [ -z "$configs" ] && exit 0
+total=$(printf '%s\n' "$configs" | wc -l | tr -d ' ')
+limit=12
+count=0
 
 echo "jaunt projects in this repo — run jaunt build/check/status from the OWNING directory:"
 for cfg in $configs; do
+  count=$((count + 1))
+  if [ "$count" -gt "$limit" ]; then
+    remaining=$((total - limit))
+    echo "- …and $remaining more (run 'uv run jaunt status' there manually)"
+    break
+  fi
   dir=$(dirname "$cfg")
   rel="${dir#"$root"}"; rel="${rel#/}"; [ -z "$rel" ] && rel="."
-  out=$(cd "$dir" && timeout 60 uv run --no-sync jaunt status --json --progress none 2>/dev/null)
+  out=$(cd "$dir" && timeout 30 uv run --no-sync jaunt status --json --progress none 2>/dev/null)
   if [ -z "$out" ]; then
     echo "- $rel: status unavailable (run 'uv run jaunt status' there manually)"
     continue

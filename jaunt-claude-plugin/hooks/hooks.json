@@ -2,11 +2,12 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Edit|Write|NotebookEdit",
+        "matcher": "Edit|MultiEdit|Write|NotebookEdit",
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --no-sync jaunt guard 2>/dev/null || true"
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/guard.sh\"",
+            "timeout": 10
           }
         ]
       }
@@ -16,7 +17,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/session-status.sh\""
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/session-status.sh\"",
+            "timeout": 120
           }
         ]
       }
