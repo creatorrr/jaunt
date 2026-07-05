@@ -17,3 +17,4 @@
 2026-07-05 22:34Z advisory jaunt.contract.strength — The spec says to yield every helper-produced string, but also says every yielded value is distinct; if helpers produce duplicates, those requirements conflict, so the implementation preserves first-seen order and de-duplicates.
 2026-07-05 22:34Z advisory jaunt.contract.strength — iter_mutants requires yielding helper-produced strings while also requiring every yielded value to be distinct; if handwritten helpers emit duplicate source strings, those requirements conflict.
 2026-07-05 23:03Z refreeze jaunt.contract.strength — cosmetic (gate: EQUIVALENT)
+2026-07-05 23:12Z build    jaunt.contract.strength — rebuilt

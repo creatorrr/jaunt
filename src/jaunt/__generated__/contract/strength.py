@@ -2,11 +2,11 @@
 # jaunt:tool_version=1.5.2
 # jaunt:kind=build
 # jaunt:source_module=jaunt.contract.strength
-# jaunt:module_digest=sha256:20e9378bea9c0c888d67b44374098de15ddbee5ec5a8c010d2428dcf2e30dc93
+# jaunt:module_digest=sha256:6f9f735029a0e75219b40e96c6fc2e3a8e87c0966b8a5879a983825e040c175a
 # jaunt:digest_scheme=2
-# jaunt:spec_digests={"jaunt.contract.strength:compute_case_strength": {"p": "76a65ec8a8a19600a07b5985853b4c278a7719539405359530f1267169dfb124", "s": "8c1f5c405744d39f8cbfa230b4660175b1b469e4598838c881b8b574ced46b54"}, "jaunt.contract.strength:format_strength": {"p": "6a1e9dfd6c7f1cfe61edd37f71dbe84300bfc4ed1cda56af27bf3d220867b61d", "s": "8ea1d923576cf0ce1fecdb27cb47478ea10be63bed9a728a8e3346725d7aab7c"}, "jaunt.contract.strength:iter_mutants": {"p": "c3d18e0d1c7d21baeb83963d6f38c3310fac498885701991abf3b7d8da28f2e0", "s": "3d1aaa5b6f19c9b5fe15707ca9ae1562a65e56d008369384cf623fecd1ceb166"}, "jaunt.contract.strength:parse_strength": {"p": "3fddb3460e474c0d30ce1962a6441e9acff787341653319f2f7d160d9cf50eb7", "s": "0993d40eac3a951352fe2cf82ebad9ab373c30ac328211d5dc98e1b00a551222"}}
+# jaunt:spec_digests={"jaunt.contract.strength:compute_case_strength": {"p": "76a65ec8a8a19600a07b5985853b4c278a7719539405359530f1267169dfb124", "s": "8c1f5c405744d39f8cbfa230b4660175b1b469e4598838c881b8b574ced46b54"}, "jaunt.contract.strength:format_strength": {"p": "6a1e9dfd6c7f1cfe61edd37f71dbe84300bfc4ed1cda56af27bf3d220867b61d", "s": "8ea1d923576cf0ce1fecdb27cb47478ea10be63bed9a728a8e3346725d7aab7c"}, "jaunt.contract.strength:iter_mutants": {"p": "584d506b62e9e4d13ec6eff8d5705e54e48d7e9b0bff8ecd9996836ed8379fcc", "s": "3d1aaa5b6f19c9b5fe15707ca9ae1562a65e56d008369384cf623fecd1ceb166"}, "jaunt.contract.strength:parse_strength": {"p": "3fddb3460e474c0d30ce1962a6441e9acff787341653319f2f7d160d9cf50eb7", "s": "0993d40eac3a951352fe2cf82ebad9ab373c30ac328211d5dc98e1b00a551222"}}
 # jaunt:generation_fingerprint=sha256:eb3e1333da7449bf778b85ba678bc29fcd75ee04d27ba64205e37fe6de578a45
-# jaunt:module_api_digest=sha256:423966e730dc63f8e432243c1b78c96b20b8b4641a5ba9cb98e588984f089fde
+# jaunt:module_api_digest=sha256:4935339b6dc2c5b3817cec5e1f86fbebeb6e32e89e33bb3299ad6b309035f229
 # jaunt:module_context_digest=sha256:2cc5cd404847c58cc286b6191599da26562c0de0e87ae5dc99f2ae88d6b7e254
 # jaunt:spec_refs=["jaunt.contract.strength:compute_case_strength", "jaunt.contract.strength:format_strength", "jaunt.contract.strength:iter_mutants", "jaunt.contract.strength:parse_strength"]
 
@@ -19,6 +19,13 @@ from typing import TYPE_CHECKING, cast
 if TYPE_CHECKING:
     from jaunt.contract.cases import CaseBlocks
 
+__all__ = [
+    "compute_case_strength",
+    "format_strength",
+    "iter_mutants",
+    "parse_strength",
+]
+
 
 def compute_case_strength(
     source: str,
@@ -26,52 +33,16 @@ def compute_case_strength(
     blocks: "CaseBlocks",
     namespace: dict[str, object],
 ) -> tuple[int, int, int]:
-    """Score how many mutants of ``source`` the contract cases in ``blocks`` kill.
+    """Score how many mutants of ``source`` the contract cases in ``blocks`` kill."""
 
-    Returns ``(killed, applicable, excluded)``. Fixture cases are excluded from
-    scoring (mutating and re-running pytest per mutant is unbounded for DB
-    fixtures); the excluded count is surfaced in the battery header.
-
-    Import ``CaseBlocks`` from ``jaunt.contract.cases`` lazily inside this
-    function (a module-level import would create an import cycle).
-
-    Procedure:
-
-    1. ``excluded`` is the number of cases across ``blocks.examples`` and
-       ``blocks.raises`` whose ``.fixtures`` is truthy.
-    2. Build ``pure``: a new ``CaseBlocks`` keeping only the cases whose
-       ``.fixtures`` is falsy - ``examples`` = the non-fixture examples,
-       ``raises`` = the non-fixture raises - and carrying ``blocks.fixtures_declared``
-       through unchanged as ``fixtures_declared``.
-    3. If ``pure.is_empty()`` (no pure cases pin the body, so every mutant
-       survives): set ``applicable`` to the number of mutants produced by
-       ``iter_mutants(source)`` and return ``(0, applicable, excluded)``.
-    4. Otherwise, initialize ``killed = 0`` and ``applicable = 0``. For each
-       ``mutant_src`` from ``iter_mutants(source)``:
-       - Build ``ns = dict(namespace)`` and ``exec`` the compiled ``mutant_src``
-         into ``ns``. If executing the mutant raises any exception, it is a
-         non-applicable mutant - skip it (continue) without counting.
-       - Look up ``ns.get(target)``; if it is not callable, skip it (continue)
-         without counting.
-       - The mutant is applicable: increment ``applicable``. Decide whether the
-         mutant is killed with the handwritten helper
-         ``_evaluate_mutant_killed(pure, ns)`` (reach it the way the other
-         handwritten helpers are reached - import the source module
-         ``jaunt.contract.strength`` and read the helper off it - never
-         reimplement it or call ``evaluate_cases`` directly, so mutants that do
-         not terminate stay bounded). If it returns ``True`` the mutant was
-         detected - increment ``killed``.
-    5. Return ``(killed, applicable, excluded)``.
-
-    ``blocks`` and ``namespace`` are read at call time; the function does not read
-    module-level mutable state.
-    """
-    from jaunt.contract import strength as source_strength
     from jaunt.contract.cases import CaseBlocks
+    import jaunt.contract.strength as strength_module
 
-    excluded = sum(1 for case in (*blocks.examples, *blocks.raises) if case.fixtures)
     pure_examples = tuple(case for case in blocks.examples if not case.fixtures)
     pure_raises = tuple(case for case in blocks.raises if not case.fixtures)
+    excluded = sum(1 for case in blocks.examples if case.fixtures) + sum(
+        1 for case in blocks.raises if case.fixtures
+    )
     pure = CaseBlocks(
         examples=pure_examples,
         raises=pure_raises,
@@ -83,20 +54,17 @@ def compute_case_strength(
         return (0, applicable, excluded)
 
     evaluate_mutant_killed = cast(
-        "Callable[[CaseBlocks, dict[str, object]], bool]",
-        getattr(source_strength, "_evaluate_mutant_killed"),
+        Callable[[CaseBlocks, dict[str, object]], bool],
+        getattr(strength_module, "_evaluate_mutant_killed"),
     )
 
     killed = 0
     applicable = 0
     for mutant_src in iter_mutants(source):
         ns = dict(namespace)
-        execution_failed = False
         try:
-            exec(compile(mutant_src, "<jaunt-mutant>", "exec"), ns)
+            exec(compile(mutant_src, "<mutant>", "exec"), ns)
         except Exception:
-            execution_failed = True
-        if execution_failed:
             continue
         if not callable(ns.get(target)):
             continue
@@ -108,99 +76,53 @@ def compute_case_strength(
 
 
 def format_strength(killed: int, applicable: int) -> str:
-    """Format a strength pair as the ``"<killed>/<applicable>"`` string.
+    """Format a strength pair as the ``"<killed>/<applicable>"`` string."""
 
-    Return ``f"{killed}/{applicable}"`` - the two integers joined by a single
-    ``"/"``. This is the exact inverse of :func:`parse_strength` for well-formed
-    input.
-
-    Examples:
-    - ``format_strength(2, 5)`` -> ``"2/5"``
-    - ``format_strength(0, 0)`` -> ``"0/0"``
-    """
     return f"{killed}/{applicable}"
 
 
 def iter_mutants(func_source: str) -> Iterator[str]:
-    """Yield one-mutation variants of ``func_source`` as unparsed Python source.
+    """Yield one-mutation variants of ``func_source`` as unparsed Python source."""
 
-    Parse ``func_source`` into an ``ast.Module`` (call it ``base``). Compute the
-    set of docstring-constant ids to leave untouched with the handwritten helper
-    ``_skip_constant_ids(base)``, and the ordered list of nodes to mutate with the
-    handwritten helper ``_mutation_targets(base)``.
+    import jaunt.contract.strength as strength_module
 
-    Emit mutants in two phases, in this order:
-
-    1. Node mutations, in node order: for each ``(i, node)`` from
-       ``enumerate(nodes)``, yield every string produced by the handwritten helper
-       ``_mutate_node(base, i, node, skip)``.
-    2. Statement deletions: for each ``(walk_index, stmt_index)`` from the
-       handwritten helper ``_stmt_deletion_targets(base)``, call the handwritten
-       helper ``_emit_stmt_deletion(base, walk_index, stmt_index)`` and yield its
-       result only when it is not ``None``.
-
-    Every yielded value is a distinct, parseable source string differing from
-    ``func_source`` by a single mutation. This is a generator; the helpers own the
-    mutation and deletion semantics - do not reimplement them.
-    """
-    from jaunt.contract import strength as source_strength
-
-    skip_constant_ids = cast(
-        Callable[[ast.Module], set[int]],
-        getattr(source_strength, "_skip_constant_ids"),
-    )
     mutation_targets = cast(
         Callable[[ast.Module], list[ast.AST]],
-        getattr(source_strength, "_mutation_targets"),
+        getattr(strength_module, "_mutation_targets"),
+    )
+    skip_constant_ids = cast(
+        Callable[[ast.Module], set[int]],
+        getattr(strength_module, "_skip_constant_ids"),
     )
     mutate_node = cast(
         Callable[[ast.Module, int, ast.AST, set[int]], Iterator[str]],
-        getattr(source_strength, "_mutate_node"),
+        getattr(strength_module, "_mutate_node"),
     )
     stmt_deletion_targets = cast(
         Callable[[ast.Module], list[tuple[int, int]]],
-        getattr(source_strength, "_stmt_deletion_targets"),
+        getattr(strength_module, "_stmt_deletion_targets"),
     )
     emit_stmt_deletion = cast(
         Callable[[ast.Module, int, int], str | None],
-        getattr(source_strength, "_emit_stmt_deletion"),
+        getattr(strength_module, "_emit_stmt_deletion"),
     )
 
     base = ast.parse(func_source)
     skip = skip_constant_ids(base)
     nodes = mutation_targets(base)
-    yielded: set[str] = set()
 
     for index, node in enumerate(nodes):
-        for mutant_src in mutate_node(base, index, node, skip):
-            if mutant_src in yielded:
-                continue
-            yielded.add(mutant_src)
-            yield mutant_src
+        yield from mutate_node(base, index, node, skip)
 
     for walk_index, stmt_index in stmt_deletion_targets(base):
-        mutant_src = emit_stmt_deletion(base, walk_index, stmt_index)
-        if mutant_src is None or mutant_src in yielded:
-            continue
-        yielded.add(mutant_src)
-        yield mutant_src
+        deleted = emit_stmt_deletion(base, walk_index, stmt_index)
+        if deleted is not None:
+            yield deleted
 
 
 def parse_strength(text: str) -> tuple[int, int]:
-    """Parse a ``"<killed>/<applicable>"`` strength string into ``(killed, applicable)``.
+    """Parse a ``"<killed>/<applicable>"`` strength string into ``(killed, applicable)``."""
 
-    Split ``text`` on its first ``"/"``; the part before the slash is the killed
-    count and the part after is the applicable count. Convert both to ``int`` and
-    return them as a ``(killed, applicable)`` tuple. If either part is not a valid
-    integer - including when ``text`` has no ``"/"`` (the applicable part is then
-    the empty string) - return ``(0, 0)``.
-
-    Examples:
-    - ``parse_strength("2/5")`` -> ``(2, 5)``
-    - ``parse_strength("0/0")`` -> ``(0, 0)``
-    - ``parse_strength("bad")`` -> ``(0, 0)``
-    - ``parse_strength("3/x")`` -> ``(0, 0)``
-    """
     killed_text, separator, applicable_text = text.partition("/")
     if separator == "":
         applicable_text = ""

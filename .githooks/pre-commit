@@ -2,18 +2,23 @@
 set -e
 
 # jaunt: reject __generated__ edits that don't ride their OWN spec change.
-# 1.3 layout — all generated output lives under one dir per module path:
-#   src/jaunt/__generated__/contract/strength.py  ->  spec  src/jaunt/contract/strength.py
-# i.e. the spec is the staged generated path with the "/__generated__/" segment removed.
+# 1.3 layout — all machine-owned files live under one dir per module path:
+#   src/jaunt/__generated__/contract/strength.py               ->  spec  src/jaunt/contract/strength.py
+#   src/jaunt/__generated__/contract/strength.py.contract.json ->  spec  src/jaunt/contract/strength.py
+# i.e. the spec is the staged generated path with the "/__generated__/" segment
+# removed and any ".contract.json" sidecar suffix stripped.
 # A regen with no spec edit (engine/tool bump) is legit when jaunt.toml, uv.lock, or a
 # pyproject.toml is staged alongside as regen evidence.
 staged_all=$(git diff --cached --name-only)
 regen_evidence=$(echo "$staged_all" | grep -E '(^|/)(jaunt\.toml|uv\.lock|pyproject\.toml)$' || true)
-for gen in $(echo "$staged_all" | grep -E '__generated__/.*\.py$' || true); do
-  # 1.3-layout spec mapping: drop the "/__generated__/" segment.
-  #   src/jaunt/__generated__/contract/strength.py -> src/jaunt/contract/strength.py
+for gen in $(echo "$staged_all" | grep -E '__generated__/.*\.py(\.contract\.json)?$' || true); do
+  # 1.3-layout spec mapping: drop the "/__generated__/" segment, then drop a
+  # trailing ".contract.json" sidecar suffix (a no-op for a plain .py file).
+  #   src/jaunt/__generated__/contract/strength.py               -> src/jaunt/contract/strength.py
+  #   src/jaunt/__generated__/contract/strength.py.contract.json -> src/jaunt/contract/strength.py
   gen_seg="/__generated__/"
   spec="${gen/$gen_seg//}"
+  spec="${spec%.contract.json}"
   if ! echo "$staged_all" | grep -qxF "$spec" && [ -z "$regen_evidence" ]; then
     echo "ERROR: staged $gen without staging its spec ($spec) or regen evidence (jaunt.toml/uv.lock/pyproject.toml)." >&2
     echo "Never hand-edit __generated__ — edit the spec and run: uv run jaunt build" >&2

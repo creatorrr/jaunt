@@ -2,8 +2,8 @@
 # jaunt:tool_version=1.5.2
 # jaunt:kind=stub
 # jaunt:source_module=jaunt.contract.strength
-# jaunt:generated_digest=sha256:a06b7005ebf345eaeaf4bd12e33b213310485638671e18309c093b642663db2c
-# jaunt:inputs_digest=sha256:9d145f95c8a8deb66175695f0cd911c1febea03d55ae4558db9b71b1458486d4
+# jaunt:generated_digest=sha256:5d6fb7aa10683ccbdddbfaf00a9d272c95a709a9b4891b99630d1f32c2ba94fa
+# jaunt:inputs_digest=sha256:3cb45deb679c8be51cafdc17e9c005c9ad657fca7d9ee4e72009bd01de674e18
 
 import ast
 from collections.abc import Iterator

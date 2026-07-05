@@ -173,9 +173,17 @@ def iter_mutants(func_source: str) -> Iterator[str]:
        helper ``_emit_stmt_deletion(base, walk_index, stmt_index)`` and yield its
        result only when it is not ``None``.
 
-    Every yielded value is a distinct, parseable source string differing from
-    ``func_source`` by a single mutation. This is a generator; the helpers own the
-    mutation and deletion semantics — do not reimplement them.
+    Yield EVERY source string the phase helpers produce, in the phase order above,
+    INCLUDING exact duplicates — do NOT de-duplicate. If two different mutations
+    (whether two node mutations, or a node mutation and a statement deletion)
+    unparse to the same source string, yield that string once for each occurrence;
+    the only value ever dropped is a statement deletion for which
+    ``_emit_stmt_deletion`` returns ``None``. Each yielded value is a parseable
+    source string differing from ``func_source`` by a single mutation. The caller
+    counts one applicable/killed slot per yield, so the number of yields is the raw
+    count of strings the helpers emit — the strength denominator must not shrink
+    because two mutations happened to collide. This is a generator; the helpers own
+    the mutation and deletion semantics — do not reimplement them.
     """
     raise NotImplementedError
 
