@@ -14,6 +14,10 @@ import re
 from dataclasses import dataclass, field
 from typing import TypedDict
 
+import jaunt
+
+jaunt.magic_module(__name__)
+
 _HEADER_RE = re.compile(r"([A-Za-z][A-Za-z ]*):\s*$")
 _CASE_EXCEPTION_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _FIXTURES_RE = re.compile(r"^Fixtures:\s*(.+)$", re.MULTILINE)
@@ -30,6 +34,8 @@ class _MakeCaseKw(TypedDict):
 
 class CaseParseError(ValueError):
     """A case line that is explicitly call-shaped but invalid."""
+
+    line: str
 
     def __init__(self, message: str, *, line: str) -> None:
         super().__init__(message)
@@ -258,97 +264,85 @@ def parse_case_blocks(
     module_names: frozenset[str],
     method: str | None = None,
 ) -> CaseBlocks:
-    fixtures_declared = _parse_fixtures(docstring)
-    kw: _MakeCaseKw = {
-        "target": target,
-        "async_map": async_map,
-        "fixtures_declared": fixtures_declared,
-        "module_names": module_names,
-        "method_override": method,
-    }
+    r"""Parse a spec ``docstring`` into a :class:`CaseBlocks` of executable call
+    cases, reading the ``Examples:`` and ``Raises:`` sections.
 
-    examples: list[CallCase] = []
-    for line in _case_lines_for_section(docstring, "Examples"):
-        pair = _split_top_level_eq(line)
-        if pair is not None:
-            call_expr, expected = pair
-            rooted, _ = _call_root_and_method(ast.parse(call_expr, mode="eval").body, target)
-            if not rooted:
-                raise CaseParseError(
-                    f"example call must be rooted in the target {target!r}", line=line
-                )
-            examples.append(
-                _make_case(
-                    source_line=line,
-                    call_expr=call_expr,
-                    expected_expr=expected,
-                    exc_name=None,
-                    legacy=False,
-                    **kw,
-                )
-            )
-            continue
-        if "->" in line:
-            left, right = line.split("->", 1)
-            left, right = left.strip(), right.strip()
-            if _valid_case_expr(left) and _valid_case_expr(right):
-                examples.append(
-                    _make_case(
-                        source_line=line,
-                        call_expr=f"{target}({left})",
-                        expected_expr=right,
-                        exc_name=None,
-                        legacy=True,
-                        **kw,
-                    )
-                )
-        # Anything else under Examples: prose; skipped (legacy behavior).
+    Keyword-only parameters: ``target`` is the symbol name each case is rooted
+    in (a function or class name); ``async_map`` maps ``target`` and
+    ``"{target}.{method}"`` keys to booleans marking async calls; ``module_names``
+    is the frozenset of top-level names in the target's module (used to classify
+    a referenced name as an import); ``method`` is an optional method-override
+    name applied to every case built here (default ``None``).
 
-    raises: list[CallCase] = []
-    for line in _case_lines_for_section(docstring, "Raises"):
-        if " raises " in line:
-            inp, exc = line.split(" raises ", 1)
-            inp, exc = inp.strip(), exc.strip().rstrip(".")
-            if not (_valid_case_expr(inp) and _CASE_EXCEPTION_NAME_RE.match(exc)):
-                continue
-            tree = ast.parse(inp, mode="eval")
-            rooted, _ = _call_root_and_method(tree.body, target)
-            if rooted and isinstance(tree.body, (ast.Call, ast.Attribute)):
-                raises.append(
-                    _make_case(
-                        source_line=line,
-                        call_expr=inp,
-                        expected_expr=None,
-                        exc_name=exc,
-                        legacy=False,
-                        **kw,
-                    )
-                )
-            else:
-                raises.append(
-                    _make_case(
-                        source_line=line,
-                        call_expr=f"{target}({inp})",
-                        expected_expr=None,
-                        exc_name=exc,
-                        legacy=True,
-                        **kw,
-                    )
-                )
-            continue
-        m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s+on\s+(.+)$", line)
-        if m and _valid_case_expr(m.group(2).strip()):
-            raises.append(
-                _make_case(
-                    source_line=line,
-                    call_expr=f"{target}({m.group(2).strip()})",
-                    expected_expr=None,
-                    exc_name=m.group(1),
-                    legacy=True,
-                    **kw,
-                )
-            )
+    Both sections are extracted line-by-line with the module helper
+    ``_case_lines_for_section(docstring, "Examples")`` and
+    ``_case_lines_for_section(docstring, "Raises")`` (each returns the stripped
+    text of the ``- ``-prefixed bullet lines under that header). Declared
+    fixtures come from ``_parse_fixtures(docstring)`` and are stored on the
+    result as ``fixtures_declared``.
 
-    return CaseBlocks(
-        examples=tuple(examples), raises=tuple(raises), fixtures_declared=fixtures_declared
-    )
+    Every case is built by calling the module helper ``_make_case(...)`` with
+    keyword arguments ``source_line`` (the raw bullet line), ``call_expr``,
+    ``expected_expr``, ``exc_name``, ``legacy``, plus the shared keywords
+    ``target=target``, ``async_map=async_map``,
+    ``fixtures_declared=fixtures_declared``, ``module_names=module_names``, and
+    ``method_override=method``. ``_make_case`` performs name classification and
+    may raise ``CaseParseError``; do not catch it. Preserve the order in which
+    cases are appended (source order within each section).
+
+    Examples section — for each bullet line, in order:
+
+    1. Call-equality form: try ``_split_top_level_eq(line)``. When it returns a
+       ``(call_expr, expected)`` pair, the line is an explicit ``call == expected``
+       case. Verify the call is rooted in the target with
+       ``_call_root_and_method(ast.parse(call_expr, mode="eval").body, target)``;
+       if the returned ``rooted`` flag is false, raise
+       ``CaseParseError(f"example call must be rooted in the target {target!r}", line=line)``.
+       Otherwise append a case built with ``call_expr=call_expr``,
+       ``expected_expr=expected``, ``exc_name=None``, ``legacy=False``. Then move
+       to the next line.
+    2. Legacy arrow form: otherwise, if ``"->"`` is in the line, split on the
+       first ``"->"`` into ``left``/``right`` and strip both. Only when
+       ``_valid_case_expr(left)`` and ``_valid_case_expr(right)`` are both true,
+       append a case with ``call_expr=f"{target}({left})"``,
+       ``expected_expr=right``, ``exc_name=None``, ``legacy=True``. (Invalid
+       arrow lines are silently skipped.)
+    3. Anything else is prose and is skipped (no case, no error).
+
+    Raises section — for each bullet line, in order:
+
+    1. ``" raises "`` form: if the literal substring ``" raises "`` is present,
+       split on its first occurrence into ``inp`` and ``exc``; strip ``inp`` and
+       strip ``exc`` then strip a single trailing ``"."`` from it
+       (``exc.strip().rstrip(".")``). Skip the line (no case) unless both
+       ``_valid_case_expr(inp)`` is true and ``_CASE_EXCEPTION_NAME_RE.match(exc)``
+       matches. Then parse ``inp`` (``ast.parse(inp, mode="eval")``) and compute
+       ``rooted`` via ``_call_root_and_method(tree.body, target)``. If ``rooted``
+       is true AND ``tree.body`` is an ``ast.Call`` or ``ast.Attribute``, append
+       a call-form case with ``call_expr=inp``, ``expected_expr=None``,
+       ``exc_name=exc``, ``legacy=False``. Otherwise append a legacy case with
+       ``call_expr=f"{target}({inp})"``, ``expected_expr=None``,
+       ``exc_name=exc``, ``legacy=True``. Then move to the next line.
+    2. Legacy ``"<Exc> on <input>"`` form: otherwise, match the line against
+       ``re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s+on\s+(.+)$", line)``. If it
+       matches and ``_valid_case_expr`` of the stripped second group is true,
+       append a legacy case with ``call_expr=f"{target}({<group2 stripped>})"``,
+       ``expected_expr=None``, ``exc_name=<group1>``, ``legacy=True``.
+       (Non-matching lines are skipped.)
+
+    Return ``CaseBlocks(examples=tuple(examples), raises=tuple(raises),
+    fixtures_declared=fixtures_declared)``.
+
+    Examples:
+        - An ``Examples:`` bullet ``f(1, 2) == 3`` (target ``f``) yields one
+          non-legacy example whose ``call_expr`` is ``"f(1, 2)"``.
+        - An ``Examples:`` bullet ``'a b' -> 'a-b'`` yields a ``legacy=True``
+          example with ``call_expr == "f('a b')"`` and ``expected_expr == "'a-b'"``.
+        - A ``Raises:`` bullet ``'' raises ValueError`` yields a legacy raises
+          case with ``exc_name == "ValueError"``.
+
+    Raises:
+        - An ``Examples:`` bullet whose call is not rooted in ``target`` (e.g.
+          ``g(1) == 2`` when ``target`` is ``"f"``) raises ``CaseParseError``.
+    """
+    raise NotImplementedError
