@@ -1,0 +1,10 @@
+{
+  "name": "jaunt",
+  "version": "1.0.0",
+  "description": "Spec-driven Python codegen (jaunt) support: generated-code guard hook, session freshness map, plan-first cost-aware build workflow, conversion protocol, project doctor, first-build reviewer agent, and spec-authoring knowledge.",
+  "author": { "name": "Jaunt Contributors" },
+  "homepage": "https://jaunt.ing/docs/guides/claude-code-plugin",
+  "repository": "https://github.com/creatorrr/jaunt",
+  "license": "MIT",
+  "keywords": ["jaunt", "spec-driven", "code-generation", "python", "llm", "claude-code"]
+}

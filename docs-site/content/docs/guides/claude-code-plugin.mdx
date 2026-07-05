@@ -1,0 +1,185 @@
+---
+title: Claude Code Plugin
+description: "First-party Claude Code plugin: guard hook, session freshness map, and cost-aware build/convert/doctor workflows."
+---
+
+For Claude Code specifically, Jaunt has a first-party 1.0.0 plugin that packages the CLI glue from the coding-agents guide: the guard hook, a session freshness map, the `/jaunt:*` build/convert/doctor skills, and a first-build-reviewer agent. The organizing principle is paid paths deliberate, free paths frictionless; hooks fail open so a broken env never blocks editing or session start. No MCP server: the CLI's `--json` is the machine interface.
+
+## Install
+
+Install from the GitHub marketplace first:
+
+```bash
+claude plugin marketplace add creatorrr/jaunt
+claude plugin install jaunt@jaunt-plugins
+```
+
+From a clone, run this at the repo root:
+
+```bash
+claude plugin marketplace add .
+claude plugin install jaunt@jaunt-plugins
+```
+
+For one session only, point Claude Code at the plugin directory:
+
+```bash
+claude --plugin-dir ./jaunt-claude-plugin
+```
+
+Repos with a hand-rolled `jaunt guard` hook in `.claude/settings.json` can delete it once the plugin loads. It becomes a duplicate, and `/jaunt:doctor` flags it.
+
+## What loads into a session
+
+Two things load. First, the SessionStart hook prints a freshness map, one line per Jaunt project discovered by scanning for `jaunt.toml`:
+
+```console
+jaunt projects in this repo — run jaunt build/check/status from the OWNING directory:
+- packages/email: 12 fresh
+- packages/billing: 4 fresh, 1 STALE: invoices (structural) — fingerprint-only staleness re-stamps free; structural staleness is a paid rebuild
+- packages/canonical: 8 fresh, 1 orphans (jaunt clean --orphans)
+```
+
+Second, the auto-invocable `working-with-jaunt` knowledge skill carries the cost taxonomy. Its body loads when you touch a spec module, `__generated__/`, `jaunt.toml`, or a `.pyi` — not preloaded into every session:
+
+| what you change | digest class | consequence |
+|---|---|---|
+| Formatting, comments, whitespace | none | Nothing: no restale |
+| Docstring prose, same meaning | prose | Semantic-gate refreeze, ~$0 |
+| Docstring behavior, signature, stub shape, constants, `magic_module(prompt=...)` | structural | paid rebuild |
+| jaunt version bump or `[codex]` / `[build].instructions` change | fingerprint | free re-stamp |
+
+In shorthand: none / prose (~$0 refreeze) / structural (paid rebuild) / fingerprint (free re-stamp).
+
+## The guard hook
+
+If an agent tries to edit `src/app/__generated__/billing.py`, the PreToolUse hook (`scripts/guard.sh`) resolves the owning Jaunt project from the tool-call payload path first, `cd`s there, and runs `jaunt guard`:
+
+```json
+{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask", "permissionDecisionReason": "src/app/__generated__/billing.py is machine-owned generated code (jaunt). Edit the spec instead: src/app/billing.py. Changes here are overwritten on the next build."}}
+```
+
+Owning-project resolution means `generated_dir` comes from the right `jaunt.toml` in a multi-project repo. The MVP ran the guard from the session cwd and could read the wrong config. The hook fails open: a path with no owning `jaunt.toml`, or any env problem, exits `0` silently and never blocks the edit. A tool call against a source path produces no output and is allowed through.
+
+## `/jaunt:build`
+
+The build skill follows a four-step, plan-first protocol: resolve the owning project, classify staleness before spending, build, then gate. The `--json` payloads below are trimmed excerpts showing only the keys the skill reads; the real `jaunt status --json` also emits `command`, `ok`, `digests`, `orphans`, and contract/tree blocks, and `jaunt build --json` also emits `skipped`, `failed`, `cost`, `cache`, and `context_stats`.
+
+```console
+$ bash "${CLAUDE_PLUGIN_ROOT}/scripts/resolve-project.sh" packages/billing/invoices.py
+packages/billing
+
+$ uv run jaunt status --json --progress none
+{
+  "fresh": ["customers", "tax_codes"],
+  "stale": ["invoices", "payments", "ledger"],
+  "stale_changes": {
+    "invoices": "structural",
+    "payments": "structural",
+    "ledger": "fingerprint"
+  }
+}
+
+These 2 modules will bill: invoices (structural), payments (structural). ledger is fingerprint-only and re-stamps free.
+
+$ uv run jaunt build --json
+{
+  "command": "build",
+  "ok": true,
+  "generated": ["invoices", "payments"],
+  "refrozen": [],
+  "advisories": {
+    "invoices": ["Ambiguous timezone handling for invoice due dates; pin UTC or local time in the spec."]
+  }
+}
+
+Advisory from invoices: Ambiguous timezone handling for invoice due dates; pin UTC or local time in the spec.
+
+$ uv run jaunt check
+Contract check: 0 contract function(s).
+Magic freshness: all modules fresh.      # exit 0
+
+$ uv run pytest
+42 passed
+
+first-build-reviewer dispatched for packages/billing/invoices.py -> packages/billing/__generated__/invoices.py
+```
+
+Advisories are the highest-signal output Jaunt produces and must be surfaced verbatim.
+
+## `/jaunt:doctor`
+
+Doctor is free and deterministic. It never spends money and reports what a build would bill.
+
+```console
+$ bash "${CLAUDE_PLUGIN_ROOT}/scripts/doctor.sh"
+== environment
+- codex: codex-cli 0.x.y
+- codex auth: Logged in
+- jaunt: jaunt 1.5.1
+- python3: Python 3.12.x
+
+== projects
+- packages/email: 12 fresh
+- packages/billing: 4 fresh, 1 stale [structural: 1 (paid rebuild)]
+- packages/canonical: 8 fresh, 1 orphans (run 'uv run jaunt clean --orphans')
+
+== config drift
+- DRIFT: [codex]/build.instructions differ across projects — this restales the drifted project; it re-stamps free on the next build when specs are unchanged (only a paired structural/prose edit bills).
+  - group: packages/billing, packages/email
+  - group: packages/canonical
+  differing blocks: [codex]
+
+== duplicate guard hooks
+- no duplicate hand-rolled guard hook detected
+```
+
+`== environment` checks Codex, auth, Jaunt, and `python3`; not authenticated means run `codex login`. `== projects` shows freshness, stale classes, and orphans; orphans are fixed with `uv run jaunt clean --orphans`. `== config drift` means make `[codex]` and `build.instructions` byte-identical before building. `== duplicate guard hooks` means delete the hand-rolled entry because the plugin already ships it.
+
+The projects-line stale-class format is `N stale [structural: X (paid rebuild), fingerprint: Y (free re-stamp), prose: Z (~$0 refreeze)]`.
+
+## `/jaunt:convert`
+
+The convert skill is user-invoked only (`disable-model-invocation: true`) because it bills. Its nine phases are: triage, safety net / characterization tests first, resolve project, distill contract, convert to stub, preview spend, build + gate, first-build line review, commit. Phase 7, build, is the step that spends real money.
+
+```python
+import jaunt
+
+jaunt.magic_module(__name__)
+
+
+def issue_jwt(subject: str, *, ttl_seconds: int) -> str:
+    """Return a signed JWT for subject that expires ttl_seconds from now.
+
+    The token uses HS256, includes sub, iat, and exp claims, and reads the
+    signing secret from JWT_SECRET at call time.
+    """
+    raise NotImplementedError
+```
+
+A typical JWT conversion starts with a handwritten module, adds characterization tests for the current token claims and expiry behavior, distills those observations into the docstring contract, replaces the body with `raise NotImplementedError` under `jaunt.magic_module(__name__)`, previews spend with `uv run jaunt status --json`, then runs `/jaunt:build`. After the build passes `jaunt check` and the existing tests, the first-build reviewer reads the generated body against the contract.
+
+## `first-build-reviewer`
+
+The reviewer hunts for contract-silence divergence: behavior present in the generated body that the docstring does not pin. This is the failure class no deterministic gate catches; tests can pass while behavior is wrong.
+
+Example finding:
+
+```console
+DIVERGENCE-RISK
+Observed: generated body returns a naive datetime with no tzinfo.
+Silent: the docstring does not say whether the timestamp is naive or timezone-aware.
+Docstring addition: Returns a timezone-aware UTC datetime.
+```
+
+The deliverable is always spec docstring edits, never `__generated__/` patches. Prose-class additions refreeze ~$0, while a new pinned behavior is structural and re-bills.
+
+## Design notes
+
+- No MCP server: CLI `--json` is the interface, and a server lifecycle adds surface without capability.
+- Hooks fail open, exiting `0` on any env problem.
+- Paid paths are deliberate; free paths are frictionless.
+- Owning-project resolution routes guard and build against the right config in multi-project repos.
+- Duplicate hand-rolled `jaunt guard` hooks should be deleted once the plugin loads.
+
+Next: [PyPI Skills](/docs/guides/pypi-skills).

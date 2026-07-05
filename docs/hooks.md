@@ -1,3 +1,5 @@
+The `jaunt` Claude Code plugin (`jaunt-claude-plugin/`, docs at /docs/guides/claude-code-plugin) packages this hook prewired; the snippet below is the hand-rolled equivalent for other harnesses.
+
 # Warn-on-access hook
 
 Add to `.claude/settings.json` in a jaunt project:

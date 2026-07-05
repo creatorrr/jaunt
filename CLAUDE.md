@@ -82,6 +82,7 @@ src/jaunt/          # Library source
   prompts/          # LLM prompt templates (Jinja-like {{var}})
 tests/              # pytest test suite (~41 files)
 examples/           # Runnable example projects
+jaunt-claude-plugin/  # Claude Code plugin (marketplace at .claude-plugin/marketplace.json)
 ```
 
 ## Key Concepts
