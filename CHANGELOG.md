@@ -3,6 +3,16 @@
 All notable changes to jaunt. Generated from conventional commits by
 [git-cliff](https://git-cliff.org); one section per published PyPI release.
 
+## [1.5.2] - 2026-07-05
+
+### Chores
+
+- Update CHANGELOG.md for v1.5.1 [skip ci]
+
+### Features
+
+- 1.5.2 — jaunt builds jaunt (self-hosting bootstrap) + install-claude-plugin (#72)
+- Claude Code plugin 1.0.0 — guard + freshness hooks, build/doctor/convert skills, first-build reviewer (#71)
 ## [1.5.1] - 2026-07-05
 
 ### Chores
