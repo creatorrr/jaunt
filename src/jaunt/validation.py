@@ -104,6 +104,7 @@ def validate_build_generated_source(
     first_party_modules: Iterable[str] = (),
     check_imports: bool = False,
     import_allowlist: Iterable[str] = (),
+    spec_source_file: Path | None = None,
 ) -> list[str]:
     errors, mod = _base_validation(source, expected_names)
     if mod is None:
@@ -135,6 +136,7 @@ def validate_build_generated_source(
                 source_roots=source_roots or (),
                 first_party_modules=first_party_modules,
                 allowlist=import_allowlist,
+                spec_source_file=spec_source_file,
             )
         )
     return errors
@@ -391,6 +393,7 @@ def validate_generated_import_provenance(
     source_roots: Sequence[Path] | None = None,
     first_party_modules: Iterable[str] = (),
     allowlist: Iterable[str] = (),
+    spec_source_file: Path | None = None,
 ) -> list[str]:
     try:
         mod = ast.parse(source or "")
@@ -403,6 +406,7 @@ def validate_generated_import_provenance(
         source_roots=source_roots or (),
         first_party_modules=first_party_modules,
         allowlist=allowlist,
+        spec_source_file=spec_source_file,
     )
 
 
@@ -414,6 +418,7 @@ def _validate_generated_import_provenance(
     source_roots: Sequence[Path],
     first_party_modules: Iterable[str],
     allowlist: Iterable[str],
+    spec_source_file: Path | None = None,
 ) -> list[str]:
     stdlib = getattr(sys, "stdlib_module_names", set())
     allowed_first_party = _first_party_top_levels(
@@ -422,7 +427,14 @@ def _validate_generated_import_provenance(
         configured=first_party_modules,
     )
     allowlist_norm = {pep503_normalize(name) for name in allowlist if name.strip()}
+    # Deps declared in the config-root pyproject stay valid. In a uv workspace the
+    # spec may live in a member package whose own pyproject declares the dep — walk
+    # up from the spec's own file too and union both dependency sets (finding 29).
     declared_dists = _declared_project_dependencies(_find_pyproject(project_dir))
+    if spec_source_file is not None:
+        declared_dists = declared_dists | _declared_project_dependencies(
+            _find_pyproject(spec_source_file)
+        )
 
     importlib_aliases, direct_dynamic_names = _importlib_dynamic_bindings(mod)
 

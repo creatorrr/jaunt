@@ -323,6 +323,93 @@ def test_generated_import_provenance_refreshes_declared_dependencies_after_pypro
     )
 
 
+def _make_uv_workspace(tmp_path: Path) -> Path:
+    """Repo-root pyproject declares only ``openai``; ``pkg`` declares ``whenever``.
+
+    Returns the spec source file under ``pkg/src/...``.
+    """
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\ndependencies = ['openai']\n",
+        encoding="utf-8",
+    )
+    pkg = tmp_path / "pkg"
+    (pkg / "src" / "thing").mkdir(parents=True)
+    (pkg / "pyproject.toml").write_text(
+        "[project]\ndependencies = ['whenever']\n",
+        encoding="utf-8",
+    )
+    spec_file = pkg / "src" / "thing" / "specs.py"
+    spec_file.write_text("", encoding="utf-8")
+    return spec_file
+
+
+def test_generated_import_provenance_resolves_dep_from_owning_pyproject(
+    tmp_path: Path,
+) -> None:
+    spec_file = _make_uv_workspace(tmp_path)
+    src = "import whenever\n\ndef play():\n    return whenever.Instant\n"
+
+    assert (
+        validate_generated_import_provenance(
+            src,
+            generated_module="thing.__generated__.specs",
+            project_dir=tmp_path,
+            spec_source_file=spec_file,
+        )
+        == []
+    )
+
+
+def test_generated_import_provenance_owning_dep_rejected_without_spec_file(
+    tmp_path: Path,
+) -> None:
+    # Regression pin: without the spec source file, the config-root pyproject
+    # (declaring only openai) is consulted and the owning-package dep is rejected.
+    spec_file = _make_uv_workspace(tmp_path)
+    src = "import whenever\n\ndef play():\n    return whenever.Instant\n"
+
+    errs = validate_generated_import_provenance(
+        src,
+        generated_module="thing.__generated__.specs",
+        project_dir=tmp_path,
+    )
+    assert any("whenever" in err for err in errs)
+    assert spec_file.exists()
+
+
+def test_generated_import_provenance_root_dep_still_passes_with_spec_file(
+    tmp_path: Path,
+) -> None:
+    spec_file = _make_uv_workspace(tmp_path)
+    src = "import openai\n\ndef play():\n    return openai\n"
+
+    assert (
+        validate_generated_import_provenance(
+            src,
+            generated_module="thing.__generated__.specs",
+            project_dir=tmp_path,
+            spec_source_file=spec_file,
+        )
+        == []
+    )
+
+
+def test_generated_import_provenance_undeclared_still_fails_with_spec_file(
+    tmp_path: Path,
+) -> None:
+    spec_file = _make_uv_workspace(tmp_path)
+    src = "import hallucinated_pkg\n\ndef play():\n    return 1\n"
+
+    errs = validate_generated_import_provenance(
+        src,
+        generated_module="thing.__generated__.specs",
+        project_dir=tmp_path,
+        spec_source_file=spec_file,
+    )
+    assert any("hallucinated_pkg" in err for err in errs)
+    assert any("generated_import_allowlist" in err for err in errs)
+
+
 def test_generated_import_provenance_allows_configured_allowlist(tmp_path: Path) -> None:
     src = "import intentional_extra\n\ndef play():\n    return 1\n"
 
