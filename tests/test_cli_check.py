@@ -298,7 +298,7 @@ def test_check_magic_free_project_exits_zero(tmp_path: Path, monkeypatch, capsys
     assert rc == cli.EXIT_OK
     assert out["ok"] is True
     # No magic specs -> empty magic block, never blocking.
-    assert out["magic"] == {"fresh": [], "stale": {}, "unbuilt": []}
+    assert out["magic"] == {"fresh": [], "stale": {}, "unbuilt": [], "orphans": []}
 
 
 def test_fingerprint_env_hint(monkeypatch) -> None:

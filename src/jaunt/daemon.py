@@ -32,6 +32,7 @@ class BuildOutcome:
     refrozen: bool
     error: str = ""
     advisories: tuple[str, ...] = ()
+    newly_governed: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -169,10 +170,11 @@ class CliRunner:
     ) -> BuildOutcome:
         _, payload = self._run_build(worktree, module, heartbeat)
         adv = tuple(payload.get("advisories", {}).get(module, ()))
+        ng = tuple(payload.get("newly_governed", {}).get(module, ()))
         if module in payload.get("refrozen", []):
-            return BuildOutcome(ok=True, refrozen=True, advisories=adv)
+            return BuildOutcome(ok=True, refrozen=True, advisories=adv, newly_governed=ng)
         if module in payload.get("generated", []):
-            return BuildOutcome(ok=True, refrozen=False, advisories=adv)
+            return BuildOutcome(ok=True, refrozen=False, advisories=adv, newly_governed=ng)
         error = str(payload.get("failed", {}).get(module, payload.get("error", "build failed")))
         return BuildOutcome(ok=False, refrozen=False, error=error.splitlines()[0][:200])
 
@@ -504,6 +506,7 @@ def _collect_finished(state: DaemonState, root: Path, cfg: JauntConfig) -> None:
                 jobs_mod.GREEN,
                 phase="",
                 advisories=_json.dumps(list(result.build.advisories)),
+                newly_governed=_json.dumps(list(result.build.newly_governed)),
             )
         state.pending[job_id] = result
 

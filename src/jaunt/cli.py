@@ -240,6 +240,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Show what would be removed without deleting.",
     )
     clean_p.add_argument(
+        "--orphans",
+        action="store_true",
+        help="Remove only orphaned generated artifacts (spec no longer exists).",
+    )
+    clean_p.add_argument(
         "--json",
         action="store_true",
         dest="json_output",
@@ -1742,6 +1747,76 @@ def _find_generated_dirs(roots: Sequence[Path], generated_dir: str) -> list[Path
     return sorted(found)
 
 
+def _find_project_orphans(
+    *,
+    root: Path,
+    cfg: JauntConfig,
+    source_dirs: Sequence[Path],
+    governed_modules: set[str],
+    contract_refs: set[str] | None,
+):
+    """Collect orphaned jaunt artifacts across (possibly nested) generated dirs.
+
+    contract_refs=None means "do not scan contract batteries" (e.g. --magic-only,
+    where contracts were not discovered).
+    """
+    from jaunt.reconcile import OrphanArtifact, find_orphans
+
+    existing = [d for d in source_dirs if d.exists()]
+    if not existing:
+        return []
+    seen: dict[Path, OrphanArtifact] = {}
+    # Generated modules + their sidecars live under each generated dir; the
+    # generated dir's PARENT is the package_dir find_orphans scans.
+    for gen_root in _find_generated_dirs(existing, cfg.paths.generated_dir):
+        for o in find_orphans(
+            package_dir=gen_root.parent,
+            generated_dir=cfg.paths.generated_dir,
+            governed_modules=governed_modules,
+            source_dirs=[],
+            battery_dir=None,
+            contract_refs=set(),
+        ):
+            seen.setdefault(o.path, o)
+    # Stubs (across source dirs) + optionally contract batteries, in one pass with
+    # a non-existent generated_dir so the generated scan is a no-op.
+    battery = None
+    refs: set[str] = set()
+    if contract_refs is not None:
+        battery_dir = root / cfg.contract.battery_dir
+        battery = battery_dir if battery_dir.exists() else None
+        refs = contract_refs
+    for o in find_orphans(
+        package_dir=existing[0],
+        generated_dir="__jaunt_no_such_generated__",
+        governed_modules=governed_modules,
+        source_dirs=existing,
+        battery_dir=battery,
+        contract_refs=refs,
+    ):
+        seen.setdefault(o.path, o)
+    return sorted(seen.values(), key=lambda o: str(o.path))
+
+
+def _discover_reconcile_sets(root: Path, cfg: JauntConfig) -> tuple[set[str], set[str]]:
+    """Discover currently-governed magic module names and contract refs."""
+    from jaunt import discovery, registry
+
+    source_dirs = [root / sr for sr in cfg.paths.source_roots]
+    existing = [d for d in source_dirs if d.exists()]
+    _prepend_sys_path([*existing, root])
+    registry.clear_registries()
+    mods = discovery.discover_modules(
+        roots=existing, exclude=[], generated_dir=cfg.paths.generated_dir
+    )
+    discovery.evict_modules_for_import(module_names=mods, roots=existing)
+    discovery.import_and_collect(mods, kind="magic")
+    governed = set(registry.get_specs_by_module("magic").keys())
+    contract_specs = _discover_contract_specs(root=root, cfg=cfg)
+    contract_refs = {str(e.spec_ref) for e in contract_specs.values()}
+    return governed, contract_refs
+
+
 def _find_jaunt_stubs(roots: Sequence[Path], generated_dir: str) -> list[Path]:
     from jaunt import stub_emitter
 
@@ -1834,6 +1909,57 @@ def cmd_clean(args: argparse.Namespace) -> int:
             _emit_json({"command": "clean", "ok": False, "error": str(e)})
         return EXIT_CONFIG_OR_DISCOVERY
 
+    if getattr(args, "orphans", False):
+        governed_modules, contract_refs = _discover_reconcile_sets(root, cfg)
+        source_dirs = [root / sr for sr in cfg.paths.source_roots]
+        orphans = _find_project_orphans(
+            root=root,
+            cfg=cfg,
+            source_dirs=source_dirs,
+            governed_modules=governed_modules,
+            contract_refs=contract_refs,
+        )
+        orphan_rels = [str(o.path.relative_to(root)) for o in orphans]
+        if getattr(args, "dry_run", False):
+            if json_mode:
+                _emit_json(
+                    {
+                        "command": "clean",
+                        "ok": True,
+                        "dry_run": True,
+                        "orphans": True,
+                        "would_remove": orphan_rels,
+                    }
+                )
+            return EXIT_OK
+
+        for orphan in orphans:
+            orphan.path.unlink(missing_ok=True)
+
+        from jaunt import journal
+
+        journal.append_events(
+            root,
+            [
+                journal.JournalEvent(
+                    action="orphan-removed",
+                    module=o.source_module,
+                    detail=str(o.path.relative_to(root)),
+                )
+                for o in orphans
+            ],
+        )
+        if json_mode:
+            _emit_json(
+                {
+                    "command": "clean",
+                    "ok": True,
+                    "orphans": True,
+                    "removed": orphan_rels,
+                }
+            )
+        return EXIT_OK
+
     generated_dir = cfg.paths.generated_dir
     scan_roots = [root / sr for sr in cfg.paths.source_roots] + [
         root / tr for tr in cfg.paths.test_roots
@@ -1898,6 +2024,11 @@ def _fingerprint_env_hint(cfg: JauntConfig, stale_changes: dict[str, str]) -> st
     )
 
 
+def _render_stale_reason(reason: str) -> str:
+    """Human-facing stale label; the free re-stamp case is called out as such."""
+    return "re-stamp: free" if reason == "re-stamp" else reason
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     json_mode = _is_json_mode(args)
     try:
@@ -1948,6 +2079,9 @@ def cmd_check(args: argparse.Namespace) -> int:
         magic_fresh: list[str] = []
         magic_stale: dict[str, str] = {}
         magic_unbuilt: list[str] = []
+        magic_orphans: list[str] = []
+        orphan_objs: list = []
+        newly_governed_modules: dict[str, list[str]] = {}
         if run_magic:
             from jaunt import builder
 
@@ -1985,7 +2119,30 @@ def cmd_check(args: argparse.Namespace) -> int:
                         )
                 magic_fresh = sorted(mstatus.fresh)
 
-        magic_blocked = bool(magic_stale or magic_unbuilt)
+            package_dir = next((d for d in source_dirs if d.exists()), None)
+            if package_dir is not None:
+                from jaunt import registry
+                from jaunt.reconcile import newly_governed_specs
+
+                governed_modules = set(registry.get_specs_by_module("magic").keys())
+                entries = list(registry.get_magic_registry().values())
+                newly_governed_modules = newly_governed_specs(
+                    entries,
+                    package_dir=package_dir,
+                    generated_dir=cfg.paths.generated_dir,
+                )
+                orphan_objs = _find_project_orphans(
+                    root=root,
+                    cfg=cfg,
+                    source_dirs=source_dirs,
+                    governed_modules=governed_modules,
+                    contract_refs=(
+                        None if not run_contracts else {str(e.spec_ref) for e in specs.values()}
+                    ),
+                )
+                magic_orphans = [str(o.path.relative_to(root)) for o in orphan_objs]
+
+        magic_blocked = bool(magic_stale or magic_unbuilt or magic_orphans)
         blocked = bool(contract_blocked) or magic_blocked
 
         if json_mode:
@@ -1998,6 +2155,7 @@ def cmd_check(args: argparse.Namespace) -> int:
                     "fresh": magic_fresh,
                     "stale": magic_stale,
                     "unbuilt": sorted(magic_unbuilt),
+                    "orphans": sorted(magic_orphans),
                 }
             _emit_json(payload)
         else:
@@ -2016,14 +2174,27 @@ def cmd_check(args: argparse.Namespace) -> int:
                 else:
                     print("Contract check: 0 contract function(s).")
             if run_magic:
-                if magic_unbuilt or magic_stale:
+                if magic_unbuilt or magic_stale or magic_orphans:
                     print(
                         f"Magic freshness: {len(magic_unbuilt)} unbuilt, {len(magic_stale)} stale."
                     )
                     for module_name in sorted(magic_unbuilt):
-                        print(f"[BLOCK] {module_name}: unbuilt")
+                        if module_name in newly_governed_modules:
+                            print(
+                                f"[BLOCK] {module_name}: unbuilt "
+                                "(newly governed by module scan — first build)"
+                            )
+                        else:
+                            print(f"[BLOCK] {module_name}: unbuilt")
                     for module_name, reason in sorted(magic_stale.items()):
-                        print(f"[BLOCK] {module_name}: stale ({reason})")
+                        print(f"[BLOCK] {module_name}: stale ({_render_stale_reason(reason)})")
+                    for orphan in sorted(orphan_objs, key=lambda o: str(o.path)):
+                        relpath = str(orphan.path.relative_to(root))
+                        print(
+                            f"[BLOCK] orphaned artifact: {relpath} "
+                            f"(spec {orphan.source_module} no longer exists) — "
+                            "run 'jaunt clean --orphans' or restore the spec"
+                        )
                     hint = _fingerprint_env_hint(cfg, magic_stale)
                     if hint:
                         print(hint, file=sys.stderr)
@@ -2406,6 +2577,23 @@ def cmd_status(args: argparse.Namespace) -> int:
         if not magic_only:
             contract_rows, review_refs = _contract_rows(infer_default)
 
+        from jaunt import registry as _registry
+
+        _governed = set(_registry.get_specs_by_module("magic").keys())
+        _pkg_dir = next((d for d in source_dirs if d.exists()), None)
+        orphan_objs = (
+            _find_project_orphans(
+                root=root,
+                cfg=cfg,
+                source_dirs=source_dirs,
+                governed_modules=_governed,
+                contract_refs=(None if magic_only else {str(r["ref"]) for r in contract_rows}),
+            )
+            if _pkg_dir is not None
+            else []
+        )
+        orphan_rels = [str(o.path.relative_to(root)) for o in orphan_objs]
+
         if mstatus.total == 0:
             if json_mode:
                 payload: dict[str, object] = {
@@ -2415,6 +2603,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                     "stale_changes": {},
                     "fresh": [],
                     "digests": mstatus.digests,
+                    "orphans": orphan_rels,
                 }
                 if not magic_only:
                     payload.update(
@@ -2440,6 +2629,11 @@ def cmd_status(args: argparse.Namespace) -> int:
                         )
                 if tree_drift is not None:
                     print(f"tree: {tree_drift} (run jaunt tree)")
+                if orphan_rels:
+                    print(f"Orphaned artifacts ({len(orphan_rels)}):")
+                    for orphan in sorted(orphan_objs, key=lambda o: str(o.path)):
+                        relpath = str(orphan.path.relative_to(root))
+                        print(f"- {relpath} (spec {orphan.source_module} no longer exists)")
             return EXIT_OK
 
         stale = mstatus.stale
@@ -2454,6 +2648,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                 "stale_changes": stale_changes,
                 "fresh": sorted(fresh),
                 "digests": mstatus.digests,
+                "orphans": orphan_rels,
             }
             if not magic_only:
                 payload.update(
@@ -2470,13 +2665,43 @@ def cmd_status(args: argparse.Namespace) -> int:
             print(f"Status: {mstatus.total} module(s) total")
             print(f"Stale ({len(stale_sorted)}):")
             for mod in stale_sorted:
-                print(f"- {mod} ({stale_changes.get(mod, 'structural')})")
+                print(f"- {mod} ({_render_stale_reason(stale_changes.get(mod, 'structural'))})")
+            restamp_legacy = 0
+            module_entries = _registry.get_specs_by_module("magic")
+            for mod in stale_sorted:
+                if stale_changes.get(mod) != "re-stamp":
+                    continue
+                try:
+                    if any(
+                        (
+                            'raise RuntimeError("spec stub")'
+                            in Path(entry.source_file).read_text(encoding="utf-8")
+                        )
+                        or (
+                            "raise RuntimeError('spec stub')"
+                            in Path(entry.source_file).read_text(encoding="utf-8")
+                        )
+                        for entry in module_entries.get(mod, [])
+                    ):
+                        restamp_legacy += 1
+                except Exception:  # noqa: BLE001 - best-effort hint; status must not fail
+                    continue
+            if restamp_legacy:
+                print(
+                    f"hint: {restamp_legacy} module(s) are stale (re-stamp: free) "
+                    "with legacy stub bodies — run 'jaunt migrate' to re-stamp them"
+                )
             hint = _fingerprint_env_hint(cfg, stale_changes)
             if hint:
                 print(hint, file=sys.stderr)
             print(f"Fresh ({len(fresh_sorted)}):")
             for mod in fresh_sorted:
                 print(f"- {mod}")
+            if orphan_rels:
+                print(f"Orphaned artifacts ({len(orphan_rels)}):")
+                for orphan in sorted(orphan_objs, key=lambda o: str(o.path)):
+                    relpath = str(orphan.path.relative_to(root))
+                    print(f"- {relpath} (spec {orphan.source_module} no longer exists)")
             if contract_rows:
                 print(f"Contracts ({len(contract_rows)}):")
                 for row in contract_rows:
@@ -2819,6 +3044,16 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
 
             rc_search.ensure_index(package_dir)
 
+        from jaunt.reconcile import newly_governed_specs
+
+        newly_governed = newly_governed_specs(
+            list(specs.values()), package_dir=package_dir, generated_dir=cfg.paths.generated_dir
+        )
+        if newly_governed and not json_mode:
+            for mod in sorted(newly_governed):
+                for sym in newly_governed[mod]:
+                    print(f"newly governed by module scan: {mod}.{sym} — first build")
+
         jobs = int(args.jobs) if args.jobs is not None else int(cfg.build.jobs)
         report = await builder.run_build(
             package_dir=package_dir,
@@ -2939,6 +3174,8 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                 }
             if report.stub_warnings:
                 build_payload["stub_warnings"] = report.stub_warnings
+            if newly_governed:
+                build_payload["newly_governed"] = {k: v for k, v in sorted(newly_governed.items())}
             _emit_json(build_payload)
 
         if report.failed:
@@ -3935,20 +4172,31 @@ def cmd_specs(args: argparse.Namespace) -> int:
         specs = dict(registry.get_magic_registry())
         infer_default = bool(cfg.build.infer_deps) and not bool(args.no_infer_deps)
         spec_graph = build_spec_graph(specs, infer_default=infer_default)
+        from jaunt.reconcile import newly_governed_specs
+
+        pkg_dir = next((d for d in source_dirs if d.exists()), None)
+        newly = newly_governed_specs(
+            list(specs.values()), package_dir=pkg_dir, generated_dir=cfg.paths.generated_dir
+        )
 
         module_filter = args.module
-        spec_list = [
-            {
-                "ref": str(ref),
-                "module": entry.module,
-                "qualname": entry.qualname,
-                "source_file": entry.source_file,
-                "origin": entry.origin,
-                "kwargs": entry.decorator_kwargs,
-            }
-            for ref, entry in sorted(specs.items())
-            if not module_filter or entry.module == module_filter
-        ]
+        spec_list = []
+        for ref, entry in sorted(specs.items()):
+            if module_filter and entry.module != module_filter:
+                continue
+            spec_list.append(
+                {
+                    "ref": str(ref),
+                    "module": entry.module,
+                    "qualname": entry.qualname,
+                    "source_file": entry.source_file,
+                    "origin": entry.origin,
+                    "kwargs": entry.decorator_kwargs,
+                    "newly_governed": bool(
+                        entry.origin == "module" and entry.qualname in newly.get(entry.module, [])
+                    ),
+                }
+            )
         dep_graph = {
             str(ref): sorted(str(d) for d in deps)
             for ref, deps in sorted(spec_graph.items())
@@ -3971,6 +4219,8 @@ def cmd_specs(args: argparse.Namespace) -> int:
                 parts = [f"- {item['ref']} ({item['source_file']})"]
                 if item["origin"] == "module":
                     parts.append(" [module]")
+                if item["newly_governed"]:
+                    parts.append(" [newly governed — first build]")
                 if item["kwargs"]:
                     parts.append(f" kwargs={item['kwargs']}")
                 if deps:
