@@ -1,2 +1,3 @@
 2026-07-05 20:15Z build    jaunt.migrate — rebuilt
 2026-07-05 20:15Z advisory jaunt.migrate — No `_context/dep_*.pyi` files were present in this trimmed workspace, so dependency API usage was derived from the spec text.
+2026-07-05 20:16Z build    jaunt.heldout — rebuilt
