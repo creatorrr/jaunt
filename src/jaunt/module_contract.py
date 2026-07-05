@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+import jaunt
 from jaunt.registry import SpecEntry
 from jaunt.spec_ref import SpecRef, normalize_spec_ref, normalize_spec_refs
 
@@ -34,12 +35,35 @@ class ModuleContract:
     symbols: tuple[HandwrittenSymbol, ...] = ()
 
 
+@jaunt.contract
 def build_module_contract(
     *,
     entries: list[SpecEntry],
     expected_names: list[str],
     generated_names: list[str] | None = None,
 ) -> ModuleContract:
+    """Build the handwritten-context :class:`ModuleContract` for a spec module.
+
+    Reads the source file of ``entries[0]`` and walks its top-level nodes,
+    collecting every function, async function, class, and simple assignment
+    whose name is NOT in the generated set into a tuple of
+    :class:`HandwrittenSymbol` records. The generated set is ``generated_names``
+    when given, otherwise ``expected_names``. The result carries the source
+    path, a stable SHA-256 ``digest`` over the collected symbols' structural
+    metadata, a rendered ``prompt_block`` of that handwritten context, the tuple
+    of ``handwritten_names``, and the ``symbols`` themselves.
+
+    Keyword-only arguments. When ``entries`` is empty the module has no source
+    to read, so a sentinel empty contract is returned: ``source_file`` is the
+    empty string, ``prompt_block`` is ``"(none)\\n"``, ``handwritten_names`` and
+    ``symbols`` are empty tuples, and ``digest`` is the SHA-256 hex digest of
+    the two bytes ``b"[]"``.
+
+    Examples:
+    - build_module_contract(entries=[], expected_names=[]).handwritten_names == ()
+    - build_module_contract(entries=[], expected_names=[]).symbols == ()
+    - build_module_contract(entries=[], expected_names=[]).source_file == ""
+    """
     if not entries:
         empty_digest = hashlib.sha256(b"[]").hexdigest()
         return ModuleContract(
@@ -159,7 +183,19 @@ def target_refs_by_test_name(entries: list[SpecEntry]) -> dict[str, tuple[SpecRe
     return targets
 
 
+@jaunt.contract
 def target_modules_by_name(entries: list[SpecEntry]) -> dict[str, tuple[str, ...]]:
+    """Map each test entry's qualname to the tuple of modules it targets.
+
+    Resolves each entry's ``targets`` via :func:`target_refs_by_test_name`, then
+    reduces every spec ref to its module component (the text before ``:``),
+    preserving first-seen order and dropping duplicates within one entry. Every
+    entry contributes a key even when it declares no targets (mapping to an
+    empty tuple). An empty ``entries`` list yields an empty dict.
+
+    Examples:
+    - target_modules_by_name([]) == {}
+    """
     targets: dict[str, tuple[str, ...]] = {}
     for qualname, refs in target_refs_by_test_name(entries).items():
         modules: list[str] = []
@@ -171,7 +207,19 @@ def target_modules_by_name(entries: list[SpecEntry]) -> dict[str, tuple[str, ...
     return targets
 
 
+@jaunt.contract
 def group_test_entries_by_target_module(entries: list[SpecEntry]) -> dict[str, list[SpecEntry]]:
+    """Group test entries by each distinct module they target.
+
+    Iterates ``entries`` in a stable sort order (by ``module``, ``qualname``,
+    then string spec ref) and, for every distinct target module an entry
+    declares, appends that entry to the module's list. An entry that targets the
+    same module more than once is recorded once for it. Entries with no targets
+    contribute nothing. An empty ``entries`` list yields an empty dict.
+
+    Examples:
+    - group_test_entries_by_target_module([]) == {}
+    """
     grouped: dict[str, list[SpecEntry]] = {}
     for entry in sorted(entries, key=lambda item: (item.module, item.qualname, str(item.spec_ref))):
         seen_modules: set[str] = set()
