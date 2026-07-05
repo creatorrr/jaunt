@@ -435,6 +435,11 @@ def _validate_generated_import_provenance(
         declared_dists = declared_dists | _declared_project_dependencies(
             _find_pyproject(spec_source_file)
         )
+    # The build prompt sanctions importing any installed third-party dist the
+    # spec module itself imports, even when no reachable pyproject declares it
+    # (the spec importing it proves it is installed). Honor that promise so the
+    # validator does not reject an import the prompt explicitly allowed.
+    spec_imported_tops = _spec_module_top_level_imports(spec_source_file)
 
     importlib_aliases, direct_dynamic_names = _importlib_dynamic_bindings(mod)
 
@@ -463,6 +468,8 @@ def _validate_generated_import_provenance(
         if top in allowed_first_party:
             continue
         if pep503_normalize(top) in allowlist_norm:
+            continue
+        if top in spec_imported_tops:
             continue
         if _import_resolves_to_declared_dependency(top, declared_dists=declared_dists):
             continue
@@ -640,6 +647,41 @@ def _local_top_levels(root: Path) -> set[str]:
             if (child / "__init__.py").is_file() or any(child.glob("*.py")):
                 out.add(name)
     return out
+
+
+def _spec_module_top_level_imports(spec_source_file: Path | None) -> frozenset[str]:
+    """Top-level distribution names the spec module itself imports.
+
+    Only module-level absolute imports count: relative imports resolve to
+    first-party siblings, and imports nested inside functions/classes are not
+    part of the module's declared surface. A ``None`` spec file (or one that
+    cannot be read/parsed) yields no names.
+    """
+    if spec_source_file is None:
+        return frozenset()
+    try:
+        text = spec_source_file.read_text(encoding="utf-8")
+    except OSError:
+        return frozenset()
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return frozenset()
+    tops: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top = alias.name.split(".", 1)[0]
+                if top:
+                    tops.add(top)
+        elif isinstance(node, ast.ImportFrom):
+            if int(getattr(node, "level", 0) or 0) > 0:
+                continue
+            if node.module:
+                top = node.module.split(".", 1)[0]
+                if top:
+                    tops.add(top)
+    return frozenset(tops)
 
 
 def _find_pyproject(start: Path) -> Path | None:

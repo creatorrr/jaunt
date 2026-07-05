@@ -202,3 +202,14 @@ def test_check_blocks_on_wrong_order(tmp_path: Path, capsys) -> None:
     err = capsys.readouterr().err
     assert rc == cli.EXIT_CONFIG_OR_DISCOVERY
     assert "reorder source_roots" in err
+
+
+def test_test_no_build_blocks_on_spanning_roots(tmp_path: Path, capsys) -> None:
+    # `jaunt test --no-build` imports specs directly and never runs cmd_build;
+    # it must still hit the multi-root gate (exit 2) before touching pytest.
+    root = _two_root_project(tmp_path)
+    args = cli.parse_args(["test", "--root", str(root), "--no-build", "--no-run", "--no-progress"])
+    rc = cli.cmd_test(args)
+    err = capsys.readouterr().err
+    assert rc == cli.EXIT_CONFIG_OR_DISCOVERY
+    assert "span multiple source_roots" in err

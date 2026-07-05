@@ -424,6 +424,56 @@ def test_generated_import_provenance_allows_configured_allowlist(tmp_path: Path)
     )
 
 
+def test_generated_import_provenance_allows_spec_module_own_import(tmp_path: Path) -> None:
+    # The build prompt sanctions third-party dists the SPEC module itself
+    # imports even when no reachable pyproject declares them. A repo-root
+    # pyproject declaring only openai must not reject a spec-imported numpy.
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\ndependencies = ['openai']\n",
+        encoding="utf-8",
+    )
+    spec_file = tmp_path / "pkg" / "specs.py"
+    spec_file.parent.mkdir(parents=True)
+    spec_file.write_text("import numpy\n\n\ndef solve():\n    ...\n", encoding="utf-8")
+    src = "import numpy\n\ndef solve():\n    return numpy.zeros(3)\n"
+
+    assert (
+        validate_generated_import_provenance(
+            src,
+            generated_module="pkg.__generated__.specs",
+            project_dir=tmp_path,
+            spec_source_file=spec_file,
+        )
+        == []
+    )
+
+
+def test_generated_import_provenance_only_spec_top_level_imports_count(tmp_path: Path) -> None:
+    # A dist imported nowhere the spec declares -- not at the spec's module top
+    # level, not in any pyproject, not allowlisted -- still fails. (The spec's
+    # nested/relative imports do not sanction it.)
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\ndependencies = ['openai']\n",
+        encoding="utf-8",
+    )
+    spec_file = tmp_path / "pkg" / "specs.py"
+    spec_file.parent.mkdir(parents=True)
+    spec_file.write_text(
+        "import numpy\n\n\ndef solve():\n    import scipy\n    return scipy\n",
+        encoding="utf-8",
+    )
+    src = "import scipy\n\ndef solve():\n    return scipy\n"
+
+    errs = validate_generated_import_provenance(
+        src,
+        generated_module="pkg.__generated__.specs",
+        project_dir=tmp_path,
+        spec_source_file=spec_file,
+    )
+    assert any("scipy" in err for err in errs)
+    assert any("generated_import_allowlist" in err for err in errs)
+
+
 def test_test_validation_rejects_wrapper_introspection_by_default() -> None:
     src = (
         "def test_game_flow() -> None:\n"
