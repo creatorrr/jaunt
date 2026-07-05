@@ -58,11 +58,11 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-exclude = ["examples/**", "src/jaunt/__generated__/**"]
+exclude = ["examples/**", "src/jaunt/__generated__/**", "tests/contract/**"]
 
 [tool.ruff.lint]
 select = ["E", "F", "B"]
 ignore = ["E741"]
 
 [tool.ty.src]
-exclude = ["examples/**", "src/jaunt/__generated__/**"]
+exclude = ["examples/**", "src/jaunt/__generated__/**", "tests/contract/**"]
