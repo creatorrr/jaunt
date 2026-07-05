@@ -3,6 +3,15 @@
 All notable changes to jaunt. Generated from conventional commits by
 [git-cliff](https://git-cliff.org); one section per published PyPI release.
 
+## [1.5.1] - 2026-07-05
+
+### Chores
+
+- Update CHANGELOG.md for v1.5.0 [skip ci]
+
+### Fixes
+
+- 1.5.1 — wave-6 adoption findings 27/28/29 (workspace import policy, multi-root gate, free fingerprint re-stamp) (#70)
 ## [1.5.0] - 2026-07-05
 
 ### Chores
