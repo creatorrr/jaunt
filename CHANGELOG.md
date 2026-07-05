@@ -3,6 +3,15 @@
 All notable changes to jaunt. Generated from conventional commits by
 [git-cliff](https://git-cliff.org); one section per published PyPI release.
 
+## [1.5.0] - 2026-07-05
+
+### Chores
+
+- Update CHANGELOG.md for v1.4.2 [skip ci]
+
+### Features
+
+- 1.5.0 — advisories channel, jaunt migrate, orphan lifecycle, skills trust-and-verify (#69)
 ## [1.4.2] - 2026-07-04
 
 ### Chores
