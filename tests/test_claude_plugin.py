@@ -72,6 +72,22 @@ def test_hooks_reference_existing_executable_scripts():
             assert script.stat().st_mode & 0o111, f"not executable: {ref}"
 
 
+def test_all_plugin_files_are_tracked_by_git():
+    # .gitignore's `build/` pattern once swallowed skills/build/SKILL.md; a
+    # re-include keeps the dir tracked. Fails if any plugin file goes untracked.
+    if shutil.which("git") is None or not (REPO / ".git").exists():  # pragma: no cover
+        pytest.skip("not a git checkout")
+    proc = subprocess.run(
+        ["git", "-C", str(REPO), "ls-files", "--", "jaunt-claude-plugin"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    tracked = sorted(proc.stdout.splitlines())
+    on_disk = sorted(str(p.relative_to(REPO)) for p in PLUGIN.rglob("*") if p.is_file())
+    assert tracked == on_disk
+
+
 def test_scripts_are_valid_bash():
     if shutil.which("bash") is None:  # pragma: no cover
         pytest.skip("bash unavailable")

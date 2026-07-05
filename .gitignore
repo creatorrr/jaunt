@@ -18,6 +18,8 @@ __pycache__/
 
 dist/
 build/
+# the plugin's /jaunt:build skill lives in a dir named build/ — keep it tracked
+!jaunt-claude-plugin/skills/build/
 *.egg-info/
 
 .omc/
