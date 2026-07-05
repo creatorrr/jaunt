@@ -13,14 +13,27 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
+import jaunt
 from jaunt.generate.base import ModuleSpecContext
 
 logger = logging.getLogger("jaunt.cache")
 
 
+@jaunt.contract
 @dataclass(frozen=True, slots=True)
 class CacheEntry:
-    """A single cached LLM response."""
+    """A single cached LLM response.
+
+    Immutable value object holding the generated ``source`` text plus the token
+    accounting (``prompt_tokens``, ``completion_tokens``), the provenance
+    (``model``, ``provider``), and the ``cached_at`` epoch timestamp recorded
+    when the entry was written. Fields are positional in declaration order.
+
+    Examples:
+    - CacheEntry("body", 10, 20, "gpt-5.5", "openai", 0.0).source == "body"
+    - CacheEntry("body", 10, 20, "gpt-5.5", "openai", 0.0).prompt_tokens == 10
+    - CacheEntry("body", 10, 20, "gpt-5.5", "openai", 0.0).provider == "openai"
+    """
 
     source: str
     prompt_tokens: int
@@ -115,8 +128,22 @@ def cache_key_from_context(
     return h.hexdigest()
 
 
+@jaunt.contract
 class ResponseCache:
-    """File-backed LLM response cache with in-process memo."""
+    """File-backed LLM response cache with an in-process memo.
+
+    Constructed with a ``cache_dir`` positional and a keyword-only ``enabled``
+    flag (default ``True``). A freshly constructed cache has zero ``hits`` and
+    zero ``misses``; the counters advance as ``get``/``put`` are called. When
+    ``enabled`` is False the cache is inert: ``get`` always misses and returns
+    ``None`` (counting the miss) and ``put`` is a no-op. On disk, entries live
+    at ``cache_dir/<key[:2]>/<key>.json``.
+
+    Examples:
+    - ResponseCache(Path("/tmp/jaunt-cache-probe"), enabled=True).hits == 0
+    - ResponseCache(Path("/tmp/jaunt-cache-probe"), enabled=True).misses == 0
+    - ResponseCache(Path("/tmp/jaunt-cache-probe"), enabled=False).get("k") == None
+    """
 
     def __init__(self, cache_dir: Path, *, enabled: bool = True) -> None:
         self._cache_dir = cache_dir

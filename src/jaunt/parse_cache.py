@@ -13,7 +13,10 @@ import pickle
 import sys
 from pathlib import Path
 
+import jaunt
 
+
+@jaunt.contract
 class ParseCache:
     """File-backed cache for ``(source, ast.Module)`` tuples.
 
@@ -21,6 +24,15 @@ class ParseCache:
     that the file's ``st_mtime_ns`` and ``st_size`` match what was recorded at
     cache-write time **and** that the Python version matches (pickled ASTs are
     not portable across Python versions).
+
+    ``parse(file_path)`` returns ``None`` when the file cannot be stat'd or read
+    (for example, it does not exist); otherwise it returns the
+    ``(source, tree)`` tuple, populating the on-disk pickle and the in-process
+    memo. ``clear()`` drops the memo and removes every ``*.pickle`` entry under
+    the cache directory.
+
+    Examples:
+    - ParseCache(Path("/tmp/jaunt-parse-probe")).parse("/nonexistent/does_not_exist.py") == None
     """
 
     _PY_TAG = f"py{sys.version_info.major}{sys.version_info.minor}"

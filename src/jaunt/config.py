@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import jaunt
 from jaunt.errors import JauntConfigError
 
 
@@ -155,8 +156,22 @@ class AgentConfig:
     engine: str = "codex"
 
 
+@jaunt.contract
 @dataclass(frozen=True)
 class CodexConfig:
+    """Codex engine settings; the defaults encode Jaunt's model policy.
+
+    Every field defaults to Jaunt's canonical Codex configuration: model
+    ``gpt-5.5`` at ``high`` reasoning effort, the ``workspace-write`` sandbox,
+    CLI-version fingerprinting off, and empty ``features``/``config`` overrides.
+
+    Examples:
+    - CodexConfig().model == "gpt-5.5"
+    - CodexConfig().reasoning_effort == "high"
+    - CodexConfig().sandbox == "workspace-write"
+    - CodexConfig().fingerprint_cli_version == False
+    """
+
     model: str = "gpt-5.5"
     reasoning_effort: str = "high"
     sandbox: str = "workspace-write"
@@ -233,8 +248,18 @@ class JauntConfig:
     semantic_gate: SemanticGateConfig = field(default_factory=SemanticGateConfig)
 
 
+@jaunt.contract
 def find_project_root(start: Path) -> Path:
-    """Walk upward from `start` (file or directory) looking for `jaunt.toml`."""
+    """Walk upward from ``start`` (a file or directory) looking for ``jaunt.toml``.
+
+    Resolves ``start`` (its parent when ``start`` is a file), then ascends parent
+    by parent and returns the first directory that directly contains a
+    ``jaunt.toml`` file. When the filesystem root is reached without finding one,
+    ``JauntConfigError`` is raised.
+
+    Raises:
+    - find_project_root(Path("/")) raises JauntConfigError
+    """
 
     cur = start
     try:
@@ -321,11 +346,19 @@ def _resolve_prompt_override(value: str, *, root: Path) -> str:
     return str((root / path).resolve())
 
 
+@jaunt.contract
 def load_config(*, root: Path | None = None, config_path: Path | None = None) -> JauntConfig:
-    """Load and validate `jaunt.toml`.
+    """Load and validate ``jaunt.toml``.
 
-    If neither `root` nor `config_path` are provided, the project root is
-    discovered by walking upward from the current working directory.
+    If neither ``root`` nor ``config_path`` are provided, the project root is
+    discovered by walking upward from the current working directory. When
+    ``config_path`` points at a file that does not exist, ``JauntConfigError`` is
+    raised (wrapping the underlying ``FileNotFoundError``). Unknown sections or
+    keys, an invalid TOML body, or a missing/unsupported ``version`` likewise
+    raise ``JauntConfigError``.
+
+    Raises:
+    - load_config(config_path=Path("/nonexistent/jaunt.toml")) raises JauntConfigError
     """
 
     if config_path is None:

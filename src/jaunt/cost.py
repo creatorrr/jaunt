@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import jaunt
 from jaunt.generate.base import TokenUsage
 
 # Estimated cost per 1M tokens (input, output) by model prefix.
@@ -35,9 +36,24 @@ def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> fl
     return 0.0
 
 
+@jaunt.contract
 @dataclass
 class CostTracker:
-    """Accumulates token usage across a build/test run."""
+    """Accumulate token usage and estimated cost across a build/test run.
+
+    A freshly constructed tracker has recorded no usage and no cache hits, so
+    every aggregate reads zero. ``record(module_name, usage)`` appends a usage
+    record and ``record_cache_hit()`` bumps the cache-hit counter; the token
+    totals, ``estimated_cost``, and ``api_calls`` are all derived on demand from
+    the recorded usage list. ``estimated_cost`` is the sum of per-record model
+    pricing and is ``0.0`` when nothing has been recorded.
+
+    Examples:
+    - CostTracker().api_calls == 0
+    - CostTracker().cache_hits == 0
+    - CostTracker().total_tokens == 0
+    - CostTracker().estimated_cost == 0.0
+    """
 
     max_cost: float | None = None
     _records: list[tuple[str, TokenUsage]] = field(default_factory=list)
