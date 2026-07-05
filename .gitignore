@@ -6,6 +6,8 @@ __pycache__/
 *.py[cod]
 
 **/__generated__/
+!src/jaunt/__generated__/
+!src/jaunt/__generated__/**
 
 .agents/
 
