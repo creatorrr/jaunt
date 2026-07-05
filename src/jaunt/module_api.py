@@ -8,6 +8,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+import jaunt
 from jaunt.registry import SpecEntry
 from jaunt.spec_ref import SpecRef
 
@@ -265,6 +266,7 @@ def _append_doc_lines(lines: list[str], doc: str, *, indent: str = "") -> None:
         lines.append(f"{indent}  {line}")
 
 
+@jaunt.contract
 def build_generated_class_api_summary(
     generated_source: str,
     class_name: str,
@@ -272,6 +274,18 @@ def build_generated_class_api_summary(
     spec_docstring: str,
     public_api_only: bool = True,
 ) -> SpecApiSummary:
+    """Summarize the public API of a class defined in *generated_source*.
+
+    Parses *generated_source*, locates the top-level class named *class_name*,
+    and returns a :class:`SpecApiSummary` whose ``doc`` is *spec_docstring* and
+    whose ``members`` are the class's members. When *public_api_only* is true
+    (the default), members whose name starts with a single underscore are
+    dropped, but dunder members (names starting with ``__``) are kept.
+
+    Raises:
+        - build_generated_class_api_summary('x = 1', 'C', spec_docstring='') raises ValueError
+    """
+
     tree = ast.parse(generated_source)
     cls = _find_top_level_class(tree, class_name)
     if cls is None:
@@ -289,7 +303,20 @@ def build_generated_class_api_summary(
     )
 
 
+@jaunt.contract
 def generated_public_api_digest(generated_source: str, class_name: str) -> str:
+    """Return a stable sha256 hex digest of a generated class's public API.
+
+    Builds the public-API summary of the top-level class *class_name* in
+    *generated_source* and hashes the sorted ``(name, signature)`` pairs of its
+    members. The digest is independent of member declaration order and of the
+    class docstring, so a body-only change that leaves signatures untouched
+    yields the same digest.
+
+    Raises:
+        - generated_public_api_digest('x = 1', 'C') raises ValueError
+    """
+
     summary = build_generated_class_api_summary(
         generated_source, class_name, spec_docstring="", public_api_only=True
     )

@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 
+import jaunt
 from jaunt.errors import JauntDependencyCycleError
 from jaunt.registry import SpecEntry
 from jaunt.spec_ref import SpecRef, normalize_spec_ref, spec_ref_from_object
@@ -391,8 +392,21 @@ def build_spec_graph(
     return graph
 
 
+@jaunt.contract
 def collapse_to_module_dag(spec_graph: dict[SpecRef, set[SpecRef]]) -> dict[str, set[str]]:
-    """Collapse a spec dependency graph into a module-level graph."""
+    """Collapse a spec dependency graph into a module-level graph.
+
+    Each ``SpecRef`` key/value has the form ``"module:qualname"``; the module is
+    the part before the first ``":"``. The result maps every module that appears
+    (as a spec owner or a dependency owner) to the set of OTHER modules it
+    depends on. Self edges (a module depending on itself) are dropped, so a
+    module with only intra-module dependencies maps to an empty set. The empty
+    graph yields an empty dict.
+
+    Examples:
+        - collapse_to_module_dag({}) == {}
+        - collapse_to_module_dag({'m1:f': {'m2:g'}}) == {'m1': {'m2'}, 'm2': set()}
+    """
 
     module_graph: dict[str, set[str]] = {}
 
@@ -411,12 +425,23 @@ def collapse_to_module_dag(spec_graph: dict[SpecRef, set[SpecRef]]) -> dict[str,
     return module_graph
 
 
+@jaunt.contract
 def find_cycles(graph: dict[K, set[K]]) -> list[list[K]]:
     """Return all distinct elementary cycles in *graph*, or ``[]`` if acyclic.
 
-    Uses a DFS-based approach: when a back-edge is found during traversal, the
-    cycle path is extracted from the recursion stack.  Each cycle is reported
-    once (normalized so the lexicographically smallest element comes first).
+    *graph* maps a node to the set of nodes it depends on (edges point to
+    dependencies). Uses a DFS-based approach: when a back-edge is found during
+    traversal, the cycle path is extracted from the recursion stack. Each cycle
+    is reported once, normalized so the lexicographically smallest element comes
+    first, and nodes are visited in sorted order so the output is deterministic.
+    An acyclic graph (including the empty graph) yields ``[]``; a self-loop
+    yields a single one-element cycle.
+
+    Examples:
+        - find_cycles({}) == []
+        - find_cycles({'a': {'a'}}) == [['a']]
+        - find_cycles({'a': {'b'}, 'b': {'a'}}) == [['a', 'b']]
+        - find_cycles({'a': {'b'}, 'b': set()}) == []
     """
 
     all_nodes: set[K] = set(graph.keys())
@@ -461,8 +486,23 @@ def find_cycles(graph: dict[K, set[K]]) -> list[list[K]]:
     return cycles
 
 
+@jaunt.contract
 def toposort(graph: dict[K, set[K]]) -> list[K]:
-    """Topologically sort a dependency graph (deps before dependents)."""
+    """Topologically sort a dependency graph (deps before dependents).
+
+    *graph* maps a node to the set of nodes it depends on. The returned list
+    orders every node so that each node's dependencies appear before it. Nodes
+    are visited in sorted order, so the ordering is deterministic. Nodes that
+    appear only as dependency targets (never as keys) are included. The empty
+    graph yields ``[]``.
+
+    Examples:
+        - toposort({}) == []
+        - toposort({'a': {'b'}, 'b': set()}) == ['b', 'a']
+
+    Raises:
+        - toposort({'a': {'b'}, 'b': {'a'}}) raises JauntDependencyCycleError
+    """
 
     perm: set[K] = set()
     temp: set[K] = set()

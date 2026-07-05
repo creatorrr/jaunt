@@ -10,6 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+import jaunt
 from jaunt.class_analysis import is_preserve_decorator, is_stub_body, split_class_members
 from jaunt.errors import JauntDependencyCycleError
 from jaunt.registry import SpecEntry
@@ -437,10 +438,21 @@ class ContractDigests:
     body: str
 
 
+@jaunt.contract
 def load_contract_node(
     source_file: str, qualname: str
 ) -> ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef:
-    """Load a top-level function (sync or async) or class node by name."""
+    """Load a top-level function (sync or async) or class node by name.
+
+    *qualname* must name a top-level symbol: a dotted qualname (a method or
+    nested class) is rejected before *source_file* is read, since contract specs
+    are top-level functions or whole classes. When *qualname* is a plain name,
+    *source_file* is parsed and the matching top-level function or class node is
+    returned; a name that resolves to no such top-level definition is an error.
+
+    Raises:
+        - load_contract_node('m.py', 'A.b') raises ValueError
+    """
 
     if "." in qualname:
         raise ValueError(
@@ -458,8 +470,17 @@ def load_contract_node(
     raise ValueError(f"Top-level function or class {qualname!r} not found in {source_file}.")
 
 
+@jaunt.contract
 def load_function_node(source_file: str, qualname: str) -> ast.FunctionDef:
-    """Back-compat shim: contract loader restricted to sync functions."""
+    """Back-compat shim: contract loader restricted to sync functions.
+
+    Delegates to :func:`load_contract_node`, so a dotted *qualname* is rejected
+    before *source_file* is read. When the resolved top-level node is not a sync
+    ``def`` (e.g. it is an async function or a class), that is also an error.
+
+    Raises:
+        - load_function_node('m.py', 'A.b') raises ValueError
+    """
 
     node = load_contract_node(source_file, qualname)
     if not isinstance(node, ast.FunctionDef):
