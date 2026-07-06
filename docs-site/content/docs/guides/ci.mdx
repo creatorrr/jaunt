@@ -6,6 +6,9 @@ description: "Use jaunt check as a deterministic, model-free CI gate that fails 
 You want CI to fail when someone commits a spec change without rebuilding, or
 lets committed code drift from its contract. You don't want CI to call a model,
 and you don't want to store an API key on the runner. `jaunt check` is that gate.
+It is also the gate [Jaunt runs on itself](/docs/self-hosting): every pull
+request to the framework passes `jaunt check` over Jaunt's own self-hosted
+modules, keyless.
 
 ## `jaunt check` is the gate
 
