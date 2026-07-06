@@ -70,6 +70,14 @@ export default function HomePage() {
     <main className="flex flex-col">
       {/* Hero */}
       <section className="px-6 pt-20 pb-14 text-center">
+        <div className="mb-4 flex justify-center">
+          <Link
+            href="/docs/self-hosting"
+            className="rounded-full border border-fd-border bg-fd-muted/50 px-4 py-1 text-xs font-medium text-fd-muted-foreground hover:text-fd-foreground"
+          >
+            New in 1.5.2: Jaunt builds Jaunt →
+          </Link>
+        </div>
         <p className="text-sm font-medium tracking-wide text-fd-muted-foreground">
           Spec-driven code generation for Python
         </p>
@@ -122,6 +130,45 @@ export default function HomePage() {
           <div className="mt-6 grid gap-4 md:grid-cols-2">
             <CodePanel label="Spec — you write this" code={SPEC_CODE} />
             <CodePanel label="Generated — jaunt writes this" code={GENERATED_CODE} />
+          </div>
+        </div>
+      </section>
+
+      {/* Self-hosting */}
+      <section className="border-t border-fd-border px-6 py-16">
+        <div className="mx-auto max-w-5xl">
+          <h2 className="text-center text-xl font-semibold">Jaunt builds Jaunt</h2>
+          <p className="mx-auto mt-2 max-w-2xl text-center text-sm text-fd-muted-foreground">
+            Since 1.5.2 the framework is its own adopter. The <code>jaunt guard</code> hook,
+            held-out test redaction, <code>jaunt migrate</code>, and the contract machinery you
+            just read about are docstring specs — their generated bodies ship in the wheel you
+            install. The build-critical core runs committed contract batteries instead, and{' '}
+            <code>jaunt check</code> gates Jaunt&apos;s own drift on every pull request.
+          </p>
+          <div className="mx-auto mt-6 grid max-w-3xl gap-4 text-center sm:grid-cols-3">
+            <div className="rounded-xl border border-fd-border bg-fd-card p-4">
+              <div className="text-2xl font-bold">7</div>
+              <div className="mt-1 text-xs text-fd-muted-foreground">
+                framework modules generated from their own docstring specs
+              </div>
+            </div>
+            <div className="rounded-xl border border-fd-border bg-fd-card p-4">
+              <div className="text-2xl font-bold">31</div>
+              <div className="mt-1 text-xs text-fd-muted-foreground">
+                committed contract batteries on 15 core modules, derived at $0
+              </div>
+            </div>
+            <div className="rounded-xl border border-fd-border bg-fd-card p-4">
+              <div className="text-2xl font-bold">exit 0</div>
+              <div className="mt-1 text-xs text-fd-muted-foreground">
+                <code>jaunt check</code> on Jaunt itself, in CI, no API key
+              </div>
+            </div>
+          </div>
+          <div className="mt-6 text-center">
+            <Link href="/docs/self-hosting" className="text-sm font-medium underline">
+              How it works, and what it caught
+            </Link>
           </div>
         </div>
       </section>

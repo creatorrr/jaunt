@@ -1,0 +1,134 @@
+---
+title: Jaunt builds Jaunt
+description: "Since 1.5.2 the framework is its own adopter: seven modules are magic-mode specs with committed generated bodies, fifteen more run contract batteries, and jaunt check gates Jaunt's own drift in CI."
+---
+
+Since 1.5.2, Jaunt's repository is a Jaunt project. A root `jaunt.toml` with
+`source_roots = ["src"]` governs part of the framework's own source, using both
+modes on the code you install from PyPI. When you run `jaunt build`, some of
+the tool doing the building was itself built by `jaunt build`.
+
+This page is the proof, the honest boundaries of it, and how to inspect it in
+a clone.
+
+## Seven modules are magic-mode specs
+
+`jaunt.guard`, `jaunt.heldout`, `jaunt.migrate`, and the four contract helpers
+`jaunt.contract.{strength, cases, drift, edits}` are docstring-contract stubs.
+Their implementations live in `src/jaunt/__generated__/` and their `.pyi`
+stubs sit next to each spec — all committed, all shipped in the wheel. Runtime
+resolution is by module name, so an installed Jaunt loads its own generated
+code without any `jaunt.toml` present.
+
+This is the committed source of `src/jaunt/contract/drift.py`, trimmed:
+
+```python
+import enum
+
+import jaunt
+
+jaunt.magic_module(__name__)
+
+
+class DriftState(enum.Enum):        # real body -> handwritten, untouched
+    UNBUILT = "unbuilt"
+    STALE_PROSE = "stale-prose"
+    ...
+
+
+def compute_drift_state(
+    *,
+    has_battery: bool,
+    prose_match: bool,
+    signature_match: bool,
+    body_match: bool,
+    battery_passed: bool | None,
+) -> DriftState:
+    """Resolve the drift state of one contract function from five boolean signals.
+
+    This is a pure, deterministic classifier (no model, no I/O): given the
+    already-computed comparison signals for a single contract-tracked function,
+    it returns exactly one ``DriftState``...
+    """
+    raise NotImplementedError
+```
+
+The docstring is the module. The body Jaunt generated from it is what runs
+when `jaunt check` classifies your contract drift.
+
+The existing test suite was the acceptance gate for every conversion, and no
+test was edited to accommodate generation. Where a generated body diverged
+from the docstring's intent, the fix went through the docstring and a rebuild,
+never through the generated file — the same [fix-forward
+rule](/docs/guides/writing-magic-specs) the docs ask of you.
+
+## Fifteen modules run contract batteries
+
+The build-critical core — `digest`, `deps`, `header`, `module_api`,
+`module_contract`, `change_detection`, `validation`, `stub_emitter`, `cost`,
+`cache`, `config`, `parse_cache`, `discovery`, `generate.fingerprint`,
+`reconcile` — uses [contract mode](/docs/guides/contract-mode): the committed
+code stays canonical, and `jaunt reconcile` derives pytest batteries from the
+docstrings. Thirty-one batteries are committed under `tests/contract/jaunt/`
+and run with the rest of the suite.
+
+All thirty-one derived deterministically from structured `Examples:` and
+`Raises:` blocks. The reconcile that produced them made zero model calls.
+
+`jaunt check` runs in Jaunt's CI on every pull request and gates both kinds of
+drift — spec-vs-generated for the magic modules, prose-vs-battery for the
+contract ones — with no API key.
+
+## Converting the framework found bugs in the framework
+
+That is the point of dogfooding, and it delivered on day one:
+
+- **The advisories channel flagged real quirks in Jaunt's own code** during
+  its first self-builds: a stale comment in a contract-editing helper, an
+  `import jaunt as ...` alias edge the helper mishandles, and an ambiguous
+  requirement in the mutation-scoring spec that code review then confirmed as
+  an actual behavior divergence. The spec was tightened and the module
+  rebuilt.
+- **Deriving batteries for `config.find_project_root` hung `jaunt reconcile`.**
+  Mutation-based strength scoring executes AST mutants of a governed body, and
+  a mutant of an unbounded loop never terminates. Strength scoring now bounds
+  each mutant's wall-clock time. Any adopter with a `while True:` in a
+  governed function was one reconcile away from the same hang.
+- **Two discovery bugs blocked self-hosting entirely** (a project whose specs
+  live inside the running tool's own package made discovery return zero
+  specs) and are fixed in 1.5.2 for any tool that wants to do the same thing.
+
+## What stays handwritten, and why
+
+Self-hosting has hard boundaries, and pretending otherwise would be worse than
+naming them:
+
+- **Eight modules can carry no Jaunt decorator at all**: `errors`, `runtime`,
+  `module_magic`, `decorator_analysis`, `class_analysis`, `registry`,
+  `spec_ref`, `paths`. They execute during `import jaunt` itself, before
+  `magic_module` and `contract` exist to be called.
+- **Build-critical modules can never be magic-mode.** The builder imports and
+  runs them to build anything, so a stub would be circular — the builder would
+  need the generated body it is trying to generate. They get contract mode
+  instead.
+- **`contract.derive` is handwritten by choice.** Its rendered battery bytes
+  feed the deterministic `check` gate; regenerating the renderer would restale
+  every committed battery.
+- **One limitation**: `jaunt watch` holds a single interpreter, so an edit to
+  an already-imported framework spec module takes effect on the next process,
+  not the current one. One-shot CLI runs and daemon job subprocesses always
+  start fresh.
+
+## See for yourself
+
+```bash
+git clone https://github.com/creatorrr/jaunt && cd jaunt
+uv sync --frozen
+
+uv run jaunt specs            # the framework's own governed specs + dep graph
+uv run jaunt status           # freshness of the self-hosted modules
+uv run jaunt check            # exit 0: specs, generated code, and batteries in sync
+```
+
+`jaunt check` is deterministic and free — the same gate Jaunt's CI runs, the
+same one the [CI guide](/docs/guides/ci) recommends for your project.
