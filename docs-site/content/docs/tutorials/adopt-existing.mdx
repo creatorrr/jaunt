@@ -3,7 +3,7 @@ title: Adopt jaunt in an existing project
 description: "Hand one function of a working repo to jaunt without disturbing the rest."
 ---
 
-You have a real codebase with real tests. You do not want a rewrite. You want to try jaunt on exactly one function, keep your existing tests as the safety net, and gate the result in CI. That is what this tutorial does, using a small token-bucket rate limiter as the host project.
+You have a real codebase with real tests. You do not want a rewrite. You want to try jaunt on exactly one function, keep your existing tests as the safety net, and gate the result in CI. That is what this tutorial does, using a small token-bucket rate limiter as the host project. (It is also exactly how [jaunt adopted jaunt](/docs/self-hosting) — the framework converted its own modules with this protocol, existing tests as the gate.)
 
 Every command and its output ran against jaunt 1.3.0.
 

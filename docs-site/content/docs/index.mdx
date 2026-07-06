@@ -46,10 +46,13 @@ def _render_debug(email: Email) -> str:      # real body → handwritten helper
 
 The [quickstart](/docs/tutorials/quickstart) runs a full module end to end and shows the generated body, the cost line, and the test jaunt writes for it.
 
+And since 1.5.2, [jaunt builds jaunt](/docs/self-hosting): parts of the framework you install are generated from their own docstring specs, and `jaunt check` gates the framework's own drift in CI.
+
 ## Find your way around
 
 <Cards>
   <Card title="Start here" href="/docs/tutorials/quickstart" description="The quickstart: an empty directory to a generated, tested module in about ten minutes." />
+  <Card title="Jaunt builds Jaunt" href="/docs/self-hosting" description="Since 1.5.2 the framework is its own adopter — the proof, the boundaries, and the bugs dogfooding caught." />
   <Card title="Get things done" href="/docs/guides/writing-magic-specs" description="Task-first guides: writing specs, dependencies, contract mode, the daemon, and CI." />
   <Card title="Understand it" href="/docs/concepts/how-jaunt-works" description="How runtime forwarding, incremental builds, and the Codex engine actually work." />
   <Card title="Look it up" href="/docs/reference/cli" description="The CLI, jaunt.toml schema, JSON output, and the generated-file layout." />

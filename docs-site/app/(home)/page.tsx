@@ -140,9 +140,9 @@ export default function HomePage() {
           <h2 className="text-center text-xl font-semibold">Jaunt builds Jaunt</h2>
           <p className="mx-auto mt-2 max-w-2xl text-center text-sm text-fd-muted-foreground">
             Since 1.5.2 the framework is its own adopter. The <code>jaunt guard</code> hook,
-            held-out test redaction, <code>jaunt migrate</code>, and the contract machinery you
-            just read about are docstring specs — their generated bodies ship in the wheel you
-            install. The build-critical core runs committed contract batteries instead, and{' '}
+            held-out test redaction, <code>jaunt migrate</code>, and the contract-mode machinery
+            are docstring specs — generated exactly like the demo above, their bodies shipped in
+            the wheel you install. The build-critical core runs committed contract batteries, and{' '}
             <code>jaunt check</code> gates Jaunt&apos;s own drift on every pull request.
           </p>
           <div className="mx-auto mt-6 grid max-w-3xl gap-4 text-center sm:grid-cols-3">

@@ -5,7 +5,9 @@ description: "Pin the behavior of committed code with @jaunt.contract and a deri
 
 You have code you want to keep hand-written — an adopted legacy function, a hot
 path you've tuned, anything the generator should not touch — but you still want
-its behavior pinned by a contract. That is contract mode.
+its behavior pinned by a contract. That is contract mode. It is how
+[Jaunt pins its own build-critical core](/docs/self-hosting): fifteen framework
+modules run committed contract batteries derived this way.
 
 Jaunt picks a mode per symbol from the decorator:
 
