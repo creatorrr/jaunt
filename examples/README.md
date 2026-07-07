@@ -30,6 +30,17 @@ All example projects live here. Each subfolder is a standalone Jaunt project wit
 | `whole`     | `06_whole_class/`          | Whole-class `@jaunt.magic` — game/inventory/stats                                   |
 | `uttt`      | `07_ultimate_ttt/`         | Ultimate Tic-Tac-Toe: game + minimax AI + CLI; built end-to-end by a first-time agent — see its `CASE-STUDY.md` |
 
+### Contract mode
+
+These run `jaunt reconcile` / `jaunt check` instead of `jaunt build`; the ones
+marked deterministic derive without a model or API key.
+
+| Directory              | Description                                                                 |
+| ---------------------- | --------------------------------------------------------------------------- |
+| `contract_slugify/`    | Contract-mode walkthrough: strong vs deliberately weak contracts (deterministic) |
+| `contract_async/`      | Async functions and fixtures under contract mode                            |
+| `contract_properties/` | Hypothesis `properties` case kind: conservation, round-trips, bounds — and a bug examples can't catch (deterministic) |
+
 ### Minimal
 
 | Shortcut | Directory   | Description                             |

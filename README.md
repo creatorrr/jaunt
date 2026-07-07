@@ -106,9 +106,14 @@ Jaunt has two authoring modes that coexist in the same project:
 - **Contract mode** (`@jaunt.contract`): committed code is canonical and Jaunt
   derives a committed pytest battery under `tests/contract/`. Covers top-level
   functions (sync or async) and whole classes; derived cases may use pytest
-  fixtures resolved from `tests/contract/conftest.py`.
+  fixtures resolved from `tests/contract/conftest.py`. Opt-in `"properties"`
+  derives Hypothesis property tests from a `Properties:` docstring section —
+  deterministic `given <bindings> :: <invariant>` bullets, plus prose bullets
+  the model transcribes at `reconcile`.
 
-See `examples/contract_slugify/` for a Contract-mode walkthrough.
+See `examples/contract_slugify/` for a Contract-mode walkthrough and
+`examples/contract_properties/` for property idioms (conservation, round-trips,
+bounds) — including a truncation bug the pinned examples can't catch.
 
 ## Jaunt builds itself
 
