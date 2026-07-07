@@ -228,9 +228,11 @@ derive = ["examples", "errors"]    # case kinds derived from docstring prose. Op
                                    #   `given <name>: <type-or-strategy> :: <invariant>`, plus
                                    #   model-transcribed prose bullets at reconcile. Rendered with
                                    #   derandomize=True + database=None so `check` stays a pure
-                                   #   function of committed code; excluded from mutation strength
-                                   #   (counted in strength-excluded); fixtures and async targets
-                                   #   are rejected in property bullets (v1).
+                                   #   function of committed code (jaunt-driven battery runs also
+                                   #   redirect Hypothesis's derived caches to .jaunt/hypothesis);
+                                   #   excluded from mutation strength (counted in
+                                   #   strength-excluded); fixtures and async targets are rejected
+                                   #   in property bullets (v1).
 strength = true                    # run mutation-based strength scoring at reconcile
 property_max_examples = 50         # Hypothesis budget per derived property case
 

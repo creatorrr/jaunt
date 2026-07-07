@@ -181,8 +181,16 @@ deadline=None)`:
   keeps derandomization and the example database independent (its CI profile
   sets both) — without it, a local run could replay or save examples under
   `.hypothesis/examples` and pass/fail would not be a pure function of
-  committed code. With both set, no `.hypothesis/` directory materializes in
-  adopter repos and `check` keeps its "deterministic, offline" guarantee.
+  committed code. `check` keeps its "deterministic, offline" guarantee.
+- One residue remains even with both set: Hypothesis writes **derived caches**
+  (unicode tables, a constants pool scanned from the code under test) under
+  `.hypothesis/` in the cwd. These are caches of derived data, not replayed
+  examples — outcomes are unaffected — but a CI gate should not dirty the
+  tree, so jaunt-driven battery runs (`check`/`reconcile`/`status`) set
+  `HYPOTHESIS_STORAGE_DIRECTORY` to `.jaunt/hypothesis` (respecting a
+  user-set value). A **direct** `pytest` run of a property battery may still
+  create `.hypothesis/` locally; adopters should gitignore it. (Found in the
+  live shim-backed run, not on paper.)
 - `deadline=None` because Hypothesis's per-example deadline is wall-clock-based
   and a top flakiness source in CI; the battery's pytest run already has
   process-level timeouts.

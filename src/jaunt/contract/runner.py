@@ -91,6 +91,12 @@ def run_battery_file(path: Path, *, root: Path, source_roots: list[str]) -> bool
     env = dict(os.environ)
     extra = os.pathsep.join(str((root / sr).resolve()) for sr in source_roots)
     env["PYTHONPATH"] = extra + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    # Property batteries disable the Hypothesis example database (database=None),
+    # but Hypothesis still writes derived caches (unicode data, constants) under
+    # .hypothesis/ in the cwd. Redirect them into jaunt's sidecar dir so
+    # check/reconcile never dirty the adopter's working tree. Outcomes are
+    # unaffected: the caches are derived data, not replayed examples.
+    env.setdefault("HYPOTHESIS_STORAGE_DIRECTORY", str(root / ".jaunt" / "hypothesis"))
     proc = subprocess.run(
         [
             sys.executable,

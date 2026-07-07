@@ -242,6 +242,8 @@ def test_reconcile_writes_and_validates_property_battery(tmp_path: Path) -> None
     assert "@given(t=st.from_type(str))" in text
     assert "max_examples=8" in text
     assert "def test_examples(" in text  # examples region still present
+    # Hypothesis derived caches are redirected into .jaunt/, not .hypothesis/.
+    assert not (root / ".hypothesis").exists()
 
 
 def test_reconcile_failing_property_blocks_write(tmp_path: Path) -> None:
