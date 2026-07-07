@@ -144,8 +144,9 @@ builtin_skills = ["pytest", "ruff", "ty", "uv"]  # override to trim/extend the d
 
 [contract]
 battery_dir = "tests/contract" # where derived contract batteries are written
-derive = ["examples", "errors"] # case kinds derived from docstring prose
+derive = ["examples", "errors"] # case kinds derived from docstring prose ("properties" is opt-in)
 strength = true                # run mutation-based strength scoring at reconcile
+property_max_examples = 50     # Hypothesis budget per derived property case
 
 [semantic_gate]
 enabled = true                 # gate behaviorally-equivalent edits before a rebuild

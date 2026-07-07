@@ -2856,7 +2856,7 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
 
         _backend_box: list[GeneratorBackend] = []
 
-        def _model_extract(prose: str):
+        def _model_extract(prose: str, func_name: str = "f"):
             if not _backend_box:
                 _backend_box.append(_build_backend(cfg))
             backend = _backend_box[0]
@@ -2864,7 +2864,9 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
             async def _complete(system: str, user: str) -> str:
                 return await backend.complete_text(system=system, user=user)
 
-            return asyncio.run(extract_blocks_via_model(prose, complete=_complete))
+            return asyncio.run(
+                extract_blocks_via_model(prose, complete=_complete, func_name=func_name)
+            )
 
         specs = _discover_contract_specs(root=root, cfg=cfg)
         target_mods = _iter_target_modules(getattr(args, "target", []) or [])
@@ -2885,6 +2887,7 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
                     tool_version=__version__,
                     model_extract=_model_extract,
                     source_roots=cfg.paths.source_roots,
+                    property_max_examples=cfg.contract.property_max_examples,
                 )
             )
 
@@ -2911,7 +2914,7 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
             for r in results:
                 if r.ok:
                     excluded = r.strength_excluded
-                    suffix = f" ({excluded} fixture cases not scored)" if excluded else ""
+                    suffix = f" ({excluded} fixture/property cases not scored)" if excluded else ""
                     print(f"[ok] {r.spec_ref}: in sync (strength {r.strength}){suffix}")
                 else:
                     print(f"[FAIL] {r.spec_ref}: body does not satisfy contract")
@@ -2971,6 +2974,7 @@ def cmd_adopt(args: argparse.Namespace) -> int:
             module_namespace=vars(mod),
             tool_version=__version__,
             source_roots=cfg.paths.source_roots,
+            property_max_examples=cfg.contract.property_max_examples,
         )
 
         if result.ok:
@@ -3000,7 +3004,7 @@ def cmd_adopt(args: argparse.Namespace) -> int:
             )
         elif result.ok:
             excluded = result.strength_excluded
-            suffix = f" ({excluded} fixture cases not scored)" if excluded else ""
+            suffix = f" ({excluded} fixture/property cases not scored)" if excluded else ""
             print(f"Adopted {result.spec_ref} (strength {result.strength}){suffix}.")
         else:
             print(f"Adopted {result.spec_ref} but the body disagrees with its docstring:")
@@ -3259,7 +3263,9 @@ def cmd_status(args: argparse.Namespace) -> int:
                     for row in contract_rows:
                         flag = " [review]" if row["review"] else ""
                         excluded = row["strength_excluded"]
-                        suffix = f" ({excluded} fixture cases not scored)" if excluded else ""
+                        suffix = (
+                            f" ({excluded} fixture/property cases not scored)" if excluded else ""
+                        )
                         print(
                             f"- {row['ref']}: {row['state']} (strength {row['strength']}){suffix}"
                             + flag
@@ -3344,7 +3350,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                 for row in contract_rows:
                     flag = " [review]" if row["review"] else ""
                     excluded = row["strength_excluded"]
-                    suffix = f" ({excluded} fixture cases not scored)" if excluded else ""
+                    suffix = f" ({excluded} fixture/property cases not scored)" if excluded else ""
                     print(
                         f"- {row['ref']}: {row['state']} (strength {row['strength']}){suffix}"
                         + flag

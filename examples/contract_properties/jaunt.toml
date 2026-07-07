@@ -1,0 +1,16 @@
+version = 1
+
+[paths]
+source_roots = ["src"]
+test_roots = ["tests"]
+
+[llm]
+provider = "openai"
+model = "gpt-5.2"
+api_key_env = "OPENAI_API_KEY"
+
+[contract]
+battery_dir = "tests/contract"
+derive = ["examples", "errors", "properties"]
+strength = true
+property_max_examples = 50

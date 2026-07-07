@@ -1,6 +1,6 @@
 [project]
 name = "jaunt"
-version = "1.5.2"
+version = "1.6.0"
 description = "Spec-driven code generation framework: write intent as decorated Python stubs, generate implementations and tests with LLMs."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -22,6 +22,7 @@ dependencies = [
   "pytest-asyncio>=1.0",
   "anyio>=4.1",
   "pyyaml>=6.0",
+  "hypothesis>=6",
 ]
 
 [project.urls]
