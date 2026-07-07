@@ -61,7 +61,7 @@ def test_reconcile_entry_uses_model_when_unstructured(tmp_path) -> None:
         mod = importlib.import_module("demo")
         entry = next(iter(registry.get_contract_registry().values()))
 
-        def model_extract(prose: str) -> ContractBlocks:
+        def model_extract(prose: str, func_name: str = "f") -> ContractBlocks:
             return ContractBlocks(
                 examples=(ExampleRow('"hi"', '"HI"'),),
                 raises=(RaisesRow('""', "ValueError"),),

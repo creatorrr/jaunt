@@ -38,7 +38,7 @@ class LLMConfig:
 
 _VALID_ASYNC_RUNNERS = ("asyncio", "anyio")
 _VALID_AGENT_ENGINES = ("codex",)
-_VALID_DERIVE = ("examples", "errors")
+_VALID_DERIVE = ("examples", "errors", "properties")
 _VALID_REASONING_EFFORTS = ("low", "medium", "high")
 _ALLOWED_SECTIONS = frozenset(
     {
@@ -103,7 +103,7 @@ _DAEMON_KEYS = frozenset({"poll_interval", "max_jobs", "notify_command", "auto_c
 _SKILLS_KEYS = frozenset(
     {"auto", "max_chars_per_skill", "inject_user_skills", "builtin", "builtin_skills"}
 )
-_CONTRACT_KEYS = frozenset({"battery_dir", "derive", "strength"})
+_CONTRACT_KEYS = frozenset({"battery_dir", "derive", "strength", "property_max_examples"})
 _SEMANTIC_GATE_KEYS = frozenset({"enabled", "model", "reasoning_effort"})
 _CONTEXT_KEYS = frozenset(
     {"repo_map", "repo_map_file", "enrich", "max_chars", "overview", "search"}
@@ -222,6 +222,7 @@ class ContractConfig:
     battery_dir: str = "tests/contract"
     derive: list[str] = field(default_factory=lambda: ["examples", "errors"])
     strength: bool = True
+    property_max_examples: int = 50
 
 
 @dataclass(frozen=True)
@@ -720,6 +721,17 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     else:
         contract_strength = True
 
+    if "property_max_examples" in contract_tbl:
+        contract_property_max_examples = _as_int(
+            contract_tbl["property_max_examples"], name="contract.property_max_examples"
+        )
+        if contract_property_max_examples < 1:
+            raise JauntConfigError(
+                "Invalid config: contract.property_max_examples must be a positive integer."
+            )
+    else:
+        contract_property_max_examples = 50
+
     context_tbl = _as_table(data.get("context", {}), name="context")
     _reject_unknown(context_tbl, _CONTEXT_KEYS, "[context]")
     if "repo_map" in context_tbl:
@@ -884,6 +896,7 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             battery_dir=contract_battery_dir,
             derive=contract_derive,
             strength=contract_strength,
+            property_max_examples=contract_property_max_examples,
         ),
         context=ContextConfig(
             repo_map=context_repo_map,

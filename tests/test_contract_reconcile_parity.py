@@ -155,7 +155,7 @@ def test_model_extract_parse_error_returns_failure_and_preserves_battery(
     battery_path.parent.mkdir(parents=True)
     battery_path.write_text("ORIGINAL BATTERY\n", encoding="utf-8")
 
-    def model_extract(prose: str) -> ContractBlocks:
+    def model_extract(prose: str, func_name: str = "f") -> ContractBlocks:
         assert "Unstructured" in prose
         return ContractBlocks(examples=(ExampleRow("mystery", "1"),))
 

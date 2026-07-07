@@ -28,12 +28,23 @@ class RaisesRow:
 
 
 @dataclass(frozen=True, slots=True)
+class PropertyRow:
+    """A model-derived property in Tier-1 form: bindings like ``"t: str"`` plus a
+    boolean invariant expression. Rendered back into a ``given … :: …`` bullet and
+    re-parsed by the deterministic grammar, so a malformed row fails loudly."""
+
+    bindings: str
+    expr: str
+
+
+@dataclass(frozen=True, slots=True)
 class ContractBlocks:
     examples: tuple[ExampleRow, ...] = ()
     raises: tuple[RaisesRow, ...] = ()
+    properties: tuple[PropertyRow, ...] = ()
 
     def is_empty(self) -> bool:
-        return not self.examples and not self.raises
+        return not self.examples and not self.raises and not self.properties
 
 
 async def extract_blocks_via_model(
@@ -62,7 +73,12 @@ async def extract_blocks_via_model(
         for row in payload.get("raises", [])
         if "input" in row and "exc" in row
     )
-    return ContractBlocks(examples=examples, raises=raises)
+    properties = tuple(
+        PropertyRow(str(row["bindings"]), str(row["expr"]))
+        for row in payload.get("properties", [])
+        if "bindings" in row and "expr" in row
+    )
+    return ContractBlocks(examples=examples, raises=raises, properties=properties)
 
 
 def _render_examples_region(rows: tuple[ExampleRow, ...], func_name: str) -> DerivedRegion:

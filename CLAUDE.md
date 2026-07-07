@@ -38,8 +38,8 @@ uv run ty check
 # Build an example project (requires the `codex` CLI, authenticated via `codex login`)
 cd examples/jwt_auth && uv run --project ../.. jaunt build
 
-# Batteries included: pytest, pytest-asyncio, anyio, rich, and watchfiles
-# ship in the base install — no optional extras.
+# Batteries included: pytest, pytest-asyncio, anyio, rich, watchfiles, and
+# hypothesis ship in the base install — no optional extras.
 
 # Run with JSON output (for programmatic consumption)
 jaunt build --json
@@ -222,8 +222,17 @@ max_hits = 8
 
 [contract]
 battery_dir = "tests/contract"     # where derived contract batteries are written
-derive = ["examples", "errors"]    # case kinds derived from docstring prose
+derive = ["examples", "errors"]    # case kinds derived from docstring prose. Opt-in
+                                   #   "properties": Hypothesis-backed cases from a Properties:
+                                   #   docstring section — deterministic bullets
+                                   #   `given <name>: <type-or-strategy> :: <invariant>`, plus
+                                   #   model-transcribed prose bullets at reconcile. Rendered with
+                                   #   derandomize=True + database=None so `check` stays a pure
+                                   #   function of committed code; excluded from mutation strength
+                                   #   (counted in strength-excluded); fixtures and async targets
+                                   #   are rejected in property bullets (v1).
 strength = true                    # run mutation-based strength scoring at reconcile
+property_max_examples = 50         # Hypothesis budget per derived property case
 
 [semantic_gate]
 enabled = true              # gate behaviorally-equivalent edits before a gpt-5.5 rebuild

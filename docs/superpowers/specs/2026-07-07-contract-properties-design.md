@@ -1,8 +1,12 @@
 # Contract mode `properties` case kind (Hypothesis-backed) — Design
 
 **Date:** 2026-07-07
-**Status:** Sketch for review (fast-follow deferred from contract-mode v1; see
-`2026-06-23-contract-mode-design.md` §Non-goals)
+**Status:** First cut implemented (this PR). Revised for the PR-review findings:
+`database=None` in rendered settings, rooting walks the whole invariant, binding
+names are import-classified, prose+structured bullets merge, and fixtures/async
+targets are rejected in v1 rather than claimed "for free". (Originally a sketch
+for the fast-follow deferred from contract-mode v1; see
+`2026-06-23-contract-mode-design.md` §Non-goals.)
 **Topic:** Add `"properties"` to `[contract] derive` — property/invariant cases in
 derived batteries, rendered as vanilla Hypothesis code, with the model deriving the
 *oracle* and Hypothesis deriving the *inputs*.
@@ -79,17 +83,31 @@ Grammar: `given <bindings> :: <boolean-expr>`.
 - `::` separates bindings from the invariant expression. Chosen because it is
   unambiguous against both the annotation colons in bindings and the `->` arrow
   the legacy example form uses.
-- `<boolean-expr>` must reference the target (checked with the existing
-  `_call_root_and_method` rooting walk); free names are classified by the
-  existing `_classify_names` (fixture / module import / builtin), so property
-  cases get `Fixtures:` support and battery `extra_imports` for free.
+- The invariant is usually an `ast.Compare`/`ast.BoolOp`, not a bare call, so
+  rooting **walks the whole expression** and requires at least one call rooted
+  in the target (each rooted call is checked individually via the existing
+  `_call_root_and_method` helper).
+- Free names from **both** the invariant and the binding type/strategy
+  expressions are classified against the module's top-level names for battery
+  `extra_imports` (a binding like `p: Path` needs `Path` importable at
+  collection time even though it never appears in the invariant). Unknown
+  names fail loudly, mirroring the example grammar.
+- **Fixtures are rejected in v1** with an actionable error: pytest fixtures are
+  function-scoped by default and Hypothesis reuses them across every generated
+  example (`HealthCheck.function_scoped_fixture`), so "free" fixture support
+  would be unsound. **Async targets are rejected in v1** too — `await` cannot
+  appear in an `eval`-mode invariant expression.
 
-Parsing lands in `contract/cases.py` beside the `Examples:`/`Raises:` logic: a new
-`PropertyCase` (bindings + expression, plus the shared `fixtures`/`imports`/
-`is_async` fields) and a `properties: tuple[PropertyCase, ...]` slot on
-`CaseBlocks`. Note `cases.py` is a **self-hosted magic module** — this change is
-an edit to the `parse_case_blocks` docstring contract plus
-`jaunt build --target jaunt.contract.cases`, not a hand-written body.
+Parsing lives in a **new handwritten module `contract/properties.py`** (not in
+`cases.py` as originally sketched): `PropertyCase`/`PropertyBlocks`, the Tier-1
+parser, and the Hypothesis renderer. It reuses the handwritten grammar helpers
+from `cases.py` (`_case_lines_for_section`, `_call_root_and_method`,
+`_names_in`, …) so the two grammars cannot drift, while leaving the self-hosted
+magic spec in `cases.py` (`parse_case_blocks`) untouched — adding properties
+never restales it, and no `codex` rebuild is needed to ship the feature. A
+welcome side effect: property cases are excluded from the mutation-strength
+loop **by construction** (they are not in `CaseBlocks`, which is all
+`compute_case_strength` sees).
 
 ### Tier 2 — prose bullets (model-derived at `reconcile`)
 
@@ -108,6 +126,14 @@ into a checkable expression, **not** inventing invariants the prose doesn't
 state: a docstring with no `Properties:` section derives no property cases (see
 §Explicitly rejected for the fully-automatic alternative).
 
+**Structured and prose bullets merge** (review finding): when a `Properties:`
+section mixes both, reconcile parses the Tier-1 bullets deterministically and
+sends **only the leftover prose bullets** through the model — not gated on the
+overall block being empty. Model rows are rendered back into Tier-1 `given … ::
+…` bullets and re-parsed by the same deterministic grammar, so a malformed row
+fails loudly at reconcile instead of producing an unparseable battery. Tier-2
+is function-path only in v1; class/method docstrings get Tier-1 only.
+
 This is the highest-model-trust case kind so far (examples are author-written
 rows the model transcribes; a property expression is model-*formulated*). Three
 things bound it, all already in the architecture:
@@ -124,10 +150,11 @@ things bound it, all already in the architecture:
 
 ```python
 # >>> jaunt:derived properties
-from hypothesis import given, settings, strategies as st
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 @given(t=st.from_type(str))
-@settings(max_examples=50, derandomize=True, deadline=None)
+@settings(max_examples=50, derandomize=True, database=None, deadline=None)
 def test_prop_1(t):  # derived from: Properties
     assert slugify(slugify(t)) == slugify(t)
 # <<< jaunt:derived properties
@@ -146,13 +173,16 @@ def test_prop_1(t):  # derived from: Properties
 
 ## Determinism (`check` stays a pure function of the code)
 
-Every rendered property gets `@settings(derandomize=True, deadline=None)`:
+Every rendered property gets `@settings(derandomize=True, database=None,
+deadline=None)`:
 
-- `derandomize=True` is Hypothesis's CI mode — example generation becomes
-  deterministic per (test, strategy) with no database or seed file, so battery
-  pass/fail depends only on committed code. No `.hypothesis/` directory
-  materializes in adopter repos, and `check` keeps its "deterministic, offline"
-  guarantee.
+- `derandomize=True` makes example generation deterministic per (test,
+  strategy); `database=None` is required **in addition** because Hypothesis
+  keeps derandomization and the example database independent (its CI profile
+  sets both) — without it, a local run could replay or save examples under
+  `.hypothesis/examples` and pass/fail would not be a pure function of
+  committed code. With both set, no `.hypothesis/` directory materializes in
+  adopter repos and `check` keeps its "deterministic, offline" guarantee.
 - `deadline=None` because Hypothesis's per-example deadline is wall-clock-based
   and a top flakiness source in CI; the battery's pytest run already has
   process-level timeouts.
@@ -161,7 +191,10 @@ Every rendered property gets `@settings(derandomize=True, deadline=None)`:
   first derives (or its expression changes), reconcile runs one exploratory
   **non**-derandomized pass with a larger budget before freezing, so flaky or
   wrong properties are shaken out at the moment a human is already reviewing,
-  not later in CI. Failures surface as derive-time findings.
+  not later in CI. Failures surface as derive-time findings. *(First cut: the
+  exploratory pass is deferred; reconcile validates the derandomized battery
+  via pytest before writing, which catches wrong-but-deterministic properties.
+  The exploratory pass remains the designed follow-up.)*
 
 `max_examples` defaults to 50 (matching `hypothesis-auto`'s default),
 configurable via `[contract] property_max_examples`.
@@ -182,8 +215,9 @@ Mutation scoring (`contract/strength.py`) runs pure cases in-process per mutant
 via `_evaluate_mutant_killed`. Running 50 Hypothesis examples per mutant is the
 wrong cost profile, so v1 of this feature:
 
-- **Excludes property cases from the mutation loop**, exactly as fixture-backed
-  cases are excluded today, and counts them in the existing
+- **Excludes property cases from the mutation loop** — by construction, since
+  they live in `PropertyBlocks` rather than the `CaseBlocks` that
+  `compute_case_strength` consumes — and counts them in the existing
   `strength_excluded` header field so the score stays honest about what it
   measured.
 - Leaves the door open (config `[contract] strength_properties = false`) for a
@@ -220,45 +254,56 @@ strength_properties = false                    # (future) budgeted property runs
 typos comes for free). Default `derive` is unchanged — existing projects see
 zero behavior or byte diff until they opt in.
 
-## Deliverables (file-by-file)
+## Deliverables (file-by-file, as implemented)
 
-- `config.py` — `"properties"` in `_VALID_DERIVE`; `property_max_examples`
-  (+ reserved `strength_properties`) on the `[contract]` section.
-- `contract/cases.py` *(self-hosted magic — edit the docstring contract, rebuild)*
-  — `Properties:` section parsing, `PropertyCase`, `CaseBlocks.properties`,
-  Tier-1 `given … :: …` grammar with rooting + name classification.
-- `contract/derive.py` *(handwritten by choice)* — `PropertyRow` in the model
-  payload shape, `_render_properties_cases`, `derive_case_regions` wiring,
-  region-local `hypothesis` import.
-- `contract/runner.py` — pass property cases through derive/merge; exploratory
-  non-derandomized pass at reconcile; hypothesis-importable precondition.
-- `contract/strength.py` *(self-hosted magic)* — exclude property cases from the
-  mutant loop; fold the exclusion into `strength_excluded`.
-- `prompts/contract_derive_system.md` / `contract_derive_user.md` — extend the
-  strict-JSON shape with `"properties"`; transcribe-don't-invent rules for
-  invariants.
-- `pyproject.toml` — add `hypothesis>=6` to base dependencies.
-- Tests — Tier-1 grammar (parse/root/classify/reject), renderer bytes
-  (derandomize + deadline always present; no-property batteries byte-identical
-  to today), mocked-model Tier-2 derivation, merge preserves hand-added cases
-  around the new region, strength exclusion accounting, config validation.
-- Example — extend a contract example with one Tier-1 and one Tier-2 property
-  (idempotence is the canonical demo for `slugify`).
-- Docs — `CLAUDE.md` `[contract]` block, contract-mode docs, the `jaunt` skill.
+- `config.py` *(contract mode — body-only change, benign drift)* —
+  `"properties"` in `_VALID_DERIVE`; `property_max_examples` on `[contract]`
+  (`strength_properties` reserved for the budgeted follow-up, not yet a key).
+- **New** `contract/properties.py` *(handwritten)* — `PropertyBinding` /
+  `PropertyCase` / `PropertyBlocks`, the Tier-1 `given … :: …` parser
+  (bindings via a dict-literal parse; invariant-wide rooting walk; import
+  classification over invariant + bindings; fixture/async rejection), the
+  Hypothesis region renderer (`derandomize=True, database=None,
+  deadline=None`; region-local hypothesis imports; positional
+  `test_prop_<i>` names; `properties-<method>` region suffixes), and
+  `properties_extra_imports`.
+- `contract/derive.py` *(handwritten by choice)* — `PropertyRow` +
+  `ContractBlocks.properties` in the model payload shape.
+- `contract/runner.py` — property parsing on both the function and class
+  paths; prose-bullet model merge (function path); Tier-1 round-trip of model
+  rows; hypothesis-importable precondition; pytest validation whenever
+  property cases exist; `strength_excluded += len(property cases)`;
+  extra-imports union; `model_extract` now `(prose, func_name)` so the model
+  can emit target-rooted expressions.
+- `cli.py` — thread `property_max_examples` through `reconcile`/`adopt`; pass
+  the real function name into the model closure.
+- `prompts/contract_derive_system.md` — strict-JSON shape gains
+  `"properties"`; transcribe-don't-invent rules for invariants.
+- `pyproject.toml` — `hypothesis>=6` in base dependencies.
+- Tests (`tests/test_contract_properties.py`) — Tier-1 grammar
+  (parse/root/classify/reject incl. the review findings), renderer bytes,
+  no-property batteries byte-identical across derive sets, mocked-model Tier-2
+  merge (model sees only prose bullets + real func name), failing property
+  blocks the write, strength-excluded accounting, class-method suffix regions,
+  config validation.
+- Deferred from the first cut: the exploratory non-derandomized reconcile
+  pass, a runnable example project, and `jaunt` skill / contract-docs updates
+  beyond `CLAUDE.md`.
+- `contract/cases.py` and `contract/strength.py` *(self-hosted magic)* —
+  deliberately **untouched**; see §Authoring surface for why the grammar lives
+  in its own module.
 
-## Open questions
+## Open questions — resolved in the first cut
 
-1. **Tier-1 separator spelling.** `given … :: …` is proposed; alternatives were
-   `forall`/`->`. Confirm before the grammar lands in the `cases.py` contract.
-2. **`from_type` failure mode.** `st.from_type` raises at collection time for
-   unresolvable annotations (e.g. bare protocols). Proposed: reconcile-time
-   validation resolves every binding's strategy once and surfaces a finding,
-   so the committed battery never fails at collection.
-3. **Test-function naming.** Positional (`test_prop_1`) vs. a slug of the
-   expression. Positional is stable under expression edits only if ordering is
-   stable; a content slug churns names on any edit. Leaning positional-in-
-   source-order (matches how parametrize rows behave today).
-4. **Class contracts.** Property bullets in method docstrings should compose
-   with `region_suffix` like examples do, but instance construction inside a
-   `given` needs a story (probably: Tier 1 requires the expression to construct
-   or receive the instance explicitly; no implicit `st.builds(Cls)` in v1).
+1. **Tier-1 separator spelling.** Kept `given … :: …`.
+2. **`from_type` failure mode.** Covered by reconcile's pytest validation: any
+   battery containing property cases is run before it is written, so a
+   collection-time `from_type` failure surfaces as a reconcile finding and the
+   broken battery is never committed. (A friendlier targeted message than the
+   generic validation failure is possible follow-up polish.)
+3. **Test-function naming.** Positional in source order (`test_prop_1`, …),
+   matching how parametrize rows behave today.
+4. **Class contracts.** Method-docstring bullets compose with
+   `region_suffix` (`properties-<method>`, `test_prop_<method>_<i>`); the
+   expression must construct or receive the instance explicitly
+   (`Counter(n).peek() == n`) — no implicit `st.builds(Cls)` in v1.

@@ -135,8 +135,9 @@ def reconcile_entry(
     *,
     module_namespace: dict[str, object],
     tool_version: str,
-    model_extract: Callable[[str], ContractBlocks] | None = None,
+    model_extract: Callable[[str, str], ContractBlocks] | None = None,
     source_roots: list[str] | None = None,
+    property_max_examples: int = 50,
 ) -> ReconcileResult:
     import ast
 
@@ -146,6 +147,12 @@ def reconcile_entry(
         battery_extra_imports,
         derive_case_regions,
         evaluate_cases,
+    )
+    from jaunt.contract.properties import (
+        PropertyBlocks,
+        parse_property_blocks,
+        properties_extra_imports,
+        render_properties_region,
     )
     from jaunt.contract.strength import compute_case_strength, format_strength
     from jaunt.digest import contract_digests, load_contract_node
@@ -168,12 +175,20 @@ def reconcile_entry(
             path=path,
             spec_ref=spec_ref,
             source_roots=source_roots,
+            property_max_examples=property_max_examples,
         )
 
     module_names = _module_top_level_names(entry.source_file)
     async_map = {entry.qualname: isinstance(node, ast.AsyncFunctionDef)}
     docstring = _docstring_of(node)
+    want_properties = "properties" in derive
 
+    def _parse_props(doc: str) -> PropertyBlocks:
+        return parse_property_blocks(
+            doc, target=entry.qualname, async_map=async_map, module_names=module_names
+        )
+
+    pblocks = PropertyBlocks()
     try:
         blocks = parse_case_blocks(
             docstring,
@@ -181,16 +196,58 @@ def reconcile_entry(
             async_map=async_map,
             module_names=module_names,
         )
-        if blocks.is_empty() and model_extract is not None and docstring.strip():
-            legacy = model_extract(docstring)
+        if want_properties:
+            pblocks = _parse_props(docstring)
+        if (
+            blocks.is_empty()
+            and not pblocks.cases
+            and model_extract is not None
+            and docstring.strip()
+        ):
+            legacy = model_extract(docstring, entry.qualname)
+            synth = _legacy_blocks_to_docstring(legacy)
             blocks = parse_case_blocks(
-                _legacy_blocks_to_docstring(legacy),
+                synth,
                 target=entry.qualname,
                 async_map=async_map,
                 module_names=module_names,
             )
+            if want_properties:
+                pblocks = _parse_props(synth)
+        elif want_properties and pblocks.prose and model_extract is not None:
+            # Structured and prose bullets coexist: send only the prose bullets
+            # through the model, round-trip its rows through the Tier-1 grammar,
+            # and merge with the deterministically parsed cases.
+            prose_doc = "Properties:\n" + "\n".join(f"- {b}" for b in pblocks.prose)
+            legacy = model_extract(prose_doc, entry.qualname)
+            synth = _legacy_blocks_to_docstring(ContractBlocks(properties=legacy.properties))
+            reparsed = _parse_props(synth)
+            if reparsed.prose:
+                bad = "; ".join(reparsed.prose)
+                return ReconcileResult(
+                    spec_ref,
+                    False,
+                    "0/0",
+                    [f"model-derived property is not in 'given … :: …' form: {bad}"],
+                    path,
+                    False,
+                )
+            pblocks = PropertyBlocks(cases=(*pblocks.cases, *reparsed.cases), prose=pblocks.prose)
     except CaseParseError as exc:
         return ReconcileResult(spec_ref, False, "0/0", [f"{exc} (line: {exc.line})"], path, False)
+
+    if pblocks.cases and not _hypothesis_importable():
+        return ReconcileResult(
+            spec_ref,
+            False,
+            "0/0",
+            [
+                "contract.derive includes 'properties' but the 'hypothesis' package is "
+                "not importable in this environment; install hypothesis>=6"
+            ],
+            path,
+            False,
+        )
 
     fn = module_namespace.get(entry.qualname)
     if not callable(fn):
@@ -217,8 +274,13 @@ def reconcile_entry(
             ast.unparse(node), entry.qualname, blocks, strength_ns
         )
         strength = format_strength(killed, applicable)
+        # Property cases never enter the per-mutant loop (wrong cost profile);
+        # count them so the score stays honest about what it measured.
+        excluded += len(pblocks.cases)
 
     regions = derive_case_regions(blocks, target=entry.qualname, derive=derive)
+    if pblocks.cases:
+        regions.append(render_properties_region(pblocks.cases, max_examples=property_max_examples))
     existing = path.read_text(encoding="utf-8") if path.is_file() else None
     text = merge_battery(
         existing,
@@ -234,17 +296,22 @@ def reconcile_entry(
             "strength_excluded": str(excluded),
             "tool_version": tool_version,
         },
-        extra_imports=battery_extra_imports(blocks),
+        extra_imports=tuple(
+            sorted({*battery_extra_imports(blocks), *properties_extra_imports(pblocks)})
+        ),
     )
 
-    if blocks.has_fixture_cases():
+    if blocks.has_fixture_cases() or pblocks.cases:
         ok = _validate_via_pytest(text, path, root=root, entry=entry, source_roots=source_roots)
         if not ok:
             return ReconcileResult(
                 spec_ref,
                 False,
                 "0/0",
-                ["fixture-dependent cases failed under pytest; run the battery for detail"],
+                [
+                    "fixture- or property-based cases failed under pytest; "
+                    "run the battery for detail"
+                ],
                 path,
                 False,
             )
@@ -267,6 +334,7 @@ def _reconcile_class(
     path: Path,
     spec_ref: str,
     source_roots: list[str],
+    property_max_examples: int = 50,
 ) -> ReconcileResult:
     import ast
 
@@ -277,6 +345,12 @@ def _reconcile_class(
         derive_case_regions,
         evaluate_cases,
     )
+    from jaunt.contract.properties import (
+        PropertyBlocks,
+        parse_property_blocks,
+        properties_extra_imports,
+        render_properties_region,
+    )
     from jaunt.contract.strength import compute_case_strength, format_strength
     from jaunt.digest import contract_digests
 
@@ -286,19 +360,31 @@ def _reconcile_class(
     for m in methods:
         async_map[f"{cls_name}.{m.name}"] = isinstance(m, ast.AsyncFunctionDef)
     module_names = _module_top_level_names(entry.source_file)
+    want_properties = "properties" in derive
 
     # Partition by which docstring each case came from: class-docstring cases
     # render in the base `examples`/`errors` regions, method-docstring cases in
     # `examples-<method>`/`errors-<method>` regions. (Do NOT partition by
     # `case.method` — a class-docstring case like `Counter(1).peek() == 1` has
     # `method="peek"` for async resolution but still belongs to the class region.)
+    # Tier-2 (model-derived) properties are function-path only in v1; class
+    # docstrings get the deterministic Tier-1 grammar, prose bullets are skipped.
+    class_props = PropertyBlocks()
+    method_props: list[tuple[str, PropertyBlocks]] = []
+    all_props = PropertyBlocks()
     try:
+        class_doc = ast.get_docstring(node, clean=True) or ""
         class_doc_blocks = parse_case_blocks(
-            ast.get_docstring(node, clean=True) or "",
+            class_doc,
             target=cls_name,
             async_map=async_map,
             module_names=module_names,
         )
+        if want_properties:
+            class_props = parse_property_blocks(
+                class_doc, target=cls_name, async_map=async_map, module_names=module_names
+            )
+            all_props = class_props
         all_blocks = class_doc_blocks
         method_blocks: list[tuple[str, CaseBlocks]] = []
         for m in methods:
@@ -317,8 +403,28 @@ def _reconcile_class(
             if not mb.is_empty():
                 method_blocks.append((m.name, mb))
                 all_blocks = all_blocks.merged(mb)
+            if want_properties:
+                mp = parse_property_blocks(
+                    doc, target=cls_name, async_map=async_map, module_names=module_names
+                )
+                if mp.cases:
+                    method_props.append((m.name, mp))
+                    all_props = all_props.merged(mp)
     except CaseParseError as exc:
         return ReconcileResult(spec_ref, False, "0/0", [f"{exc} (line: {exc.line})"], path, False)
+
+    if all_props.cases and not _hypothesis_importable():
+        return ReconcileResult(
+            spec_ref,
+            False,
+            "0/0",
+            [
+                "contract.derive includes 'properties' but the 'hypothesis' package is "
+                "not importable in this environment; install hypothesis>=6"
+            ],
+            path,
+            False,
+        )
 
     cls_obj = module_namespace.get(cls_name)
     if not callable(cls_obj):
@@ -345,10 +451,21 @@ def _reconcile_class(
             ast.unparse(node), cls_name, all_blocks, strength_ns
         )
         strength = format_strength(killed, applicable)
+        excluded += len(all_props.cases)
 
     regions = derive_case_regions(class_doc_blocks, target=cls_name, derive=derive)
+    if class_props.cases:
+        regions.append(
+            render_properties_region(class_props.cases, max_examples=property_max_examples)
+        )
     for name, mb in method_blocks:
         regions += derive_case_regions(mb, target=cls_name, derive=derive, region_suffix=name)
+    for name, mp in method_props:
+        regions.append(
+            render_properties_region(
+                mp.cases, max_examples=property_max_examples, region_suffix=name
+            )
+        )
 
     existing = path.read_text(encoding="utf-8") if path.is_file() else None
     text = merge_battery(
@@ -365,16 +482,21 @@ def _reconcile_class(
             "strength_excluded": str(excluded),
             "tool_version": tool_version,
         },
-        extra_imports=battery_extra_imports(all_blocks),
+        extra_imports=tuple(
+            sorted({*battery_extra_imports(all_blocks), *properties_extra_imports(all_props)})
+        ),
     )
 
-    if all_blocks.has_fixture_cases():
+    if all_blocks.has_fixture_cases() or all_props.cases:
         if not _validate_via_pytest(text, path, root=root, entry=entry, source_roots=source_roots):
             return ReconcileResult(
                 spec_ref,
                 False,
                 "0/0",
-                ["fixture-dependent cases failed under pytest; run the battery for detail"],
+                [
+                    "fixture- or property-based cases failed under pytest; "
+                    "run the battery for detail"
+                ],
                 path,
                 False,
             )
@@ -401,6 +523,12 @@ def _module_top_level_names(source_file: str) -> frozenset[str]:
     return frozenset(names)
 
 
+def _hypothesis_importable() -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec("hypothesis") is not None
+
+
 def _legacy_blocks_to_docstring(blocks: ContractBlocks) -> str:
     lines = []
     if blocks.examples:
@@ -410,6 +538,10 @@ def _legacy_blocks_to_docstring(blocks: ContractBlocks) -> str:
     if blocks.raises:
         lines.append("Raises:")
         lines += [f"    - {r.input_expr} raises {r.exc_name}" for r in blocks.raises]
+        lines.append("")
+    if blocks.properties:
+        lines.append("Properties:")
+        lines += [f"    - given {r.bindings} :: {r.expr}" for r in blocks.properties]
     return "\n".join(lines)
 
 
