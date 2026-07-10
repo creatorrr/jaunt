@@ -1813,15 +1813,16 @@ def _find_project_orphans(
     source_dirs: Sequence[Path],
     test_dirs: Sequence[Path],
     governed_modules: set[str],
+    governed_modules_by_owner: dict[Path, set[str]] | None = None,
     contract_refs: set[str] | None,
     include_artifacts: bool = True,
     classify_test_orphans: bool = True,
 ):
     """Collect orphaned jaunt artifacts across (possibly nested) generated dirs.
 
-    - `governed_modules` is the union set: magic spec modules PLUS test spec
-      modules, so generated tests (whose header `source_module` is the TEST spec
-      module) are judged against the modules that still exist.
+    - `governed_modules` is the workspace-wide union used for side-by-side stubs.
+      Generated modules use `governed_modules_by_owner` when supplied so the same
+      test-module name in another package cannot keep an orphan alive.
     - Generated dirs are scanned under BOTH the source roots and the test roots
       (deduplicated): the tester writes generated tests under the test roots'
       `__generated__`, which is invisible when a project's source roots do not
@@ -1834,6 +1835,7 @@ def _find_project_orphans(
       when the governed test-module set is incomplete).
     """
     from jaunt.reconcile import OrphanArtifact, find_orphans
+    from jaunt.workspace import nearest_pyproject
 
     seen: dict[Path, OrphanArtifact] = {}
     existing_source = [d for d in source_dirs if d.exists()]
@@ -1845,10 +1847,17 @@ def _find_project_orphans(
         # source AND test roots (deduplicated by _find_generated_dirs).
         scan_dirs = [*existing_source, *existing_test]
         for gen_root in _find_generated_dirs(scan_dirs, cfg.paths.generated_dir):
+            owner_pyproject = nearest_pyproject(gen_root, config_root=root)
+            owner = owner_pyproject.parent if owner_pyproject is not None else root.resolve()
+            owner_governed = (
+                governed_modules
+                if governed_modules_by_owner is None
+                else governed_modules_by_owner.get(owner, set())
+            )
             for o in find_orphans(
                 package_dir=gen_root.parent,
                 generated_dir=cfg.paths.generated_dir,
-                governed_modules=governed_modules,
+                governed_modules=owner_governed,
                 source_dirs=[],
                 battery_dir=None,
                 contract_refs=set(),
@@ -1890,11 +1899,13 @@ def _find_project_orphans(
     return sorted(seen.values(), key=lambda o: str(o.path))
 
 
-def _discover_governed_test_modules(root: Path, cfg: JauntConfig) -> tuple[set[str], bool]:
-    """Governed test-module names and whether generated-test orphan detection is safe.
+def _discover_governed_test_modules(
+    root: Path, cfg: JauntConfig
+) -> tuple[dict[Path, set[str]], bool]:
+    """Governed test-module names by owner and orphan-classification safety.
 
-    The returned set holds the module names that appear as `source_module` in
-    generated test headers:
+    Each returned owner set holds the module names that appear as
+    `source_module` in generated test headers:
 
     - Explicit `@jaunt.test` specs, read from the test registry after importing
       the marker-discovered test modules (keyed exactly as the tester keys
@@ -1912,13 +1923,14 @@ def _discover_governed_test_modules(root: Path, cfg: JauntConfig) -> tuple[set[s
 
     from jaunt import discovery, registry
 
-    governed: set[str] = set()
+    governed: dict[Path, set[str]] = {}
 
     from jaunt.workspace import resolve_workspace
 
     workspace = resolve_workspace(root, cfg)
     _prepend_sys_path([root, *workspace.source_roots])
     for owner in workspace.owner_dirs:
+        owner_governed = governed.setdefault(owner, set())
         _prepend_sys_path([owner])
         owner_routes = workspace.tests_for_owner(owner)
         test_dirs = [route.root for route in owner_routes]
@@ -1939,8 +1951,8 @@ def _discover_governed_test_modules(root: Path, cfg: JauntConfig) -> tuple[set[s
             try:
                 importlib.import_module(module)
             except Exception:  # noqa: BLE001 - per-module fail-safe: keep its tests non-orphan
-                governed.add(module)
-        governed |= set(registry.get_specs_by_module("test").keys())
+                owner_governed.add(module)
+        owner_governed.update(registry.get_specs_by_module("test").keys())
 
     # Auto-class test modules require magic specs. If the synthesis pass fails we
     # cannot know the auto module names, so disable test-orphan classification
@@ -1970,7 +1982,7 @@ def _discover_governed_test_modules(root: Path, cfg: JauntConfig) -> tuple[set[s
                 tests_package=tests_package,
                 generated_dir=cfg.paths.generated_dir,
             )
-            governed |= set(auto.keys())
+            governed.setdefault(owner, set()).update(auto.keys())
     except Exception as exc:  # noqa: BLE001 - fail safe: skip test-orphan detection this run
         _eprint(
             f"warning: could not enumerate auto-class test modules "
@@ -1980,16 +1992,28 @@ def _discover_governed_test_modules(root: Path, cfg: JauntConfig) -> tuple[set[s
     return governed, True
 
 
+def _governed_modules_by_owner(
+    workspace: ResolvedWorkspace,
+    magic_modules: set[str],
+    test_modules: dict[Path, set[str]],
+) -> dict[Path, set[str]]:
+    """Combine magic and test governance without crossing package boundaries."""
+
+    combined = {owner: set(modules) for owner, modules in test_modules.items()}
+    for module in magic_modules:
+        combined.setdefault(workspace.route_for(module).owner_dir, set()).add(module)
+    return combined
+
+
 def _discover_reconcile_sets(root: Path, cfg: JauntConfig) -> tuple[set[str], set[str]]:
     """Discover currently-governed magic module names and contract refs."""
     from jaunt import discovery, registry
+    from jaunt.workspace import resolve_workspace
 
-    source_dirs = [root / sr for sr in cfg.paths.source_roots]
-    existing = [d for d in source_dirs if d.exists()]
+    workspace = resolve_workspace(root, cfg)
+    existing = list(workspace.source_roots)
     _prepend_sys_path([*existing, root])
-    mods = discovery.discover_modules(
-        roots=existing, exclude=[], generated_dir=cfg.paths.generated_dir
-    )
+    mods = [route.module for route in workspace.modules]
     discovery.prepare_import_environment(module_names=mods, roots=existing)
     discovery.import_and_collect(mods, kind="magic")
     governed = set(registry.get_specs_by_module("magic").keys())
@@ -2093,18 +2117,20 @@ def cmd_clean(args: argparse.Namespace) -> int:
     if getattr(args, "orphans", False):
         governed_modules, contract_refs = _discover_reconcile_sets(root, cfg)
         test_governed, classify_test_orphans = _discover_governed_test_modules(root, cfg)
-        governed_modules = governed_modules | test_governed
         from jaunt.workspace import resolve_workspace
 
         workspace = resolve_workspace(root, cfg)
+        governed_by_owner = _governed_modules_by_owner(workspace, governed_modules, test_governed)
+        governed_modules = set().union(*governed_by_owner.values())
         source_dirs = list(workspace.source_roots)
-        test_dirs = [route.root for route in workspace.test_roots]
+        test_dirs = list(workspace.artifact_test_roots())
         orphans = _find_project_orphans(
             root=root,
             cfg=cfg,
             source_dirs=source_dirs,
             test_dirs=test_dirs,
             governed_modules=governed_modules,
+            governed_modules_by_owner=governed_by_owner,
             contract_refs=contract_refs,
             classify_test_orphans=classify_test_orphans,
         )
@@ -2153,7 +2179,7 @@ def cmd_clean(args: argparse.Namespace) -> int:
 
     workspace = resolve_workspace(root, cfg)
     generated_dir = cfg.paths.generated_dir
-    scan_roots = [*workspace.source_roots, *(route.root for route in workspace.test_roots)]
+    scan_roots = [*workspace.source_roots, *workspace.artifact_test_roots()]
     scan_roots.extend(owner / cfg.contract.battery_dir for owner in workspace.owner_dirs)
     found = _find_generated_dirs(scan_roots, generated_dir)
     stubs = _find_jaunt_stubs(scan_roots, generated_dir)
@@ -2799,7 +2825,7 @@ def cmd_check(args: argparse.Namespace) -> int:
 
         workspace = resolve_workspace(root, cfg)
         source_dirs = list(workspace.source_roots)
-        test_dirs = [route.root for route in workspace.test_roots]
+        test_dirs = list(workspace.artifact_test_roots())
         if run_magic:
             from jaunt import builder
 
@@ -2850,13 +2876,17 @@ def cmd_check(args: argparse.Namespace) -> int:
                 # against the union of magic and test spec modules. Contract
                 # batteries are handled on the contract side below.
                 test_governed, classify_test_orphans = _discover_governed_test_modules(root, cfg)
-                governed_union = governed_modules | test_governed
+                governed_by_owner = _governed_modules_by_owner(
+                    workspace, governed_modules, test_governed
+                )
+                governed_union = set().union(*governed_by_owner.values())
                 artifact_orphan_objs = _find_project_orphans(
                     root=root,
                     cfg=cfg,
                     source_dirs=source_dirs,
                     test_dirs=test_dirs,
                     governed_modules=governed_union,
+                    governed_modules_by_owner=governed_by_owner,
                     contract_refs=None,
                     include_artifacts=True,
                     classify_test_orphans=classify_test_orphans,
@@ -3349,15 +3379,18 @@ def cmd_status(args: argparse.Namespace) -> int:
 
         _governed = set(_registry.get_specs_by_module("magic").keys())
         _pkg_dir = next((d for d in source_dirs if d.exists()), None)
-        _test_dirs = [route.root for route in workspace.test_roots]
+        _test_dirs = list(workspace.artifact_test_roots())
         _test_governed, _classify_test_orphans = _discover_governed_test_modules(root, cfg)
+        _governed_by_owner = _governed_modules_by_owner(workspace, _governed, _test_governed)
+        _governed_union = set().union(*_governed_by_owner.values())
         orphan_objs = (
             _find_project_orphans(
                 root=root,
                 cfg=cfg,
                 source_dirs=source_dirs,
                 test_dirs=_test_dirs,
-                governed_modules=_governed | _test_governed,
+                governed_modules=_governed_union,
+                governed_modules_by_owner=_governed_by_owner,
                 contract_refs=(None if magic_only else {str(r["ref"]) for r in contract_rows}),
                 classify_test_orphans=_classify_test_orphans,
             )
@@ -4410,12 +4443,12 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
         return EXIT_GENERATION_ERROR
 
 
-def cmd_test(args: argparse.Namespace) -> int:
+async def _cmd_test_workspace_async(args: argparse.Namespace) -> int:
     # Each owning pyproject is an independent pytest/import namespace.  Running
     # owners sequentially prevents identical ``tests.*`` module names from
     # colliding and lets package-local pytest configuration apply via cwd.
     if getattr(args, "_workspace_owner", None):
-        return asyncio.run(_cmd_test_async(args))
+        return await _cmd_test_async(args)
     try:
         root, cfg = _load_config(args)
         from jaunt.workspace import resolve_workspace
@@ -4429,10 +4462,10 @@ def cmd_test(args: argparse.Namespace) -> int:
 
     owners = workspace.owner_dirs
     if len(owners) <= 1:
-        return asyncio.run(_cmd_test_async(args))
+        return await _cmd_test_async(args)
 
     if not bool(args.no_build):
-        build_rc = asyncio.run(_cmd_build_async(args))
+        build_rc = await _cmd_build_async(args)
         if build_rc != EXIT_OK:
             return build_rc
 
@@ -4447,7 +4480,7 @@ def cmd_test(args: argparse.Namespace) -> int:
         child.no_build = True
         captured = io.StringIO()
         with contextlib.redirect_stdout(captured):
-            rc = asyncio.run(_cmd_test_async(child))
+            rc = await _cmd_test_async(child)
         exit_codes.append(rc)
         output = captured.getvalue()
         if _is_json_mode(args):
@@ -4491,6 +4524,10 @@ def cmd_test(args: argparse.Namespace) -> int:
             }
         )
     return rc
+
+
+def cmd_test(args: argparse.Namespace) -> int:
+    return asyncio.run(_cmd_test_workspace_async(args))
 
 
 def cmd_eval(args: argparse.Namespace) -> int:
@@ -4780,7 +4817,10 @@ def cmd_skill(args: argparse.Namespace) -> int:
                 for name in removed:
                     _eprint(f"removed auto-skill: {name}")
 
-        source_dirs = [root / sr for sr in cfg.paths.source_roots]
+        from jaunt.workspace import resolve_workspace
+
+        workspace = resolve_workspace(root, cfg)
+        source_dirs = list(workspace.source_roots)
         refresh_ok = True
         refresh_error: str | None = None
         try:

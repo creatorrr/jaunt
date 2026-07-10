@@ -20,7 +20,7 @@ def _run(argv: list[str]):
     from jaunt.registry import clear_registries
 
     orig_path = list(sys.path)
-    before = set(sys.modules.keys())
+    before = dict(sys.modules)
     try:
         return cli.main(argv)
     finally:
@@ -32,6 +32,9 @@ def _run(argv: list[str]):
             # later tests that call cmd_check directly (leaving is_blocking stale).
             if name not in before and not (name == "jaunt" or name.startswith("jaunt.")):
                 del sys.modules[name]
+        for name, module in before.items():
+            if not (name == "jaunt" or name.startswith("jaunt.")):
+                sys.modules[name] = module
 
 
 def _orphan_project(tmp_path: Path, *, pkg: str = "orphpkg") -> tuple[str, Path]:
@@ -263,6 +266,142 @@ def test_synthesis_failure_disables_test_orphan_classification(
     rc = _run(["clean", "--orphans", "--root", str(tmp_path)])
     assert rc == cli.EXIT_OK
     assert gen_test.exists(), "must not delete a generated test with an incomplete governed set"
+
+
+def test_clean_orphans_preserves_live_module_under_globbed_source_root(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    _write(
+        tmp_path / "jaunt.toml",
+        'version=1\n[paths]\nsource_roots=["packages/*/src"]\ntest_roots=[]\n'
+        "[build]\nemit_stubs=false\n",
+    )
+    _write(tmp_path / "packages/a/pyproject.toml", "[project]\nname='a'\nversion='1'\n")
+    _write(tmp_path / "packages/a/src/app/__init__.py", "")
+    _write(
+        tmp_path / "packages/a/src/app/spec.py",
+        "import jaunt\n@jaunt.magic()\ndef live(): ...\n",
+    )
+    generated = tmp_path / "packages/a/src/app/__generated__/spec.py"
+    header = format_header(
+        tool_version="0",
+        kind="build",
+        source_module="app.spec",
+        module_digest="deadbeef",
+        spec_refs=["app.spec:live"],
+    )
+    _write(generated, header + "\n\ndef live():\n    return None\n")
+
+    monkeypatch.chdir(tmp_path)
+    rc = _run(["clean", "--orphans", "--dry-run", "--json", "--root", str(tmp_path)])
+    out = json.loads(capsys.readouterr().out)
+
+    assert rc == cli.EXIT_OK
+    assert str(generated.relative_to(tmp_path)) not in out["would_remove"]
+
+
+def test_clean_orphans_scans_owner_fallback_test_root(tmp_path: Path, monkeypatch, capsys) -> None:
+    _write(
+        tmp_path / "jaunt.toml",
+        'version=1\n[paths]\nsource_roots=["packages/*/src"]\ntest_roots=[]\n',
+    )
+    _write(tmp_path / "packages/a/pyproject.toml", "[project]\nname='a'\nversion='1'\n")
+    _write(tmp_path / "packages/a/src/app/__init__.py", "")
+    generated = tmp_path / "packages/a/tests/__generated__/test_gone.py"
+    header = format_header(
+        tool_version="0",
+        kind="test",
+        source_module="tests.test_gone",
+        module_digest="deadbeef",
+        spec_refs=["tests.test_gone:test_gone"],
+    )
+    _write(generated, header + "\n\ndef test_gone():\n    assert True\n")
+
+    monkeypatch.chdir(tmp_path)
+    rc = _run(["clean", "--orphans", "--dry-run", "--json", "--root", str(tmp_path)])
+    out = json.loads(capsys.readouterr().out)
+
+    assert rc == cli.EXIT_OK
+    assert str(generated.relative_to(tmp_path)) in out["would_remove"]
+
+
+def test_test_orphans_are_scoped_to_the_owning_package(tmp_path: Path, monkeypatch, capsys) -> None:
+    _write(
+        tmp_path / "jaunt.toml",
+        'version=1\n[paths]\nsource_roots=["packages/*/src"]\ntest_roots=["packages/*/tests"]\n',
+    )
+    for package in ("a", "b"):
+        _write(
+            tmp_path / f"packages/{package}/pyproject.toml",
+            f"[project]\nname='{package}'\nversion='1'\n",
+        )
+        _write(tmp_path / f"packages/{package}/src/app_{package}/__init__.py", "")
+        _write(tmp_path / f"packages/{package}/tests/__init__.py", "")
+    _write(
+        tmp_path / "packages/b/tests/test_spec.py",
+        "import jaunt\n@jaunt.test()\ndef test_live(): ...\n",
+    )
+    orphan = tmp_path / "packages/a/tests/__generated__/test_spec.py"
+    header = format_header(
+        tool_version="0",
+        kind="test",
+        source_module="tests.test_spec",
+        module_digest="deadbeef",
+        spec_refs=["tests.test_spec:test_gone"],
+    )
+    _write(orphan, header + "\n\ndef test_gone():\n    assert True\n")
+
+    monkeypatch.chdir(tmp_path)
+    rc = _run(["clean", "--orphans", "--dry-run", "--json", "--root", str(tmp_path)])
+    out = json.loads(capsys.readouterr().out)
+
+    assert rc == cli.EXIT_OK
+    assert str(orphan.relative_to(tmp_path)) in out["would_remove"]
+
+
+def test_contract_battery_owner_survives_removal_of_last_marker(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    _write(
+        tmp_path / "jaunt.toml",
+        'version=1\n[paths]\nsource_roots=["packages/*/src"]\ntest_roots=[]\n',
+    )
+    _write(tmp_path / "packages/a/pyproject.toml", "[project]\nname='a'\nversion='1'\n")
+    _write(tmp_path / "packages/a/src/app/__init__.py", "")
+    battery = tmp_path / "packages/a/tests/contract/test_gone.py"
+    header = format_contract_battery_header(
+        derived_from="app.gone:vanished",
+        prose_digest="aa",
+        signature="() -> None",
+        body_digest="bb",
+        strength="0",
+        tool_version="0",
+    )
+    _write(battery, header + "\n\ndef test_x():\n    assert True\n")
+
+    monkeypatch.chdir(tmp_path)
+    rc = _run(["check", "--contracts-only", "--json", "--root", str(tmp_path)])
+    out = json.loads(capsys.readouterr().out)
+
+    assert rc == cli.EXIT_PYTEST_FAILURE
+    assert str(battery.relative_to(tmp_path)) in out["orphans"]
+
+
+def test_plain_clean_scans_owner_fallback_test_root(tmp_path: Path, monkeypatch) -> None:
+    _write(
+        tmp_path / "jaunt.toml",
+        'version=1\n[paths]\nsource_roots=["packages/*/src"]\ntest_roots=[]\n',
+    )
+    _write(tmp_path / "packages/a/pyproject.toml", "[project]\nname='a'\nversion='1'\n")
+    _write(tmp_path / "packages/a/src/app/__init__.py", "")
+    generated_dir = tmp_path / "packages/a/tests/__generated__"
+    _write(generated_dir / "test_auto.py", "def test_auto(): pass\n")
+
+    monkeypatch.chdir(tmp_path)
+    rc = _run(["clean", "--root", str(tmp_path)])
+
+    assert rc == cli.EXIT_OK
+    assert not generated_dir.exists()
 
 
 def _combined_orphan_project(tmp_path: Path) -> tuple[Path, Path]:

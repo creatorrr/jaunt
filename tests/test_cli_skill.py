@@ -120,6 +120,33 @@ def test_parse_skill_refresh() -> None:
     assert args.force is True
 
 
+def test_cmd_skill_refresh_expands_globbed_source_roots(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from jaunt.skills_auto import PyPISkillsResult
+
+    source_root = tmp_path / "packages/a/src"
+    _write(source_root / "app.py", "import httpx\n")
+    _write(
+        tmp_path / "jaunt.toml",
+        'version=1\n[paths]\nsource_roots=["packages/*/src"]\ntest_roots=[]\n',
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_ensure_pypi_skills(**kwargs):
+        captured.update(kwargs)
+        return PyPISkillsResult(warnings=[])
+
+    monkeypatch.setattr("jaunt.skills_auto.ensure_pypi_skills", fake_ensure_pypi_skills)
+
+    rc = main(["skill", "refresh", "--root", str(tmp_path), "--json"])
+    out = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert out["ok"] is True
+    assert captured["source_roots"] == [source_root.resolve()]
+
+
 def test_parse_skill_import() -> None:
     args = parse_args(["skill", "import", "rich", "--from", "/some/dir", "--dry-run"])
     assert args.skill_command == "import"

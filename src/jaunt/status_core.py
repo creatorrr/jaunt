@@ -23,14 +23,14 @@ if TYPE_CHECKING:
 
 
 def prepend_sys_path(dirs: Sequence[Path]) -> None:
-    """Ensure discovered modules are importable (idempotent)."""
-    seen: set[str] = set(sys.path)
-    for d in reversed([p.resolve() for p in dirs if p.exists()]):
-        s = str(d)
-        if s in seen:
-            continue
-        sys.path.insert(0, s)
-        seen.add(s)
+    """Make discovered modules importable in the requested precedence order."""
+
+    ordered = list(dict.fromkeys(str(path.resolve()) for path in dirs if path.exists()))
+    if not ordered:
+        return
+    requested = set(ordered)
+    sys.path[:] = [entry for entry in sys.path if entry not in requested]
+    sys.path[:0] = ordered
 
 
 def enforce_source_root_routing(
@@ -40,7 +40,7 @@ def enforce_source_root_routing(
 ) -> None:
     """Compatibility no-op retained for integrations importing the 1.5 gate.
 
-    Per-module workspace routing replaced the first-root assumption in 1.6.3.
+    Per-module workspace routing replaced the first-root assumption in 1.6.2.
     Route validity and duplicate module names are now checked by
     :func:`jaunt.workspace.resolve_workspace` before imports.
     """
@@ -80,18 +80,18 @@ def discover_targeted_test_entries(*, root: Path, cfg: JauntConfig) -> list:
     from jaunt import discovery
     from jaunt.errors import JauntDiscoveryError
     from jaunt.module_contract import extract_targeted_test_entries
+    from jaunt.workspace import resolve_workspace
 
-    test_dirs = [root / tr for tr in cfg.paths.test_roots]
+    workspace = resolve_workspace(root, cfg)
     entries: list = []
-    for tr, test_dir in zip(cfg.paths.test_roots, test_dirs, strict=False):
-        if not test_dir.exists():
+    for route in workspace.test_roots:
+        if not route.root.exists():
             continue
-        prefix = ".".join(Path(tr).parts)
         discovered = discovery.discover_module_files(
-            roots=[test_dir],
+            roots=[route.root],
             exclude=[],
             generated_dir=cfg.paths.generated_dir,
-            module_prefix=prefix or None,
+            module_prefix=route.module_prefix,
         )
         for module_name, path in discovered:
             try:

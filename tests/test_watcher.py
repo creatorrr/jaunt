@@ -450,7 +450,7 @@ def test_cycle_runner_calls_cmd_test_when_enabled(monkeypatch) -> None:
         )
         return 0
 
-    monkeypatch.setattr("jaunt.cli._cmd_test_async", fake_cmd_test)
+    monkeypatch.setattr("jaunt.cli._cmd_test_workspace_async", fake_cmd_test)
 
     import jaunt.cli
 
@@ -480,7 +480,7 @@ def test_cycle_runner_propagates_progress_mode(monkeypatch) -> None:
         return 0
 
     monkeypatch.setattr("jaunt.cli._cmd_build_async", fake_cmd_build)
-    monkeypatch.setattr("jaunt.cli._cmd_test_async", fake_cmd_test)
+    monkeypatch.setattr("jaunt.cli._cmd_test_workspace_async", fake_cmd_test)
 
     import jaunt.cli
 
@@ -509,7 +509,7 @@ def test_cycle_runner_still_propagates_no_progress_alias(monkeypatch) -> None:
         return 0
 
     monkeypatch.setattr("jaunt.cli._cmd_build_async", fake_cmd_build)
-    monkeypatch.setattr("jaunt.cli._cmd_test_async", fake_cmd_test)
+    monkeypatch.setattr("jaunt.cli._cmd_test_workspace_async", fake_cmd_test)
 
     import jaunt.cli
 
@@ -536,7 +536,7 @@ def test_cycle_runner_skips_test_on_build_failure(monkeypatch) -> None:
         return 0
 
     monkeypatch.setattr("jaunt.cli._cmd_build_async", fake_cmd_build)
-    monkeypatch.setattr("jaunt.cli._cmd_test_async", fake_cmd_test)
+    monkeypatch.setattr("jaunt.cli._cmd_test_workspace_async", fake_cmd_test)
 
     import jaunt.cli
 

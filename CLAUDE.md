@@ -259,7 +259,7 @@ like `[gate]` or key like `reasoning-effort` fails loudly instead of being
 silently ignored. `jaunt instructions` (run before a `jaunt.toml` exists) prints
 the full annotated config schema.
 
-**Per-module workspace routing (1.6.3).** `source_roots` and `test_roots` accept
+**Per-module workspace routing (1.6.2).** `source_roots` and `test_roots` accept
 literal paths and globs, so one config can cover several packages and mixed
 flat/`src` layouts. Globs expand in stable lexical order and must match at least
 one directory. Missing literal roots remain legal when another source root

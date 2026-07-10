@@ -121,6 +121,9 @@ class ResolvedWorkspace:
     def owner_dirs(self) -> tuple[Path, ...]:
         owners = {route.owner_dir for route in self.modules}
         owners.update(route.owner_dir for route in self.test_roots)
+        for source_root in self.source_roots:
+            pyproject = nearest_pyproject(source_root, config_root=self.root)
+            owners.add(pyproject.parent if pyproject is not None else self.root)
         return tuple(sorted(owners, key=lambda path: path.as_posix()))
 
     def route_for(self, module: str) -> ModuleRoute:
@@ -144,6 +147,22 @@ class ResolvedWorkspace:
             owner_pyproject=nearest_pyproject(owner_dir, config_root=self.root),
             module_prefix="tests",
         )
+
+    def artifact_test_roots(self) -> tuple[Path, ...]:
+        """Configured test roots plus per-owner fallback output roots."""
+
+        roots: list[Path] = []
+        seen: set[Path] = set()
+        for route in self.test_roots:
+            if route.root not in seen:
+                roots.append(route.root)
+                seen.add(route.root)
+        for owner in self.owner_dirs:
+            fallback = self.primary_test_root(owner).root
+            if fallback not in seen:
+                roots.append(fallback)
+                seen.add(fallback)
+        return tuple(roots)
 
 
 def _matched_import_root(path: Path, roots: Sequence[Path]) -> Path | None:

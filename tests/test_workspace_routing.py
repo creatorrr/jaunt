@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -132,10 +133,47 @@ def test_cli_test_generates_identical_test_modules_per_owner(tmp_path: Path, mon
     )
     monkeypatch.setattr(jaunt.cli, "_build_backend", lambda _cfg: GoodBackend())
 
-    rc = jaunt.cli.main(
-        ["test", "--root", str(tmp_path), "--no-build", "--no-run", "--no-progress"]
-    )
+    original_path = list(sys.path)
+    original_modules = dict(sys.modules)
+    try:
+        rc = jaunt.cli.main(
+            ["test", "--root", str(tmp_path), "--no-build", "--no-run", "--no-progress"]
+        )
+    finally:
+        sys.path[:] = original_path
+        for name in list(sys.modules):
+            if name not in original_modules and not name.startswith("jaunt"):
+                del sys.modules[name]
+        for name, module in original_modules.items():
+            if not name.startswith("jaunt"):
+                sys.modules[name] = module
 
     assert rc == 0
     assert (tmp_path / "packages/a/tests/__generated__/test_spec.py").is_file()
     assert (tmp_path / "packages/b/tests/__generated__/test_spec.py").is_file()
+
+
+def test_targeted_test_discovery_expands_globbed_test_roots(tmp_path: Path) -> None:
+    from jaunt.status_core import discover_targeted_test_entries
+
+    _write(tmp_path / "packages/a/pyproject.toml", "[project]\nname='a'\nversion='1'\n")
+    _write(tmp_path / "packages/a/src/app/__init__.py")
+    _write(tmp_path / "packages/a/src/app/api.py", "def value(): return 1\n")
+    _write(tmp_path / "packages/a/tests/__init__.py")
+    _write(
+        tmp_path / "packages/a/tests/test_api.py",
+        "import jaunt\n"
+        "from app.api import value\n"
+        "@jaunt.test(targets=[value])\n"
+        "def test_value(): ...\n",
+    )
+    cfg = _config(
+        tmp_path,
+        sources='["packages/*/src"]',
+        tests='["packages/*/tests"]',
+    )
+
+    entries = discover_targeted_test_entries(root=tmp_path, cfg=cfg)
+
+    assert [entry.module for entry in entries] == ["tests.test_api"]
+    assert [str(ref) for ref in entries[0].decorator_kwargs["targets"]] == ["app.api:value"]
