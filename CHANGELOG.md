@@ -5,11 +5,13 @@ All notable changes to jaunt. Generated from conventional commits by
 
 ## [1.6.1] - 2026-07-10
 
-### Changed
+### Chores
 
-- Default Jaunt Codex generation to `gpt-5.6-sol` with medium reasoning effort.
-- Ask generated implementations to stay readable and maintainable after `jaunt eject`.
+- Update CHANGELOG.md for v1.6.0 [skip ci]
 
+### Other
+
+- [codex] Default Jaunt generation to gpt-5.6-sol (#75)
 ## [1.6.0] - 2026-07-07
 
 ### Chores
