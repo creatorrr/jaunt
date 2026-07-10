@@ -3,6 +3,15 @@
 All notable changes to jaunt. Generated from conventional commits by
 [git-cliff](https://git-cliff.org); one section per published PyPI release.
 
+## [1.6.2] - 2026-07-10
+
+### Chores
+
+- Update CHANGELOG.md for v1.6.1 [skip ci]
+
+### Other
+
+- [codex] add per-module workspace routing (#76)
 ## [1.6.1] - 2026-07-10
 
 ### Chores
