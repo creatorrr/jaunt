@@ -23,14 +23,14 @@ if TYPE_CHECKING:
 
 
 def prepend_sys_path(dirs: Sequence[Path]) -> None:
-    """Ensure discovered modules are importable (idempotent)."""
-    seen: set[str] = set(sys.path)
-    for d in reversed([p.resolve() for p in dirs if p.exists()]):
-        s = str(d)
-        if s in seen:
-            continue
-        sys.path.insert(0, s)
-        seen.add(s)
+    """Make discovered modules importable in the requested precedence order."""
+
+    ordered = list(dict.fromkeys(str(path.resolve()) for path in dirs if path.exists()))
+    if not ordered:
+        return
+    requested = set(ordered)
+    sys.path[:] = [entry for entry in sys.path if entry not in requested]
+    sys.path[:0] = ordered
 
 
 def enforce_source_root_routing(
@@ -38,74 +38,14 @@ def enforce_source_root_routing(
     source_dirs: Sequence[Path],
     module_specs: dict[str, list[SpecEntry]],
 ) -> None:
-    """Hard gate for the multi-root output-routing trap (FEEDBACK finding 28).
+    """Compatibility no-op retained for integrations importing the 1.5 gate.
 
-    jaunt 1.5 routes ALL generated output to the first *existing* configured
-    source root. When governed specs live under a different or additional root,
-    output silently lands in the wrong package while ``status``/``check`` read
-    the same wrong path and stay green. Until per-module routing lands, refuse
-    the ambiguous configuration with a ``JauntConfigError`` (CLI exit 2).
-
-    The owning root of a spec is the most-specific (longest-path) configured
-    source root that contains its ``source_file``, so nested defaults
-    (``["src", "."]``) with specs under ``src`` resolve to ``src`` and pass.
-    No governed specs -> no gate.
+    Per-module workspace routing replaced the first-root assumption in 1.6.2.
+    Route validity and duplicate module names are now checked by
+    :func:`jaunt.workspace.resolve_workspace` before imports.
     """
-    from jaunt.errors import JauntConfigError
 
-    existing = [d for d in source_dirs if d.exists()]
-    if not existing or not module_specs:
-        return
-    package_dir = existing[0]
-
-    def _owning_root(source_file: str) -> Path | None:
-        try:
-            spec_path = Path(source_file).resolve()
-        except OSError:
-            return None
-        best: Path | None = None
-        for root in source_dirs:
-            try:
-                rp = root.resolve()
-            except OSError:
-                continue
-            if spec_path == rp or rp in spec_path.parents:
-                if best is None or len(rp.parts) > len(best.parts):
-                    best = rp
-        return best
-
-    # resolved owning root -> the configured (display) path of the first spec
-    owners: dict[Path, Path] = {}
-    for entries in module_specs.values():
-        for entry in entries:
-            resolved = _owning_root(entry.source_file)
-            if resolved is None:
-                continue
-            display = next((d for d in source_dirs if d.resolve() == resolved), resolved)
-            owners.setdefault(resolved, display)
-            break
-
-    if not owners:
-        return
-
-    if len(owners) > 1:
-        a, b = sorted(str(d) for d in owners.values())[:2]
-        raise JauntConfigError(
-            f"governed specs span multiple source_roots ({a}, {b}): jaunt 1.5 "
-            "routes all generated output to the first existing root, which "
-            "breaks packages under the others (FEEDBACK finding 28). Give each "
-            "adopted package its own jaunt project (jaunt.toml with "
-            'source_roots=["."] at the package root), or keep all specs under '
-            "one root."
-        )
-
-    resolved_owner, display_owner = next(iter(owners.items()))
-    if resolved_owner != package_dir.resolve():
-        raise JauntConfigError(
-            f"your specs live under {display_owner} but generated output would "
-            f"be routed to {package_dir}; reorder source_roots so "
-            f"{display_owner} comes first."
-        )
+    del source_dirs, module_specs
 
 
 def iter_target_modules(targets: Iterable[str]) -> set[str]:
@@ -140,18 +80,18 @@ def discover_targeted_test_entries(*, root: Path, cfg: JauntConfig) -> list:
     from jaunt import discovery
     from jaunt.errors import JauntDiscoveryError
     from jaunt.module_contract import extract_targeted_test_entries
+    from jaunt.workspace import resolve_workspace
 
-    test_dirs = [root / tr for tr in cfg.paths.test_roots]
+    workspace = resolve_workspace(root, cfg)
     entries: list = []
-    for tr, test_dir in zip(cfg.paths.test_roots, test_dirs, strict=False):
-        if not test_dir.exists():
+    for route in workspace.test_roots:
+        if not route.root.exists():
             continue
-        prefix = ".".join(Path(tr).parts)
         discovered = discovery.discover_module_files(
-            roots=[test_dir],
+            roots=[route.root],
             exclude=[],
             generated_dir=cfg.paths.generated_dir,
-            module_prefix=prefix or None,
+            module_prefix=route.module_prefix,
         )
         for module_name, path in discovered:
             try:
@@ -201,7 +141,10 @@ def compute_magic_status(
     from jaunt.module_api import module_api_digest
     from jaunt.module_contract import group_test_entries_by_target_module
 
-    existing = [d for d in source_dirs if d.exists()]
+    from jaunt.workspace import resolve_workspace
+
+    workspace = resolve_workspace(root, cfg)
+    existing = list(workspace.source_roots)
     prepend_sys_path([*existing, root])
 
     # Discover first, then reset the import environment through the shared entry
@@ -210,11 +153,7 @@ def compute_magic_status(
     # a self-package carve-out then refuses to re-register (the cached self module
     # re-import is a no-op), leaving the magic registry empty when jaunt builds
     # jaunt — the split-brain bug 1 in its status/check form.
-    modules = discovery.discover_modules(
-        roots=existing,
-        exclude=[],
-        generated_dir=cfg.paths.generated_dir,
-    )
+    modules = [route.module for route in workspace.modules]
     discovery.prepare_import_environment(module_names=modules, roots=existing)
     discovery.import_and_collect(modules, kind="magic")
 
@@ -229,7 +168,6 @@ def compute_magic_status(
     package_dir = next((d for d in existing), None)
     if package_dir is None:
         raise JauntConfigError("No existing source_roots to check.")
-    enforce_source_root_routing(source_dirs=source_dirs, module_specs=module_specs)
 
     build_generation_fingerprint = generation_fingerprint(
         cfg,
@@ -245,12 +183,14 @@ def compute_magic_status(
     )
     targeted_test_entries = group_test_entries_by_target_module(static_targeted_test_entries)
     for module_name, entries in module_specs.items():
+        module_dir = workspace.route_for(module_name).output_base
         expected, _errs = builder._build_expected_names(entries)
         wcc = builder._whole_class_context(
             entries,
             specs=specs,
-            package_dir=package_dir,
+            package_dir=module_dir,
             generated_dir=cfg.paths.generated_dir,
+            module_output_bases=workspace.output_bases,
         )
         build_module_context_digests[module_name] = builder.build_module_context_artifacts(
             module_name=module_name,
@@ -258,7 +198,7 @@ def compute_magic_status(
             expected_names=expected,
             module_specs=module_specs,
             module_dag=module_dag,
-            package_dir=package_dir,
+            package_dir=module_dir,
             generated_dir=cfg.paths.generated_dir,
             build_instructions=build_instructions,
             targeted_test_entries=targeted_test_entries,
@@ -278,6 +218,7 @@ def compute_magic_status(
         generation_fingerprint=build_generation_fingerprint,
         module_context_digests=build_module_context_digests,
         module_base_api_digests=build_module_base_api_digests,
+        module_output_bases=workspace.output_bases,
         force=force,
     )
     api_changed = builder.detect_api_changed_modules(
@@ -285,6 +226,7 @@ def compute_magic_status(
         generated_dir=cfg.paths.generated_dir,
         module_specs=module_specs,
         module_api_digests=build_module_api_digests,
+        module_output_bases=workspace.output_bases,
     )
 
     target_mods = iter_target_modules(target)
@@ -308,7 +250,7 @@ def compute_magic_status(
         m: _label_change_kind(
             generation_fingerprint=build_generation_fingerprint,
             module_name=m,
-            package_dir=package_dir,
+            package_dir=workspace.route_for(m).output_base,
             generated_dir=cfg.paths.generated_dir,
             module_specs=module_specs,
         )
@@ -321,7 +263,11 @@ def compute_magic_status(
             entries = module_specs.get(module_name, [])
             if not entries:
                 continue
-            gen_source = builder._read_generated(package_dir, cfg.paths.generated_dir, module_name)
+            gen_source = builder._read_generated(
+                workspace.route_for(module_name).output_base,
+                cfg.paths.generated_dir,
+                module_name,
+            )
             if gen_source is None:
                 continue
             reason = stub_emitter.stub_staleness(

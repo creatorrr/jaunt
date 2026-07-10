@@ -127,7 +127,10 @@ def test_classify_change_treats_missing_old_snapshot_as_structural(tmp_path: Pat
 
 
 def test_gate_prose_accepts_equivalent_token() -> None:
+    seen: dict[str, object] = {}
+
     async def fake_run_exec(**kwargs: object) -> SimpleNamespace:
+        seen.update(kwargs)
         return SimpleNamespace(final_message="EQUIVALENT")
 
     verdict = asyncio.run(
@@ -141,6 +144,8 @@ def test_gate_prose_accepts_equivalent_token() -> None:
     )
 
     assert verdict == "EQUIVALENT"
+    assert seen["model"] == "gpt-5.6-luna"
+    assert seen["reasoning_effort"] == "medium"
 
 
 def test_gate_prose_strips_equivalent_token() -> None:

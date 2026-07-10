@@ -387,12 +387,18 @@ def _resolve_test_output_path(
 
 
 def _auto_test_output_path(
-    *, project_dir: Path, module_name: str, generated_dir: str, tests_package: str
+    *,
+    project_dir: Path,
+    module_name: str,
+    generated_dir: str,
+    tests_package: str,
+    test_roots: Sequence[Path] | None = None,
 ) -> Path:
-    # tests.__auto__.pkg.mod -> <project>/<tests_package>/<generated_dir>/auto/pkg/mod.py
+    # tests.__auto__.pkg.mod -> <owner>/<first-test-root>/<generated_dir>/auto/pkg/mod.py
     suffix = module_name.split(".__auto__.", 1)[1]
-    rel = Path(tests_package) / generated_dir / "auto" / Path(*suffix.split("."))
-    return (project_dir / rel).with_suffix(".py")
+    output_root = Path(test_roots[0]).resolve() if test_roots else project_dir / tests_package
+    rel = Path(generated_dir) / "auto" / Path(*suffix.split("."))
+    return (output_root / rel).with_suffix(".py")
 
 
 def _test_output_path_for_module(
@@ -410,6 +416,7 @@ def _test_output_path_for_module(
             module_name=module_name,
             generated_dir=generated_dir,
             tests_package=tests_package,
+            test_roots=test_roots,
         )
     return _resolve_test_output_path(
         project_dir=project_dir,
@@ -898,12 +905,14 @@ def _collect_generated_build_paths_by_module(
     package_dir: Path,
     generated_dir: str,
     module_specs: dict[str, list[SpecEntry]],
+    module_output_bases: dict[str, Path] | None = None,
 ) -> dict[str, Path]:
     out: dict[str, Path] = {}
     for module_name in module_specs:
         gen_mod = paths.spec_module_to_generated_module(module_name, generated_dir=generated_dir)
         rel = paths.generated_module_to_relpath(gen_mod, generated_dir=generated_dir)
-        out[module_name] = (package_dir / rel).resolve()
+        module_dir = (module_output_bases or {}).get(module_name, package_dir)
+        out[module_name] = (module_dir / rel).resolve()
     return out
 
 
@@ -929,6 +938,8 @@ class RepairBuildContext:
     targeted_test_entries: dict[str, list[SpecEntry]] = field(default_factory=dict)
     project_root: Path | None = None
     source_roots: list[Path] = field(default_factory=list)
+    module_output_bases: dict[str, Path] = field(default_factory=dict)
+    module_owner_dirs: dict[str, Path] = field(default_factory=dict)
     builtin_skill_names: tuple[str, ...] = ()
     skills_digest: str = ""
     jobs: int = 1
@@ -1500,6 +1511,7 @@ async def run_tests(
                     package_dir=repair_build_context.package_dir,
                     generated_dir=repair_build_context.generated_dir,
                     module_specs=repair_build_context.module_specs,
+                    module_output_bases=repair_build_context.module_output_bases,
                 )
 
             failed_test_modules, implicated_build_modules = _implicated_modules_from_pytest(
@@ -1533,6 +1545,8 @@ async def run_tests(
                     async_runner=repair_build_context.async_runner,
                     project_root=repair_build_context.project_root,
                     source_roots=repair_build_context.source_roots,
+                    module_output_bases=repair_build_context.module_output_bases,
+                    module_owner_dirs=repair_build_context.module_owner_dirs,
                     builtin_skill_names=repair_build_context.builtin_skill_names,
                     skills_digest=repair_build_context.skills_digest,
                     build_instructions=repair_build_context.build_instructions,

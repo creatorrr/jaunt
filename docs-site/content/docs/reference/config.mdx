@@ -107,8 +107,8 @@ strength = true                # run mutation-based strength scoring at reconcil
 
 [semantic_gate]
 enabled = true                 # gate behaviorally-equivalent edits before a rebuild
-model = "gpt-5.4-mini"         # small model that judges contract equivalence
-reasoning_effort = "high"      # low | medium | high
+model = "gpt-5.6-luna"         # small model that judges contract equivalence
+reasoning_effort = "medium"    # low | medium | high
 
 [context]
 repo_map = true                # maintain treedocs.yaml + inject a repo map
@@ -125,11 +125,13 @@ max_hits = 8
 
 Notes on a few keys:
 
-- `paths.source_roots`: the CLI picks the *first existing* source root as the
-  output base for generated build modules. If your governed specs live under a
-  later root, or span more than one root, `jaunt build`/`check` stop with a
-  config error (exit `2`) rather than route output to the wrong package — see
-  [Upgrading 1.5.1](/docs/reference/upgrading#151).
+- `paths.source_roots` accepts literal directories and globs. Jaunt expands
+  globs in lexical order and routes each module through the most-specific
+  matching import root. An unmatched glob is a config error; a missing literal
+  is tolerated when another source root exists.
+- `paths.test_roots` uses the same glob rules. Test roots are grouped by their
+  nearest `pyproject.toml`, and generated tests go to the first configured root
+  for that owner.
 - `prompts.*` are treated as *file paths* read at runtime, not inline text. Copy
   a default from `src/jaunt/prompts/` and point at your edited copy.
 - `[llm]` is informational under the Codex engine. Codex handles its own

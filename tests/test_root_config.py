@@ -34,5 +34,5 @@ def test_root_jaunt_toml_loads() -> None:
     assert cfg.contract.strength is True
 
     assert cfg.semantic_gate.enabled is True
-    assert cfg.semantic_gate.model == "gpt-5.4-mini"
-    assert cfg.semantic_gate.reasoning_effort == "high"
+    assert cfg.semantic_gate.model == "gpt-5.6-luna"
+    assert cfg.semantic_gate.reasoning_effort == "medium"

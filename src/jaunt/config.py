@@ -7,6 +7,7 @@ and performs light validation/existence checks.
 from __future__ import annotations
 
 import difflib
+import glob
 import keyword
 import tomllib
 from dataclasses import dataclass, field
@@ -228,8 +229,8 @@ class ContractConfig:
 @dataclass(frozen=True)
 class SemanticGateConfig:
     enabled: bool = True
-    model: str = "gpt-5.4-mini"
-    reasoning_effort: str = "high"
+    model: str = "gpt-5.6-luna"
+    reasoning_effort: str = "medium"
 
 
 @dataclass(frozen=True)
@@ -781,17 +782,34 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     if "model" in semantic_gate_tbl:
         semantic_gate_model = _as_str(semantic_gate_tbl["model"], name="semantic_gate.model")
     else:
-        semantic_gate_model = "gpt-5.4-mini"
+        semantic_gate_model = "gpt-5.6-luna"
 
     if "reasoning_effort" in semantic_gate_tbl:
         semantic_gate_reasoning_effort = _as_str(
             semantic_gate_tbl["reasoning_effort"], name="semantic_gate.reasoning_effort"
         ).strip()
     else:
-        semantic_gate_reasoning_effort = "high"
+        semantic_gate_reasoning_effort = "medium"
 
     # Validation
-    if not any((root / sr).exists() for sr in source_roots):
+    def _path_entry_matches(entry: str) -> bool:
+        path = Path(entry)
+        pattern = str(path if path.is_absolute() else root / path)
+        if any(char in entry for char in "*?["):
+            return any(Path(match).is_dir() for match in glob.glob(pattern, recursive=True))
+        return Path(pattern).exists()
+
+    for entry in source_roots:
+        if any(char in entry for char in "*?[") and not _path_entry_matches(entry):
+            raise JauntConfigError(
+                f"Invalid config: paths.source_roots glob {entry!r} matched no directories."
+            )
+    for entry in test_roots:
+        if any(char in entry for char in "*?[") and not _path_entry_matches(entry):
+            raise JauntConfigError(
+                f"Invalid config: paths.test_roots glob {entry!r} matched no directories."
+            )
+    if not any(_path_entry_matches(sr) for sr in source_roots):
         raise JauntConfigError(
             "Invalid config: none of paths.source_roots exist on disk relative to the project root."
         )

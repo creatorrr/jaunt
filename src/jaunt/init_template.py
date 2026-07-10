@@ -150,8 +150,8 @@ property_max_examples = 50     # Hypothesis budget per derived property case
 
 [semantic_gate]
 enabled = true                 # gate behaviorally-equivalent edits before a rebuild
-model = "gpt-5.4-mini"         # small model that judges contract equivalence
-reasoning_effort = "high"      # low | medium | high
+model = "gpt-5.6-luna"         # small model that judges contract equivalence
+reasoning_effort = "medium"    # low | medium | high
 
 [context]
 repo_map = true                # maintain treedocs.yaml + inject a repo map

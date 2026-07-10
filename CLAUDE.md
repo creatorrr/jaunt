@@ -9,7 +9,7 @@ code-generation engine (`codex exec`).
 > **Codex model policy:** strictly use `gpt-5.6-sol` for EVERY Codex invocation
 > (`codex exec`, `codex mcp-server`, `codex app-server`) — never `gpt-5.2`,
 > `gpt-5.2-codex`, or any other variant. The only deliberate exception is the
-> small `[semantic_gate]` judge model (`gpt-5.4-mini`).
+> `[semantic_gate]` judge model (`gpt-5.6-luna`).
 
 ## Quick Reference
 
@@ -238,8 +238,8 @@ property_max_examples = 50         # Hypothesis budget per derived property case
 
 [semantic_gate]
 enabled = true              # gate behaviorally-equivalent edits before a gpt-5.6-sol rebuild
-model = "gpt-5.4-mini"      # small model that judges contract equivalence (must work via codex exec)
-reasoning_effort = "high"   # low | medium | high
+model = "gpt-5.6-luna"      # small model that judges contract equivalence (must work via codex exec)
+reasoning_effort = "medium" # low | medium | high
 
 [prompts]
 # Optional file path overrides for LLM prompt templates.
@@ -259,19 +259,17 @@ like `[gate]` or key like `reasoning-effort` fails loudly instead of being
 silently ignored. `jaunt instructions` (run before a `jaunt.toml` exists) prints
 the full annotated config schema.
 
-**Multi-root routing gate (1.5.1).** Jaunt routes generated output to the first
-existing `source_roots` entry. If governed specs span more than one root, or all
-live under a root that is not the first existing one, `build`/`check`/`status`/
-`migrate` fail with a `JauntConfigError` (exit 2) rather than build into the
-wrong package (FEEDBACK finding 28). Owning root is resolved by longest-path
-containment, so nested defaults (`["src", "."]`) with specs under `src/` pass.
-The fix is one jaunt project per package (`jaunt.toml` with `source_roots=["."]`
-at the package's import root). **Generated-import policy (1.5.1):** the build
-prompt sanctions the stdlib and any installed distribution the spec module
-imports or the owning package declares (imported from its real module), and the
-undeclared-import validator resolves declared deps from the pyproject owning the
-spec's source file as well as the config-root one. `build.generated_import_allowlist`
-is the escape hatch for a dep no pyproject declares (rarely needed post-1.5.1).
+**Per-module workspace routing (1.6.2).** `source_roots` and `test_roots` accept
+literal paths and globs, so one config can cover several packages and mixed
+flat/`src` layouts. Globs expand in stable lexical order and must match at least
+one directory. Missing literal roots remain legal when another source root
+exists. Overlapping roots resolve by longest containment; duplicate dotted
+module names fail before imports. Generated code, stubs, ty, tests, and contract
+batteries follow each module's nearest owning `pyproject.toml`. The undeclared-
+import validator reads only that owner's dependencies; a workspace-root
+dependency does not sanction an undeclared child-package dependency.
+`jaunt migrate --merge-projects` plans a no-model consolidation of existing
+child configs and refuses any route, digest, fingerprint, or artifact change.
 
 Every build prompt opens with a static **Jaunt preamble** (`src/jaunt/prompts/codex_preamble.md`)
 that frames what Jaunt is, states the signature/docstring contract, and asks for simple,
@@ -301,7 +299,7 @@ equivalent, Jaunt **re-freezes** the module (rewrites the header digests over th
 validated, unchanged generated body) instead of paying for a full `gpt-5.6-sol` rebuild
 (Layer B). Structural changes, validation failures, and any gate error fail safe to a
 rebuild. `--json` reports re-frozen modules under `"refrozen"`. The gate model must be
-runnable via `codex exec` (e.g. `gpt-5.4-mini`); `gpt-5.4-nano` is not — `codex exec`
+runnable via `codex exec` (the default is `gpt-5.6-luna`); `gpt-5.4-nano` is not — `codex exec`
 attaches a `tool_search` tool nano rejects.
 
 ## CLI Commands

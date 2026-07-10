@@ -122,7 +122,7 @@ def build_cycle_runner(
     run_tests: bool,
 ) -> Callable[[WatchEvent], Coroutine[Any, Any, WatchCycleResult]]:
     """Create a cycle runner that calls async build/test helpers."""
-    from jaunt.cli import _cmd_build_async, _cmd_test_async
+    from jaunt.cli import _cmd_build_async, _cmd_test_workspace_async
 
     build_args = argparse.Namespace(
         root=getattr(args, "root", None),
@@ -160,7 +160,7 @@ def build_cycle_runner(
 
         test_rc: int | None = None
         if run_tests and build_rc == 0:
-            test_rc = await _cmd_test_async(test_args)
+            test_rc = await _cmd_test_workspace_async(test_args)
 
         duration = time.monotonic() - t0
         return WatchCycleResult(

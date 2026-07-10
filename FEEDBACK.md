@@ -657,3 +657,85 @@ The round-2 advisory named the exact rejection ("...rejected as undeclared
 by the provided previous-attempt errors") — that one line is what sent us
 into `validation.py` and turned a mystery retry loop into finding 29 in
 about ten minutes. Two-for-two on advisories ending archaeology sessions.
+
+## 2026-07-10 — 1.6.1 upgrade verified; finding 30 (the per-module root resolution request, in full)
+
+Context: mem-mcp-b, 1.5.1 → 1.6.1 in one hop. Both projects (repo-root
+`memory-store-utils`, 7 modules; `apps/memory-api` `mcp_memory_server`,
+1 module) adopted the new `gpt-5.6-sol@medium` default by editing both
+`[codex]` blocks explicitly. Result: free re-stamp in both projects
+(`Built 0, skipped 7` / `Built 0, skipped 1`), `check` green, $0. The
+1.5.1 fingerprint re-stamp behavior held exactly as advertised — config
+churn without regeneration is now genuinely cheap, which we relied on
+twice today.
+
+Two small notes before the main event:
+
+- The 1.6.1 default-model change landed in a patch release and (per the
+  PR's own bot review) alters the generation fingerprint for
+  minimally-configured projects. We were shielded by explicit `[codex]`
+  blocks, but the semver contract "patch never restales" is worth
+  keeping — adopters plan spend around it.
+- `jaunt build` in the memory-api project now warns `31 generated
+  skill(s) were missing required section headings: PyYAML, aiosql, ...`.
+  These are jaunt's own earlier skill outputs failing jaunt's own newer
+  validator. Cosmetic, but a `jaunt skills --regenerate-invalid` (or
+  auto-heal on build) would beat a wall of warnings nobody can act on.
+
+### 30. Per-module source-root resolution — the detailed ask (severity: high; supersedes the asks in 27/28/29)
+
+This is the standing request from findings 27–29, written out as a design
+request now that 1.6 shipped without it. The one-project-per-package
+workaround works (we run it in CI daily) but it converts one design gap
+into four adopter-side obligations, and every new package we adopt adds
+another copy of each.
+
+**The rule we want:** resolve everything that is currently derived from
+`source_roots[0]`/config root *per spec module*, by walking up from the
+spec's own `source_file`:
+
+1. **Owning package** = nearest ancestor `pyproject.toml` of the spec
+   file. This single lookup should drive all of:
+   - module identity (the dotted name — finding 6's granularity trap
+     dies with it);
+   - `__generated__/` and `.pyi` placement (beside the spec, under the
+     owning package's source tree);
+   - declared-dependency resolution for the undeclared-import validator
+     (finding 29 — walk up from the spec file, not the project dir);
+   - the ty sandbox root and pyproject discovery for type-checking;
+   - test-root association (nearest `tests/` under the owning package,
+     or an explicit per-package mapping in config).
+2. **Config collapses back to one file.** With per-module resolution,
+   `source_roots` can safely list every adopted package (or a glob:
+   `source_roots = ["packages/python/*/src", "apps/memory-api"]`), and
+   the 1.5.1 multi-root exit-2 gate becomes unnecessary. One `jaunt.toml`
+   means `[codex]` and `[build].instructions` are shared by construction
+   — the byte-identical-blocks footgun (finding 28 residual) is not
+   mitigated but *deleted*. Today a one-character drift between our two
+   configs would silently restale and re-bill 8 modules; we have a
+   comment in each file begging future editors not to touch them. That
+   is not a stable equilibrium.
+3. **Per-package artifacts are fine; per-package *config* is the
+   problem.** We don't mind `treedocs.yaml` or journals splitting per
+   owning package (1.5's per-project split was coherent). Keep those
+   wherever resolution puts them — just don't make us duplicate policy.
+4. **Migration must be fingerprint-neutral.** The 1.5.1→1.6.1 re-stamp
+   proves the machinery exists: merging N per-package projects into one
+   per-module-resolved config should re-stamp, not rebuild. If module
+   identity is computed from the owning package (point 1), dotted names
+   don't change and digests shouldn't either. A `jaunt migrate
+   --merge-projects` that verifies $0 before touching anything would
+   make adoption a non-event.
+5. **CI collapses to one gate.** `jaunt check` at the repo root, exit 4
+   on any stale module in any package. Today we run it once per project
+   directory and the workflow file grows a step per adopted package.
+
+Scale note for prioritization: we're at 2 projects/8 modules and the
+overhead is already comment-guarded duplication + N CI steps + "run
+jaunt from the right directory" tribal knowledge (our AGENTS.md spends
+a paragraph on it, and a session hook reminds every agent). The repo
+has ~5 more utility packages that are natural adoption targets; each
+one currently costs a new jaunt.toml with hand-synced `[codex]` and
+`[build]` blocks. Per-module resolution is the difference between
+"adopt a package = add one glob entry" and "adopt a package = add a
+config file that can silently re-bill the others if it drifts."
