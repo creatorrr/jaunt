@@ -57,7 +57,7 @@ Messages are standard JSON-RPC 2.0:
 
 ```jsonc
 // Request: has method + id + params
-{ "method": "thread/start", "id": 10, "params": { "model": "gpt-5.5" } }
+{ "method": "thread/start", "id": 10, "params": { "model": "gpt-5.6-sol" } }
 // Response: echoes id, with result or error
 { "id": 10, "result": { "thread": { "id": "thr_123" } } }
 // Notification: no id (server → client events)
@@ -76,14 +76,14 @@ Messages are standard JSON-RPC 2.0:
 { "method": "initialized", "params": {} }
 
 // 2. create a conversation
-{ "method": "thread/start", "id": 1, "params": { "model": "gpt-5.5" } }
+{ "method": "thread/start", "id": 1, "params": { "model": "gpt-5.6-sol" } }
 //    → { "id": 1, "result": { "thread": { "id": "thr_123" } } }
 
 // 3. send user input; stream events back
 { "method": "turn/start", "id": 2,
   "params": { "threadId": "thr_123",
               "input": [{ "type": "text", "text": "Run the tests" }],
-              "model": "gpt-5.5", "effort": "medium" } }
+              "model": "gpt-5.6-sol", "effort": "medium" } }
 ```
 
 After `turn/start` the server streams notifications until the turn completes.
@@ -134,7 +134,7 @@ rl.on("line", (line) => console.log("server:", JSON.parse(line)));
 
 send({ method: "initialize", id: 0, params: { clientInfo: { name: "demo", title: "Demo", version: "0.0.1" } } });
 send({ method: "initialized", params: {} });
-send({ method: "thread/start", id: 1, params: { model: "gpt-5.5" } });
+send({ method: "thread/start", id: 1, params: { model: "gpt-5.6-sol" } });
 // then turn/start with the returned thread id…
 ```
 

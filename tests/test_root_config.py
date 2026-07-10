@@ -18,8 +18,8 @@ def test_root_jaunt_toml_loads() -> None:
 
     assert cfg.version == 1
     assert cfg.agent.engine == "codex"
-    assert cfg.codex.model == "gpt-5.5"
-    assert cfg.codex.reasoning_effort == "high"
+    assert cfg.codex.model == "gpt-5.6-sol"
+    assert cfg.codex.reasoning_effort == "medium"
     assert cfg.codex.sandbox == "workspace-write"
 
     assert cfg.paths.source_roots == ["src"]

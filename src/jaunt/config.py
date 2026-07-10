@@ -162,18 +162,18 @@ class CodexConfig:
     """Codex engine settings; the defaults encode Jaunt's model policy.
 
     Every field defaults to Jaunt's canonical Codex configuration: model
-    ``gpt-5.5`` at ``high`` reasoning effort, the ``workspace-write`` sandbox,
+    ``gpt-5.6-sol`` at ``medium`` reasoning effort, the ``workspace-write`` sandbox,
     CLI-version fingerprinting off, and empty ``features``/``config`` overrides.
 
     Examples:
-    - CodexConfig().model == "gpt-5.5"
-    - CodexConfig().reasoning_effort == "high"
+    - CodexConfig().model == "gpt-5.6-sol"
+    - CodexConfig().reasoning_effort == "medium"
     - CodexConfig().sandbox == "workspace-write"
     - CodexConfig().fingerprint_cli_version == False
     """
 
-    model: str = "gpt-5.5"
-    reasoning_effort: str = "high"
+    model: str = "gpt-5.6-sol"
+    reasoning_effort: str = "medium"
     sandbox: str = "workspace-write"
     # Off by default: embedding `codex --version` in the generation fingerprint
     # couples `jaunt check` to environments that have the codex binary (a CI
@@ -617,14 +617,14 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     if "model" in codex_tbl:
         codex_model = _as_str(codex_tbl["model"], name="codex.model")
     else:
-        codex_model = "gpt-5.5"
+        codex_model = "gpt-5.6-sol"
 
     if "reasoning_effort" in codex_tbl:
         codex_reasoning_effort = _as_str(
             codex_tbl["reasoning_effort"], name="codex.reasoning_effort"
         ).strip()
     else:
-        codex_reasoning_effort = "high"
+        codex_reasoning_effort = "medium"
 
     if "sandbox" in codex_tbl:
         codex_sandbox = _as_str(codex_tbl["sandbox"], name="codex.sandbox").strip()

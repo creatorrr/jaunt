@@ -54,8 +54,11 @@ The call counts against your build cost budget and shows up in the cost summary.
 
 Every build prompt opens with a static preamble
 (`src/jaunt/prompts/codex_preamble.md`). It frames what Jaunt is, states the
-signature/docstring contract, and lists the core design laws the generator is
-held to. It adds no model call. Its text is part of the build fingerprint, so
-editing it — or overriding it in config — regenerates already-built modules.
+signature/docstring contract, and tells the generator to write straightforward,
+human-maintainable code and useful comments. That matters if you later run
+`jaunt eject` and keep the implementation as ordinary source. The preamble also
+lists the core design laws the generator is held to. It adds no model call. Its
+text is part of the build fingerprint, so editing it — or overriding it in
+config — regenerates already-built modules.
 
 Next: [Change Detection](/docs/concepts/change-detection).

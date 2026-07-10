@@ -6,8 +6,8 @@ test_roots = ["tests"]
 generated_dir = "__generated__"
 
 [codex]
-model = "gpt-5.5"
-reasoning_effort = "high"
+model = "gpt-5.6-sol"
+reasoning_effort = "medium"
 sandbox = "workspace-write"
 
 [test]

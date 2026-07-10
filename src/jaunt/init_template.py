@@ -14,7 +14,7 @@ generated_dir = "__generated__"
 # Informational under the Codex engine: the model is set in [codex] below, and
 # Codex authenticates via `codex login` / CODEX_API_KEY (not an api_key_env here).
 provider = "openai"
-model = "gpt-5.5"
+model = "gpt-5.6-sol"
 # max_cost_per_build = 5.0
 
 [build]
@@ -51,8 +51,8 @@ pytest_args = ["-q"]
 engine = "codex"
 
 [codex]
-model = "gpt-5.5"
-reasoning_effort = "high"
+model = "gpt-5.6-sol"
+reasoning_effort = "medium"
 sandbox = "workspace-write"
 # Opt-in: include `codex --version` in freshness fingerprints. Couples
 # `jaunt check` to environments that have the codex binary installed.
@@ -119,8 +119,8 @@ project_overview_user = ""
 engine = "codex"               # the only supported engine
 
 [codex]
-model = "gpt-5.5"
-reasoning_effort = "high"      # low | medium | high
+model = "gpt-5.6-sol"
+reasoning_effort = "medium"    # low | medium | high
 sandbox = "workspace-write"
 # Opt-in: embed `codex --version` in freshness fingerprints. Couples `jaunt
 # check` to environments that have the codex binary installed.

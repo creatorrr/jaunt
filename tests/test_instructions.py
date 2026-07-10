@@ -21,7 +21,7 @@ def _make_project(
     tmp_path: Path,
     *,
     generated_dir: str = "__generated__",
-    model: str = "gpt-5.5",
+    model: str = "gpt-5.6-sol",
     pkg: str = "ipkg",
 ) -> None:
     _write(
