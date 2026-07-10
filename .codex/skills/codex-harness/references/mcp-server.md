@@ -11,7 +11,7 @@ the path the Jaunt harness is built on.
 
 ```bash
 codex mcp-server                      # stdio MCP server
-codex mcp-server -c model="gpt-5.5" --enable multi_agent
+codex mcp-server -c model="gpt-5.6-sol" --enable multi_agent
 ```
 
 Flags are limited to config plumbing: `-c key=value`, `--enable/--disable
@@ -27,7 +27,7 @@ Starts a Codex conversation. Parameters mirror the Codex `Config` struct:
 | Param | Type | Notes |
 |-------|------|-------|
 | `prompt` | string | **Required.** The initial user prompt. |
-| `model` | string | e.g. `gpt-5.5`. |
+| `model` | string | e.g. `gpt-5.6-sol`. |
 | `cwd` | string | Working dir for the session. Relative paths resolve against the server process's cwd. |
 | `sandbox` | `read-only` \| `workspace-write` \| `danger-full-access` | **Pass `workspace-write` to let Codex edit files.** |
 | `approval-policy` | `untrusted` \| `on-failure` \| `on-request` \| `never` | For headless use, `never`. |
@@ -75,7 +75,7 @@ async def run():
                 "cwd": "/path/to/repo",
                 "sandbox": "workspace-write",
                 "approval-policy": "never",
-                "model": "gpt-5.5",
+                "model": "gpt-5.6-sol",
             })
 
             # The thread id lives in structuredContent. Inspect the actual shape

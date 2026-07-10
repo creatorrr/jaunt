@@ -22,7 +22,7 @@ No generated body changes, and the one restale it causes costs nothing to clear.
   prompt is a fingerprint input, so every built module reports stale once. Their
   spec sources are unchanged, so `jaunt build` resolves each through the
   re-stamp path: it writes the new fingerprint over the existing body with no
-  semantic-gate call and no `gpt-5.5` call. `jaunt check` counts fingerprint
+  semantic-gate call and no `gpt-5.6-sol` call. `jaunt check` counts fingerprint
   staleness as drift and exits `4` until you run that one build and commit the
   re-stamped headers. `--json` lists the modules under `refrozen`.
 - **Specs that span source roots now stop at a config error instead of building

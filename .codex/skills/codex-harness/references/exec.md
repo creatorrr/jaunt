@@ -44,7 +44,7 @@ the prompt inside a `<stdin>` block — handy for feeding logs/diffs as context.
 ### Model / config
 | Flag | Effect |
 |------|--------|
-| `-m, --model <MODEL>` | Model override (e.g. `gpt-5.5`). |
+| `-m, --model <MODEL>` | Model override (e.g. `gpt-5.6-sol`). |
 | `-c, --config <key=value>` | Override any `config.toml` value (TOML-parsed; dotted paths). Repeatable. |
 | `-p, --profile <NAME>` | Layer `$CODEX_HOME/<NAME>.config.toml` on the base config. |
 | `--enable <FEATURE>` / `--disable <FEATURE>` | Toggle a feature (e.g. `multi_agent`). |
@@ -187,7 +187,7 @@ stdin to dodge quoting:
 
 ```bash
 codex exec --dangerously-bypass-approvals-and-sandbox \
-  -c model_reasoning_effort="high" - < promptfile
+  -c model_reasoning_effort="medium" - < promptfile
 ```
 
 **Permission gotcha when Codex runs inside Claude Code:** the auto-mode

@@ -3,7 +3,7 @@
 This example is intentionally ambitious. It exercises:
 
 - the Codex engine
-- `gpt-5.5` with `reasoning_effort = "high"`
+- `gpt-5.6-sol` with `reasoning_effort = "medium"`
 - an explicit user-managed Rich skill built through `jaunt skill build`
 - a multi-module spec graph
 - a Rich-rendered terminal UI on top of pure minimax game logic

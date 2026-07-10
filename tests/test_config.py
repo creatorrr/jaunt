@@ -182,8 +182,8 @@ def test_codex_engine_defaults_load(tmp_path: Path) -> None:
     cfg = load_config(root=tmp_path)
 
     assert cfg.agent.engine == "codex"
-    assert cfg.codex.model == "gpt-5.5"
-    assert cfg.codex.reasoning_effort == "high"
+    assert cfg.codex.model == "gpt-5.6-sol"
+    assert cfg.codex.reasoning_effort == "medium"
     assert cfg.codex.sandbox == "workspace-write"
     assert cfg.codex.features == []
     assert cfg.codex.config == {}
@@ -590,6 +590,8 @@ def test_init_template_roundtrips(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     cfg = load_config(root=tmp_path)
     assert cfg.version == 1
+    assert cfg.codex.model == "gpt-5.6-sol"
+    assert cfg.codex.reasoning_effort == "medium"
 
 
 def test_full_schema_template_roundtrips(tmp_path: Path) -> None:
@@ -599,6 +601,8 @@ def test_full_schema_template_roundtrips(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     cfg = load_config(root=tmp_path)
     assert cfg.version == 1
+    assert cfg.codex.model == "gpt-5.6-sol"
+    assert cfg.codex.reasoning_effort == "medium"
 
 
 def test_full_schema_template_covers_all_allowlists() -> None:

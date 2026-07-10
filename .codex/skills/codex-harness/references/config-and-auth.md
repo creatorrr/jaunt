@@ -44,8 +44,8 @@ Override any value per-invocation with `-c key=value` — the value is **parsed 
 TOML**, so quote strings and use dotted paths for nesting:
 
 ```bash
-codex exec -c model="gpt-5.5" \
-           -c model_reasoning_effort="high" \
+codex exec -c model="gpt-5.6-sol" \
+           -c model_reasoning_effort="medium" \
            -c 'sandbox_permissions=["disk-full-read-access"]' \
            -c shell_environment_policy.inherit=all \
            "…"
@@ -55,8 +55,8 @@ Commonly-set keys:
 
 | Key | Meaning |
 |-----|---------|
-| `model` | Default model (`gpt-5.5`, …). |
-| `model_reasoning_effort` | `low` \| `medium` \| `high` — reasoning budget. The user's automation uses `high`. |
+| `model` | Default model (`gpt-5.6-sol`, …). |
+| `model_reasoning_effort` | `low` \| `medium` \| `high` — reasoning budget. The user's automation uses `medium`. |
 | `model_provider` | Provider id (for non-OpenAI / OSS backends). |
 | `approval_policy` | Default of `-a/--ask-for-approval`. |
 | `sandbox_mode` | Default sandbox policy. |

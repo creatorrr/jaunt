@@ -3,6 +3,13 @@
 All notable changes to jaunt. Generated from conventional commits by
 [git-cliff](https://git-cliff.org); one section per published PyPI release.
 
+## [1.6.1] - 2026-07-10
+
+### Changed
+
+- Default Jaunt Codex generation to `gpt-5.6-sol` with medium reasoning effort.
+- Ask generated implementations to stay readable and maintainable after `jaunt eject`.
+
 ## [1.6.0] - 2026-07-07
 
 ### Chores

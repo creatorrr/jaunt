@@ -66,6 +66,10 @@ def test_build_prompt_preamble_contains_required_terms() -> None:
         "docstring",
         "__generated__",
         "no placeholder",
+        "human will read",
+        "jaunt eject",
+        "avoid needless layers",
+        "comments and docstrings",
     ]
     for term in required_terms:
         assert term.lower() in lower, f"Required term {term!r} not found in prompt"

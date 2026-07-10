@@ -6,7 +6,7 @@ as test stubs (`@jaunt.test`). Jaunt generates real implementations and pytest
 tests into `__generated__/` directories using the OpenAI **Codex** CLI as its
 code-generation engine (`codex exec`).
 
-> **Codex model policy:** strictly use `gpt-5.5` for EVERY Codex invocation
+> **Codex model policy:** strictly use `gpt-5.6-sol` for EVERY Codex invocation
 > (`codex exec`, `codex mcp-server`, `codex app-server`) — never `gpt-5.2`,
 > `gpt-5.2-codex`, or any other variant. The only deliberate exception is the
 > small `[semantic_gate]` judge model (`gpt-5.4-mini`).
@@ -156,8 +156,8 @@ version = 1
 engine = "codex"          # the only supported engine
 
 [codex]
-model = "gpt-5.5"
-reasoning_effort = "high"  # low | medium | high
+model = "gpt-5.6-sol"
+reasoning_effort = "medium"  # low | medium | high
 sandbox = "workspace-write"
 
 # [llm] is retained but informational under Codex: Codex authenticates via
@@ -237,7 +237,7 @@ strength = true                    # run mutation-based strength scoring at reco
 property_max_examples = 50         # Hypothesis budget per derived property case
 
 [semantic_gate]
-enabled = true              # gate behaviorally-equivalent edits before a gpt-5.5 rebuild
+enabled = true              # gate behaviorally-equivalent edits before a gpt-5.6-sol rebuild
 model = "gpt-5.4-mini"      # small model that judges contract equivalence (must work via codex exec)
 reasoning_effort = "high"   # low | medium | high
 
@@ -274,10 +274,11 @@ spec's source file as well as the config-root one. `build.generated_import_allow
 is the escape hatch for a dep no pyproject declares (rarely needed post-1.5.1).
 
 Every build prompt opens with a static **Jaunt preamble** (`src/jaunt/prompts/codex_preamble.md`)
-that frames what Jaunt is and states the signature/docstring contract. It is always-on and
-adds no model call. Its content is part of the build freshness fingerprint (like
-`build_system`/`build_module`), so editing the preamble — or pointing at a different one —
-regenerates already-built modules. Replace it project-wide via
+that frames what Jaunt is, states the signature/docstring contract, and asks for simple,
+human-maintainable code and useful comments so an ejected implementation remains approachable.
+It is always-on and adds no model call. Its content is part of the build freshness fingerprint
+(like `build_system`/`build_module`), so editing the preamble — or pointing at a different one
+— regenerates already-built modules. Replace it project-wide via
 `[prompts] build_preamble = "path/to/my_preamble.md"` (a relative path resolves against the
 project root).
 
@@ -297,7 +298,7 @@ longer mark a module stale (Layer A — deterministic, build + test). When a spe
 docstring genuinely changes but its signature/structure do not, a small
 `[semantic_gate]` model judges whether the change is behaviorally meaningful: if it is
 equivalent, Jaunt **re-freezes** the module (rewrites the header digests over the
-validated, unchanged generated body) instead of paying for a full `gpt-5.5` rebuild
+validated, unchanged generated body) instead of paying for a full `gpt-5.6-sol` rebuild
 (Layer B). Structural changes, validation failures, and any gate error fail safe to a
 rebuild. `--json` reports re-frozen modules under `"refrozen"`. The gate model must be
 runnable via `codex exec` (e.g. `gpt-5.4-mini`); `gpt-5.4-nano` is not — `codex exec`
