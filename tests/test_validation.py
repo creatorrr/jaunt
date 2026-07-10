@@ -377,21 +377,19 @@ def test_generated_import_provenance_owning_dep_rejected_without_spec_file(
     assert spec_file.exists()
 
 
-def test_generated_import_provenance_root_dep_still_passes_with_spec_file(
+def test_generated_import_provenance_root_dep_does_not_leak_to_owner(
     tmp_path: Path,
 ) -> None:
     spec_file = _make_uv_workspace(tmp_path)
     src = "import openai\n\ndef play():\n    return openai\n"
 
-    assert (
-        validate_generated_import_provenance(
-            src,
-            generated_module="thing.__generated__.specs",
-            project_dir=tmp_path,
-            spec_source_file=spec_file,
-        )
-        == []
+    errs = validate_generated_import_provenance(
+        src,
+        generated_module="thing.__generated__.specs",
+        project_dir=tmp_path,
+        spec_source_file=spec_file,
     )
+    assert any("openai" in err for err in errs)
 
 
 def test_generated_import_provenance_undeclared_still_fails_with_spec_file(

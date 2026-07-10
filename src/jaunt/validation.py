@@ -441,14 +441,12 @@ def _validate_generated_import_provenance(
         configured=first_party_modules,
     )
     allowlist_norm = {pep503_normalize(name) for name in allowlist if name.strip()}
-    # Deps declared in the config-root pyproject stay valid. In a uv workspace the
-    # spec may live in a member package whose own pyproject declares the dep — walk
-    # up from the spec's own file too and union both dependency sets (finding 29).
-    declared_dists = _declared_project_dependencies(_find_pyproject(project_dir))
-    if spec_source_file is not None:
-        declared_dists = declared_dists | _declared_project_dependencies(
-            _find_pyproject(spec_source_file)
-        )
+    # The nearest owning project is the package dependency boundary.  A
+    # dependency declared only by the workspace root must not sanction an
+    # undeclared dependency in a member package.
+    declared_dists = _declared_project_dependencies(
+        _find_pyproject(spec_source_file or project_dir, stop_at=project_dir)
+    )
     # The build prompt sanctions importing any installed third-party dist the
     # spec module itself imports, even when no reachable pyproject declares it
     # (the spec importing it proves it is installed). Honor that promise so the
@@ -698,17 +696,20 @@ def _spec_module_top_level_imports(spec_source_file: Path | None) -> frozenset[s
     return frozenset(tops)
 
 
-def _find_pyproject(start: Path) -> Path | None:
+def _find_pyproject(start: Path, *, stop_at: Path | None = None) -> Path | None:
     try:
         cur = start.resolve()
     except Exception:
         cur = start
     if cur.is_file():
         cur = cur.parent
+    stop = stop_at.resolve() if stop_at is not None else None
     while True:
         candidate = cur / "pyproject.toml"
         if candidate.is_file():
             return candidate
+        if stop is not None and cur == stop:
+            return None
         if cur.parent == cur:
             return None
         cur = cur.parent

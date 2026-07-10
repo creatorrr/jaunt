@@ -123,7 +123,18 @@ def _generated_relpath(module_name: str, *, generated_dir: str) -> Path:
     return paths.generated_module_to_relpath(generated_module, generated_dir=generated_dir)
 
 
-def _read_generated(package_dir: Path, generated_dir: str, module_name: str) -> str | None:
+def _read_generated(
+    package_dir: Path,
+    generated_dir: str,
+    module_name: str,
+    *,
+    module_output_bases: dict[str, Path] | None = None,
+) -> str | None:
+    from jaunt.workspace import output_base_for
+
+    package_dir = output_base_for(
+        module_name, default=package_dir, module_output_bases=module_output_bases
+    )
     relpath = _generated_relpath(module_name, generated_dir=generated_dir)
     try:
         return (package_dir / relpath).read_text(encoding="utf-8")
@@ -235,6 +246,7 @@ def detect_stale_modules(
     generation_fingerprint: str = "",
     module_context_digests: dict[str, str] | None = None,
     module_base_api_digests: dict[str, str] | None = None,
+    module_output_bases: dict[str, Path] | None = None,
     force: bool = False,
 ) -> set[str]:
     if force:
@@ -242,8 +254,13 @@ def detect_stale_modules(
 
     stale: set[str] = set()
     for module_name, entries in module_specs.items():
+        from jaunt.workspace import output_base_for
+
+        module_dir = output_base_for(
+            module_name, default=package_dir, module_output_bases=module_output_bases
+        )
         relpath = _generated_relpath(module_name, generated_dir=generated_dir)
-        out_path = package_dir / relpath
+        out_path = module_dir / relpath
         if not out_path.exists():
             stale.add(module_name)
             continue
@@ -298,13 +315,19 @@ def detect_api_changed_modules(
     generated_dir: str,
     module_specs: dict[str, list[SpecEntry]],
     module_api_digests: dict[str, str],
+    module_output_bases: dict[str, Path] | None = None,
 ) -> set[str]:
     changed: set[str] = set()
     for module_name, entries in module_specs.items():
         if not entries:
             continue
+        from jaunt.workspace import output_base_for
+
+        module_dir = output_base_for(
+            module_name, default=package_dir, module_output_bases=module_output_bases
+        )
         relpath = _generated_relpath(module_name, generated_dir=generated_dir)
-        out_path = package_dir / relpath
+        out_path = module_dir / relpath
         if not out_path.exists():
             changed.add(module_name)
             continue
@@ -389,7 +412,13 @@ def refreeze_module(
     header_fields: dict[str, object],
     snapshots: dict[str, dict],
     validate_body: Callable[[str], list[str]] | None = None,
+    module_output_bases: dict[str, Path] | None = None,
 ) -> RefreezeOutcome:
+    from jaunt.workspace import output_base_for
+
+    package_dir = output_base_for(
+        module_name, default=package_dir, module_output_bases=module_output_bases
+    )
     relpath = _generated_relpath(module_name, generated_dir=generated_dir)
     module_path = package_dir / relpath
     try:
@@ -505,6 +534,7 @@ async def plan_refreeze_or_rebuild(
     gate_enabled: bool = True,
     validators_by_module: dict[str, Callable[[str], list[str]]] | None = None,
     run_exec=None,
+    module_output_bases: dict[str, Path] | None = None,
 ) -> RefreezePlan:
     del specs, spec_graph
 
@@ -525,7 +555,12 @@ async def plan_refreeze_or_rebuild(
             header_fields_by_module.get(module_name, {}),
             entries,
         )
-        existing = _read_generated(package_dir, generated_dir, module_name)
+        existing = _read_generated(
+            package_dir,
+            generated_dir,
+            module_name,
+            module_output_bases=module_output_bases,
+        )
         if existing is None:
             rebuild.add(module_name)
             continue
@@ -551,8 +586,13 @@ async def plan_refreeze_or_rebuild(
         # fingerprint can be re-stamped over the untouched body deterministically
         # -- no semantic-gate/model call and no backend rebuild (finding 27).
         # Defer the write (see above).
+        from jaunt.workspace import output_base_for
+
+        module_dir = output_base_for(
+            module_name, default=package_dir, module_output_bases=module_output_bases
+        )
         relpath = _generated_relpath(module_name, generated_dir=generated_dir)
-        old_snapshots = read_contract_sidecar(sidecar_path(package_dir / relpath))
+        old_snapshots = read_contract_sidecar(sidecar_path(module_dir / relpath))
         if entries and all(
             classify_change(old_snapshots.get(str(entry.spec_ref)), entry) == "none"
             for entry in entries
@@ -564,8 +604,13 @@ async def plan_refreeze_or_rebuild(
     meaningful_modules: set[str] = set()
     for module_name in sorted(gate_modules):
         entries = module_specs.get(module_name, [])
+        from jaunt.workspace import output_base_for
+
+        module_dir = output_base_for(
+            module_name, default=package_dir, module_output_bases=module_output_bases
+        )
         relpath = _generated_relpath(module_name, generated_dir=generated_dir)
-        module_file = package_dir / relpath
+        module_file = module_dir / relpath
         old_snapshots = read_contract_sidecar(sidecar_path(module_file))
         if gate_enabled:
             if run_exec is not None:
@@ -601,6 +646,7 @@ async def plan_refreeze_or_rebuild(
             header_fields=header_fields,
             snapshots=_compute_snapshots(entries),
             validate_body=validators.get(module_name),
+            module_output_bases=module_output_bases,
         )
         if outcome.needs_rebuild:
             failed_refreeze.add(module_name)
@@ -808,6 +854,7 @@ def _whole_class_context(
     specs: dict[SpecRef, SpecEntry],
     package_dir: Path,
     generated_dir: str,
+    module_output_bases: dict[str, Path] | None = None,
 ) -> WholeClassContext:
     """Assemble base-class context for the whole-class specs in ``entries``."""
 
@@ -844,7 +891,14 @@ def _whole_class_context(
             dep = specs.get(dep_ref)
             if dep is None or dep.module == entry.module:
                 continue
-            gen_path = package_dir / _generated_relpath(dep.module, generated_dir=generated_dir)
+            from jaunt.workspace import output_base_for
+
+            dep_dir = output_base_for(
+                dep.module,
+                default=package_dir,
+                module_output_bases=module_output_bases,
+            )
+            gen_path = dep_dir / _generated_relpath(dep.module, generated_dir=generated_dir)
             try:
                 gen_src = gen_path.read_text(encoding="utf-8")
             except FileNotFoundError:
@@ -1360,6 +1414,8 @@ def _ty_error_context(
     package_dir: Path,
     generated_dir: str,
     ty_cmd: list[str],
+    owner_dir: Path | None = None,
+    source_roots: Sequence[Path] = (),
 ) -> list[str]:
     relpath = _generated_relpath(module_name, generated_dir=generated_dir)
     with tempfile.TemporaryDirectory(prefix=".jaunt-ty-") as tmp:
@@ -1378,7 +1434,12 @@ def _ty_error_context(
         env = os.environ.copy()
         cur = env.get("PYTHONPATH") or ""
         cur_parts = [x for x in cur.split(os.pathsep) if x] if cur else []
-        pp = [str(tmp_root.resolve()), str(package_dir.resolve()), *cur_parts]
+        pp = [
+            str(tmp_root.resolve()),
+            str(package_dir.resolve()),
+            *(str(root.resolve()) for root in source_roots),
+            *cur_parts,
+        ]
         merged: list[str] = []
         seen: set[str] = set()
         for p in pp:
@@ -1393,7 +1454,7 @@ def _ty_error_context(
             # validator callback; keep it short and bounded.
             proc = subprocess.run(
                 [*ty_cmd, "check", str(tmp_path)],
-                cwd=str(package_dir),
+                cwd=str(owner_dir or package_dir),
                 env=env,
                 capture_output=True,
                 text=True,
@@ -1608,6 +1669,8 @@ async def run_build(
     search_max_hits: int = 8,
     project_root: Path | None = None,
     source_roots: Sequence[Path] | None = None,
+    module_output_bases: dict[str, Path] | None = None,
+    module_owner_dirs: dict[str, Path] | None = None,
     builtin_skill_names: Sequence[str] = (),
     skills_digest: str = "",
     jobs: int = 4,
@@ -1647,13 +1710,26 @@ async def run_build(
         for root in (source_roots or (package_dir,))
     )
 
+    def _module_dir(module_name: str) -> Path:
+        from jaunt.workspace import output_base_for
+
+        return output_base_for(
+            module_name,
+            default=package_dir,
+            module_output_bases=module_output_bases,
+        )
+
+    def _owner_dir(module_name: str) -> Path:
+        return (module_owner_dirs or {}).get(module_name, _module_dir(module_name))
+
     def _validate_skipped_generated_modules(modules: set[str]) -> dict[str, list[str]]:
         if not check_generated_imports:
             return {}
         failures: dict[str, list[str]] = {}
         for module_name in sorted(modules):
             relpath = _generated_relpath(module_name, generated_dir=generated_dir)
-            gen_path = package_dir / relpath
+            module_dir = _module_dir(module_name)
+            gen_path = module_dir / relpath
             module_entries = module_specs.get(module_name, [])
             spec_source_file = Path(module_entries[0].source_file) if module_entries else None
             try:
@@ -1671,7 +1747,7 @@ async def run_build(
                 generated_module=paths.spec_module_to_generated_module(
                     module_name, generated_dir=generated_dir
                 ),
-                project_dir=package_dir,
+                project_dir=_owner_dir(module_name),
                 source_roots=validation_source_roots,
                 first_party_modules=first_party_modules,
                 check_imports=True,
@@ -1711,7 +1787,12 @@ async def run_build(
             if not entries:
                 continue
             source_file = entries[0].source_file
-            gen_source = _read_generated(package_dir, generated_dir, module_name)
+            gen_source = _read_generated(
+                package_dir,
+                generated_dir,
+                module_name,
+                module_output_bases=module_output_bases,
+            )
             if gen_source is None:
                 continue
             expected, _ = _build_expected_names(entries)
@@ -1854,7 +1935,7 @@ async def run_build(
             else:
                 # Try reading from disk (pre-existing generated file).
                 relpath = _generated_relpath(dep_mod, generated_dir=generated_dir)
-                gen_path = package_dir / relpath
+                gen_path = _module_dir(dep_mod) / relpath
                 try:
                     if gen_path.exists():
                         dep_gen[dep_mod] = gen_path.read_text(encoding="utf-8")
@@ -1933,6 +2014,8 @@ async def run_build(
 
     async def build_one(module_name: str) -> tuple[bool, list[str]]:
         entries = module_specs.get(module_name, [])
+        module_dir = _module_dir(module_name)
+        owner_dir = _owner_dir(module_name)
 
         expected, conflict_errs = _build_expected_names(entries)
         if conflict_errs:
@@ -1949,9 +2032,11 @@ async def run_build(
                 return _ty_error_context(
                     source=source,
                     module_name=module_name,
-                    package_dir=package_dir,
+                    package_dir=module_dir,
                     generated_dir=generated_dir,
                     ty_cmd=ty_cmd_local,
+                    owner_dir=owner_dir,
+                    source_roots=validation_source_roots,
                 )
 
             ty_validator = _local_ty_validator
@@ -1990,8 +2075,9 @@ async def run_build(
             wcc = _whole_class_context(
                 component_entries,
                 specs=specs,
-                package_dir=package_dir,
+                package_dir=module_dir,
                 generated_dir=generated_dir,
+                module_output_bases=module_output_bases,
             )
             component_contract = build_module_context_artifacts(
                 module_name=module_name,
@@ -2000,7 +2086,7 @@ async def run_build(
                 generated_names=all_generated_names,
                 module_specs=module_specs,
                 module_dag=module_dag,
-                package_dir=package_dir,
+                package_dir=module_dir,
                 generated_dir=generated_dir,
                 build_instructions=build_instructions,
                 targeted_test_entries=targeted_test_entries,
@@ -2035,7 +2121,11 @@ async def run_build(
                 query_text = (
                     " ".join(component_expected) + " " + " ".join(decorator_prompts.values())
                 )
-                hits = rc_search.query(query_text, root=package_dir, max_hits=search_max_hits)
+                hits = rc_search.query(
+                    query_text,
+                    root=project_root or owner_dir,
+                    max_hits=search_max_hits,
+                )
                 if hits:
                     relevant_files = tuple(
                         (f"relevant_{i}.py", f"# {h.file}\n{h.snippet}\n")
@@ -2095,7 +2185,7 @@ async def run_build(
                     spec_module=module_name,
                     handwritten_names=(),
                     generated_module=generated_module,
-                    project_dir=package_dir,
+                    project_dir=owner_dir,
                     source_roots=validation_source_roots,
                     first_party_modules=first_party_modules,
                     check_imports=True,
@@ -2110,7 +2200,7 @@ async def run_build(
                     spec_module=module_name,
                     handwritten_names=handwritten_names,
                     generated_module=generated_module,
-                    project_dir=package_dir,
+                    project_dir=owner_dir,
                     source_roots=validation_source_roots,
                     first_party_modules=first_party_modules,
                     check_imports=check_generated_imports,
@@ -2157,8 +2247,9 @@ async def run_build(
         wcc_module = _whole_class_context(
             entries,
             specs=specs,
-            package_dir=package_dir,
+            package_dir=module_dir,
             generated_dir=generated_dir,
+            module_output_bases=module_output_bases,
         )
         module_contract = build_module_context_artifacts(
             module_name=module_name,
@@ -2167,7 +2258,7 @@ async def run_build(
             generated_names=all_generated_names,
             module_specs=module_specs,
             module_dag=module_dag,
-            package_dir=package_dir,
+            package_dir=module_dir,
             generated_dir=generated_dir,
             build_instructions=build_instructions,
             targeted_test_entries=targeted_test_entries,
@@ -2186,7 +2277,7 @@ async def run_build(
                 generated_module=paths.spec_module_to_generated_module(
                     module_name, generated_dir=generated_dir
                 ),
-                project_dir=package_dir,
+                project_dir=owner_dir,
                 source_roots=validation_source_roots,
                 first_party_modules=first_party_modules,
                 check_imports=check_generated_imports,
@@ -2320,7 +2411,7 @@ async def run_build(
         snapshots = _compute_snapshots(entries)
 
         write_generated_module(
-            package_dir=package_dir,
+            package_dir=module_dir,
             generated_dir=generated_dir,
             module_name=module_name,
             source=result_source,

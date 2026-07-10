@@ -48,6 +48,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from jaunt.jobs import JobRecord
     from jaunt.registry import SpecEntry
     from jaunt.spec_ref import SpecRef
+    from jaunt.workspace import ResolvedWorkspace
 
 
 EXIT_OK = 0
@@ -280,6 +281,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="allow_newly_governed",
         help="Also rewrite ungoverned legacy stub bodies that would create new specs.",
+    )
+    migrate_p.add_argument(
+        "--merge-projects",
+        action="store_true",
+        dest="merge_projects",
+        help="Plan/apply consolidation of tracked descendant jaunt.toml files.",
     )
     migrate_p.add_argument(
         "--json",
@@ -721,19 +728,17 @@ def _effective_include_target_tests(cfg: JauntConfig, args: argparse.Namespace) 
 
 def _discover_test_spec_modules(*, root: Path, cfg: JauntConfig) -> tuple[list[Path], list[str]]:
     from jaunt import discovery
+    from jaunt.workspace import resolve_workspace
 
-    test_dirs = [root / tr for tr in cfg.paths.test_roots]
-    existing_test_dirs = [d for d in test_dirs if d.exists()]
+    workspace = resolve_workspace(root, cfg)
+    existing_test_dirs = [route.root for route in workspace.test_roots]
     modules_set: set[str] = set()
-    for tr, test_dir in zip(cfg.paths.test_roots, test_dirs, strict=False):
-        if not test_dir.exists():
-            continue
-        prefix = ".".join(Path(tr).parts)
+    for route in workspace.test_roots:
         mods = discovery.discover_modules(
-            roots=[test_dir],
+            roots=[route.root],
             exclude=[],
             generated_dir=cfg.paths.generated_dir,
-            module_prefix=prefix or None,
+            module_prefix=route.module_prefix,
         )
         modules_set.update(mods)
     return existing_test_dirs, sorted(modules_set)
@@ -741,14 +746,12 @@ def _discover_test_spec_modules(*, root: Path, cfg: JauntConfig) -> tuple[list[P
 
 def _discover_contract_specs(*, root: Path, cfg: JauntConfig) -> dict[SpecRef, SpecEntry]:
     from jaunt import discovery, registry
+    from jaunt.workspace import resolve_workspace
 
-    source_dirs = [root / sr for sr in cfg.paths.source_roots]
+    workspace = resolve_workspace(root, cfg)
+    source_dirs = list(workspace.source_roots)
     _prepend_sys_path([*source_dirs, root])
-    modules = discovery.discover_modules(
-        roots=[d for d in source_dirs if d.exists()],
-        exclude=[],
-        generated_dir=cfg.paths.generated_dir,
-    )
+    modules = [route.module for route in workspace.modules]
     discovery.prepare_import_environment(
         module_names=modules, roots=[d for d in source_dirs if d.exists()]
     )
@@ -757,19 +760,17 @@ def _discover_contract_specs(*, root: Path, cfg: JauntConfig) -> dict[SpecRef, S
 
 
 def _resolve_contract_source_file(*, root: Path, cfg: JauntConfig, module: str) -> Path:
-    from jaunt import discovery
+    from jaunt.workspace import resolve_module_source
 
-    source_dirs = [root / sr for sr in cfg.paths.source_roots if (root / sr).exists()]
-    found = discovery.discover_module_files(
-        roots=source_dirs,
-        exclude=[],
-        generated_dir=cfg.paths.generated_dir,
-        target_modules={module},
-    )
-    for mod, path in found:
-        if mod == module:
-            return path
-    raise JauntDiscoveryError(f"Could not locate source module {module!r} under source_roots.")
+    return resolve_module_source(root, cfg, module)
+
+
+def _contract_owner_context(*, root: Path, cfg: JauntConfig, module: str) -> tuple[Path, list[str]]:
+    from jaunt.workspace import resolve_workspace
+
+    workspace = resolve_workspace(root, cfg)
+    owner = workspace.route_for(module).owner_dir
+    return owner, [str(path) for path in workspace.source_roots]
 
 
 def _build_backend(cfg: JauntConfig):
@@ -1868,10 +1869,16 @@ def _find_project_orphans(
                 seen.setdefault(o.path, o)
 
     if contract_refs is not None:
-        battery_dir = root / cfg.contract.battery_dir
-        if battery_dir.exists():
+        from jaunt.workspace import resolve_workspace
+
+        workspace = resolve_workspace(root, cfg)
+        owners = workspace.owner_dirs or (root.resolve(),)
+        for owner in owners:
+            battery_dir = owner / cfg.contract.battery_dir
+            if not battery_dir.exists():
+                continue
             for o in find_orphans(
-                package_dir=root,
+                package_dir=owner,
                 generated_dir="__jaunt_no_such_generated__",
                 governed_modules=governed_modules,
                 source_dirs=[],
@@ -1907,11 +1914,28 @@ def _discover_governed_test_modules(root: Path, cfg: JauntConfig) -> tuple[set[s
 
     governed: set[str] = set()
 
-    test_dirs, test_modules = _discover_test_spec_modules(root=root, cfg=cfg)
-    if test_modules:
-        _prepend_sys_path([root, *[root / sr for sr in cfg.paths.source_roots]])
-        discovery.prepare_import_environment(module_names=test_modules, roots=test_dirs)
-        for module in test_modules:
+    from jaunt.workspace import resolve_workspace
+
+    workspace = resolve_workspace(root, cfg)
+    _prepend_sys_path([root, *workspace.source_roots])
+    for owner in workspace.owner_dirs:
+        _prepend_sys_path([owner])
+        owner_routes = workspace.tests_for_owner(owner)
+        test_dirs = [route.root for route in owner_routes]
+        test_modules: set[str] = set()
+        for route in owner_routes:
+            test_modules.update(
+                discovery.discover_modules(
+                    roots=[route.root],
+                    exclude=[],
+                    generated_dir=cfg.paths.generated_dir,
+                    module_prefix=route.module_prefix,
+                )
+            )
+        if not test_modules:
+            continue
+        discovery.prepare_import_environment(module_names=sorted(test_modules), roots=test_dirs)
+        for module in sorted(test_modules):
             try:
                 importlib.import_module(module)
             except Exception:  # noqa: BLE001 - per-module fail-safe: keep its tests non-orphan
@@ -1921,27 +1945,32 @@ def _discover_governed_test_modules(root: Path, cfg: JauntConfig) -> tuple[set[s
     # Auto-class test modules require magic specs. If the synthesis pass fails we
     # cannot know the auto module names, so disable test-orphan classification
     # entirely rather than judge against a partial set.
-    source_dirs = [root / sr for sr in cfg.paths.source_roots if (root / sr).exists()]
+    source_dirs = list(workspace.source_roots)
     if not source_dirs:
         return governed, True
-    first_test_root = Path(cfg.paths.test_roots[0]) if cfg.paths.test_roots else Path("tests")
-    tests_package = ".".join(first_test_root.parts) or "tests"
     try:
         from jaunt.module_contract import synthesize_auto_class_test_entries
 
         _prepend_sys_path([*source_dirs, root])
-        mods = discovery.discover_modules(
-            roots=source_dirs, exclude=[], generated_dir=cfg.paths.generated_dir
-        )
+        mods = [route.module for route in workspace.modules]
         discovery.prepare_import_environment(module_names=mods, roots=source_dirs)
         discovery.import_and_collect(mods, kind="magic")
-        auto = synthesize_auto_class_test_entries(
-            registry.get_magic_registry(),
-            default_on=bool(cfg.test.auto_class_tests),
-            tests_package=tests_package,
-            generated_dir=cfg.paths.generated_dir,
-        )
-        governed |= set(auto.keys())
+        magic_specs = registry.get_magic_registry()
+        for owner in workspace.owner_dirs:
+            owner_modules = {
+                route.module for route in workspace.modules if route.owner_dir == owner
+            }
+            owner_specs = {
+                ref: entry for ref, entry in magic_specs.items() if entry.module in owner_modules
+            }
+            tests_package = workspace.primary_test_root(owner).module_prefix
+            auto = synthesize_auto_class_test_entries(
+                owner_specs,
+                default_on=bool(cfg.test.auto_class_tests),
+                tests_package=tests_package,
+                generated_dir=cfg.paths.generated_dir,
+            )
+            governed |= set(auto.keys())
     except Exception as exc:  # noqa: BLE001 - fail safe: skip test-orphan detection this run
         _eprint(
             f"warning: could not enumerate auto-class test modules "
@@ -2065,8 +2094,11 @@ def cmd_clean(args: argparse.Namespace) -> int:
         governed_modules, contract_refs = _discover_reconcile_sets(root, cfg)
         test_governed, classify_test_orphans = _discover_governed_test_modules(root, cfg)
         governed_modules = governed_modules | test_governed
-        source_dirs = [root / sr for sr in cfg.paths.source_roots]
-        test_dirs = [root / tr for tr in cfg.paths.test_roots]
+        from jaunt.workspace import resolve_workspace
+
+        workspace = resolve_workspace(root, cfg)
+        source_dirs = list(workspace.source_roots)
+        test_dirs = [route.root for route in workspace.test_roots]
         orphans = _find_project_orphans(
             root=root,
             cfg=cfg,
@@ -2117,10 +2149,12 @@ def cmd_clean(args: argparse.Namespace) -> int:
             )
         return EXIT_OK
 
+    from jaunt.workspace import resolve_workspace
+
+    workspace = resolve_workspace(root, cfg)
     generated_dir = cfg.paths.generated_dir
-    scan_roots = [root / sr for sr in cfg.paths.source_roots] + [
-        root / tr for tr in cfg.paths.test_roots
-    ]
+    scan_roots = [*workspace.source_roots, *(route.root for route in workspace.test_roots)]
+    scan_roots.extend(owner / cfg.contract.battery_dir for owner in workspace.owner_dirs)
     found = _find_generated_dirs(scan_roots, generated_dir)
     stubs = _find_jaunt_stubs(scan_roots, generated_dir)
     dry_run = getattr(args, "dry_run", False)
@@ -2160,11 +2194,42 @@ def cmd_clean(args: argparse.Namespace) -> int:
 @dataclass(frozen=True, slots=True)
 class _BuildDiscoveryContext:
     package_dir: Path
+    workspace: "ResolvedWorkspace"
     specs: dict["SpecRef", "SpecEntry"]
     spec_graph: dict["SpecRef", set["SpecRef"]]
     module_dag: dict[str, set[str]]
     module_specs: dict[str, list["SpecEntry"]]
     header_fields_by_module: dict[str, dict[str, object]]
+
+
+def _newly_governed_for_workspace(
+    entries: Sequence["SpecEntry"],
+    *,
+    workspace: "ResolvedWorkspace",
+    generated_dir: str,
+) -> dict[str, list[str]]:
+    from jaunt import builder
+
+    grouped: dict[str, list[str]] = {}
+    present: dict[str, bool] = {}
+    for entry in entries:
+        if entry.origin != "module":
+            continue
+        exists = present.get(entry.module)
+        if exists is None:
+            route = workspace.route_for(entry.module)
+            exists = (
+                builder._read_generated(
+                    route.output_base,
+                    generated_dir,
+                    entry.module,
+                )
+                is not None
+            )
+            present[entry.module] = exists
+        if not exists:
+            grouped.setdefault(entry.module, []).append(entry.qualname)
+    return {module: sorted(symbols) for module, symbols in grouped.items()}
 
 
 def _discover_build_context(
@@ -2174,10 +2239,11 @@ def _discover_build_context(
     _sync_generated_dir_env(cfg)
     include_target_tests = _effective_include_target_tests(cfg, args)
     build_instructions = _effective_build_instructions(cfg, args)
-    source_dirs = [root / sr for sr in cfg.paths.source_roots]
-    package_dir = next((d for d in source_dirs if d.exists()), None)
-    if package_dir is None:
-        raise JauntConfigError("No existing source_roots to build into.")
+    from jaunt.workspace import resolve_workspace
+
+    workspace = resolve_workspace(root, cfg)
+    source_dirs = list(workspace.source_roots)
+    package_dir = source_dirs[0]
 
     _prepend_sys_path([*source_dirs, root])
 
@@ -2188,11 +2254,7 @@ def _discover_build_context(
     from jaunt.module_api import module_api_digest
     from jaunt.module_contract import group_test_entries_by_target_module
 
-    modules = discovery.discover_modules(
-        roots=[d for d in source_dirs if d.exists()],
-        exclude=[],
-        generated_dir=cfg.paths.generated_dir,
-    )
+    modules = [route.module for route in workspace.modules]
     discovery.prepare_import_environment(
         module_names=modules,
         roots=[d for d in source_dirs if d.exists()],
@@ -2213,10 +2275,6 @@ def _discover_build_context(
         )
     module_dag = collapse_to_module_dag(spec_graph)
     module_specs = registry.get_specs_by_module("magic")
-    from jaunt.status_core import enforce_source_root_routing
-
-    enforce_source_root_routing(source_dirs=source_dirs, module_specs=module_specs)
-
     build_generation_fingerprint = generation_fingerprint(
         cfg,
         kind="build",
@@ -2232,12 +2290,14 @@ def _discover_build_context(
 
     header_fields_by_module: dict[str, dict[str, object]] = {}
     for module_name, entries in sorted(module_specs.items()):
+        module_dir = workspace.route_for(module_name).output_base
         expected, _errs = builder._build_expected_names(entries)
         wcc = builder._whole_class_context(
             entries,
             specs=specs,
-            package_dir=package_dir,
+            package_dir=module_dir,
             generated_dir=cfg.paths.generated_dir,
+            module_output_bases=workspace.output_bases,
         )
         module_context = builder.build_module_context_artifacts(
             module_name=module_name,
@@ -2245,7 +2305,7 @@ def _discover_build_context(
             expected_names=expected,
             module_specs=module_specs,
             module_dag=module_dag,
-            package_dir=package_dir,
+            package_dir=module_dir,
             generated_dir=cfg.paths.generated_dir,
             build_instructions=build_instructions,
             targeted_test_entries=targeted_test_entries,
@@ -2270,6 +2330,7 @@ def _discover_build_context(
 
     return _BuildDiscoveryContext(
         package_dir=package_dir,
+        workspace=workspace,
         specs=specs,
         spec_graph=spec_graph,
         module_dag=module_dag,
@@ -2379,38 +2440,71 @@ def _migrate_candidate_files(root: Path, cfg: JauntConfig) -> dict[Path, str]:
     walk itself via `exclude` globs so a large test tree is never read; the
     post-filter still guards nested hidden dirs and non-root test trees.
     """
-    from jaunt import discovery
+    from jaunt.workspace import resolve_workspace
 
-    source_dirs = [root / sr for sr in cfg.paths.source_roots if (root / sr).exists()]
-    test_dirs = [(root / tr).resolve() for tr in cfg.paths.test_roots]
-    found: dict[Path, str] = {}
-    for source_dir in source_dirs:
-        resolved_root = source_dir.resolve()
-        # Prune top-level hidden dirs, and any test root nested under this source
-        # dir, before discover_module_files reads files for marker detection.
-        exclude = [".*", ".*/*"]
-        for test_dir in test_dirs:
-            if test_dir.is_relative_to(resolved_root) and test_dir != resolved_root:
-                rel_test = test_dir.relative_to(resolved_root).as_posix()
-                exclude += [rel_test, f"{rel_test}/*"]
-        for module_name, path in discovery.discover_module_files(
-            roots=[source_dir], exclude=exclude, generated_dir=cfg.paths.generated_dir
-        ):
-            resolved = path.resolve()
-            try:
-                rel = resolved.relative_to(resolved_root)
-            except ValueError:
-                continue
-            if any(part.startswith(".") for part in rel.parts):
-                continue
-            if any(resolved.is_relative_to(test_dir) for test_dir in test_dirs):
-                continue
-            found.setdefault(resolved, module_name)
-    return found
+    workspace = resolve_workspace(root, cfg)
+    return {
+        route.source_file: route.module
+        for route in workspace.modules
+        if not any(part.startswith(".") for part in route.source_file.relative_to(root).parts)
+    }
 
 
 def cmd_migrate(args: argparse.Namespace) -> int:
     json_mode = _is_json_mode(args)
+    if bool(getattr(args, "merge_projects", False)):
+        try:
+            root, _cfg = _load_config(args)
+            from jaunt.workspace_merge import apply_merge, plan_merge
+
+            plan = plan_merge(root)
+            payload = plan.to_json(root)
+            if not bool(getattr(args, "apply", False)):
+                if json_mode:
+                    _emit_json({"command": "migrate", "ok": plan.neutral, **payload})
+                else:
+                    print("Merge-projects plan:")
+                    for action in plan.actions:
+                        print(f"- {action['action']}: {action['path']}")
+                    for conflict in plan.conflicts:
+                        print(f"[CONFLICT] {conflict}")
+                return EXIT_OK if plan.neutral else EXIT_CONFIG_OR_DISCOVERY
+            if not plan.neutral:
+                if json_mode:
+                    _emit_json({"command": "migrate", "ok": False, **payload})
+                else:
+                    for conflict in plan.conflicts:
+                        _eprint(f"error: {conflict}")
+                return EXIT_CONFIG_OR_DISCOVERY
+            if not bool(getattr(args, "force", False)) and _is_dirty_worktree(root):
+                error = "dirty working tree"
+                if json_mode:
+                    _emit_json({"command": "migrate", "ok": False, "error": error, **payload})
+                else:
+                    _eprint("error: refusing to merge projects; git working tree is dirty")
+                return EXIT_CONFIG_OR_DISCOVERY
+            applied, error = apply_merge(root, plan)
+            if json_mode:
+                _emit_json(
+                    {
+                        "command": "migrate",
+                        "ok": applied,
+                        "applied": applied,
+                        **payload,
+                        **({"error": error} if error else {}),
+                    }
+                )
+            elif applied:
+                print("Merged descendant Jaunt projects into the root jaunt.toml.")
+            else:
+                _eprint(f"error: merge rolled back: {error}")
+            return EXIT_OK if applied else EXIT_CONFIG_OR_DISCOVERY
+        except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError) as exc:
+            _print_error(exc)
+            if json_mode:
+                _emit_json({"command": "migrate", "ok": False, "error": str(exc)})
+            return EXIT_CONFIG_OR_DISCOVERY
+
     try:
         root, cfg = _load_config(args)
         ctx = _discover_build_context(root, cfg, args)
@@ -2451,11 +2545,20 @@ def cmd_migrate(args: argparse.Namespace) -> int:
                 governed_symbols=source_governed.get(resolved, set()),
             )
         )
-    stub_actions = migrate.plan_stub_reemissions(
-        module_specs=ctx.module_specs,
-        package_dir=ctx.package_dir,
-        generated_dir=cfg.paths.generated_dir,
-    )
+    stub_actions = []
+    for output_base in sorted(set(ctx.workspace.output_bases.values())):
+        routed_specs = {
+            module: entries
+            for module, entries in ctx.module_specs.items()
+            if ctx.workspace.route_for(module).output_base == output_base
+        }
+        stub_actions.extend(
+            migrate.plan_stub_reemissions(
+                module_specs=routed_specs,
+                package_dir=output_base,
+                generated_dir=cfg.paths.generated_dir,
+            )
+        )
     migration_order = {
         migrate.LEGACY_STUB_MIGRATION_ID: 0,
         migrate.STUB_REEMIT_MIGRATION_ID: 1,
@@ -2548,6 +2651,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             module_name=module,
             header_fields=builder._header_fields_with_spec_digests(header_fields, entries),
             snapshots=builder._compute_snapshots(entries),
+            module_output_bases=ctx_after.workspace.output_bases,
         )
         if outcome.needs_rebuild:
             needs_rebuild_modules.add(module)
@@ -2572,7 +2676,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             stub = _reemit_stub_for_module(
                 module_name=module,
                 entries=entries,
-                package_dir=ctx_after.package_dir,
+                package_dir=ctx_after.workspace.route_for(module).output_base,
                 generated_dir=cfg.paths.generated_dir,
                 tool_version=builder._tool_version(),
             )
@@ -2650,22 +2754,32 @@ def cmd_check(args: argparse.Namespace) -> int:
             specs = _discover_contract_specs(root=root, cfg=cfg)
 
             if specs:
-
-                def _run(path: Path) -> bool:
-                    return runner.run_battery_file(
-                        path, root=root, source_roots=cfg.paths.source_roots
+                for entry in sorted(specs.values(), key=lambda e: str(e.spec_ref)):
+                    owner, source_roots = _contract_owner_context(
+                        root=root, cfg=cfg, module=entry.module
                     )
 
-                contract_results = [
-                    runner.evaluate_entry(
-                        root,
-                        cfg.contract.battery_dir,
-                        cfg.contract.derive,
-                        entry,
-                        run_battery=_run,
+                    def _run(
+                        path: Path,
+                        *,
+                        _owner=owner,
+                        _source_roots=source_roots,
+                    ) -> bool:
+                        return runner.run_battery_file(
+                            path,
+                            root=_owner,
+                            source_roots=_source_roots,
+                        )
+
+                    contract_results.append(
+                        runner.evaluate_entry(
+                            owner,
+                            cfg.contract.battery_dir,
+                            cfg.contract.derive,
+                            entry,
+                            run_battery=_run,
+                        )
                     )
-                    for entry in sorted(specs.values(), key=lambda e: str(e.spec_ref))
-                ]
                 contract_blocked_results = [r for r in contract_results if is_blocking(r.state)]
                 contract_checked = [
                     {"ref": str(r.spec_ref), "state": r.state.value} for r in contract_results
@@ -2681,8 +2795,11 @@ def cmd_check(args: argparse.Namespace) -> int:
         artifact_orphan_objs: list = []
         battery_orphan_objs: list = []
         newly_governed_modules: dict[str, list[str]] = {}
-        source_dirs = [root / sr for sr in cfg.paths.source_roots]
-        test_dirs = [root / tr for tr in cfg.paths.test_roots]
+        from jaunt.workspace import resolve_workspace
+
+        workspace = resolve_workspace(root, cfg)
+        source_dirs = list(workspace.source_roots)
+        test_dirs = [route.root for route in workspace.test_roots]
         if run_magic:
             from jaunt import builder
 
@@ -2702,12 +2819,12 @@ def cmd_check(args: argparse.Namespace) -> int:
             )
 
             if mstatus.total:
-                package_dir = next((d for d in source_dirs if d.exists()), None)
                 for module_name in sorted(mstatus.stale):
                     generated_missing = (
-                        package_dir is None
-                        or builder._read_generated(
-                            package_dir, cfg.paths.generated_dir, module_name
+                        builder._read_generated(
+                            workspace.route_for(module_name).output_base,
+                            cfg.paths.generated_dir,
+                            module_name,
                         )
                         is None
                     )
@@ -2719,16 +2836,14 @@ def cmd_check(args: argparse.Namespace) -> int:
                         )
                 magic_fresh = sorted(mstatus.fresh)
 
-            package_dir = next((d for d in source_dirs if d.exists()), None)
-            if package_dir is not None:
+            if source_dirs:
                 from jaunt import registry
-                from jaunt.reconcile import newly_governed_specs
 
                 governed_modules = set(registry.get_specs_by_module("magic").keys())
                 entries = list(registry.get_magic_registry().values())
-                newly_governed_modules = newly_governed_specs(
+                newly_governed_modules = _newly_governed_for_workspace(
                     entries,
-                    package_dir=package_dir,
+                    workspace=workspace,
                     generated_dir=cfg.paths.generated_dir,
                 )
                 # Judge generated artifacts (impl + tests + stubs + sidecars)
@@ -2876,9 +2991,10 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
             if target_mods and entry.module not in target_mods:
                 continue
             module = importlib.import_module(entry.module)
+            owner, source_roots = _contract_owner_context(root=root, cfg=cfg, module=entry.module)
             results.append(
                 runner.reconcile_entry(
-                    root,
+                    owner,
                     cfg.contract.battery_dir,
                     cfg.contract.derive,
                     cfg.contract.strength,
@@ -2886,7 +3002,7 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
                     module_namespace=vars(module),
                     tool_version=__version__,
                     model_extract=_model_extract,
-                    source_roots=cfg.paths.source_roots,
+                    source_roots=source_roots,
                     property_max_examples=cfg.contract.property_max_examples,
                 )
             )
@@ -2965,15 +3081,16 @@ def cmd_adopt(args: argparse.Namespace) -> int:
 
         importlib.reload(importlib.import_module(module))
         mod = importlib.import_module(module)
+        owner, source_roots = _contract_owner_context(root=root, cfg=cfg, module=module)
         result = runner.reconcile_entry(
-            root,
+            owner,
             cfg.contract.battery_dir,
             cfg.contract.derive,
             cfg.contract.strength,
             entry,
             module_namespace=vars(mod),
             tool_version=__version__,
-            source_roots=cfg.paths.source_roots,
+            source_roots=source_roots,
             property_max_examples=cfg.contract.property_max_examples,
         )
 
@@ -3050,7 +3167,8 @@ def cmd_eject(args: argparse.Namespace) -> int:
         ejected: list[str] = []
         warnings: list[str] = []
         for entry in targets:
-            path = runner.battery_path(root, cfg.contract.battery_dir, entry)
+            owner, _source_roots = _contract_owner_context(root=root, cfg=cfg, module=entry.module)
+            path = runner.battery_path(owner, cfg.contract.battery_dir, entry)
             if path.is_file():
                 parsed = parse_battery(path.read_text(encoding="utf-8"))
                 strength = (parsed.header or {}).get("strength", "0/0")
@@ -3128,7 +3246,10 @@ def cmd_status(args: argparse.Namespace) -> int:
         include_target_tests = _effective_include_target_tests(cfg, args)
         build_instructions = _effective_build_instructions(cfg, args)
 
-        source_dirs = [root / sr for sr in cfg.paths.source_roots]
+        from jaunt.workspace import resolve_workspace
+
+        workspace = resolve_workspace(root, cfg)
+        source_dirs = list(workspace.source_roots)
         _prepend_sys_path([*source_dirs, root])
 
         tree_drift = None
@@ -3161,21 +3282,31 @@ def cmd_status(args: argparse.Namespace) -> int:
             if not contract_specs:
                 return rows, review
 
-            def _run_battery(path: Path) -> bool:
-                return contract_runner.run_battery_file(
-                    path, root=root, source_roots=cfg.paths.source_roots
+            statuses = {}
+            for entry in contract_specs.values():
+                owner, source_roots = _contract_owner_context(
+                    root=root, cfg=cfg, module=entry.module
                 )
 
-            statuses = {
-                str(e.spec_ref): contract_runner.evaluate_entry(
-                    root,
+                def _run_battery(
+                    path: Path,
+                    *,
+                    _owner=owner,
+                    _source_roots=source_roots,
+                ) -> bool:
+                    return contract_runner.run_battery_file(
+                        path,
+                        root=_owner,
+                        source_roots=_source_roots,
+                    )
+
+                statuses[str(entry.spec_ref)] = contract_runner.evaluate_entry(
+                    owner,
                     cfg.contract.battery_dir,
                     cfg.contract.derive,
-                    e,
+                    entry,
                     run_battery=_run_battery,
                 )
-                for e in contract_specs.values()
-            }
 
             cgraph = build_spec_graph(contract_specs, infer_default=infer_default)
             stale_prose = {
@@ -3218,7 +3349,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
         _governed = set(_registry.get_specs_by_module("magic").keys())
         _pkg_dir = next((d for d in source_dirs if d.exists()), None)
-        _test_dirs = [root / tr for tr in cfg.paths.test_roots]
+        _test_dirs = [route.root for route in workspace.test_roots]
         _test_governed, _classify_test_orphans = _discover_governed_test_modules(root, cfg)
         orphan_objs = (
             _find_project_orphans(
@@ -3414,7 +3545,10 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
         include_target_tests = _effective_include_target_tests(cfg, args)
         build_instructions = _effective_build_instructions(cfg, args)
 
-        source_dirs = [root / sr for sr in cfg.paths.source_roots]
+        from jaunt.workspace import resolve_workspace
+
+        workspace = resolve_workspace(root, cfg)
+        source_dirs = list(workspace.source_roots)
 
         builtin_on = bool(cfg.skills.builtin) and not bool(
             getattr(args, "no_builtin_skills", False)
@@ -3456,11 +3590,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
         from jaunt import discovery, registry
         from jaunt.deps import build_spec_graph, collapse_to_module_dag, find_cycles
 
-        modules = discovery.discover_modules(
-            roots=[d for d in source_dirs if d.exists()],
-            exclude=[],
-            generated_dir=cfg.paths.generated_dir,
-        )
+        modules = [route.module for route in workspace.modules]
         discovery.prepare_import_environment(
             module_names=modules,
             roots=[d for d in source_dirs if d.exists()],
@@ -3505,9 +3635,6 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             )
 
         module_specs = registry.get_specs_by_module("magic")
-        from jaunt.status_core import enforce_source_root_routing
-
-        enforce_source_root_routing(source_dirs=source_dirs, module_specs=module_specs)
 
         from jaunt.cost import CostTracker
 
@@ -3530,9 +3657,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             # Abort early if generating the overview already blew the budget.
             cost_tracker.check_budget()
 
-        package_dir = next((d for d in source_dirs if d.exists()), None)
-        if package_dir is None:
-            raise JauntConfigError("No existing source_roots to build into.")
+        package_dir = source_dirs[0]
 
         # Lazy import so other work can land independently.
         from jaunt import builder
@@ -3551,12 +3676,14 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
         build_module_base_api_digests: dict[str, str] = {}
         targeted_test_entries = group_test_entries_by_target_module(static_targeted_test_entries)
         for module_name, entries in module_specs.items():
+            module_dir = workspace.route_for(module_name).output_base
             expected, _errs = builder._build_expected_names(entries)
             wcc = builder._whole_class_context(
                 entries,
                 specs=specs,
-                package_dir=package_dir,
+                package_dir=module_dir,
                 generated_dir=cfg.paths.generated_dir,
+                module_output_bases=workspace.output_bases,
             )
             build_module_context_digests[module_name] = builder.build_module_context_artifacts(
                 module_name=module_name,
@@ -3564,7 +3691,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                 expected_names=expected,
                 module_specs=module_specs,
                 module_dag=module_dag,
-                package_dir=package_dir,
+                package_dir=module_dir,
                 generated_dir=cfg.paths.generated_dir,
                 build_instructions=build_instructions,
                 targeted_test_entries=targeted_test_entries,
@@ -3583,6 +3710,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             generation_fingerprint=build_generation_fingerprint,
             module_context_digests=build_module_context_digests,
             module_base_api_digests=build_module_base_api_digests,
+            module_output_bases=workspace.output_bases,
             force=bool(args.force),
         )
         api_changed = builder.detect_api_changed_modules(
@@ -3590,6 +3718,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             generated_dir=cfg.paths.generated_dir,
             module_specs=module_specs,
             module_api_digests=build_module_api_digests,
+            module_output_bases=workspace.output_bases,
         )
 
         target_mods = _iter_target_modules(args.target)
@@ -3636,7 +3765,10 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                 fresh_base = build_module_base_api_digests.get(module_name)
                 if fresh_base:
                     existing_src = builder._read_generated(
-                        package_dir, cfg.paths.generated_dir, module_name
+                        package_dir,
+                        cfg.paths.generated_dir,
+                        module_name,
+                        module_output_bases=workspace.output_bases,
                     )
                     if existing_src is not None:
                         on_disk_base = builder._normalize_digest(
@@ -3659,6 +3791,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                 cfg=cfg.semantic_gate,
                 gate_enabled=cfg.semantic_gate.enabled
                 and not bool(getattr(args, "no_semantic_gate", False)),
+                module_output_bases=workspace.output_bases,
             )
             refrozen_modules = set(plan.refrozen)
             expanded_stale = set(plan.rebuild)
@@ -3687,12 +3820,12 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
         if cfg.context.search.enabled:
             from jaunt.repo_context import search as rc_search
 
-            rc_search.ensure_index(package_dir)
+            rc_search.ensure_index(root)
 
-        from jaunt.reconcile import newly_governed_specs
-
-        newly_governed = newly_governed_specs(
-            list(specs.values()), package_dir=package_dir, generated_dir=cfg.paths.generated_dir
+        newly_governed = _newly_governed_for_workspace(
+            list(specs.values()),
+            workspace=workspace,
+            generated_dir=cfg.paths.generated_dir,
         )
         if newly_governed and not json_mode:
             for mod in sorted(newly_governed):
@@ -3717,6 +3850,8 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             search_enabled=search_enabled,
             search_max_hits=cfg.context.search.max_hits,
             source_roots=[d for d in source_dirs if d.exists()],
+            module_output_bases=workspace.output_bases,
+            module_owner_dirs={route.module: route.owner_dir for route in workspace.modules},
             jobs=jobs,
             progress=progress,
             response_cache=response_cache,
@@ -3864,11 +3999,26 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
 
             tester.ensure_pytest_available()
 
-        source_dirs = [root / sr for sr in cfg.paths.source_roots]
-        test_dirs = [root / tr for tr in cfg.paths.test_roots]
+        from jaunt.workspace import resolve_workspace
+
+        workspace = resolve_workspace(root, cfg)
+        source_dirs = list(workspace.source_roots)
+        owner_scope_raw = getattr(args, "_workspace_owner", None)
+        owner_scope = Path(owner_scope_raw).resolve() if owner_scope_raw else None
+        test_routes = [
+            route
+            for route in workspace.test_roots
+            if owner_scope is None or route.owner_dir == owner_scope
+        ]
+        test_dirs = [route.root for route in test_routes]
+        test_project_dir = owner_scope or (
+            test_routes[0].owner_dir
+            if test_routes and len({route.owner_dir for route in test_routes}) == 1
+            else root
+        )
         # Import source specs and namespace-package test modules without
         # prepending raw test roots, which can shadow stdlib/dependency imports.
-        _prepend_sys_path([*source_dirs, root])
+        _prepend_sys_path([*source_dirs, test_project_dir, root])
 
         if not bool(args.no_build):
             rc = await _cmd_build_async(args)
@@ -3897,11 +4047,7 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
         build_magic_spec_graph: dict[SpecRef, set[SpecRef]] = {}
         build_magic_module_dag: dict[str, set[str]] = {}
         if bool(args.no_build):
-            src_mods = discovery.discover_modules(
-                roots=[d for d in source_dirs if d.exists()],
-                exclude=[],
-                generated_dir=cfg.paths.generated_dir,
-            )
+            src_mods = [route.module for route in workspace.modules]
             discovery.prepare_import_environment(
                 module_names=src_mods,
                 roots=[d for d in source_dirs if d.exists()],
@@ -3914,12 +4060,6 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
                 infer_default=bool(cfg.build.infer_deps) and (not bool(args.no_infer_deps)),
             )
             build_magic_module_dag = collapse_to_module_dag(build_magic_spec_graph)
-            # `--no-build` imports specs directly and reads artifacts through the
-            # first-existing source root -- the same multi-root routing trap the
-            # build path gates. Apply the identical gate here (finding 28).
-            from jaunt.status_core import enforce_source_root_routing
-
-            enforce_source_root_routing(source_dirs=source_dirs, module_specs=build_module_specs)
         else:
             # cmd_build() already imported and registered magic specs.
             build_magic_specs = dict(registry.get_magic_registry())
@@ -3949,7 +4089,7 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
                     generated_module,
                     generated_dir=cfg.paths.generated_dir,
                 )
-                generated_path = package_dir / relpath
+                generated_path = workspace.route_for(entry.module).output_base / relpath
                 if not generated_path.exists():
                     return None
                 return generated_path.read_text(encoding="utf-8")
@@ -3982,17 +4122,16 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
 
         modules_set: set[str] = set()
         existing_test_dirs = [d for d in test_dirs if d.exists()]
-        first_test_root = Path(cfg.paths.test_roots[0]) if cfg.paths.test_roots else Path("tests")
-        tests_package = ".".join(first_test_root.parts) or "tests"
-        for tr, test_dir in zip(cfg.paths.test_roots, test_dirs, strict=False):
-            if not test_dir.exists():
-                continue
-            prefix = ".".join(Path(tr).parts)
+        primary_test_route = (
+            test_routes[0] if test_routes else workspace.primary_test_root(test_project_dir)
+        )
+        tests_package = primary_test_route.module_prefix
+        for route in test_routes:
             mods = discovery.discover_modules(
-                roots=[test_dir],
+                roots=[route.root],
                 exclude=[],
                 generated_dir=cfg.paths.generated_dir,
-                module_prefix=prefix or None,
+                module_prefix=route.module_prefix,
             )
             modules_set.update(mods)
         modules = sorted(modules_set)
@@ -4000,8 +4139,17 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
         discovery.import_and_collect(modules, kind="test")
 
         specs = dict(registry.get_test_registry())
+        auto_magic_specs = (
+            {
+                ref: entry
+                for ref, entry in build_magic_specs.items()
+                if workspace.route_for(entry.module).owner_dir == owner_scope
+            }
+            if owner_scope is not None
+            else build_magic_specs
+        )
         auto_entries = synthesize_auto_class_test_entries(
-            build_magic_specs,
+            auto_magic_specs,
             default_on=bool(cfg.test.auto_class_tests),
             tests_package=tests_package,
             generated_dir=cfg.paths.generated_dir,
@@ -4056,7 +4204,7 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
                 test_target_api_digests[module_name] = hashlib.sha256(payload).hexdigest()
 
         stale = tester.detect_stale_test_modules(
-            project_dir=root,
+            project_dir=test_project_dir,
             generated_dir=cfg.paths.generated_dir,
             tests_package=tests_package,
             test_roots=existing_test_dirs,
@@ -4103,7 +4251,7 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
                     "spec_refs": [str(e.spec_ref) for e in entries],
                 }
             test_plan = await tester.plan_test_refreeze_or_rebuild(
-                project_dir=root,
+                project_dir=test_project_dir,
                 generated_dir=cfg.paths.generated_dir,
                 module_specs=module_specs,
                 specs=specs,
@@ -4161,6 +4309,8 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             builtin_skill_names=builtin_skill_names,
             skills_digest=test_skills_digest,
             source_roots=[d for d in source_dirs if d.exists()],
+            module_output_bases=workspace.output_bases,
+            module_owner_dirs={route.module: route.owner_dir for route in workspace.modules},
             jobs=int(cfg.build.jobs),
             async_runner=cfg.build.async_runner,
             build_instructions=build_instructions,
@@ -4169,7 +4319,7 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
         )
 
         result = tester.run_tests(
-            project_dir=root,
+            project_dir=test_project_dir,
             tests_package=tests_package,
             generated_dir=cfg.paths.generated_dir,
             test_roots=existing_test_dirs,
@@ -4188,7 +4338,7 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             pytest_args=pytest_args,
             progress=progress,
             pythonpath=[*source_dirs, root],
-            cwd=root,
+            cwd=test_project_dir,
             response_cache=response_cache,
             cost_tracker=cost_tracker,
             async_runner=cfg.build.async_runner,
@@ -4261,7 +4411,86 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
 
 
 def cmd_test(args: argparse.Namespace) -> int:
-    return asyncio.run(_cmd_test_async(args))
+    # Each owning pyproject is an independent pytest/import namespace.  Running
+    # owners sequentially prevents identical ``tests.*`` module names from
+    # colliding and lets package-local pytest configuration apply via cwd.
+    if getattr(args, "_workspace_owner", None):
+        return asyncio.run(_cmd_test_async(args))
+    try:
+        root, cfg = _load_config(args)
+        from jaunt.workspace import resolve_workspace
+
+        workspace = resolve_workspace(root, cfg)
+    except (JauntConfigError, JauntDiscoveryError) as exc:
+        _print_error(exc)
+        if _is_json_mode(args):
+            _emit_json({"command": "test", "ok": False, "error": str(exc)})
+        return EXIT_CONFIG_OR_DISCOVERY
+
+    owners = workspace.owner_dirs
+    if len(owners) <= 1:
+        return asyncio.run(_cmd_test_async(args))
+
+    if not bool(args.no_build):
+        build_rc = asyncio.run(_cmd_build_async(args))
+        if build_rc != EXIT_OK:
+            return build_rc
+
+    import contextlib
+    import io
+
+    owner_results: list[dict[str, object]] = []
+    exit_codes: list[int] = []
+    for owner in owners:
+        child = argparse.Namespace(**vars(args))
+        child._workspace_owner = str(owner)
+        child.no_build = True
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            rc = asyncio.run(_cmd_test_async(child))
+        exit_codes.append(rc)
+        output = captured.getvalue()
+        if _is_json_mode(args):
+            payload: dict[str, object] = {}
+            for line in reversed(output.splitlines()):
+                try:
+                    parsed = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(parsed, dict):
+                    payload = parsed
+                    break
+            owner_results.append(
+                {
+                    "owner": str(owner.relative_to(root)),
+                    "ok": rc == EXIT_OK,
+                    "result": payload,
+                }
+            )
+        else:
+            print(f"== {owner.relative_to(root) or Path('.')} ==")
+            if output:
+                print(output, end="")
+
+    rc = (
+        EXIT_CONFIG_OR_DISCOVERY
+        if EXIT_CONFIG_OR_DISCOVERY in exit_codes
+        else EXIT_GENERATION_ERROR
+        if EXIT_GENERATION_ERROR in exit_codes
+        else EXIT_PYTEST_FAILURE
+        if EXIT_PYTEST_FAILURE in exit_codes
+        else EXIT_OK
+    )
+    if _is_json_mode(args):
+        _emit_json(
+            {
+                "command": "test",
+                "ok": rc == EXIT_OK,
+                "exit_code": rc,
+                "owners": owner_results,
+            }
+        )
+    return rc
 
 
 def cmd_eval(args: argparse.Namespace) -> int:
@@ -4340,8 +4569,13 @@ def cmd_watch(args: argparse.Namespace) -> int:
         run_watch_loop,
     )
 
-    source_roots = [root / sr for sr in cfg.paths.source_roots]
-    test_roots = [root / tr for tr in cfg.paths.test_roots] if getattr(args, "test", False) else []
+    from jaunt.workspace import resolve_workspace
+
+    workspace = resolve_workspace(root, cfg)
+    source_roots = list(workspace.source_roots)
+    test_roots = (
+        [route.root for route in workspace.test_roots] if getattr(args, "test", False) else []
+    )
     watch_paths = [d for d in (source_roots + test_roots) if d.exists()]
 
     if not watch_paths:
@@ -4800,17 +5034,16 @@ def cmd_specs(args: argparse.Namespace) -> int:
     json_mode = _is_json_mode(args)
     try:
         root, cfg = _load_config(args)
-        source_dirs = [root / sr for sr in cfg.paths.source_roots]
+        from jaunt.workspace import resolve_workspace
+
+        workspace = resolve_workspace(root, cfg)
+        source_dirs = list(workspace.source_roots)
         _prepend_sys_path([*source_dirs, root])
 
         from jaunt import discovery, registry
         from jaunt.deps import build_spec_graph
 
-        modules = discovery.discover_modules(
-            roots=[d for d in source_dirs if d.exists()],
-            exclude=[],
-            generated_dir=cfg.paths.generated_dir,
-        )
+        modules = [route.module for route in workspace.modules]
         discovery.prepare_import_environment(
             module_names=modules,
             roots=[d for d in source_dirs if d.exists()],
@@ -4820,11 +5053,10 @@ def cmd_specs(args: argparse.Namespace) -> int:
         specs = dict(registry.get_magic_registry())
         infer_default = bool(cfg.build.infer_deps) and not bool(args.no_infer_deps)
         spec_graph = build_spec_graph(specs, infer_default=infer_default)
-        from jaunt.reconcile import newly_governed_specs
-
-        pkg_dir = next((d for d in source_dirs if d.exists()), None)
-        newly = newly_governed_specs(
-            list(specs.values()), package_dir=pkg_dir, generated_dir=cfg.paths.generated_dir
+        newly = _newly_governed_for_workspace(
+            list(specs.values()),
+            workspace=workspace,
+            generated_dir=cfg.paths.generated_dir,
         )
 
         module_filter = args.module

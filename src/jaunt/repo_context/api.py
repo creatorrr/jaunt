@@ -10,7 +10,16 @@ from jaunt.repo_context.digests import TreeCache
 
 
 def _source_roots(root: Path, cfg) -> list[Path]:
-    return [root / sr for sr in cfg.paths.source_roots]
+    from jaunt.workspace import expand_roots
+
+    return list(
+        expand_roots(
+            root,
+            cfg.paths.source_roots,
+            setting="paths.source_roots",
+            require_one=True,
+        )
+    )
 
 
 class _JsonBackendAdapter:

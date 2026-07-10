@@ -1,20 +1,10 @@
-"""Hard config gate for the multi-root output-routing trap (FEEDBACK finding 28).
-
-jaunt 1.5 routes all generated output to the first *existing* configured source
-root. When governed specs live under a different or additional root, the output
-silently lands in the wrong package while ``status``/``check`` read the same
-wrong path and stay green (fresh-and-green-while-runtime-is-broken). Until
-per-module routing lands, the ambiguous configuration is refused with exit 2.
-"""
+"""Per-module replacement for the Jaunt 1.5 multi-root routing gate."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from jaunt import cli
-from jaunt.errors import JauntConfigError
 from jaunt.status_core import enforce_source_root_routing
 
 
@@ -97,7 +87,7 @@ def test_helper_passes_nested_default_roots(tmp_path: Path) -> None:
     )
 
 
-def test_helper_raises_on_spanning_roots(tmp_path: Path) -> None:
+def test_legacy_helper_is_noop_on_spanning_roots(tmp_path: Path) -> None:
     root = _two_root_project(tmp_path)
     from jaunt.registry import SpecEntry
     from jaunt.spec_ref import SpecRef
@@ -113,17 +103,16 @@ def test_helper_raises_on_spanning_roots(tmp_path: Path) -> None:
             decorator_kwargs={},
         )
 
-    with pytest.raises(JauntConfigError, match="span multiple source_roots"):
-        enforce_source_root_routing(
-            source_dirs=[root / "pkg_a", root / "pkg_b"],
-            module_specs={
-                "mrgate_a.specs": [_entry("mrgate_a.specs", "pkg_a/mrgate_a/specs.py")],
-                "mrgate_b.specs": [_entry("mrgate_b.specs", "pkg_b/mrgate_b/specs.py")],
-            },
-        )
+    enforce_source_root_routing(
+        source_dirs=[root / "pkg_a", root / "pkg_b"],
+        module_specs={
+            "mrgate_a.specs": [_entry("mrgate_a.specs", "pkg_a/mrgate_a/specs.py")],
+            "mrgate_b.specs": [_entry("mrgate_b.specs", "pkg_b/mrgate_b/specs.py")],
+        },
+    )
 
 
-def test_helper_raises_on_wrong_order(tmp_path: Path) -> None:
+def test_legacy_helper_is_noop_on_wrong_order(tmp_path: Path) -> None:
     root = _wrong_order_project(tmp_path)
     from jaunt.registry import SpecEntry
     from jaunt.spec_ref import SpecRef
@@ -137,11 +126,10 @@ def test_helper_raises_on_wrong_order(tmp_path: Path) -> None:
         obj=None,
         decorator_kwargs={},
     )
-    with pytest.raises(JauntConfigError, match="reorder source_roots"):
-        enforce_source_root_routing(
-            source_dirs=[root / "empty_first", root / "pkg_b"],
-            module_specs={"mrgate_b.specs": [entry]},
-        )
+    enforce_source_root_routing(
+        source_dirs=[root / "empty_first", root / "pkg_b"],
+        module_specs={"mrgate_b.specs": [entry]},
+    )
 
 
 def test_helper_noop_without_specs(tmp_path: Path) -> None:
@@ -166,50 +154,48 @@ def test_status_passes_default_roots(tmp_path: Path, capsys) -> None:
     assert "span multiple source_roots" not in err
 
 
-def test_build_gate_fires_before_backend(tmp_path: Path, capsys) -> None:
-    # The gate must trip before cmd_build spends any tokens (no codex needed).
+def test_workspace_resolves_each_output_base(tmp_path: Path) -> None:
     root = _two_root_project(tmp_path)
-    args = cli.parse_args(["build", "--root", str(root), "--no-progress"])
-    rc = cli.cmd_build(args)
-    err = capsys.readouterr().err
-    assert rc == cli.EXIT_CONFIG_OR_DISCOVERY
-    assert "span multiple source_roots" in err
-    assert "FEEDBACK finding 28" in err
+    from jaunt.config import load_config
+    from jaunt.workspace import resolve_workspace
+
+    workspace = resolve_workspace(root, load_config(root=root))
+    assert workspace.route_for("mrgate_a.specs").output_base == (root / "pkg_a").resolve()
+    assert workspace.route_for("mrgate_b.specs").output_base == (root / "pkg_b").resolve()
 
 
-def test_check_blocks_on_spanning_roots(tmp_path: Path, capsys) -> None:
+def test_check_reports_unbuilt_across_spanning_roots(tmp_path: Path, capsys) -> None:
     root = _two_root_project(tmp_path)
     args = cli.parse_args(["check", "--root", str(root)])
     rc = cli.cmd_check(args)
-    err = capsys.readouterr().err
-    assert rc == cli.EXIT_CONFIG_OR_DISCOVERY
-    assert "span multiple source_roots" in err
+    out = capsys.readouterr().out
+    assert rc == cli.EXIT_PYTEST_FAILURE
+    assert "mrgate_a.specs" in out
+    assert "mrgate_b.specs" in out
 
 
-def test_status_blocks_on_spanning_roots(tmp_path: Path, capsys) -> None:
+def test_status_supports_spanning_roots(tmp_path: Path, capsys) -> None:
     root = _two_root_project(tmp_path)
     args = cli.parse_args(["status", "--root", str(root)])
     rc = cli.cmd_status(args)
-    err = capsys.readouterr().err
-    assert rc == cli.EXIT_CONFIG_OR_DISCOVERY
-    assert "span multiple source_roots" in err
+    out = capsys.readouterr().out
+    assert rc == cli.EXIT_OK
+    assert "mrgate_a.specs" in out
+    assert "mrgate_b.specs" in out
 
 
-def test_check_blocks_on_wrong_order(tmp_path: Path, capsys) -> None:
+def test_status_supports_empty_first_root(tmp_path: Path, capsys) -> None:
     root = _wrong_order_project(tmp_path)
-    args = cli.parse_args(["check", "--root", str(root)])
-    rc = cli.cmd_check(args)
-    err = capsys.readouterr().err
-    assert rc == cli.EXIT_CONFIG_OR_DISCOVERY
-    assert "reorder source_roots" in err
+    args = cli.parse_args(["status", "--root", str(root)])
+    rc = cli.cmd_status(args)
+    out = capsys.readouterr().out
+    assert rc == cli.EXIT_OK
+    assert "mrgate_b.specs" in out
 
 
-def test_test_no_build_blocks_on_spanning_roots(tmp_path: Path, capsys) -> None:
-    # `jaunt test --no-build` imports specs directly and never runs cmd_build;
-    # it must still hit the multi-root gate (exit 2) before touching pytest.
+def test_test_no_build_accepts_spanning_roots(tmp_path: Path, capsys) -> None:
     root = _two_root_project(tmp_path)
     args = cli.parse_args(["test", "--root", str(root), "--no-build", "--no-run", "--no-progress"])
     rc = cli.cmd_test(args)
-    err = capsys.readouterr().err
-    assert rc == cli.EXIT_CONFIG_OR_DISCOVERY
-    assert "span multiple source_roots" in err
+    capsys.readouterr()
+    assert rc == cli.EXIT_OK

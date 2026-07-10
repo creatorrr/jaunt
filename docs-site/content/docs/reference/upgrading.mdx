@@ -12,6 +12,22 @@ built modules — your generated code stays fresh across the upgrade. Anything
 that would restale built modules lands in a minor version and is called out on
 this page.
 
+## 1.6.3
+
+- A single `jaunt.toml` can now route modules across several packages and mixed
+  flat/`src` layouts. `source_roots` and `test_roots` accept globs; unmatched
+  globs fail during config loading.
+- Generated implementations, stubs, tests, contract batteries, ty checks, and
+  dependency validation follow each module's nearest owning `pyproject.toml`.
+  Root-level `status`, `check`, `clean`, `watch`, and daemon jobs cover the full
+  workspace.
+- Run `jaunt migrate --merge-projects` to prove that existing child projects can
+  be consolidated without changing module names, digests, fingerprints, or
+  artifact paths. Add `--apply` after reviewing the plan.
+- The semantic gate now defaults to `gpt-5.6-luna` at medium reasoning. Semantic
+  gate settings remain outside generation fingerprints, so this does not stale
+  generated modules.
+
 ## 1.5.1
 
 Patch release from the sixth adoption-feedback wave, focused on uv workspaces.

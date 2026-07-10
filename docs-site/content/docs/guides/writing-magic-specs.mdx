@@ -279,22 +279,38 @@ The `prompt=` reaches every governed spec in the file, so a rule that would
 otherwise live in one docstring and be invisible to the rest now applies
 everywhere. This is the pattern to prefer over cross-referencing prose.
 
-## Workspaces: one jaunt project per package
+## Workspaces: one config, several packages
 
-In a uv workspace, give each adopted package its own `jaunt.toml` with
-`source_roots = ["."]` at that package's import root, and run jaunt from there.
-Everything that resolves against the first source root then lands correctly:
-where generated files are written, what `jaunt check` reads, and which pyproject
-the undeclared-import validator consults. A single root config that lists more
-than one source root is a hard error as of 1.5.1 — jaunt used to route all
-output to the first existing root and silently break the others.
+A root config can cover flat packages, `src` packages, or both:
 
-One thing to watch across split configs: keep the `[codex]` block and
-`[build] instructions` byte-identical in every package's `jaunt.toml`. Both feed
-the generation fingerprint, so a stray difference restales — and re-bills —
-every module in that project. Shared guidance now lives once per project rather
-than once per repo; a config include would remove the footgun, but it does not
-exist yet.
+```toml
+[paths]
+source_roots = ["packages/*/src", "apps/*"]
+test_roots = ["packages/*/tests", "apps/*/tests"]
+```
+
+Jaunt derives module names relative to each concrete import root. Overlapping
+roots use longest containment, so `source_roots = [".", "src"]` still names a
+file under `src/pkg/` as `pkg.*`. Two files that derive the same dotted module
+name are rejected before either file is imported.
+
+The nearest `pyproject.toml` owns each module. Generated code and `.pyi` files
+stay beside that package, ty runs from the owner directory, and dependency
+validation reads only the owner's declared dependencies. Tests and contract
+batteries also run per owner, which keeps package-local pytest settings and
+identical `tests.*` names separate.
+
+Existing split configs can be consolidated without regeneration:
+
+```bash
+jaunt migrate --merge-projects
+jaunt migrate --merge-projects --apply
+```
+
+The dry run compares policy, routes, fingerprints, and artifact locations. The
+apply step changes only the root `[paths]` table and removes redundant child
+configs. It refuses any merge that would rename a module, move an artifact, or
+adopt stale output.
 
 ## If the output is garbage
 
