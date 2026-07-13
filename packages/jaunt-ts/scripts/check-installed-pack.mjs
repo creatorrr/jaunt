@@ -17,10 +17,16 @@ import { npmCliInvocation } from "./npm-cli.mjs";
 
 const npm = npmCliInvocation();
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const compilerRoot = resolve(
-  packageRoot,
-  "node_modules/@typescript/typescript6",
+const compilerRoot = resolve(packageRoot, "node_modules/@typescript/old");
+const compilerPackage = JSON.parse(
+  await readFile(resolve(compilerRoot, "package.json"), "utf8"),
 );
+assert.equal(
+  compilerPackage.name,
+  "typescript",
+  "clean-consumer compiler fixture must use the ordinary typescript package",
+);
+assert.match(compilerPackage.version, /^6\./);
 const sandbox = await mkdtemp(join(tmpdir(), "jaunt-ts-pack-"));
 let worker;
 
@@ -187,6 +193,23 @@ export function slugify(value: string): string { return jaunt.magic(); }
       resolve(project, "node_modules/@usejaunt/ts/package.json"),
       "utf8",
     ),
+  );
+  const installedCompiler = JSON.parse(
+    await readFile(
+      resolve(project, "node_modules/typescript/package.json"),
+      "utf8",
+    ),
+  );
+  assert.deepEqual(
+    {
+      name: installedCompiler.name,
+      version: installedCompiler.version,
+    },
+    {
+      name: "typescript",
+      version: compilerPackage.version,
+    },
+    "clean consumer must install TypeScript 6 at node_modules/typescript",
   );
 
   run(
