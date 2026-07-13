@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -778,7 +779,7 @@ async def test_real_worker_isolated_magic_eject_packs_and_runs_without_jaunt_too
         for marker in ("@usejaunt", ".jaunt", "__generated__", "jaunt:", "__jaunt")
     )
 
-    npm = shutil.which("npm.cmd") or shutil.which("npm")
+    npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
     assert npm is not None
     packed = json.loads(
         subprocess.run(
