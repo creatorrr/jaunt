@@ -51,7 +51,7 @@ class CleanReport:
 
 def _read(path: Path) -> str | None:
     try:
-        return path.read_text(encoding="utf-8")
+        return path.read_bytes().decode("utf-8")
     except (FileNotFoundError, UnicodeError):
         return None
 

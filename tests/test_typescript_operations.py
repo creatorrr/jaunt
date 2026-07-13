@@ -25,7 +25,7 @@ from jaunt.generate.base import (
     ModuleSpecContext,
     TokenUsage,
 )
-from jaunt.targets.base import TargetBuildReport, TargetCheckReport, TargetDiagnostic
+from jaunt.targets.base import TargetBuildReport, TargetCheckReport, TargetDiagnostic, TargetStatus
 from jaunt.typescript.builder import (
     _build_units,
     _build_request,
@@ -45,6 +45,7 @@ from jaunt.typescript.contracts import (
     _battery_request,
     _battery_path,
     _declaration_only_contract,
+    _magic_eject_status_reason,
     _ordinary_ejected_source,
     _projection_offset,
     _remove_contract_tag,
@@ -1417,6 +1418,30 @@ async def test_status_rejects_hand_edited_generated_artifact(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_status_preserves_mixed_api_mirror_line_endings(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    worker = FakeWorker(tmp_path)
+    worker.api = (
+        "/** Mixed line endings stay byte-significant. */\n"
+        "export interface Nested {\r\n"
+        "  readonly value: string;\r\n"
+        "}\n"
+    )
+    worker.module["apiSource"] = worker.api
+    await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+
+    status = await run_status(tmp_path, config, worker_factory=lambda *_: worker)
+
+    assert status.fresh == frozenset({"ts:src/math"})
+    assert status.invalid == {}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("relative", "expected_code"),
     [
@@ -1536,6 +1561,46 @@ async def test_magic_eject_leaves_plain_source_and_removes_jaunt_artifacts(
     )
     assert emit["package_root"] == "."
     assert emit["project_config_paths"] == ("tsconfig.json",)
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (TargetStatus(language="ts", stale={"ts:src/math": "structural"}), "structural"),
+        (TargetStatus(language="ts", unbuilt=frozenset({"ts:src/math"})), "unbuilt"),
+        (
+            TargetStatus(
+                language="ts",
+                invalid={
+                    "ts:src/math": (
+                        TargetDiagnostic(
+                            code="JAUNT_TS_API_DRIFT",
+                            message="The API mirror changed.",
+                        ),
+                    )
+                },
+            ),
+            "JAUNT_TS_API_DRIFT: The API mirror changed.",
+        ),
+    ],
+)
+def test_magic_eject_status_reason_preserves_specific_failure(
+    status: TargetStatus,
+    expected: str,
+) -> None:
+    assert _magic_eject_status_reason(status, "ts:src/math", ()) == expected
+
+
+def test_magic_eject_status_reason_prioritizes_blocking_workspace_diagnostic() -> None:
+    status = TargetStatus(language="ts", unbuilt=frozenset({"ts:src/math"}))
+    diagnostic = TargetDiagnostic(
+        code="JAUNT_TS_CONFIG_INVALID",
+        message="The workspace is invalid.",
+    )
+
+    assert _magic_eject_status_reason(status, "ts:src/math", (diagnostic,)) == (
+        "JAUNT_TS_CONFIG_INVALID: The workspace is invalid."
+    )
 
 
 @pytest.mark.asyncio

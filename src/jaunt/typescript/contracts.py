@@ -25,7 +25,7 @@ from jaunt.generate.base import GenerationRequest, GeneratorBackend, TokenUsage
 from jaunt.generate.request_cache import generate_request_cached
 from jaunt.journal import JournalEvent, append_events
 from jaunt.skill_seed import skills_fingerprint
-from jaunt.targets.base import TargetDiagnostic
+from jaunt.targets.base import TargetDiagnostic, TargetStatus
 from jaunt.typescript.builder import (
     MISSING_INPUT,
     WorkerFactory,
@@ -2747,6 +2747,26 @@ def _module_path_for_eject(module: Mapping[str, Any], key: str) -> str:
     return value
 
 
+def _magic_eject_status_reason(
+    status: TargetStatus,
+    target: str,
+    blocking_status: Sequence[TargetDiagnostic],
+) -> str:
+    if blocking_status:
+        return "; ".join(
+            f"{diagnostic.code}: {diagnostic.message}" for diagnostic in blocking_status
+        )
+    stale = status.stale.get(target)
+    if stale is not None:
+        return stale
+    if target in status.unbuilt:
+        return "unbuilt"
+    invalid = status.invalid.get(target, ())
+    if invalid:
+        return "; ".join(f"{diagnostic.code}: {diagnostic.message}" for diagnostic in invalid)
+    return "not present in the analyzed workspace"
+
+
 async def _eject_magic_module(
     root: Path,
     config: JauntConfig,
@@ -2760,11 +2780,7 @@ async def _eject_magic_module(
         diagnostic for diagnostic in status.diagnostics if diagnostic.severity == "error"
     )
     if target not in status.fresh or blocking_status:
-        reason = status.stale.get(target, "unbuilt or invalid")
-        if blocking_status:
-            reason = "; ".join(
-                f"{diagnostic.code}: {diagnostic.message}" for diagnostic in blocking_status
-            )
+        reason = _magic_eject_status_reason(status, target, blocking_status)
         raise JauntConfigError(f"Magic ejection requires a fresh module; {target} is {reason}")
     async with worker_session(root, config, worker_factory=worker_factory) as (client, initialized):
         analysis = await analyze(client, initialized, target_ids=(target,))

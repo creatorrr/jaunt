@@ -718,6 +718,8 @@ async def test_real_worker_isolated_magic_eject_packs_and_runs_without_jaunt_too
     tested = await run_test(tmp_path, config, no_build=True, generator=generator)
     assert tested.exit_code == 0, tested.failed
     assert "HELD-OUT-FILESYSTEM-SENTINEL" not in json.dumps(tested.runner)
+    status_after_test = await run_status(tmp_path, config, target_ids=("ts:src/slug",))
+    assert status_after_test.fresh == frozenset({"ts:src/slug"}), status_after_test.invalid
 
     ejected = await run_eject(tmp_path, config, target="ts:src/slug")
     assert ejected.exit_code == 0, ejected.diagnostics
@@ -776,9 +778,11 @@ async def test_real_worker_isolated_magic_eject_packs_and_runs_without_jaunt_too
         for marker in ("@usejaunt", ".jaunt", "__generated__", "jaunt:", "__jaunt")
     )
 
+    npm = shutil.which("npm.cmd") or shutil.which("npm")
+    assert npm is not None
     packed = json.loads(
         subprocess.run(
-            ["npm", "pack", "--json", "--ignore-scripts"],
+            [npm, "pack", "--json", "--ignore-scripts"],
             cwd=tmp_path,
             check=True,
             capture_output=True,
@@ -794,7 +798,7 @@ async def test_real_worker_isolated_magic_eject_packs_and_runs_without_jaunt_too
     )
     subprocess.run(
         [
-            "npm",
+            npm,
             "install",
             "--offline",
             "--ignore-scripts",
