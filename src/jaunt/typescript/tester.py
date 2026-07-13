@@ -2731,23 +2731,6 @@ def _bubblewrap_executable(environment: Mapping[str, str]) -> str | None:
     return shutil.which("bwrap", path=environment.get("PATH", ""))
 
 
-def _permission_path_aliases(*paths: Path) -> tuple[Path, ...]:
-    """Return every lexical and physical path spelling Node may observe.
-
-    macOS temporary directories commonly use the ``/var`` symlink while Vite
-    realpaths modules through ``/private/var``. Windows can similarly mix 8.3
-    short names with long paths. Node's permission model must allow both names
-    for the same directory, without granting their shared parent.
-    """
-
-    aliases: dict[str, Path] = {}
-    for path in paths:
-        lexical = Path(os.path.abspath(path))
-        for alias in (lexical, lexical.resolve()):
-            aliases.setdefault(os.path.normcase(str(alias)), alias)
-    return tuple(aliases[key] for key in sorted(aliases))
-
-
 async def _run_test_runner(
     client: Any,
     root: Path,
@@ -2799,8 +2782,34 @@ async def _run_test_runner(
         compiler_module_path,
         label="the TypeScript compiler",
     )
+    runner_root = root
+    if isolated_from is not None:
+        # Resolve the disposable view before crossing the permission boundary.
+        # Otherwise Node's realpath checks must inspect an alias ancestor such
+        # as macOS /var, and granting that existing directory would implicitly
+        # wildcard every sibling temporary workspace.
+        lexical_root = Path(os.path.abspath(root))
+        runner_root = root.resolve()
+        source_lexical = Path(os.path.abspath(isolated_from))
+        source_physical = isolated_from.resolve()
+
+        def sandbox_path(path: Path) -> Path:
+            lexical = Path(os.path.abspath(path))
+            for base in (lexical_root, source_lexical):
+                with contextlib.suppress(ValueError):
+                    return runner_root / lexical.relative_to(base)
+            physical = path.resolve()
+            with contextlib.suppress(ValueError):
+                return runner_root / physical.relative_to(source_physical)
+            return physical
+
+        # Keep package-manager symlinks lexical beneath the physical workspace
+        # prefix. The runner validates that compilerModulePath is inside root;
+        # separate read grants cover external physical node_modules targets.
+        runner = sandbox_path(runner)
+        compiler_module_path = sandbox_path(compiler_module_path)
     payload = {
-        "root": str(root),
+        "root": str(runner_root),
         "files": list(files),
         "overlays": dict(overlays or {}),
         "timeoutMs": int(timeout * 1000),
@@ -2816,7 +2825,12 @@ async def _run_test_runner(
     if deleted_files:
         payload["deletedFiles"] = list(dict.fromkeys(deleted_files))
     if package_root is not None:
-        payload["packageRoot"] = package_root
+        package_path = Path(package_root)
+        payload["packageRoot"] = (
+            str(sandbox_path(package_path))
+            if isolated_from is not None and package_path.is_absolute()
+            else package_root
+        )
     if project_config_paths:
         payload["projectConfigPaths"] = list(dict.fromkeys(project_config_paths))
     if typecheck_only:
@@ -2868,13 +2882,13 @@ async def _run_test_runner(
                 "/dev",
                 "/dev",
                 "--bind",
-                str(root.resolve()),
-                str(root.resolve()),
+                str(runner_root),
+                str(runner_root),
                 "--bind",
-                str(root.resolve()),
+                str(runner_root),
                 str(isolated_from.resolve()),
                 "--chdir",
-                str(root.resolve()),
+                str(runner_root),
                 installation.node,
             ]
         else:
@@ -2885,37 +2899,34 @@ async def _run_test_runner(
                 raise JauntConfigError(
                     "Installed @usejaunt/ts is missing its protected worker permission guard"
                 )
-            readable = [root, runner.parent, compiler_module_path.parent]
+            readable = {runner_root, runner.parent, compiler_module_path.parent}
             package_root_path = getattr(installation, "package_root", None)
             if isinstance(package_root_path, Path):
-                mapped_package = package_root_path
+                mapped_package = package_root_path.resolve()
                 source = isolated_from.resolve()
-                lexical_package = Path(os.path.abspath(package_root_path))
                 with contextlib.suppress(ValueError):
-                    mapped_package = root / lexical_package.relative_to(source)
+                    mapped_package = runner_root / mapped_package.relative_to(source)
                 if mapped_package.exists():
-                    readable.append(mapped_package)
+                    readable.add(mapped_package)
             for candidate in root.rglob("*"):
                 if not candidate.is_symlink():
                     continue
                 physical = candidate.resolve(strict=True)
                 try:
-                    physical.relative_to(root.resolve())
+                    physical.relative_to(runner_root)
                 except ValueError:
                     for parent in (physical, *physical.parents):
                         if parent.name == "node_modules":
-                            readable.append(parent)
+                            readable.add(parent)
                             break
-            readable_aliases = _permission_path_aliases(*readable)
-            writable_aliases = _permission_path_aliases(root)
             command.extend(
                 [
                     permission_flag,
                     "--allow-addons",
                     "--allow-worker",
                     f"--require={permission_guard}",
-                    *(f"--allow-fs-read={path}" for path in readable_aliases),
-                    *(f"--allow-fs-write={path}" for path in writable_aliases),
+                    *(f"--allow-fs-read={path}" for path in sorted(readable)),
+                    f"--allow-fs-write={runner_root}",
                 ]
             )
         source_text = str(isolated_from.resolve())
@@ -2927,11 +2938,11 @@ async def _run_test_runner(
             for entry in environment.get("PATH", "").split(os.pathsep)
             if entry and source_text not in os.path.abspath(entry)
         )
-        environment["PWD"] = str(root.resolve())
+        environment["PWD"] = str(runner_root)
     command.append(str(runner))
     process = await asyncio.create_subprocess_exec(
         *command,
-        cwd=str(root),
+        cwd=str(runner_root),
         env=environment,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,

@@ -75,7 +75,6 @@ from jaunt.typescript.tester import (
     _implicit_class_test_specs,
     _isolated_test_workspace,
     _is_reviewable_example_battery,
-    _permission_path_aliases,
     _redact_runner_result,
     _runner_fingerprint,
     _run_test_runner,
@@ -4658,26 +4657,133 @@ async def test_windows_runner_timeout_terminates_the_process_tree(
     assert calls == [("taskkill", "/PID", "321", "/T", "/F")]
 
 
-def test_node_permission_paths_expand_aliases_deterministically(
+@pytest.mark.asyncio
+async def test_node_permission_runner_uses_only_physical_sandbox_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    lexical = (tmp_path / "lexical-workspace").absolute()
-    physical = (tmp_path / "physical-workspace").absolute()
-    path_type = type(lexical)
-    original_resolve = path_type.resolve
+    source = tmp_path / "source"
+    source.mkdir()
+    config = _config(source)
+    package = source / "node_modules/@usejaunt/ts"
+    source_runner = package / "dist/test/runner.js"
+    source_guard = package / "dist/test/permission_guard.cjs"
+    source_compiler = source / "node_modules/typescript/lib/typescript.js"
+    source_package_owner = source / "packages/app"
+    source_package_owner.mkdir(parents=True)
+    for path in (source_runner, source_guard, source_compiler):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("export {};\n", encoding="utf-8")
 
-    def resolve_alias(path: Path, *args: Any, **kwargs: Any) -> Path:
-        if path == lexical:
-            return physical
-        return original_resolve(path, *args, **kwargs)
+    external_modules = tmp_path / "external-store/node_modules"
+    external_package = external_modules / "@usejaunt/ts"
+    external_compiler = external_modules / "typescript"
+    for source_path, target in (
+        (source_runner, external_package / "dist/test/runner.js"),
+        (source_guard, external_package / "dist/test/permission_guard.cjs"),
+        (source_compiler, external_compiler / "lib/typescript.js"),
+    ):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source_path.read_bytes())
+    physical_parent = tmp_path / "physical-view"
+    physical_root = physical_parent / "workspace"
+    (physical_root / "node_modules/@usejaunt").mkdir(parents=True)
+    (physical_root / "node_modules/@usejaunt/ts").symlink_to(
+        external_package, target_is_directory=True
+    )
+    (physical_root / "node_modules/typescript").symlink_to(
+        external_compiler, target_is_directory=True
+    )
+    (physical_root / source_package_owner.relative_to(source)).mkdir(parents=True)
+    alias_parent = tmp_path / "lexical-view"
+    alias_parent.symlink_to(physical_parent, target_is_directory=True)
+    lexical_root = alias_parent / "workspace"
 
-    monkeypatch.setattr(path_type, "resolve", resolve_alias)
+    captured: dict[str, Any] = {}
 
-    aliases = _permission_path_aliases(lexical, physical, lexical)
+    class Process:
+        returncode = 0
 
-    assert set(aliases) == {lexical, physical}
-    assert aliases == tuple(sorted(aliases, key=lambda path: os.path.normcase(str(path))))
+        async def communicate(self, payload: bytes) -> tuple[bytes, bytes]:
+            captured["payload"] = json.loads(payload)
+            return (
+                json.dumps(
+                    {
+                        "ok": True,
+                        "mode": "run",
+                        "diagnostics": [],
+                        "tests": [
+                            {
+                                "file": "tests/safe.example.test.ts",
+                                "tier": "example",
+                                "status": "passed",
+                                "durationMs": 0,
+                            }
+                        ],
+                        "captured": {"stdout": "", "stderr": ""},
+                    }
+                ).encode(),
+                b"",
+            )
+
+    async def create(*args: str, **kwargs: Any) -> Process:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return Process()
+
+    monkeypatch.setattr("jaunt.typescript.tester._bubblewrap_executable", lambda _env: None)
+    monkeypatch.setattr(
+        "jaunt.typescript.tester._node_permission_flag", lambda _node: "--permission"
+    )
+    monkeypatch.setattr("jaunt.typescript.tester.asyncio.create_subprocess_exec", create)
+    client = SimpleNamespace(
+        installation=SimpleNamespace(
+            node="node",
+            package_root=package,
+            compiler_module_path=source_compiler,
+        )
+    )
+
+    result = await _run_test_runner(
+        client,
+        lexical_root,
+        config,
+        files=(),
+        isolated_from=source,
+        package_root=str(source_package_owner),
+        redact_derived=False,
+    )
+
+    assert result["ok"] is True
+    physical_root = physical_root.resolve()
+    physical_runner = physical_root / source_runner.relative_to(source)
+    physical_compiler = physical_root / source_compiler.relative_to(source)
+    args = captured["args"]
+    kwargs = captured["kwargs"]
+    payload = captured["payload"]
+    assert payload["root"] == str(physical_root)
+    assert payload["compilerModulePath"] == str(physical_compiler)
+    assert payload["packageRoot"] == str(physical_root / source_package_owner.relative_to(source))
+    assert kwargs["cwd"] == str(physical_root)
+    assert kwargs["env"]["PWD"] == str(physical_root)
+    assert args[-1] == str(physical_runner)
+    assert f"--require={physical_runner.parent / 'permission_guard.cjs'}" in args
+    assert [arg for arg in args if arg.startswith("--allow-fs-write=")] == [
+        f"--allow-fs-write={physical_root}"
+    ]
+    read_grants = {
+        Path(arg.removeprefix("--allow-fs-read="))
+        for arg in args
+        if arg.startswith("--allow-fs-read=")
+    }
+    assert physical_root in read_grants
+    assert physical_runner.parent in read_grants
+    assert physical_compiler.parent in read_grants
+    assert physical_root / package.relative_to(source) in read_grants
+    assert external_modules in read_grants
+    assert alias_parent not in read_grants
+    assert physical_root.parent not in read_grants
+    assert str(alias_parent) not in json.dumps(captured, default=str)
 
 
 def test_status_freshness_digest_invalidates_prose_and_fingerprint_changes() -> None:

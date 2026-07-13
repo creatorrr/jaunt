@@ -39,12 +39,6 @@ function aliasedWorkspaceRoot(root: string): string {
   return alias;
 }
 
-function permissionPathAliases(...paths: string[]): string[] {
-  return [
-    ...new Set(paths.flatMap((path) => [resolve(path), realpathSync(path)])),
-  ].sort();
-}
-
 function managedTestSource(tier: "example" | "derived", body: string): string {
   const canonicalBody = `${body.trim()}\n`;
   return `// ⚙️ jaunt:generated — DO NOT EDIT. Regenerate with \`jaunt test\`.
@@ -912,49 +906,56 @@ test("permission sandbox forces nested workers to retain filesystem restrictions
     managedTestSource(
       "example",
       `
+import { EventEmitter } from "node:events";
 import { SHARE_ENV, Worker } from "node:worker_threads";
 import { expect, test } from "vitest";
 test("worker stays restricted", async () => {
   const code = String.raw\`const { parentPort } = require("node:worker_threads");
     const fs = require("node:fs");
-    const inherited = {
-      execArgv: process.execArgv,
-      guardInstalled:
-        globalThis[Symbol.for("@usejaunt/ts/permission-guard-installed")] === true,
-    };
     try {
-      parentPort.postMessage({
-        value: fs.readFileSync(${JSON.stringify(secret)}, "utf8"),
-        ...inherited,
-      });
+      fs.readFileSync(${JSON.stringify(secret)}, "utf8");
+      parentPort.postMessage({ code: "READ_SUCCEEDED" });
     } catch (error) {
-      parentPort.postMessage({ value: error.code, ...inherited });
+      parentPort.postMessage({ code: error.code, permission: error.permission });
     }\`;
+  expect(
+    globalThis[Symbol.for("@usejaunt/ts/permission-guard-installed")],
+  ).toBe(true);
+  expect(process.execArgv).toEqual([]);
+  expect(process.env.NODE_OPTIONS).toContain(${JSON.stringify(permissionFlag)});
+  expect(process.env.NODE_OPTIONS).not.toContain("--allow-worker");
+  expect(process.env.NODE_OPTIONS).not.toContain(${JSON.stringify(disablePermissionFlag)});
   const priorNodeOptions = process.env.NODE_OPTIONS;
   process.env.NODE_OPTIONS = ${JSON.stringify(disablePermissionFlag)};
   try {
-    const options = [
-      { execArgv: [], env: { NODE_OPTIONS: ${JSON.stringify(disablePermissionFlag)} } },
-      { execArgv: [${JSON.stringify(disablePermissionFlag)}], env: { NODE_OPTIONS: ${JSON.stringify(disablePermissionFlag)} } },
-      { execArgv: [], env: SHARE_ENV },
+    expect(Object.getPrototypeOf(Worker)).toBe(EventEmitter);
+    expect(Worker.listenerCount).toBe(EventEmitter.listenerCount);
+    expect(Worker.getEventListeners).toBe(EventEmitter.getEventListeners);
+    expect(Worker.prototype.constructor).toBe(Worker);
+    const attempts = [
+      [Worker, { execArgv: [], env: { NODE_OPTIONS: ${JSON.stringify(disablePermissionFlag)} } }],
+      [Worker, { execArgv: [${JSON.stringify(disablePermissionFlag)}], env: { NODE_OPTIONS: ${JSON.stringify(disablePermissionFlag)} } }],
+      [Worker, { execArgv: [], env: SHARE_ENV }],
+      [Worker.prototype.constructor, { execArgv: [${JSON.stringify(disablePermissionFlag)}], env: SHARE_ENV }],
     ];
-    const values = await Promise.all(options.map((workerOptions) =>
-      new Promise((resolve, reject) => {
-        const worker = new Worker(code, { eval: true, ...workerOptions });
-        worker.once("message", resolve);
-        worker.once("error", reject);
-      })
-    ));
-    expect(values.map(({ value }) => value)).toEqual([
-      "ERR_ACCESS_DENIED",
-      "ERR_ACCESS_DENIED",
-      "ERR_ACCESS_DENIED",
-    ]);
-    for (const value of values) {
-      expect(value.guardInstalled).toBe(true);
-      expect(value.execArgv).toContain(${JSON.stringify(permissionFlag)});
-      expect(value.execArgv).not.toContain(${JSON.stringify(disablePermissionFlag)});
-    }
+    const outcomes = await Promise.all(attempts.map(([WorkerConstructor, workerOptions]) => {
+      try {
+        const worker = new WorkerConstructor(code, { eval: true, ...workerOptions });
+        return new Promise((resolve) => {
+          worker.once("message", resolve);
+          worker.once("error", (error) => resolve({
+            code: error.code,
+            permission: error.permission,
+          }));
+        });
+      } catch (error) {
+        return { code: error.code, permission: error.permission };
+      }
+    }));
+    expect(outcomes).toEqual(Array.from({ length: attempts.length }, () => ({
+      code: "ERR_ACCESS_DENIED",
+      permission: "WorkerThreads",
+    })));
   } finally {
     if (priorNodeOptions === undefined) delete process.env.NODE_OPTIONS;
     else process.env.NODE_OPTIONS = priorNodeOptions;
@@ -963,12 +964,12 @@ test("worker stays restricted", async () => {
 `,
     ),
   );
+  const sandboxRoot = realpathSync(workspace.root);
+  const sandboxPackageRoot = realpathSync(packageRoot);
   const permissionGuard = resolve(
-    packageRoot,
+    sandboxPackageRoot,
     "dist/test/permission_guard.cjs",
   );
-  const workspaceAliases = permissionPathAliases(workspace.root);
-  const packageAliases = permissionPathAliases(packageRoot);
   const child = spawn(
     process.execPath,
     [
@@ -976,20 +977,20 @@ test("worker stays restricted", async () => {
       "--allow-addons",
       "--allow-worker",
       `--require=${permissionGuard}`,
-      ...workspaceAliases.map((path) => `--allow-fs-read=${path}`),
-      ...packageAliases.map((path) => `--allow-fs-read=${path}`),
-      ...workspaceAliases.map((path) => `--allow-fs-write=${path}`),
-      resolve(packageRoot, "dist/test/runner.js"),
+      `--allow-fs-read=${sandboxRoot}`,
+      `--allow-fs-read=${sandboxPackageRoot}`,
+      `--allow-fs-write=${sandboxRoot}`,
+      resolve(sandboxPackageRoot, "dist/test/runner.js"),
     ],
     {
-      cwd: workspace.root,
+      cwd: sandboxRoot,
       env: process.env,
       stdio: ["pipe", "pipe", "pipe"],
     },
   );
   child.stdin.end(
     JSON.stringify({
-      root: workspace.root,
+      root: sandboxRoot,
       files: [path],
       timeoutMs: 10_000,
       // This fixture contains no held-out battery. Keep infrastructure errors
