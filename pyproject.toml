@@ -1,10 +1,10 @@
 [project]
 name = "jaunt"
 version = "1.6.3"
-description = "Spec-driven code generation framework: write intent as decorated Python stubs, generate implementations and tests with LLMs."
+description = "Spec-driven code generation for Python and TypeScript: write contracts, generate validated implementations and tests with Codex."
 readme = "README.md"
 requires-python = ">=3.12"
-keywords = ["llm", "code-generation", "testing", "developer-tools", "cli"]
+keywords = ["llm", "code-generation", "testing", "typescript", "developer-tools", "cli"]
 classifiers = [
   "Development Status :: 5 - Production/Stable",
   "Intended Audience :: Developers",
@@ -40,8 +40,11 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/jaunt"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"schemas/jaunt-ts" = "jaunt/typescript/schemas"
+
 [tool.hatch.build.targets.sdist]
-include = ["src/jaunt/"]
+include = ["src/jaunt/", "schemas/jaunt-ts/"]
 
 [dependency-groups]
 dev = [

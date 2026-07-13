@@ -57,9 +57,9 @@ no Jaunt runtime dependency below the public facade.
   `jaunt migrate --config-v2` action produces the new shape without changing Python
   routes or artifacts. `--merge-projects` keeps its existing consolidation meaning.
 - The Node version used to run the analyzer is a tool-host requirement, not a
-  requirement on the generated program's deployment runtime. Freeze the exact
-  host range when the worker package is created and test it independently from
-  target runtimes.
+  requirement on the generated program's deployment runtime. The worker package
+  freezes that host range at Node `>=20 <25`; CI tests the Node 20 and Node 24
+  boundaries independently from target runtimes.
 - Generated TypeScript is committed/reviewed just like Python generated output.
   A missing implementation is always a deterministic `jaunt check` failure.
   Before `jaunt sync` it is also a compiler failure; after sync, a provenance-marked
@@ -143,14 +143,15 @@ Node-style resolution, so normal `tsc` emit does not require importing `.ts`
 extensions:
 
 ```ts
-export type * from "./__generated__/index.api.js";
+export type { PublicOptions } from "./__generated__/index.api.js";
 export * from "./index.context.js";
 export * from "./__generated__/index.js";
 ```
 
-Absent optional files are omitted. `jaunt init`, `jaunt sync`, and `jaunt migrate`
-can create a missing canonical facade, but none silently overwrites a user-written
-facade.
+Standalone interface and type-alias names are listed explicitly; `export type *`
+would collide with classes, which have both a type and a runtime value. Absent
+optional files are omitted. `jaunt init`, `jaunt sync`, and `jaunt migrate` can create
+a missing canonical facade, but none silently overwrites a user-written facade.
 
 ### 4.2 Spec grammar
 
@@ -365,7 +366,7 @@ tool_owner = "." # package that directly owns @usejaunt/ts + typescript
 generated_dir = "__generated__"
 test_runner = "vitest"
 vitest_config = ""
-vitest_args = []
+vitest_args = [] # reserved; the protected runner requires this to remain empty
 auto_class_tests = false
 fast_check_runs = 50
 contract_battery_dir = "tests/contract"
@@ -435,13 +436,16 @@ contain a stable code, message, retryable flag, and structured diagnostics.
    dependency graph, import violations, and baseline diagnostics.
 3. `analyzeContracts`: semantic IR, prose/structure digests, type graph, API digests,
    deterministic API-mirror source, and exact dependency edges for selected modules.
-4. `validateOverlay`: reserved-binding candidate sources plus selected modules;
+4. `projectContract`: compiler-AST projection of a committed contract declaration;
+   preserves TSDoc and exact exported signatures while removing executable bodies,
+   initializers, static blocks, and non-contract comments, then reparses fail-closed.
+5. `validateOverlay`: reserved-binding candidate sources plus selected modules;
    deterministically composes API mirrors/public boundaries and returns the exact
    artifact bytes/content hashes, project diagnostics, semantic conformance,
    export-set/provenance checks, and affected dependent projects without writing.
-5. `findOrphans`: expected/actual TypeScript artifacts for clean/check.
-6. `invalidate`: changed paths; refreshes affected Programs and advances the epoch.
-7. `shutdown` and `cancel`: graceful completion and queued-request cancellation.
+6. `findOrphans`: expected/actual TypeScript artifacts for clean/check.
+7. `invalidate`: changed paths; refreshes affected Programs and advances the epoch.
+8. `shutdown` and `cancel`: graceful completion and queued-request cancellation.
 
 Protocol requirements:
 
@@ -720,8 +724,9 @@ status, check discovery, and build never load them.
 - The renderer emits a typed fixture destructure; missing fixtures fail before
   Vitest starts.
 - Fixture public API digests participate in dependent battery freshness.
-- Each `@prop` arbitrary is parsed as an expression, inserted into
-  `const arb: fc.Arbitrary<T> = ...`, checked for `any`, and then passed to
+- Each `@prop` arbitrary is parsed as a restricted fast-check expression, checked
+  for `any`, and inserted with either an explicit `fc.Arbitrary<T>` annotation or
+  a type-preserving `satisfies fc.Arbitrary<unknown>` check before it reaches
   `fc.property` or `fc.asyncProperty`.
 - Seed, run count, fast-check/Vitest/Node versions, reporter protocol, protected
   effective settings, expected parameter type, and case digest are battery
@@ -746,11 +751,12 @@ scores are deterministic and recorded in battery metadata.
 
 Use `@jauntDesign` on a doc-only declaration in a private spec.
 
-- Default behavior calls the model and prints a unified declaration/TSDoc patch; it
-  does not write.
-- `--apply` checks the source digest and dirty-tree policy, applies atomically,
-  removes the marker, and validates the analysis overlay. It leaves the module
-  unbuilt so API and implementation remain separate review steps.
+- Default behavior calls the model and prints a unified declaration/TSDoc patch. It
+  leaves the spec unchanged and records the exact proposal under `.jaunt/`.
+- `--apply` requires that reviewed proposal and makes no model call. It checks the
+  source digest and dirty-tree policy, applies atomically, removes the marker, and
+  validates the analysis overlay. It leaves the module unbuilt so API and
+  implementation remain separate review steps.
 - The model may change only the marked declaration and its associated TSDoc/type
   imports. The worker rejects executable bodies and unrelated edits.
 - JSON includes target ID, patch, applied flag, diagnostics, usage, and actual cost.

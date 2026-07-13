@@ -10,16 +10,19 @@ Codex will write files inside the non-git temp workspace we seed for it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import os
 import re
+import signal
 import tempfile
 from collections.abc import Iterable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import cast
 
 from jaunt.config import CodexConfig, LLMConfig, PromptsConfig
 from jaunt.errors import JauntGenerationError
-from jaunt.generate.base import GeneratorBackend, ModuleSpecContext, TokenUsage
+from jaunt.generate.base import GenerationRequest, GeneratorBackend, ModuleSpecContext, TokenUsage
 from jaunt.generate.shared import load_prompt
 from jaunt.skill_seed import seed_skills_into_workspace
 
@@ -166,8 +169,58 @@ async def run_codex_exec(
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        start_new_session=os.name != "nt",
     )
-    stdout_bytes, stderr_bytes = await proc.communicate(prompt.encode("utf-8"))
+    try:
+        stdout_bytes, stderr_bytes = await proc.communicate(prompt.encode("utf-8"))
+    except asyncio.CancelledError:
+        # A mixed command forwards Ctrl-C/task cancellation across event-loop
+        # threads.  Cancelling ``communicate`` alone does not stop the child,
+        # which can otherwise keep running (and billing) after Jaunt exits.
+        if proc.returncode is None:
+            try:
+                if os.name != "nt" and isinstance(getattr(proc, "pid", None), int):
+                    os.killpg(proc.pid, signal.SIGTERM)
+                elif os.name == "nt" and isinstance(getattr(proc, "pid", None), int):
+                    taskkill = await asyncio.create_subprocess_exec(
+                        "taskkill",
+                        "/PID",
+                        str(proc.pid),
+                        "/T",
+                        "/F",
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    await asyncio.wait_for(taskkill.wait(), timeout=5.0)
+                else:
+                    proc.terminate()
+            except (FileNotFoundError, OSError, ProcessLookupError, TimeoutError):
+                with contextlib.suppress(ProcessLookupError):
+                    proc.terminate()
+            try:
+                await asyncio.shield(asyncio.wait_for(proc.wait(), timeout=2.0))
+            except TimeoutError:
+                try:
+                    if os.name != "nt" and isinstance(getattr(proc, "pid", None), int):
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    elif os.name == "nt" and isinstance(getattr(proc, "pid", None), int):
+                        taskkill = await asyncio.create_subprocess_exec(
+                            "taskkill",
+                            "/PID",
+                            str(proc.pid),
+                            "/T",
+                            "/F",
+                            stdout=asyncio.subprocess.DEVNULL,
+                            stderr=asyncio.subprocess.DEVNULL,
+                        )
+                        await asyncio.wait_for(taskkill.wait(), timeout=5.0)
+                    else:
+                        proc.kill()
+                except (FileNotFoundError, OSError, ProcessLookupError, TimeoutError):
+                    with contextlib.suppress(ProcessLookupError):
+                        proc.kill()
+                await asyncio.shield(proc.wait())
+        raise
     stdout = stdout_bytes.decode("utf-8", errors="replace")
     stderr = stderr_bytes.decode("utf-8", errors="replace")
 
@@ -348,6 +401,99 @@ class CodexBackend(GeneratorBackend):
         # No long-lived resources; each call is its own subprocess. Kept for
         # lifecycle compatibility with the GeneratorBackend protocol.
         return None
+
+    @staticmethod
+    def _workspace_path(root: Path, relative: str, *, label: str) -> Path:
+        candidate = PurePosixPath(relative)
+        if (
+            not relative
+            or "\\" in relative
+            or candidate.is_absolute()
+            or ".." in candidate.parts
+            or not candidate.parts
+        ):
+            raise JauntGenerationError(f"{label} must be a safe root-relative path: {relative!r}")
+        resolved = (root / Path(*candidate.parts)).resolve()
+        if resolved != root and root not in resolved.parents:
+            raise JauntGenerationError(f"{label} escapes the generation workspace: {relative!r}")
+        return resolved
+
+    async def generate_request(
+        self,
+        request: GenerationRequest,
+        *,
+        extra_error_context: list[str] | None = None,
+    ) -> tuple[str, TokenUsage | None, tuple[str, ...]]:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            target = self._workspace_path(root, request.target_path, label="target_path")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(request.seed_target_content, encoding="utf-8")
+
+            for relative, content in sorted(request.context_files.items()):
+                context_path = self._workspace_path(root, relative, label="context file")
+                if context_path == target:
+                    raise JauntGenerationError(
+                        f"context file aliases generation target: {relative!r}"
+                    )
+                context_path.parent.mkdir(parents=True, exist_ok=True)
+                context_path.write_text(content, encoding="utf-8")
+
+            seed_skills_into_workspace(
+                root,
+                project_root=request.project_root,
+                builtin_names=list(request.builtin_skill_names),
+            )
+            prompt_blocks = [
+                request.prompt.strip(),
+                f"Write the complete requested artifact to `{request.target_path}`.",
+                "Edit ONLY that target file. Do not create or modify any other file.",
+                ADVISORIES_INSTRUCTION,
+            ]
+            if extra_error_context:
+                prompt_blocks.append(
+                    "Previous attempt problems:\n" + "\n".join(extra_error_context)
+                )
+            prompt = "\n\n".join(block for block in prompt_blocks if block)
+            result = await self._run_with_config_fallback(prompt=prompt, cwd=str(root))
+            try:
+                source = target.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise JauntGenerationError(
+                    f"Codex did not leave a readable target artifact at {request.target_path!r}: "
+                    f"{exc}"
+                ) from exc
+            return source, self._usage_from(result), parse_advisories(result.final_message)
+
+    async def _run_with_config_fallback(self, *, prompt: str, cwd: str) -> CodexExecResult:
+        extra_config = dict(self._codex.config or {})
+        try:
+            return await run_codex_exec(
+                prompt=prompt,
+                cwd=cwd,
+                sandbox=self._codex.sandbox,
+                model=self._model,
+                reasoning_effort=self._codex.reasoning_effort,
+                extra_config=extra_config,
+            )
+        except JauntGenerationError as exc:
+            message = str(exc)
+            if not extra_config or not _is_model_config_error(message):
+                raise
+            offending_key = _offending_config_key(message, extra_config.keys())
+            retry_config = dict(extra_config)
+            if offending_key is None:
+                retry_config.clear()
+            else:
+                retry_config.pop(offending_key, None)
+            return await run_codex_exec(
+                prompt=prompt,
+                cwd=cwd,
+                sandbox=self._codex.sandbox,
+                model=self._model,
+                reasoning_effort=self._codex.reasoning_effort,
+                extra_config=retry_config,
+            )
 
     async def generate_module(
         self,

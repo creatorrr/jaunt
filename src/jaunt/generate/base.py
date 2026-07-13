@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from abc import ABC, abstractmethod
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal, TypeAlias, cast
 
 from jaunt.spec_ref import SpecRef
 from jaunt.validation import validate_generated_source
+
+CandidateValidator: TypeAlias = Callable[[str], list[str] | Awaitable[list[str]]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +46,53 @@ class ModuleSpecContext:
     seed_target_content: str = ""
     whole_class_contract_block: str = ""
     whole_class: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationRequest:
+    """Language-neutral request passed to a code-generation backend.
+
+    ``target_path`` and every context-file name are root-relative paths inside the
+    backend's disposable workspace. The caller owns prompt construction and semantic
+    validation; the backend owns only workspace setup, Codex invocation, and reading
+    the requested artifact.
+    """
+
+    language: Literal["py", "ts"]
+    kind: str
+    target_path: str
+    context_files: Mapping[str, str]
+    prompt: str
+    cache_payload: Mapping[str, object]
+    validator: CandidateValidator
+    project_root: Path | None = None
+    seed_target_content: str = ""
+    builtin_skill_names: tuple[str, ...] = ()
+
+
+def generation_request_cache_key(
+    request: GenerationRequest,
+    *,
+    model: str,
+    provider: str,
+    generation_fingerprint: str = "",
+) -> str:
+    """Return a language-namespaced deterministic key for a generic request."""
+
+    payload = {
+        "language": request.language,
+        "kind": request.kind,
+        "target_path": request.target_path,
+        "context_files": dict(sorted(request.context_files.items())),
+        "cache_payload": request.cache_payload,
+        "seed_target_content": request.seed_target_content,
+        "builtin_skill_names": sorted(request.builtin_skill_names),
+        "model": model,
+        "provider": provider,
+        "generation_fingerprint": generation_fingerprint,
+    }
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +176,100 @@ class GeneratorBackend(ABC):
         against a cost budget.
         """
         return await self.complete_text(system=system, user=user), None
+
+    async def generate_request(
+        self,
+        request: GenerationRequest,
+        *,
+        extra_error_context: list[str] | None = None,
+    ) -> GenerationModuleResult:
+        """Generate the target artifact for a language-neutral request.
+
+        Backends opt into this path explicitly. The legacy ``generate_module`` API
+        remains abstract so existing fake backends and Python callers keep the same
+        contract.
+        """
+
+        del request, extra_error_context
+        raise NotImplementedError("This backend does not support generic generation requests.")
+
+    async def generate_request_with_retry(
+        self,
+        request: GenerationRequest,
+        *,
+        max_attempts: int = 2,
+        initial_error_context: list[str] | None = None,
+        progress: Callable[[str, str], None] | None = None,
+    ) -> GenerationResult:
+        """Generate and validate a generic request, feeding diagnostics to retries."""
+
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
+
+        attempts = 0
+        last_source: str | None = None
+        last_errors: list[str] = []
+        extra_ctx = list(initial_error_context) if initial_error_context else None
+        advisories: tuple[str, ...] = ()
+        total_prompt = 0
+        total_completion = 0
+        total_cached_prompt = 0
+        attempt_request = request
+
+        while attempts < max_attempts:
+            attempts += 1
+            if progress is not None:
+                progress("attempt", f"{attempts}/{max_attempts}")
+            generated = await self.generate_request(attempt_request, extra_error_context=extra_ctx)
+            last_source = generated[0]
+            usage = generated[1]
+            advisories = _generation_advisories(generated)
+            if usage is not None:
+                total_prompt += usage.prompt_tokens
+                total_completion += usage.completion_tokens
+                total_cached_prompt += usage.cached_prompt_tokens
+
+            validation = request.validator(last_source)
+            last_errors = await validation if inspect.isawaitable(validation) else validation
+            if not last_errors:
+                if progress is not None:
+                    progress("done", f"attempt {attempts}")
+                return GenerationResult(
+                    attempts=attempts,
+                    source=last_source,
+                    errors=[],
+                    usage=self._aggregate_usage(
+                        total_prompt, total_completion, total_cached_prompt
+                    ),
+                    advisories=advisories,
+                )
+            if attempts < max_attempts:
+                if progress is not None:
+                    progress("retry", f"attempt {attempts}")
+                retry_context = [f"previous output errors: {error}" for error in last_errors]
+                extra_ctx = [*(extra_ctx or []), *retry_context]
+                attempt_request = replace(request, seed_target_content=last_source)
+
+        return GenerationResult(
+            attempts=attempts,
+            source=last_source,
+            errors=last_errors,
+            usage=self._aggregate_usage(total_prompt, total_completion, total_cached_prompt),
+            advisories=advisories,
+        )
+
+    def _aggregate_usage(
+        self, prompt_tokens: int, completion_tokens: int, cached_prompt_tokens: int
+    ) -> TokenUsage | None:
+        if not prompt_tokens and not completion_tokens:
+            return None
+        return TokenUsage(
+            prompt_tokens,
+            completion_tokens,
+            self.model_name,
+            self.provider_name,
+            cached_prompt_tokens=cached_prompt_tokens,
+        )
 
     async def generate_with_retry(
         self,

@@ -53,10 +53,11 @@ The SessionStart hook reads the session `cwd` and injects a bounded freshness
 summary for each discovered Jaunt workspace.
 
 The PreToolUse hook inspects `apply_patch` paths. It denies direct edits to
-files under the configured generated directory and to existing
-provenance-headed generated `.pyi` files. Environment failures, missing
-configuration, malformed payloads, and timeouts fail open. Review the hook
-source and trust decision in `/hooks`.
+files under each configured target's generated directory and to existing
+provenance-headed generated `.pyi` files. TypeScript API mirrors,
+implementations, and sidecars point back to their private `*.jaunt.ts[x]`
+spec. Environment failures, missing configuration, malformed payloads, and
+timeouts fail open. Review the hook source and trust decision in `/hooks`.
 
 The bundled command hooks require Bash (macOS, Linux, or a Windows environment
 that provides Bash). SessionStart runs `jaunt status`, which imports discovered

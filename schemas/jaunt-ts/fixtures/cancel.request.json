@@ -1,0 +1,8 @@
+{
+  "protocol": "jaunt-ts/1-draft.2",
+  "id": "cancel-1",
+  "method": "cancel",
+  "params": {
+    "requestId": "build-99"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "declaration": false,
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts", "vitest.config.ts"],
+  "exclude": [
+    "dist",
+    "node_modules",
+    "**/*.jaunt.ts",
+    "**/*.jaunt.tsx",
+    "**/*.jaunt-test.ts",
+    "**/*.jaunt-test.tsx"
+  ]
+}

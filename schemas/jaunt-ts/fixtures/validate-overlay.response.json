@@ -1,0 +1,23 @@
+{
+  "protocol": "jaunt-ts/1-draft.2",
+  "id": "overlay-1",
+  "ok": true,
+  "result": {
+    "sessionId": "session-1",
+    "epoch": 0,
+    "snapshot": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "inputHashes": {},
+    "valid": true,
+    "artifacts": [
+      {
+        "path": "src/slug/__generated__/index.ts",
+        "content": "export const slugify = () => \"slug\";\n",
+        "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": "implementation",
+        "moduleId": "ts:src/slug/index"
+      }
+    ],
+    "diagnostics": [],
+    "affectedProjects": ["tsconfig.json"]
+  }
+}

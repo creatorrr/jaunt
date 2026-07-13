@@ -12,14 +12,38 @@ from jaunt.repo_context.digests import TreeCache
 def _source_roots(root: Path, cfg) -> list[Path]:
     from jaunt.workspace import expand_roots
 
-    return list(
-        expand_roots(
-            root,
-            cfg.paths.source_roots,
-            setting="paths.source_roots",
-            require_one=True,
+    configured: list[tuple[list[str], str]] = []
+    if cfg.version == 1:
+        configured.append((cfg.paths.source_roots, "paths.source_roots"))
+    else:
+        if cfg.python_target is not None:
+            configured.append((cfg.python_target.source_roots, "target.py.source_roots"))
+        if cfg.typescript_target is not None:
+            configured.append((cfg.typescript_target.source_roots, "target.ts.source_roots"))
+
+    expanded: list[Path] = []
+    for roots, setting in configured:
+        expanded.extend(
+            expand_roots(
+                root,
+                roots,
+                setting=setting,
+                require_one=True,
+            )
         )
-    )
+    return list(dict.fromkeys(path.resolve() for path in expanded))
+
+
+def _generated_dirs(cfg) -> tuple[str, ...]:
+    configured: list[str] = []
+    if cfg.version == 1:
+        configured.append(cfg.paths.generated_dir)
+    else:
+        if cfg.python_target is not None:
+            configured.append(cfg.python_target.generated_dir)
+        if cfg.typescript_target is not None:
+            configured.append(cfg.typescript_target.generated_dir)
+    return tuple(dict.fromkeys(configured))
 
 
 class _JsonBackendAdapter:
@@ -68,7 +92,7 @@ def sync_tree(*, root: Path, cfg, today: str, enrich: bool | None = None):
     doc, result = tree_mod.sync(
         repo_root=root,
         source_roots=_source_roots(root, cfg),
-        generated_dir=cfg.paths.generated_dir,
+        generated_dir=_generated_dirs(cfg),
         cache=cache,
         project_name=root.name,
         project_version=str(cfg.version),
@@ -112,7 +136,7 @@ def check_drift(*, root: Path, cfg):
     fresh, result = tree_mod.sync(
         repo_root=root,
         source_roots=_source_roots(root, cfg),
-        generated_dir=cfg.paths.generated_dir,
+        generated_dir=_generated_dirs(cfg),
         cache=TreeCache(probe_path),
         project_name=root.name,
         project_version=str(cfg.version),

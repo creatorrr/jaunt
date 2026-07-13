@@ -1,10 +1,12 @@
 # Jaunt-for-TypeScript — design
 
-Status: **reviewed architectural spike** — the direction survived two external
-design reviews. The runnable preview in [`example/`](example/README.md) proves
-the first-review facade and test feasibility; it does not yet exercise the
-second-review API mirror, synthetic class adapters, or project graph. Updating
-and rerunning that proof is the first implementation gate.
+Status: **implemented internal alpha** — the direction survived two external design
+reviews and now has a real Node analyzer, Python orchestration, deterministic sync,
+overlay validation, and a protected Vitest runner. The runnable
+[`example/`](example/README.md) is a model-built JWT fixture that exercises classes,
+contract batteries, held-out tests, mutation strength, and packed-consumer runtime
+isolation. Smaller slugify and project-reference examples keep the core generation
+and workspace-routing paths easy to inspect.
 
 Execution is specified in [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md),
 including the second-review corrections for class variance, context layering,
@@ -216,9 +218,9 @@ executes application modules or user config.
 1. **Codex generates `.ts`** (not `.js`+`.d.ts`): one source language, native
    checker validation, ordinary project emit, and maintainable ejection.
 2. **Idiomatic over Python-parity** wherever they conflict.
-3. **Tool-host and target-runtime compatibility are separate.** Freeze the
-   worker's Node/TypeScript range with its package and test target runtimes
-   independently.
+3. **Tool-host and target-runtime compatibility are separate.** The worker host is
+   bounded to Node `>=20 <25`; its TypeScript range and test target runtimes are
+   versioned independently.
 4. **`jaunt.toml` stays**; no `jaunt.config.ts`, no package.json field.
 5. **Tag naming**: prefixed markers (`@jauntContract`, `@jauntPreserve`),
    unprefixed sections (`@fixtures`, `@prop`).

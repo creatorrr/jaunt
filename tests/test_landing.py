@@ -100,6 +100,32 @@ def test_extract_patch_empty_when_no_changes(repo: Path) -> None:
     assert landing.extract_patch(repo, base, is_allowed=_machine_owned) == ""
 
 
+def test_validate_patch_runs_gate_in_disposable_worktree_without_mutating_repo(
+    repo: Path,
+) -> None:
+    patch, _, paths = _patch_for(repo, "src/__generated__/app.py", "y = 11\n")
+    seen: list[Path] = []
+
+    def validator(worktree: Path) -> tuple[bool, str]:
+        seen.append(worktree)
+        assert (worktree / "src/__generated__/app.py").read_text(encoding="utf-8") == "y = 11\n"
+        return True, ""
+
+    valid, detail = landing.validate_patch(
+        repo,
+        patch,
+        patch_paths=paths,
+        validator=validator,
+    )
+
+    assert valid is True
+    assert detail == ""
+    assert len(seen) == 1
+    assert not seen[0].exists()
+    assert not (repo / "src/__generated__/app.py").exists()
+    assert _git(repo, "status", "--porcelain") == ""
+
+
 def _patch_for(repo: Path, relpath: str, content: str) -> tuple[str, str, list[str]]:
     """Produce (patch, base, paths) for a single-file change without committing it."""
     base = _git(repo, "rev-parse", "HEAD")

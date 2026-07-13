@@ -11,11 +11,12 @@ import glob
 import keyword
 import tomllib
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import jaunt
 from jaunt.errors import JauntConfigError
+from jaunt.typescript.config import TypeScriptPromptsConfig, TypeScriptTargetConfig
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,30 @@ class PathsConfig:
     source_roots: list[str]
     test_roots: list[str]
     generated_dir: str
+
+
+@dataclass(frozen=True)
+class PythonTargetConfig:
+    """Version-2 ``[target.py]`` values.
+
+    The existing ``PathsConfig``/``BuildConfig``/``TestConfig`` views remain the
+    compatibility API consumed by the Python implementation. This record preserves
+    the target boundary without making the Python AST pipeline target-aware.
+    """
+
+    source_roots: list[str]
+    test_roots: list[str]
+    generated_dir: str = "__generated__"
+    infer_deps: bool = True
+    test_infer_deps: bool = True
+    emit_stubs: bool = True
+    ty_retry_attempts: int = 1
+    async_runner: str = "asyncio"
+    check_generated_imports: bool = True
+    generated_import_allowlist: list[str] = field(default_factory=list)
+    pytest_args: list[str] = field(default_factory=lambda: ["-q"])
+    auto_class_tests: bool = False
+    contract_battery_dir: str = "tests/contract"
 
 
 @dataclass(frozen=True)
@@ -110,6 +135,66 @@ _CONTEXT_KEYS = frozenset(
     {"repo_map", "repo_map_file", "enrich", "max_chars", "overview", "search"}
 )
 _CONTEXT_SEARCH_KEYS = frozenset({"enabled", "internal_retrieval", "max_hits"})
+
+_V2_ALLOWED_SECTIONS = frozenset(
+    {
+        "version",
+        "target",
+        "llm",
+        "build",
+        "test",
+        "prompts",
+        "agent",
+        "codex",
+        "daemon",
+        "skills",
+        "contract",
+        "semantic_gate",
+        "context",
+    }
+)
+_V2_TARGET_KEYS = frozenset({"py", "ts"})
+_V2_PY_TARGET_KEYS = frozenset(
+    {
+        "source_roots",
+        "test_roots",
+        "generated_dir",
+        "infer_deps",
+        "test_infer_deps",
+        "emit_stubs",
+        "ty_retry_attempts",
+        "async_runner",
+        "check_generated_imports",
+        "generated_import_allowlist",
+        "pytest_args",
+        "auto_class_tests",
+        "contract_battery_dir",
+    }
+)
+_V2_TS_TARGET_KEYS = frozenset(
+    {
+        "source_roots",
+        "test_roots",
+        "projects",
+        "test_projects",
+        "tool_owner",
+        "generated_dir",
+        "test_runner",
+        "vitest_config",
+        "vitest_args",
+        "auto_class_tests",
+        "fast_check_runs",
+        "contract_battery_dir",
+    }
+)
+_V2_BUILD_KEYS = frozenset({"jobs", "include_target_tests", "instructions"})
+_V2_TEST_KEYS = frozenset({"jobs"})
+_V2_CONTRACT_KEYS = frozenset({"derive", "strength", "property_max_examples"})
+_V2_PROMPTS_KEYS = frozenset({"py", "ts"})
+_V2_PROMPTS_PY_KEYS = _PROMPTS_KEYS
+_V2_PROMPTS_TS_KEYS = frozenset(
+    {"build_system", "build_module", "test_system", "test_module", "design_system", "design_user"}
+)
 
 
 def _default_builtin_skills() -> tuple[str, ...]:
@@ -248,6 +333,22 @@ class JauntConfig:
     contract: ContractConfig = field(default_factory=ContractConfig)
     context: ContextConfig = field(default_factory=ContextConfig)
     semantic_gate: SemanticGateConfig = field(default_factory=SemanticGateConfig)
+    python_target: PythonTargetConfig | None = None
+    typescript_target: TypeScriptTargetConfig | None = None
+    typescript_prompts: TypeScriptPromptsConfig = field(default_factory=TypeScriptPromptsConfig)
+
+    @property
+    def target_languages(self) -> tuple[str, ...]:
+        """Configured target languages in stable display/scheduling order."""
+
+        if self.version == 1:
+            return ("py",)
+        languages: list[str] = []
+        if self.python_target is not None:
+            languages.append("py")
+        if self.typescript_target is not None:
+            languages.append("ts")
+        return tuple(languages)
 
 
 @jaunt.contract
@@ -348,6 +449,284 @@ def _resolve_prompt_override(value: str, *, root: Path) -> str:
     return str((root / path).resolve())
 
 
+def _validate_ts_relative_path(
+    value: str,
+    *,
+    name: str,
+    allow_empty: bool = False,
+    allow_current: bool = True,
+) -> str:
+    """Validate a root-relative POSIX path before it crosses the worker boundary."""
+
+    if not value:
+        if allow_empty:
+            return value
+        raise JauntConfigError(f"Invalid config: {name} must not be empty.")
+    path = PurePosixPath(value)
+    if "\\" in value or path.is_absolute() or ".." in path.parts:
+        raise JauntConfigError(f"Invalid config: {name} must be a safe root-relative POSIX path.")
+    if not allow_current and path == PurePosixPath("."):
+        raise JauntConfigError(f"Invalid config: {name} must name a child path.")
+    return value
+
+
+def _v2_prompt_table(prompts: dict[str, Any], key: str, allowed: frozenset[str]) -> dict[str, Any]:
+    table = _as_table(prompts.get(key), name=f"prompts.{key}")
+    _reject_unknown(table, allowed, f"[prompts.{key}]")
+    return table
+
+
+def _normalize_v2_data(
+    data: dict[str, Any], *, root: Path
+) -> tuple[
+    dict[str, Any],
+    PythonTargetConfig | None,
+    TypeScriptTargetConfig | None,
+    TypeScriptPromptsConfig,
+]:
+    """Validate v2-only structure and return a legacy-shaped Python view.
+
+    Existing Python services intentionally continue to consume ``cfg.paths``,
+    ``cfg.build``, ``cfg.test``, and ``cfg.prompts``. Normalizing only that view
+    keeps their behavior isolated from TypeScript target semantics.
+    """
+
+    _reject_unknown(data, _V2_ALLOWED_SECTIONS, "jaunt.toml")
+    target_tbl = _as_table(data.get("target"), name="target")
+    _reject_unknown(target_tbl, _V2_TARGET_KEYS, "[target]")
+    if not target_tbl:
+        raise JauntConfigError(
+            "Invalid config: version 2 requires at least one of [target.py] or [target.ts]."
+        )
+
+    py_tbl = _as_table(target_tbl.get("py"), name="target.py") if "py" in target_tbl else None
+    ts_tbl = _as_table(target_tbl.get("ts"), name="target.ts") if "ts" in target_tbl else None
+    if py_tbl is not None:
+        _reject_unknown(py_tbl, _V2_PY_TARGET_KEYS, "[target.py]")
+    if ts_tbl is not None:
+        _reject_unknown(ts_tbl, _V2_TS_TARGET_KEYS, "[target.ts]")
+
+    build_tbl = _as_table(data.get("build"), name="build")
+    _reject_unknown(build_tbl, _V2_BUILD_KEYS, "[build]")
+    test_tbl = _as_table(data.get("test"), name="test")
+    _reject_unknown(test_tbl, _V2_TEST_KEYS, "[test]")
+    prompts_tbl = _as_table(data.get("prompts"), name="prompts")
+    _reject_unknown(prompts_tbl, _V2_PROMPTS_KEYS, "[prompts]")
+    prompts_py = _v2_prompt_table(prompts_tbl, "py", _V2_PROMPTS_PY_KEYS)
+    prompts_ts = _v2_prompt_table(prompts_tbl, "ts", _V2_PROMPTS_TS_KEYS)
+
+    # Validate all unchanged shared tables now. The existing parser validates
+    # their values after this function converts the target-local Python fields.
+    shared_allowlists = {
+        "llm": _LLM_KEYS,
+        "agent": _AGENT_KEYS,
+        "codex": _CODEX_KEYS,
+        "daemon": _DAEMON_KEYS,
+        "skills": _SKILLS_KEYS,
+        "contract": _V2_CONTRACT_KEYS,
+        "semantic_gate": _SEMANTIC_GATE_KEYS,
+        "context": _CONTEXT_KEYS,
+    }
+    for section, allowed in shared_allowlists.items():
+        table = _as_table(data.get(section), name=section)
+        _reject_unknown(table, allowed, f"[{section}]")
+    context_tbl = _as_table(data.get("context"), name="context")
+    search_tbl = _as_table(context_tbl.get("search"), name="context.search")
+    _reject_unknown(search_tbl, _CONTEXT_SEARCH_KEYS, "[context.search]")
+
+    python_target: PythonTargetConfig | None = None
+    if py_tbl is not None:
+        source_roots = _as_str_list(
+            py_tbl.get("source_roots", ["src", "."]), name="target.py.source_roots"
+        )
+        test_roots = _as_str_list(py_tbl.get("test_roots", ["tests"]), name="target.py.test_roots")
+        generated_dir = _as_str(
+            py_tbl.get("generated_dir", "__generated__"), name="target.py.generated_dir"
+        )
+        python_target = PythonTargetConfig(
+            source_roots=source_roots,
+            test_roots=test_roots,
+            generated_dir=generated_dir,
+            infer_deps=_as_bool(py_tbl.get("infer_deps", True), name="target.py.infer_deps"),
+            test_infer_deps=_as_bool(
+                py_tbl.get("test_infer_deps", True), name="target.py.test_infer_deps"
+            ),
+            emit_stubs=_as_bool(py_tbl.get("emit_stubs", True), name="target.py.emit_stubs"),
+            ty_retry_attempts=_as_int(
+                py_tbl.get("ty_retry_attempts", 1), name="target.py.ty_retry_attempts"
+            ),
+            async_runner=_as_str(
+                py_tbl.get("async_runner", "asyncio"), name="target.py.async_runner"
+            ),
+            check_generated_imports=_as_bool(
+                py_tbl.get("check_generated_imports", True),
+                name="target.py.check_generated_imports",
+            ),
+            generated_import_allowlist=_as_str_list(
+                py_tbl.get("generated_import_allowlist", []),
+                name="target.py.generated_import_allowlist",
+            ),
+            pytest_args=_as_str_list(
+                py_tbl.get("pytest_args", ["-q"]), name="target.py.pytest_args"
+            ),
+            auto_class_tests=_as_bool(
+                py_tbl.get("auto_class_tests", False), name="target.py.auto_class_tests"
+            ),
+            contract_battery_dir=_as_str(
+                py_tbl.get("contract_battery_dir", "tests/contract"),
+                name="target.py.contract_battery_dir",
+            ),
+        )
+        if not source_roots:
+            raise JauntConfigError("Invalid config: target.py.source_roots must not be empty.")
+
+    typescript_target: TypeScriptTargetConfig | None = None
+    if ts_tbl is not None:
+        ts_source_roots = _as_str_list(
+            ts_tbl.get("source_roots", ["src"]), name="target.ts.source_roots"
+        )
+        ts_test_roots = _as_str_list(
+            ts_tbl.get("test_roots", ["tests"]), name="target.ts.test_roots"
+        )
+        ts_projects = _as_str_list(
+            ts_tbl.get("projects", ["tsconfig.json"]), name="target.ts.projects"
+        )
+        ts_test_projects = _as_str_list(
+            ts_tbl.get("test_projects", []), name="target.ts.test_projects"
+        )
+        fast_check_runs = _as_int(
+            ts_tbl.get("fast_check_runs", 50), name="target.ts.fast_check_runs"
+        )
+        test_runner = _as_str(ts_tbl.get("test_runner", "vitest"), name="target.ts.test_runner")
+        if not ts_source_roots:
+            raise JauntConfigError("Invalid config: target.ts.source_roots must not be empty.")
+        if not ts_projects:
+            raise JauntConfigError("Invalid config: target.ts.projects must not be empty.")
+        if fast_check_runs < 1:
+            raise JauntConfigError(
+                "Invalid config: target.ts.fast_check_runs must be a positive integer."
+            )
+        if test_runner != "vitest":
+            raise JauntConfigError(
+                "Invalid config: target.ts.test_runner must be 'vitest' in the initial "
+                "TypeScript target."
+            )
+        for index, value in enumerate(ts_source_roots):
+            _validate_ts_relative_path(value, name=f"target.ts.source_roots[{index}]")
+        for index, value in enumerate(ts_test_roots):
+            _validate_ts_relative_path(value, name=f"target.ts.test_roots[{index}]")
+        for index, value in enumerate(ts_projects):
+            _validate_ts_relative_path(value, name=f"target.ts.projects[{index}]")
+        for index, value in enumerate(ts_test_projects):
+            _validate_ts_relative_path(value, name=f"target.ts.test_projects[{index}]")
+        tool_owner = _validate_ts_relative_path(
+            _as_str(ts_tbl.get("tool_owner", "."), name="target.ts.tool_owner"),
+            name="target.ts.tool_owner",
+        )
+        generated_dir = _validate_ts_relative_path(
+            _as_str(ts_tbl.get("generated_dir", "__generated__"), name="target.ts.generated_dir"),
+            name="target.ts.generated_dir",
+            allow_current=False,
+        )
+        vitest_config = _validate_ts_relative_path(
+            _as_str(ts_tbl.get("vitest_config", ""), name="target.ts.vitest_config"),
+            name="target.ts.vitest_config",
+            allow_empty=True,
+        )
+        vitest_args = _as_str_list(ts_tbl.get("vitest_args", []), name="target.ts.vitest_args")
+        if vitest_args:
+            raise JauntConfigError(
+                "Invalid config: target.ts.vitest_args is not supported by the protected "
+                "Vitest runner; configure Vitest through target.ts.vitest_config instead."
+            )
+        contract_battery_dir = _validate_ts_relative_path(
+            _as_str(
+                ts_tbl.get("contract_battery_dir", "tests/contract"),
+                name="target.ts.contract_battery_dir",
+            ),
+            name="target.ts.contract_battery_dir",
+            allow_current=False,
+        )
+        typescript_target = TypeScriptTargetConfig(
+            source_roots=ts_source_roots,
+            test_roots=ts_test_roots,
+            projects=ts_projects,
+            test_projects=ts_test_projects,
+            tool_owner=tool_owner,
+            generated_dir=generated_dir,
+            test_runner=test_runner,
+            vitest_config=vitest_config,
+            vitest_args=vitest_args,
+            auto_class_tests=_as_bool(
+                ts_tbl.get("auto_class_tests", False), name="target.ts.auto_class_tests"
+            ),
+            fast_check_runs=fast_check_runs,
+            contract_battery_dir=contract_battery_dir,
+        )
+
+    def _prompt_value(table: dict[str, Any], key: str, name: str) -> str:
+        return _resolve_prompt_override(
+            _as_str(table.get(key, ""), name=name),
+            root=root,
+        )
+
+    typescript_prompts = TypeScriptPromptsConfig(
+        build_system=_prompt_value(prompts_ts, "build_system", "prompts.ts.build_system"),
+        build_module=_prompt_value(prompts_ts, "build_module", "prompts.ts.build_module"),
+        test_system=_prompt_value(prompts_ts, "test_system", "prompts.ts.test_system"),
+        test_module=_prompt_value(prompts_ts, "test_module", "prompts.ts.test_module"),
+        design_system=_prompt_value(prompts_ts, "design_system", "prompts.ts.design_system"),
+        design_user=_prompt_value(prompts_ts, "design_user", "prompts.ts.design_user"),
+    )
+
+    normalized: dict[str, Any] = {
+        key: value
+        for key, value in data.items()
+        if key
+        in {
+            "llm",
+            "agent",
+            "codex",
+            "daemon",
+            "skills",
+            "contract",
+            "semantic_gate",
+            "context",
+        }
+    }
+    normalized["version"] = 1
+    normalized["paths"] = {
+        "source_roots": python_target.source_roots if python_target else [],
+        "test_roots": python_target.test_roots if python_target else [],
+        "generated_dir": python_target.generated_dir if python_target else "__generated__",
+    }
+    normalized["build"] = dict(build_tbl)
+    normalized["test"] = dict(test_tbl)
+    normalized["prompts"] = dict(prompts_py)
+    if python_target is not None:
+        normalized["build"].update(
+            {
+                "infer_deps": python_target.infer_deps,
+                "ty_retry_attempts": python_target.ty_retry_attempts,
+                "async_runner": python_target.async_runner,
+                "check_generated_imports": python_target.check_generated_imports,
+                "generated_import_allowlist": python_target.generated_import_allowlist,
+                "emit_stubs": python_target.emit_stubs,
+            }
+        )
+        normalized["test"].update(
+            {
+                "infer_deps": python_target.test_infer_deps,
+                "pytest_args": python_target.pytest_args,
+                "auto_class_tests": python_target.auto_class_tests,
+            }
+        )
+        contract = dict(normalized.get("contract", {}))
+        contract["battery_dir"] = python_target.contract_battery_dir
+        normalized["contract"] = contract
+    return normalized, python_target, typescript_target, typescript_prompts
+
+
 @jaunt.contract
 def load_config(*, root: Path | None = None, config_path: Path | None = None) -> JauntConfig:
     """Load and validate ``jaunt.toml``.
@@ -393,10 +772,17 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     if version is None:
         raise JauntConfigError("Missing required `version = 1` in jaunt.toml.")
     version_i = _as_int(version, name="version")
-    if version_i != 1:
-        raise JauntConfigError(f"Unsupported config version: {version_i} (expected 1).")
-
-    _reject_unknown(data, _ALLOWED_SECTIONS, "jaunt.toml")
+    python_target: PythonTargetConfig | None = None
+    typescript_target: TypeScriptTargetConfig | None = None
+    typescript_prompts = TypeScriptPromptsConfig()
+    if version_i == 2:
+        data, python_target, typescript_target, typescript_prompts = _normalize_v2_data(
+            data, root=root
+        )
+    elif version_i == 1:
+        _reject_unknown(data, _ALLOWED_SECTIONS, "jaunt.toml")
+    else:
+        raise JauntConfigError(f"Unsupported config version: {version_i} (expected 1 or 2).")
 
     paths_tbl = _as_table(data.get("paths"), name="paths")
     _reject_unknown(paths_tbl, _PATHS_KEYS, "[paths]")
@@ -809,12 +1195,16 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             raise JauntConfigError(
                 f"Invalid config: paths.test_roots glob {entry!r} matched no directories."
             )
-    if not any(_path_entry_matches(sr) for sr in source_roots):
+    if (version_i == 1 or python_target is not None) and not any(
+        _path_entry_matches(sr) for sr in source_roots
+    ):
         raise JauntConfigError(
             "Invalid config: none of paths.source_roots exist on disk relative to the project root."
         )
 
-    if not generated_dir.isidentifier() or keyword.iskeyword(generated_dir):
+    if (version_i == 1 or python_target is not None) and (
+        not generated_dir.isidentifier() or keyword.iskeyword(generated_dir)
+    ):
         raise JauntConfigError(
             "Invalid config: paths.generated_dir must be a valid Python identifier."
         )
@@ -933,4 +1323,7 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             model=semantic_gate_model,
             reasoning_effort=semantic_gate_reasoning_effort,
         ),
+        python_target=python_target,
+        typescript_target=typescript_target,
+        typescript_prompts=typescript_prompts,
     )

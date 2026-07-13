@@ -20,6 +20,76 @@ test_roots = ["tests"]
 generated_dir = "__generated__"
 ```
 
+## Version 2 language targets
+
+Version 2 keeps shared Codex, daemon, context, and semantic-gate settings at the
+top level and moves language-specific paths under targets. A root may configure
+Python, TypeScript, or both:
+
+```toml
+version = 2
+
+[target.py]
+source_roots = ["services/api/src"]
+test_roots = ["services/api/tests"]
+generated_dir = "__generated__"
+infer_deps = true
+test_infer_deps = true
+emit_stubs = true
+ty_retry_attempts = 1
+async_runner = "asyncio"
+check_generated_imports = true
+generated_import_allowlist = []
+pytest_args = ["-q"]
+auto_class_tests = false
+contract_battery_dir = "tests/contract"
+
+[target.ts]
+source_roots = ["packages/*/src"]
+test_roots = ["packages/*/tests"]
+projects = ["tsconfig.json"]
+test_projects = ["tsconfig.test.json"]
+tool_owner = "."
+generated_dir = "__generated__"
+test_runner = "vitest"
+vitest_config = ""
+vitest_args = [] # reserved; the protected runner requires this to remain empty
+auto_class_tests = false
+fast_check_runs = 50
+contract_battery_dir = "tests/contract"
+
+[build]
+jobs = 8
+instructions = []
+
+[test]
+jobs = 4
+
+[prompts.py]
+build_system = ""
+build_preamble = ""
+build_module = ""
+test_system = ""
+test_module = ""
+
+[prompts.ts]
+build_system = ""
+build_module = ""
+test_system = ""
+test_module = ""
+design_system = ""
+design_user = ""
+```
+
+`[target.ts].projects` and `test_projects` are explicit; Jaunt does not guess the
+nearest `tsconfig.json`. `tool_owner` must directly declare `@usejaunt/ts` and a
+supported project-local TypeScript compiler. Version 2 cannot also contain `[paths]`.
+Version-1 files keep the behavior and JSON output documented below.
+
+Use `jaunt migrate --config-v2` to preview a deterministic version-1 rewrite and
+`jaunt migrate --config-v2 --apply` to commit it. The migration is model-free and
+refuses a dirty worktree unless `--force` is supplied.
+
 ## Full schema
 
 Every key outside `version` is optional and shown with its default.

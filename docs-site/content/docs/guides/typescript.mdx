@@ -1,0 +1,337 @@
+---
+title: TypeScript target
+description: "Author private TypeScript specs, generate ordinary TypeScript, and validate it with the project-local compiler."
+---
+
+The TypeScript target is available behind `version = 2` configuration. It keeps
+Jaunt's Python CLI and Codex scheduler, but delegates TypeScript parsing and
+typechecking to the project-local `@usejaunt/ts` worker. Discovery reads source and
+`tsconfig.json`; it does not execute application modules, specs, Vite config, or
+package scripts.
+
+## Install
+
+Start a new project with:
+
+```bash
+uvx jaunt init --language ts
+npm init -y && npm pkg set type=module
+npm install -D @usejaunt/ts@next 'typescript@^5.9' vitest fast-check @types/node
+```
+
+`jaunt init` does not edit `package.json`. Its human and JSON output includes the
+package command you still need to run. For an existing manifest with no `type`, that
+command is `npm pkg set type=module`. An explicit `"type": "commonjs"` is preserved;
+the generated NodeNext config lowers the scaffold's import/export syntax to CommonJS.
+
+The worker and protected test runner support Node `>=20 <25`. That is a Jaunt
+tool-host constraint, not a requirement on the runtime that executes your generated
+JavaScript.
+
+For an existing project, add this target to `jaunt.toml`:
+
+```toml
+version = 2
+
+[target.ts]
+source_roots = ["src"]
+test_roots = ["tests"]
+projects = ["tsconfig.json"]
+test_projects = ["tsconfig.test.json"]
+tool_owner = "."
+generated_dir = "__generated__"
+test_runner = "vitest"
+fast_check_runs = 50
+
+[codex]
+model = "gpt-5.6-sol"
+reasoning_effort = "medium"
+sandbox = "workspace-write"
+```
+
+If the project already has a version-1 Python config, preview the mechanical rewrite
+first, then apply it:
+
+```bash
+jaunt migrate --config-v2
+jaunt migrate --config-v2 --apply
+```
+
+The migration moves Python-only keys under `[target.py]`, preserves the loaded Python
+configuration exactly, and makes no model call.
+
+When upgrading an existing TypeScript alpha project, preview its artifact migration
+separately:
+
+```bash
+jaunt migrate --language ts
+jaunt migrate --language ts --apply
+```
+
+In a TypeScript-only version-2 project, `jaunt migrate` selects this path without the
+language flag. The command asks the project-local worker for current routes and
+validated artifact bytes, but never calls Codex. It can repair mirrors, canonical
+facades, placeholders, and sidecars, or freely re-stamp compatible fingerprint drift.
+Contract changes and incompatible alpha protocol, IR, or route records are listed as
+`model-rebuild` with the exact module to rebuild.
+
+Migration is plan-only unless `--apply` is present. The apply checks every analyzed
+input again, refuses a dirty worktree unless you pass `--force`, and rolls back the
+whole artifact manifest if a replacement fails. Older preview layouts that used an
+ambiguous `spec.jaunt.ts`, `__generated__/impl.ts`, or loader hook are reported for
+manual intervention; Jaunt does not guess the intended public facade or rename private
+specs.
+
+`tool_owner` is the package that directly declares both `@usejaunt/ts` and
+`typescript`. Jaunt does not use a global compiler and does not download one during a
+command.
+
+The first alpha supports TypeScript 5.8 through 6.x. [TypeScript 7.0 does not ship a
+stable programmatic compiler API](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/#running-side-by-side-with-typescript-60),
+so the worker rejects it with install guidance rather than analyzing the project under
+different compiler semantics. TypeScript 7 support will follow its stable tooling API.
+
+## Author a module
+
+A private spec uses the `.jaunt.ts` suffix:
+
+```ts title="src/slug/index.jaunt.ts"
+import * as jaunt from "@usejaunt/ts/spec";
+
+jaunt.magicModule();
+
+/** Lowercase a title and join non-empty ASCII word runs with hyphens. */
+export function slugify(title: string): string {
+  return jaunt.magic();
+}
+```
+
+Consumers import an ordinary committed facade:
+
+```ts title="src/slug/index.ts"
+export * from "./__generated__/index.js";
+```
+
+When the spec exports standalone interfaces or type aliases, the generated facade
+also re-exports those names explicitly from `index.api.js`. It does not use
+`export type *`, because a class has both a type and a runtime value and star exports
+would create ambiguous collisions.
+
+The full layout is:
+
+```text
+src/slug/
+  index.jaunt.ts          private contract input; never emitted or executed
+  index.context.ts        optional handwritten runtime leaf
+  index.ts                public facade
+  __generated__/
+    index.api.ts          deterministic declaration mirror
+    index.ts              generated implementation
+    index.jaunt.json      committed freshness record
+```
+
+Source imports use the owning project's runtime convention. NodeNext projects use
+`.js` specifiers; TypeScript resolves them to source `.ts` files and emitted JavaScript
+keeps valid runtime paths.
+
+The checked matrix covers NodeNext ESM, NodeNext CommonJS, Bundler/Vite-style
+resolution, and governed `.tsx`. The marker package exposes separate ESM and CommonJS
+declaration conditions, so a CommonJS spec does not accidentally type against an ESM
+entry. JSX uses the owning project's normal factory/runtime and global declarations;
+Jaunt does not add a framework runtime.
+
+## Sync before the first build
+
+```bash
+uvx jaunt sync --language ts
+uvx jaunt status --language ts
+```
+
+`sync` is deterministic and does not call Codex or the semantic gate. It writes the
+API mirror, creates a canonical facade only when none exists, and supplies an exact
+typed throwing placeholder for a missing implementation. The editor can then typecheck
+the module, while `status` and `check` still report it as unbuilt.
+
+## Build, test, and check
+
+```bash
+uvx jaunt build --language ts
+uvx jaunt test --language ts
+uvx jaunt check --language ts
+```
+
+The model writes reserved internal bindings. The worker rejects model-authored
+exports, `any`, TypeScript suppressions, and unsafe boundary casts, then composes the
+public exports itself. Candidate files are typechecked in an in-memory overlay. Jaunt
+writes the implementation, API mirror, sidecar, and any new facade only after the
+complete validation succeeds.
+
+Authored test intent lives in `*.jaunt-test.ts`. Generated batteries use Vitest and
+import the public facade. Example-tier failures retain normal detail. Derived-tier
+repair feedback contains only an opaque case ID and a normalized failure category.
+Every package that owns a configured test project must declare `vitest` directly in
+`devDependencies`; add `fast-check` there too when that package uses `@prop`. A
+hoisted installation alone is not authorization, and Jaunt checks the supported peer
+version before spending a model call.
+
+Property intent uses one deterministic line:
+
+```ts
+/** @prop given bytes: fc.uint8Array() :: decode(encode(bytes)) equals bytes */
+```
+
+The grammar accepts `equals` and `does not equal`. The input may be `string`,
+`number`, `boolean`, `bigint`, `Uint8Array`, a supported array type, or a
+compositional `fc` expression such as `fc.integer({ min: 0, max: 100 })`,
+`fc.tuple(...)`, or `fc.record(...)`. Strategy expressions are restricted to
+fast-check calls and data literals, then typechecked by the owning test project.
+Jaunt writes the predicate, semantic case ID, seed, and run count itself. Malformed
+prose, `any`, unknown invariant identifiers, and executable strategy escapes fail
+before generation. An async invariant must write `await` explicitly, uses
+`fc.asyncProperty`, and may consume typed fixtures normally.
+
+## Design and contract mode
+
+`@jauntDesign` asks Codex for a declaration patch before implementation. Review the
+dry-run diff, then apply the same source-digest-guarded proposal:
+
+```bash
+jaunt design --target ts:src/store/index#TokenStore
+jaunt design --target ts:src/store/index#TokenStore --apply
+```
+
+The second command applies the recorded patch exactly; it does not call Codex again.
+
+Existing committed TypeScript can enter contract mode without moving behind a
+generated facade:
+
+```bash
+jaunt adopt src/tokens/b64url.ts#encode --language ts
+jaunt reconcile --language ts
+jaunt check --language ts --contracts-only
+jaunt eject src/tokens/b64url.ts#encode --language ts
+```
+
+Reconcile derives committed Vitest batteries from the declaration and TSDoc. With
+`[contract].strength = true`, disposable mutation runs must show that the battery
+kills supported behavioral mutants; surviving mutants block the transaction. Magic
+eject turns a fresh generated module into ordinary TypeScript, retargets its tests,
+and validates normal JavaScript emit, declaration emit, tests, package-output safety,
+and runtime independence before removing private Jaunt artifacts.
+
+## Context and import rules
+
+`index.context.ts` is an optional runtime dependency for generated code. It is a leaf:
+it cannot value-import its own facade, generated implementation, or a private spec.
+Handwritten code that calls the generated API belongs in another module that imports
+the facade.
+
+Production code cannot import `*.jaunt.ts` or `*.jaunt-test.ts`, even with a loader.
+Specs must be excluded from emitting production and test projects. Jaunt checks this
+before any model call.
+
+## Concrete classes and preserved methods
+
+Class contracts may declare constructors, overloads, explicit `this` parameters,
+generic constraints, methods, accessors, static/readonly fields, optional members,
+and concrete inheritance. Jaunt validates each boundary through strict synthetic
+adapters instead of relying on TypeScript's bivariant class assignment.
+
+Use `@jauntPreserve` in a method or accessor's TSDoc when its handwritten body must be
+copied into the generated class:
+
+```ts
+import * as jaunt from "@usejaunt/ts/spec";
+import { normalize } from "./formatter.context.js";
+
+jaunt.magicModule();
+
+export class Formatter {
+  constructor() {
+    jaunt.magic();
+  }
+
+  /** Normalize one value. @jauntPreserve */
+  format(value: string): string {
+    return normalize(value);
+  }
+}
+```
+
+Preserved code may use parameters, `this`, local bindings, standard globals, and
+runtime imports from the paired context module. It cannot pull arbitrary runtime
+dependencies or private spec modules into generated code.
+
+## Mixed Python and TypeScript workspaces
+
+A version-2 root may contain both `[target.py]` and `[target.ts]`. Commands operate on
+both by default, and `--language py|ts` narrows a run. TypeScript IDs use the form
+`ts:src/slug/index#slugify`; unprefixed dotted IDs keep their Python meaning.
+
+Version-1 Python projects keep their existing output shape. Version-2 JSON adds a
+`targets.py` / `targets.ts` partition and qualifies top-level IDs.
+
+## Project references and package workspaces
+
+Point `projects` at a solution `tsconfig.json` when the workspace uses project
+references. Jaunt loads the full reference DAG, keeps solution-only configs as graph
+nodes, and assigns each spec to one unambiguous production project. Candidate
+validation runs against the owner and every affected downstream project before any
+file is replaced.
+
+Cross-project `deps` should use the same package or path alias the authored spec uses.
+Jaunt removes the private `.jaunt` segment for generated runtime imports instead of
+reaching across another project's `rootDir` with a relative source path. Every config
+in one reference graph must resolve the same project-local TypeScript compiler.
+
+Dependency provenance follows the nearest `package.json`. Production imports must be
+declared by that package; `devDependencies` are accepted only in configured test
+roots. npm and pnpm layouts are supported, including pnpm's workspace-visible
+compiler symlink into its external store. Keep production `compilerOptions.types`
+explicit (the starter uses `["node"]`) so a package manager's incidental hoisting of
+transitive `@types` packages cannot change the ambient compilation contract.
+
+## Security boundary
+
+Static discovery never evaluates application code or executable config. The installed
+worker and compiler do execute, and `jaunt test` executes trusted project tests in a
+disposable child process. Jaunt is a build tool, not a sandbox for generated code or
+tests.
+
+Fresh generated batteries are still typechecked and run, but they do not call the
+model again. A runner- or Vitest-only fingerprint change reheaders the unchanged
+battery after overlay validation and reports it as `refrozen`; contract, API, prompt,
+property, or body drift regenerates it. `jaunt test --force` always regenerates.
+
+## Current alpha limits
+
+The alpha supports referenced project graphs, cross-spec dependencies, concrete class
+inheritance, and `@jauntPreserve`. Put a preserve tag on the single concrete
+implementation of a non-overloaded method or accessor. Its runtime closure is limited
+to parameters, `this`, local bindings, standard globals, and imports from the paired
+context module.
+
+The analyzer still rejects `.mts`, `.cts`, JavaScript specs, abstract governed
+classes, authored `private`/`protected` members, parameter properties, computed member
+names, mixin or `implements` heritage, and preserve tags on overload groups. These
+cases fail during discovery instead of receiving a weaker conformance check.
+
+The repository JWT example under `examples/typescript-jwt` is generated by this worker.
+It covers classes, contract batteries, held-out tests, mutation strength, and a packed
+consumer. The smaller slugify and project-reference fixtures keep the basic authoring
+and workspace-routing paths independently testable.
+
+`jaunt watch` follows TypeScript source, project, package, and lockfile changes while
+excluding generated output. Daemon jobs use qualified `ts:` artifact keys and park
+only the exact implementation, API mirror, sidecar, and newly created canonical
+facade paths returned by the validated build. Landing rechecks the target before it
+commits a proposal; mixed workspaces keep Python and TypeScript job identities apart.
+
+Runnable examples:
+
+- [Single-project slugify](https://github.com/creatorrr/jaunt/tree/main/examples/typescript_slugify)
+- [npm/pnpm project references](https://github.com/creatorrr/jaunt/tree/main/examples/typescript_project_references)
+- [JWT, classes, contracts, and ejection](https://github.com/creatorrr/jaunt/tree/main/examples/typescript-jwt)
+
+The complete design and staged compatibility matrix are in
+[`docs/ts-port/IMPLEMENTATION_PLAN.md`](https://github.com/creatorrr/jaunt/blob/main/docs/ts-port/IMPLEMENTATION_PLAN.md).

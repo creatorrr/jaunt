@@ -5,13 +5,15 @@ description: Use when reading or editing a Jaunt spec module, jaunt.toml, genera
 
 # Working with Jaunt
 
-Jaunt is spec-driven Python code generation. A typed stub and its docstring are
-the contract; `jaunt build` writes the implementation under `__generated__/`.
+Jaunt is spec-driven Python and TypeScript code generation. A typed stub and its
+contract prose are canonical; `jaunt build` writes validated implementations
+under the configured generated directory.
 
 ## Iron rules
 
-1. Never hand-edit `__generated__/**` or a provenance-headed generated
-   `.pyi`. Edit the spec, rebuild, and review the regenerated files.
+1. Never hand-edit `__generated__/**`, a provenance-headed generated `.pyi`,
+   API mirror/sidecar, or a generated Vitest/contract battery. Edit the spec
+   and use `jaunt build`, `jaunt test`, or `jaunt reconcile` to regenerate it.
 2. Never change an existing test merely to accommodate generated code. Tighten
    the contract when generated behavior misses an established expectation.
 3. Resolve the workspace before running Jaunt:
@@ -31,6 +33,18 @@ not excuse an undeclared child-package dependency.
 Use `jaunt migrate --merge-projects` to preview consolidation of older child
 configs. Add `--apply` only after the no-model plan reports no route, digest,
 fingerprint, or artifact change.
+
+For a version-2 `[target.ts]`, compilation ownership comes from configured
+`projects`/`test_projects`, while the nearest `package.json` owns dependency
+provenance. Specs are private `*.jaunt.ts[x]` inputs; consumers import the
+ordinary facade. Run `jaunt sync` after adding a spec to render its API mirror
+and typed unbuilt placeholder without a model call. Never edit generated
+implementations, `*.api.ts`, `*.jaunt.json` sidecars, or generated test and
+contract batteries. During the alpha,
+`watch` follows TypeScript project/config/package inputs, and daemon jobs use
+qualified `ts:` artifact keys. Review a parked proposal's exact path allowlist
+before landing it; TypeScript jobs may change only the validated implementation,
+API mirror, sidecar, a newly created canonical facade, and Jaunt metadata.
 
 ## Freshness taxonomy
 
@@ -66,9 +80,12 @@ the build afterward.
 ```bash
 uv run jaunt specs --json
 uv run jaunt status --json --progress none
+uv run jaunt sync                 # TypeScript: deterministic, model-free
 uv run jaunt build --json
 uv run jaunt check
 uv run jaunt clean --orphans
+uv run jaunt watch --test
+uv run jaunt jobs --json
 uv run jaunt instructions
 ```
 

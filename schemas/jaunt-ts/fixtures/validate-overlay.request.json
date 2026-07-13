@@ -1,0 +1,16 @@
+{
+  "protocol": "jaunt-ts/1-draft.2",
+  "id": "overlay-1",
+  "method": "validateOverlay",
+  "params": {
+    "sessionId": "session-1",
+    "expectedEpoch": 0,
+    "expectedSnapshot": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "candidates": {
+      "ts:src/slug/index": "export function __jaunt_impl_slugify(value: string): string { return value; }\n"
+    },
+    "moduleIds": ["ts:src/slug/index"],
+    "syncModuleIds": [],
+    "restampModuleIds": []
+  }
+}

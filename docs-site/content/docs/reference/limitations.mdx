@@ -5,6 +5,20 @@ description: "Current behavioral constraints and sharp edges."
 
 These are the sharp edges you should know about.
 
+## TypeScript alpha
+
+The TypeScript target does not accept `.mts`, `.cts`, JavaScript specs, abstract
+governed classes, authored `private`/`protected` class members, or computed member
+names. Parameter properties and mixin or `implements` heritage are also rejected.
+`@jauntPreserve` is limited to the concrete implementation of a non-overloaded method
+or accessor; preserve tags on overload groups are rejected.
+TypeScript 7 is also rejected until its native compiler exposes a stable programmatic
+API; install a supported project-local compiler such as `typescript@^5.9`.
+
+These are explicit diagnostics rather than silently weakened validation. See the
+[TypeScript target guide](/docs/guides/typescript) for the supported module layout and
+workflow.
+
 ## Code-Generation Engine
 
 Jaunt uses the OpenAI Codex CLI (`codex exec`) as its sole code-generation

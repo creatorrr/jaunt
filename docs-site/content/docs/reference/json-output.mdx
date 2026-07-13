@@ -17,8 +17,30 @@ tooling that shells out to Jaunt. The payloads below are trimmed from real runs.
 - Progress bars are suppressed. To keep a progress display while parsing JSON,
   use `--progress plain` (progress on stderr, JSON on stdout).
 - `--json` is available on `build`, `test`, `status`, `check`, `specs`, `jobs`,
-  `clean`, `migrate`, `watch`, `instructions`, `init`, `log`, `tree`, `cache`,
-  and `skill`.
+  `sync`, `design`, `clean`, `migrate`, `watch`, `instructions`, `init`, `log`,
+  `tree`, `cache`, and `skill`.
+
+Version-1 Python projects keep these envelopes byte-for-byte. Version-2 workspaces
+add `"schema_version": 2`, qualify top-level IDs (`py:demo.specs`,
+`ts:src/slug/index`), and repeat language-local values under `targets.py` and
+`targets.ts`. TypeScript errors use a structured `{code, message, diagnostics}`
+record; version-1 errors remain strings.
+
+```json
+{
+  "schema_version": 2,
+  "command": "build",
+  "ok": true,
+  "generated": ["ts:src/slug/index"],
+  "skipped": ["py:demo.models"],
+  "refrozen": [],
+  "failed": {},
+  "targets": {
+    "py": {"generated": [], "skipped": ["demo.models"], "refrozen": [], "failed": {}},
+    "ts": {"generated": ["src/slug/index"], "skipped": [], "refrozen": [], "failed": {}}
+  }
+}
+```
 
 ## build
 
@@ -212,6 +234,39 @@ Without `--dry-run`, `would_remove` becomes `removed`.
 Each entry in `actions` describes one planned or applied change; `classification`
 is `re-stamp` for an already-governed spec or `newly-governs` for a legacy body
 that would newly govern a symbol. Neither mode calls the model.
+
+For `jaunt migrate --language ts`, the plan is worker-validated and includes its
+input-bound digest and any work that cannot be completed mechanically:
+
+```json
+{
+  "schema_version": 2,
+  "command": "migrate",
+  "ok": true,
+  "language": "ts",
+  "applied": false,
+  "plan_digest": "sha256:…",
+  "blocked": false,
+  "actions": [
+    {
+      "migration": "typescript-artifacts-v1",
+      "module_id": "ts:src/slug/index",
+      "path": "src/slug/__generated__/index.api.ts",
+      "kind": "api-mirror",
+      "classification": "deterministic-rewrite",
+      "description": "[deterministic-rewrite] repair API mirror: src/slug/__generated__/index.api.ts"
+    }
+  ],
+  "diagnostics": [],
+  "requires_rebuild": []
+}
+```
+
+Possible TypeScript classifications are `deterministic-rewrite`,
+`free-restamp`, `model-rebuild`, and `manual-intervention`. A dry-run with a
+manual item still has `ok: true` because the analysis succeeded; an attempted
+apply returns `ok: false`, writes nothing, and includes an `error`. Successful
+applies also include `applied_paths`.
 
 ## instructions
 

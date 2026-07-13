@@ -80,14 +80,28 @@ src/jaunt/          # Library source
     search.py            # colgrep wrapper (detect/index/query, graceful fallback)
     api.py               # High-level sync_tree / repo_map_block_for_build / check_drift
   prompts/          # LLM prompt templates (Jinja-like {{var}})
+  targets/          # Language-neutral reports/adapters and mixed-target orchestration
+  typescript/       # v2 config, worker client, TS build/test/status/lifecycle operations
 tests/              # pytest test suite (~41 files)
 examples/           # Runnable example projects
 jaunt-claude-plugin/  # Claude Code plugin (marketplace at .claude-plugin/marketplace.json)
 plugins/jaunt/        # Codex plugin (marketplace at .agents/plugins/marketplace.json)
-packages/jaunt-ts/  # Published @usejaunt/ts alpha marker API; Node worker planned
+packages/jaunt-ts/  # @usejaunt/ts markers, static analyzer worker, Vitest runner
+schemas/jaunt-ts/   # Shared draft protocol and contract-IR schemas/fixtures
 ```
 
 ## Key Concepts
+
+- **TypeScript target (alpha)**: Version-2 config can add `[target.ts]`. Private
+  `*.jaunt.ts[x]` specs are parsed without execution by the project-local
+  `@usejaunt/ts` worker. `jaunt sync` renders deterministic API mirrors and typed
+  unbuilt placeholders; model-backed builds write only after compiler-overlay and
+  semantic conformance checks. Production code imports an ordinary committed facade,
+  never the spec or a loader hook. Project references, cross-spec dependencies,
+  concrete inheritance, `@jauntPreserve`, Vitest batteries, contract mode,
+  watch, and daemon jobs all use the same qualified `ts:` target identity.
+  TypeScript 5.8 through 6.x is the initial supported compiler range; 7.0 has no
+  stable programmatic API.
 
 - **Spec**: A Python function/class stub that describes *what* to implement —
   either a top-level stub in a `jaunt.magic_module` file (the primary style) or a
@@ -328,9 +342,13 @@ jaunt clean --orphans         # Remove only orphaned artifacts (spec gone); jour
 jaunt migrate                 # Plan mechanical spec-source migrations (legacy stub bodies -> ..., stale .pyi re-emit); exits 0, no model call
 jaunt migrate --apply         # Write the planned changes (refuses on a dirty git tree unless --force)
 jaunt migrate --apply --allow-newly-governed  # Also rewrite legacy bodies that would newly govern an ungoverned symbol
+jaunt migrate --language ts   # Plan worker-validated mirror/facade/placeholder repairs or free re-stamps; no model call
+jaunt migrate --language ts --apply  # Atomically apply the TS plan; incompatible alpha artifacts request a rebuild
 
 jaunt status                  # Show which modules are stale, including upstream API fallout
 jaunt status --json           # Machine-readable status
+jaunt sync --language ts      # Deterministic TS mirrors/placeholders; no model call
+jaunt design --target ts:path#symbol  # Propose a reviewed TS declaration patch
 
 jaunt specs                   # List @jaunt.magic specs and their dependency graph
 jaunt specs --json            # Machine-readable spec list (for agents/tooling)
@@ -366,7 +384,8 @@ jaunt watch --test            # Build + test on change
 ```
 
 Common flags: `--root`, `--config`, `--jobs N`, `--force`, `--target`,
-`--no-infer-deps`, `--progress {auto,rich,plain,none}`, `--no-progress`, `--json`.
+`--language {py,ts}`, `--no-infer-deps`, `--progress {auto,rich,plain,none}`,
+`--no-progress`, `--json`.
 
 Note: `jaunt check` returns exit code `4` on any blocking drift state —
 contract drift (unbuilt / stale-prose / signature-drift / behavior-drift),
@@ -472,9 +491,11 @@ it would restale every committed battery.
 
 **Iron rules apply to us too** (see
 `plugins/jaunt/skills/working-with-jaunt/SKILL.md` or the matching Claude
-skill): never hand-edit
-anything under `__generated__/**` or any `.pyi`, and never edit an existing test
-to accommodate generated code. To change a magic-mode framework module, edit its
+skill): never hand-edit anything under `__generated__/**`, any `.pyi`, a
+TypeScript API mirror/sidecar, or a generated Vitest/contract battery, and never
+edit an existing test to accommodate generated code. Regenerate TypeScript tests
+and batteries with `jaunt test` or `jaunt reconcile`. To change a magic-mode
+framework module, edit its
 docstring contract and rebuild (`jaunt build --target jaunt.<module>`); to change
 a contract-mode module, edit the real code and re-derive with `jaunt reconcile`.
 Fix a failing self-hosted build or battery forward through the docstring, never

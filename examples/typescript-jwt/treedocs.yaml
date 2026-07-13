@@ -1,0 +1,19 @@
+# yaml-language-server: $schema=https://dandylyons.github.io/treedocs/schemas/0.2.0/treedocs.schema.json
+project:
+  last_updated: '2026-07-13'
+  name: example
+  version: '2'
+schema_version: 0.2.0
+signature: sha256:1f60320333b7c48b5cb59d467e69e9f964bd0d11c6fbb84911a229c68c974ef5
+tree:
+  src:
+    _doc: 'package: app'
+    app.ts: Demo consumer compiled with tsc and run as ordinary emitted JavaScript.
+    tokens:
+      _doc: Ordinary committed public facade. Consumers import this module; no Jaunt
+      b64url.ts: 'base64url (RFC 4648 §5, unpadded) codec — a *contract-mode* module:
+        the'
+      index.context.ts: Handwritten executable context for the tokens module.
+      index.jaunt.ts: 'JWT tokens: a private Jaunt TypeScript spec input.'
+      index.ts: Ordinary committed public facade. Consumers import this module; no
+        Jaunt

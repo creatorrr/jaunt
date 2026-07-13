@@ -1,0 +1,11 @@
+{
+  "protocol": "jaunt-ts/1-draft.2",
+  "id": "bad-1",
+  "ok": false,
+  "error": {
+    "code": "INVALID_REQUEST",
+    "message": "params must be an object",
+    "retryable": false,
+    "diagnostics": []
+  }
+}

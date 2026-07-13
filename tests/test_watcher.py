@@ -6,6 +6,7 @@ import asyncio
 import sys
 import types
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ from jaunt.watcher import (
     format_watch_cycle_json,
     run_watch_loop,
 )
+from jaunt.watcher import _python_selected, _typescript_targets
 
 # ---------------------------------------------------------------------------
 # Round 2: Optional dependency check
@@ -104,6 +106,56 @@ def test_filter_mixed_paths() -> None:
     assert result == frozenset(
         {Path("/project/src/pkg/specs.py"), Path("/project/tests/test_a.py")}
     )
+
+
+def test_filter_mixed_python_typescript_roots_and_custom_generated_dirs() -> None:
+    changed = frozenset(
+        {
+            Path("/project/python/pkg/spec.py"),
+            Path("/project/python/pkg/py-machine/out.py"),
+            Path("/project/web/src/tokens/index.jaunt.ts"),
+            Path("/project/web/tests/tokens.jaunt-test.ts"),
+            Path("/project/web/src/tokens/ts-machine/index.ts"),
+            Path("/project/package-lock.json"),
+            Path("/project/packages/web/tsconfig.build.json"),
+            Path("/project/node_modules/typescript/package.json"),
+        }
+    )
+
+    result = filter_spec_files(
+        changed,
+        source_roots=[Path("/project/python")],
+        test_roots=[],
+        generated_dir="py-machine",
+        typescript_source_roots=[Path("/project/web/src")],
+        typescript_test_roots=[Path("/project/web/tests")],
+        typescript_generated_dir="ts-machine",
+        workspace_root=Path("/project"),
+    )
+
+    assert result == frozenset(
+        {
+            Path("/project/python/pkg/spec.py"),
+            Path("/project/web/src/tokens/index.jaunt.ts"),
+            Path("/project/web/tests/tokens.jaunt-test.ts"),
+            Path("/project/package-lock.json"),
+            Path("/project/packages/web/tsconfig.build.json"),
+        }
+    )
+
+
+def test_filter_includes_exact_referenced_config_outside_target_roots() -> None:
+    config = Path("/project/configs/tsconfig.shared.json")
+    result = filter_spec_files(
+        frozenset({config}),
+        source_roots=[],
+        test_roots=[],
+        typescript_source_roots=[Path("/project/packages/app/src")],
+        workspace_root=Path("/project"),
+        config_paths=[config],
+    )
+
+    assert result == frozenset({config})
 
 
 # ---------------------------------------------------------------------------
@@ -564,3 +616,207 @@ def test_cycle_runner_measures_duration(monkeypatch) -> None:
     event = WatchEvent(changed_paths=frozenset({Path("/src/a.py")}), timestamp=1000.0)
     result = asyncio.run(runner(event))
     assert result.duration_s >= 0.0
+
+
+def test_cycle_runner_runs_typescript_build_and_test_without_nested_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jaunt.targets.base import TargetBuildReport, TargetTestReport
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tsconfig.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "jaunt.toml").write_text(
+        """\
+version = 2
+
+[target.ts]
+source_roots = ["src"]
+test_roots = ["tests"]
+projects = ["tsconfig.json"]
+""",
+        encoding="utf-8",
+    )
+    calls: list[tuple[str, tuple[str, ...]]] = []
+
+    async def fake_build(_root, _config, *, target_ids, **_kwargs):
+        calls.append(("build", tuple(target_ids)))
+        return TargetBuildReport(language="ts", generated=frozenset(target_ids))
+
+    async def fake_test(_root, _config, *, target_ids, **_kwargs):
+        calls.append(("test", tuple(target_ids)))
+        return TargetTestReport(language="ts", generated=frozenset(target_ids))
+
+    monkeypatch.setattr("jaunt.typescript.builder.run_build", fake_build)
+    monkeypatch.setattr("jaunt.typescript.tester.run_test", fake_test)
+
+    import jaunt.cli
+
+    target = "ts:src/tokens/index"
+    ns = jaunt.cli.parse_args(
+        [
+            "watch",
+            "--test",
+            "--language",
+            "ts",
+            "--target",
+            target,
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    runner = build_cycle_runner(ns, run_tests=True)
+    event = WatchEvent(
+        changed_paths=frozenset({tmp_path / "src" / "tokens" / "index.jaunt.ts"}),
+        timestamp=1000.0,
+    )
+
+    result = asyncio.run(runner(event))
+
+    assert result.build_exit_code == 0
+    assert result.test_exit_code == 0
+    assert calls == [("build", (target,)), ("test", (target,))]
+
+
+def test_mixed_watch_target_partition_keeps_both_explicit_languages() -> None:
+    args = types.SimpleNamespace(target=["api.models", "ts:packages/web/src/token"])
+
+    assert _python_selected(args) is True
+    assert _typescript_targets(args) == ("ts:packages/web/src/token",)
+
+
+@pytest.mark.asyncio
+async def test_typescript_watch_reuses_analyzer_and_invalidates_for_100_cycles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jaunt.targets.base import TargetBuildReport
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tsconfig.json").write_text("{}\n", encoding="utf-8")
+    spec_path = tmp_path / "src" / "dependency.jaunt.ts"
+    spec_path.write_text("export declare function dependency(): void;\n", encoding="utf-8")
+    (tmp_path / "jaunt.toml").write_text(
+        """\
+version = 2
+[target.ts]
+source_roots = ["src"]
+test_roots = ["tests"]
+projects = ["tsconfig.json"]
+""",
+        encoding="utf-8",
+    )
+    modules = [
+        {
+            "moduleId": "ts:src/dependency",
+            "specPath": "src/dependency.jaunt.ts",
+            "project": "tsconfig.json",
+            "packageOwner": ".",
+            "dependencies": [],
+        },
+        {
+            "moduleId": "ts:src/consumer",
+            "specPath": "src/consumer.jaunt.ts",
+            "project": "tsconfig.json",
+            "packageOwner": ".",
+            "dependencies": ["ts:src/dependency#dependency"],
+        },
+    ]
+
+    class PersistentWorker:
+        def __init__(self) -> None:
+            self.invalidations: list[tuple[str, ...]] = []
+
+        async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            if method == "invalidate":
+                self.invalidations.append(tuple(params["paths"]))
+                return {"invalidated": list(params["paths"])}
+            if method == "analyzeWorkspace":
+                return {
+                    "diagnostics": [],
+                    "projects": [
+                        {
+                            "id": "tsconfig.json",
+                            "configPath": "tsconfig.json",
+                            "references": [],
+                            "rootFiles": [
+                                "src/dependency.jaunt.ts",
+                                "src/consumer.jaunt.ts",
+                            ],
+                        }
+                    ],
+                    "testSpecs": [],
+                }
+            if method == "analyzeContracts":
+                return {
+                    "sessionId": "watch",
+                    "epoch": len(self.invalidations) + 1,
+                    "snapshot": f"snapshot-{len(self.invalidations)}",
+                    "inputHashes": {},
+                    "modules": modules,
+                }
+            raise AssertionError(method)
+
+    worker = PersistentWorker()
+    sessions = {"entered": 0, "exited": 0}
+
+    @asynccontextmanager
+    async def persistent_session(*_args, **_kwargs):
+        sessions["entered"] += 1
+        try:
+            yield worker, types.SimpleNamespace()
+        finally:
+            sessions["exited"] += 1
+
+    built_targets: list[tuple[str, ...]] = []
+
+    async def fake_build(
+        _root,
+        _config,
+        _client,
+        _initialized,
+        *,
+        target_ids,
+        **_kwargs,
+    ):
+        built_targets.append(tuple(target_ids))
+        return TargetBuildReport(language="ts", generated=frozenset(target_ids))
+
+    monkeypatch.setattr("jaunt.typescript.builder.worker_session", persistent_session)
+    monkeypatch.setattr("jaunt.typescript.builder.run_build_in_session", fake_build)
+
+    async def changes() -> AsyncIterator[set[tuple[int, str]]]:
+        for _ in range(100):
+            yield {(1, str(spec_path))}
+
+    import jaunt.cli
+
+    runner = build_cycle_runner(
+        jaunt.cli.parse_args(["watch", "--language", "ts", "--root", str(tmp_path)]),
+        run_tests=False,
+    )
+    baseline = {task for task in asyncio.all_tasks() if task is not asyncio.current_task()}
+    results: list[WatchCycleResult] = []
+    await run_watch_loop(
+        changes_iter=changes(),
+        run_cycle=runner,
+        on_event=lambda _message: None,
+        on_cycle_result=results.append,
+        on_error=lambda error: pytest.fail(str(error)),
+        source_roots=[],
+        test_roots=[],
+        typescript_source_roots=[tmp_path / "src"],
+        typescript_test_roots=[tmp_path / "tests"],
+        workspace_root=tmp_path,
+        config_paths=[tmp_path / "jaunt.toml", tmp_path / "tsconfig.json"],
+    )
+    await asyncio.sleep(0)
+
+    assert sessions == {"entered": 1, "exited": 1}
+    assert len(worker.invalidations) == 100
+    assert len(results) == 100
+    assert set(built_targets) == {("ts:src/consumer", "ts:src/dependency")}
+    remaining = {task for task in asyncio.all_tasks() if task is not asyncio.current_task()}
+    assert remaining == baseline

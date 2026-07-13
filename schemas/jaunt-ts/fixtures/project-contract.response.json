@@ -1,0 +1,15 @@
+{
+  "protocol": "jaunt-ts/1-draft.2",
+  "id": "contract-1",
+  "ok": true,
+  "result": {
+    "source": "/** Public contract. */\nexport function value(): { ok: true };\n",
+    "sourceDigest": "sha256:c9a60deff222685ea8d4e894a0262634e7883b60bdbe8067cae8f18e26a2af81",
+    "symbol": "value",
+    "kind": "function",
+    "declarationStart": 24,
+    "declarationEnd": 86,
+    "docsStart": 0,
+    "docsEnd": 23
+  }
+}

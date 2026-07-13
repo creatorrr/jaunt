@@ -1,0 +1,835 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://usejaunt.dev/schemas/jaunt-ts/contract-ir-v1-draft.2.json",
+  "title": "Jaunt TypeScript contract IR v1 draft 2",
+  "type": "object",
+  "$ref": "#/definitions/contractModuleIR",
+  "definitions": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "stringArray": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "jauntOptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "deps": { "$ref": "#/definitions/stringArray" },
+        "prompt": { "type": "string" },
+        "inferDeps": { "type": "boolean" },
+        "test": { "type": "boolean" }
+      }
+    },
+    "typeParameter": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "constraint": { "$ref": "#/definitions/typeNode" },
+        "default": { "$ref": "#/definitions/typeNode" }
+      }
+    },
+    "parameter": {
+      "type": "object",
+      "required": ["name", "type", "optional", "rest"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "type": { "$ref": "#/definitions/typeNode" },
+        "optional": { "type": "boolean" },
+        "rest": { "type": "boolean" }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "required": ["typeParameters", "parameters", "returnType"],
+      "additionalProperties": false,
+      "properties": {
+        "typeParameters": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/typeParameter" }
+        },
+        "parameters": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/parameter" }
+        },
+        "returnType": { "$ref": "#/definitions/typeNode" }
+      }
+    },
+    "typeMember": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind", "name", "optional", "readonly", "type"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "property" },
+            "name": { "type": "string" },
+            "optional": { "type": "boolean" },
+            "readonly": { "type": "boolean" },
+            "type": { "$ref": "#/definitions/typeNode" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "name", "type"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "property" },
+            "name": { "const": "unsupported" },
+            "type": {
+              "type": "object",
+              "required": ["kind"],
+              "additionalProperties": false,
+              "properties": { "kind": { "const": "unsupported" } }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "name", "optional", "signatures"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "method" },
+            "name": { "type": "string" },
+            "optional": { "type": "boolean" },
+            "signatures": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 1,
+              "items": { "$ref": "#/definitions/signature" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "signatures"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "enum": ["call", "construct", "index"] },
+            "signatures": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 1,
+              "items": { "$ref": "#/definitions/signature" }
+            }
+          }
+        }
+      ]
+    },
+    "typeNode": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "void",
+                "undefined",
+                "never",
+                "unknown",
+                "any",
+                "string",
+                "number",
+                "bigint",
+                "boolean",
+                "symbol",
+                "object",
+                "intrinsic",
+                "missing",
+                "unsupported"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "value"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "literal" },
+            "value": {
+              "anyOf": [
+                { "type": "string" },
+                { "type": "number" },
+                { "type": "boolean" },
+                { "type": "null" }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "text"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "enum": ["literal", "bigint-literal"] },
+            "text": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "name", "typeArguments"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "reference" },
+            "name": { "type": "string" },
+            "typeArguments": {
+              "type": "array",
+              "items": { "$ref": "#/definitions/typeNode" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "element"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "enum": ["array", "optional", "rest"] },
+            "name": { "type": "string" },
+            "element": { "$ref": "#/definitions/typeNode" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "name", "element"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "named-tuple" },
+            "name": { "type": "string" },
+            "element": { "$ref": "#/definitions/typeNode" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "elements"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "tuple" },
+            "elements": {
+              "type": "array",
+              "items": { "$ref": "#/definitions/typeNode" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "types"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "enum": ["union", "intersection"] },
+            "types": {
+              "type": "array",
+              "items": { "$ref": "#/definitions/typeNode" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "typeParameters", "parameters", "returnType"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "enum": ["function", "constructor"] },
+            "typeParameters": {
+              "type": "array",
+              "items": { "$ref": "#/definitions/typeParameter" }
+            },
+            "parameters": {
+              "type": "array",
+              "items": { "$ref": "#/definitions/parameter" }
+            },
+            "returnType": { "$ref": "#/definitions/typeNode" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "members"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "object" },
+            "members": {
+              "type": "array",
+              "items": { "$ref": "#/definitions/typeMember" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "object", "index"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "indexed-access" },
+            "object": { "$ref": "#/definitions/typeNode" },
+            "index": { "$ref": "#/definitions/typeNode" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "check", "extends", "trueType", "falseType"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "conditional" },
+            "check": { "$ref": "#/definitions/typeNode" },
+            "extends": { "$ref": "#/definitions/typeNode" },
+            "trueType": { "$ref": "#/definitions/typeNode" },
+            "falseType": { "$ref": "#/definitions/typeNode" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "operator", "element"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "operator" },
+            "operator": { "type": "string" },
+            "element": { "$ref": "#/definitions/typeNode" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "name"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "query" },
+            "name": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "text", "typeArguments"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "import" },
+            "text": { "type": "string" },
+            "name": { "type": "string" },
+            "typeArguments": {
+              "type": "array",
+              "items": { "$ref": "#/definitions/typeNode" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "name", "extends", "operator"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "mapped" },
+            "name": { "type": "string" },
+            "extends": { "$ref": "#/definitions/typeNode" },
+            "element": { "$ref": "#/definitions/typeNode" },
+            "index": { "$ref": "#/definitions/typeNode" },
+            "operator": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "text", "types", "elements"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "template-literal" },
+            "text": { "type": "string" },
+            "types": {
+              "type": "array",
+              "items": { "$ref": "#/definitions/typeNode" }
+            },
+            "elements": {
+              "type": "array",
+              "items": { "$ref": "#/definitions/typeNode" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "type": "string", "pattern": "^syntax-[0-9]+$" }
+          }
+        }
+      ]
+    },
+    "classMember": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "name",
+            "static",
+            "readonly",
+            "optional",
+            "signatures",
+            "type",
+            "docs",
+            "preserved"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "property" },
+            "name": { "type": "string" },
+            "static": { "type": "boolean" },
+            "readonly": { "type": "boolean" },
+            "optional": { "type": "boolean" },
+            "signatures": { "type": "array", "maxItems": 0 },
+            "type": { "$ref": "#/definitions/typeNode" },
+            "docs": { "type": "string" },
+            "preserved": { "const": false }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "name",
+            "static",
+            "readonly",
+            "optional",
+            "signatures",
+            "docs",
+            "preserved"
+          ],
+          "additionalProperties": false,
+          "dependencies": {
+            "preservedBody": ["preservedBodyDigest"],
+            "preservedBodyDigest": ["preservedBody"]
+          },
+          "allOf": [
+            {
+              "if": {
+                "required": ["preservedBody"],
+                "properties": { "preservedBody": { "type": "string" } }
+              },
+              "then": {
+                "properties": { "preserved": { "const": true } }
+              }
+            },
+            {
+              "if": {
+                "required": ["kind"],
+                "properties": { "kind": { "const": "method" } }
+              },
+              "then": {
+                "properties": { "readonly": { "const": false } }
+              }
+            },
+            {
+              "if": {
+                "required": ["kind"],
+                "properties": { "kind": { "const": "getter" } }
+              },
+              "then": {
+                "properties": {
+                  "readonly": { "const": true },
+                  "optional": { "const": false }
+                }
+              }
+            },
+            {
+              "if": {
+                "required": ["kind"],
+                "properties": { "kind": { "const": "setter" } }
+              },
+              "then": {
+                "properties": {
+                  "readonly": { "const": false },
+                  "optional": { "const": false }
+                }
+              }
+            }
+          ],
+          "properties": {
+            "kind": { "enum": ["method", "getter", "setter"] },
+            "name": { "type": "string" },
+            "static": { "type": "boolean" },
+            "readonly": { "type": "boolean" },
+            "optional": { "type": "boolean" },
+            "signatures": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 1,
+              "items": { "$ref": "#/definitions/signature" }
+            },
+            "docs": { "type": "string" },
+            "preserved": { "type": "boolean" },
+            "preservedBody": { "type": "string" },
+            "preservedBodyDigest": { "$ref": "#/definitions/digest" }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "name",
+            "static",
+            "readonly",
+            "optional",
+            "signatures",
+            "docs",
+            "preserved"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "required": ["inheritedConstructor"],
+                "properties": { "inheritedConstructor": { "const": true } }
+              },
+              "then": {
+                "required": ["synthetic"],
+                "properties": { "synthetic": { "const": true } }
+              }
+            }
+          ],
+          "properties": {
+            "kind": { "const": "constructor" },
+            "name": { "const": "constructor" },
+            "static": { "const": false },
+            "readonly": { "const": false },
+            "optional": { "const": false },
+            "signatures": {
+              "type": "array",
+              "items": { "$ref": "#/definitions/signature" }
+            },
+            "docs": { "type": "string" },
+            "preserved": { "const": false },
+            "synthetic": { "const": true },
+            "inheritedConstructor": { "const": true }
+          }
+        }
+      ]
+    },
+    "classHeritage": {
+      "type": "object",
+      "required": ["baseName", "implementationName", "typeArguments"],
+      "additionalProperties": false,
+      "properties": {
+        "baseName": { "type": "string" },
+        "implementationName": { "type": "string" },
+        "typeArguments": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/typeNode" }
+        },
+        "resolvedBaseId": { "type": "string" }
+      }
+    },
+    "symbol": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind",
+        "name",
+        "modifiers",
+        "docs",
+        "typeParameters",
+        "signatures",
+        "members",
+        "options"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "required": ["kind"],
+            "properties": { "kind": { "const": "function" } }
+          },
+          "then": {
+            "properties": {
+              "heritage": false,
+              "typeParameters": { "type": "array", "maxItems": 0 },
+              "members": { "type": "array", "maxItems": 0 }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["kind"],
+            "properties": { "kind": { "const": "class" } }
+          },
+          "then": {
+            "properties": {
+              "signatures": { "type": "array", "maxItems": 0 }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^ts:.+#.+$" },
+        "kind": { "enum": ["function", "class"] },
+        "name": { "type": "string" },
+        "modifiers": { "const": ["export"] },
+        "docs": { "type": "string" },
+        "typeParameters": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/typeParameter" }
+        },
+        "heritage": { "$ref": "#/definitions/classHeritage" },
+        "signatures": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/signature" }
+        },
+        "members": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/classMember" }
+        },
+        "options": { "$ref": "#/definitions/jauntOptions" }
+      }
+    },
+    "typeDeclaration": {
+      "type": "object",
+      "required": [
+        "name",
+        "kind",
+        "typeParameters",
+        "source",
+        "docs",
+        "digest"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "kind": { "enum": ["interface", "type"] },
+        "typeParameters": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/typeParameter" }
+        },
+        "source": { "type": "string" },
+        "docs": { "type": "string" },
+        "digest": { "$ref": "#/definitions/digest" }
+      }
+    },
+    "namedImport": {
+      "type": "object",
+      "required": ["imported", "local", "typeOnly"],
+      "additionalProperties": false,
+      "properties": {
+        "imported": { "type": "string" },
+        "local": { "type": "string" },
+        "typeOnly": { "type": "boolean" }
+      }
+    },
+    "typeImport": {
+      "type": "object",
+      "required": ["specifier", "typeOnly", "runtime", "namedImports"],
+      "additionalProperties": false,
+      "properties": {
+        "specifier": { "type": "string" },
+        "typeOnly": { "type": "boolean" },
+        "runtime": { "type": "boolean" },
+        "defaultImport": { "type": "string" },
+        "namespaceImport": { "type": "string" },
+        "namedImports": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/namedImport" }
+        }
+      }
+    },
+    "exportedDocs": {
+      "type": "object",
+      "required": ["symbol", "docs"],
+      "additionalProperties": false,
+      "properties": {
+        "symbol": { "type": "string" },
+        "docs": { "type": "string" }
+      }
+    },
+    "contextDocs": {
+      "type": "object",
+      "required": ["id", "exports"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "exports": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/exportedDocs" }
+        }
+      }
+    },
+    "fingerprint": {
+      "type": "object",
+      "required": [
+        "toolVersion",
+        "workerVersion",
+        "typescriptVersion",
+        "compilerOptionsHash",
+        "generationFingerprint",
+        "protocol",
+        "ir"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "toolVersion": { "type": "string", "minLength": 1 },
+        "workerVersion": { "type": "string", "minLength": 1 },
+        "typescriptVersion": { "type": "string", "minLength": 1 },
+        "compilerOptionsHash": { "$ref": "#/definitions/digest" },
+        "generationFingerprint": { "type": "string", "minLength": 1 },
+        "protocol": { "const": "jaunt-ts/1-draft.2" },
+        "ir": { "const": "contract-ir/1-draft.2" }
+      }
+    },
+    "moduleRoute": {
+      "type": "object",
+      "required": [
+        "specPath",
+        "facadePath",
+        "apiMirrorPath",
+        "implementationPath",
+        "sidecarPath",
+        "moduleId",
+        "project",
+        "packageOwner"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "specPath": { "type": "string" },
+        "facadePath": { "type": "string" },
+        "apiMirrorPath": { "type": "string" },
+        "implementationPath": { "type": "string" },
+        "sidecarPath": { "type": "string" },
+        "contextPath": { "type": "string" },
+        "moduleId": { "type": "string", "pattern": "^ts:" },
+        "project": { "type": "string" },
+        "packageOwner": { "type": "string" }
+      }
+    },
+    "contractModuleCore": {
+      "type": "object",
+      "required": [
+        "schema",
+        "moduleId",
+        "specPath",
+        "facadePath",
+        "apiMirrorPath",
+        "implementationPath",
+        "project",
+        "packageOwner",
+        "symbols",
+        "options",
+        "typeDeclarations",
+        "typeImports",
+        "contextDocs",
+        "dependencies",
+        "structuralDigest",
+        "proseDigest",
+        "apiDigest"
+      ],
+      "properties": {
+        "schema": { "const": "contract-ir/1-draft.2" },
+        "moduleId": { "type": "string", "pattern": "^ts:" },
+        "specPath": { "type": "string" },
+        "facadePath": { "type": "string" },
+        "apiMirrorPath": { "type": "string" },
+        "implementationPath": { "type": "string" },
+        "contextPath": { "type": "string" },
+        "project": { "type": "string" },
+        "packageOwner": { "type": "string" },
+        "symbols": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/symbol" }
+        },
+        "options": { "$ref": "#/definitions/jauntOptions" },
+        "typeDeclarations": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/typeDeclaration" }
+        },
+        "typeImports": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/typeImport" }
+        },
+        "contextDocs": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/contextDocs" }
+        },
+        "dependencies": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "structuralDigest": { "$ref": "#/definitions/digest" },
+        "proseDigest": { "$ref": "#/definitions/digest" },
+        "apiDigest": { "$ref": "#/definitions/digest" },
+        "fingerprint": { "$ref": "#/definitions/fingerprint" }
+      }
+    },
+    "contractModuleIR": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/definitions/contractModuleCore" }],
+      "propertyNames": {
+        "enum": [
+          "schema",
+          "moduleId",
+          "specPath",
+          "facadePath",
+          "apiMirrorPath",
+          "implementationPath",
+          "contextPath",
+          "project",
+          "packageOwner",
+          "symbols",
+          "options",
+          "typeDeclarations",
+          "typeImports",
+          "contextDocs",
+          "dependencies",
+          "structuralDigest",
+          "proseDigest",
+          "apiDigest",
+          "fingerprint"
+        ]
+      }
+    },
+    "contractAnalysisRecord": {
+      "allOf": [{ "$ref": "#/definitions/contractModuleCore" }],
+      "type": "object",
+      "required": [
+        "routes",
+        "apiSource",
+        "placeholderSource",
+        "sidecar",
+        "specSource"
+      ],
+      "propertyNames": {
+        "enum": [
+          "schema",
+          "moduleId",
+          "specPath",
+          "facadePath",
+          "apiMirrorPath",
+          "implementationPath",
+          "contextPath",
+          "project",
+          "packageOwner",
+          "symbols",
+          "options",
+          "typeDeclarations",
+          "typeImports",
+          "contextDocs",
+          "dependencies",
+          "structuralDigest",
+          "proseDigest",
+          "apiDigest",
+          "fingerprint",
+          "routes",
+          "apiSource",
+          "placeholderSource",
+          "sidecar",
+          "specSource",
+          "contextSource"
+        ]
+      },
+      "properties": {
+        "routes": { "$ref": "#/definitions/moduleRoute" },
+        "apiSource": { "type": "string" },
+        "placeholderSource": { "type": "string" },
+        "sidecar": { "type": "string" },
+        "specSource": { "type": "string" },
+        "contextSource": { "type": "string" }
+      }
+    }
+  }
+}

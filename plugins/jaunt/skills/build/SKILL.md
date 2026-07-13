@@ -16,7 +16,9 @@ walking up two directories. Do not assume `PLUGIN_ROOT` is set in an ordinary
 skill-driven shell call.
 
 Change to the printed directory. A root workspace may own several packages;
-Jaunt routes each module to the nearest owning `pyproject.toml`.
+Python modules route to the nearest owning `pyproject.toml`. TypeScript modules
+use configured tsconfig projects for compilation and the nearest `package.json`
+for dependency ownership.
 
 ## 2. Preview the work
 
@@ -37,6 +39,10 @@ fixed dollar estimate. If a structural change looks accidental, stop before
 the model call. Clean deleted-spec artifacts with
 `uv run jaunt clean --orphans`.
 
+For a new `*.jaunt.ts[x]` spec, run `uv run jaunt sync` before the paid build.
+It writes the deterministic API mirror and an explicitly unbuilt throwing
+placeholder; it does not call Codex or make `jaunt check` green.
+
 ## 3. Build
 
 ```bash
@@ -52,15 +58,16 @@ Review `newly_governed` before accepting the result.
 1. Surface advisories verbatim.
 2. Report the actual cost from the completed build.
 3. Run `uv run jaunt check`.
-4. Run the package's unchanged tests, Ruff, and ty.
+4. Run the package's unchanged tests and target checks: Ruff/ty for Python;
+   TypeScript typecheck, emit, and Vitest for TypeScript.
 5. Review the generated diff as production code. Fix problems through the spec.
 
 ## 5. Review a first build
 
 For a module's first successful build, delegate exactly one read-only explorer
-subagent to the `$jaunt:first-build-reviewer` checklist. Give it the spec,
-generated implementation, and generated `.pyi` path. It may read and search
-but must not edit or build.
+subagent to the `$jaunt:first-build-reviewer` checklist. Give it the spec and
+generated implementation, plus the generated `.pyi` for Python or API mirror
+for TypeScript. It may read and search but must not edit or build.
 
 If delegation is unavailable, perform the same checklist in the main thread:
 compare contract to implementation for unpinned defaults, errors, ordering,

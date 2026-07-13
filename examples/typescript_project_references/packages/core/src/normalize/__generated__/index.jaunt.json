@@ -1,0 +1,200 @@
+{
+  "apiDigest": "sha256:562bfc6134ba8f47ad7d1e478990cb73d1e76750e0441b4d28b4ae70c9ce0c85",
+  "apiMirrorPath": "packages/core/src/normalize/__generated__/index.api.ts",
+  "artifactHashes": {
+    "packages/core/src/normalize/__generated__/index.api.ts": "sha256:d78797ec808c3684fd0fa1cab951ffcae3126a77679a91fd1e3081c5be40939e",
+    "packages/core/src/normalize/__generated__/index.ts": "sha256:f381db130fee4b2528cd2955226a7bdd34384fe61bd6dab602a66246aaba5bc7",
+    "packages/core/src/normalize/index.ts": "sha256:1db00b0df482881a7fe6f67c5d84bf3d48659187a8e4ed17909cf395260f6874"
+  },
+  "contextDocs": [
+    {
+      "exports": [
+        {
+          "docs": "A basic HTTP/1.1 client, mapped on top a single TCP/TLS connection. Pipelining is disabled by default.",
+          "symbol": "Client"
+        },
+        {
+          "docs": "`true` after `client.close()` has been called.",
+          "symbol": "Client.closed"
+        },
+        {
+          "docs": "`true` after `client.destroyed()` has been called or `client.close()` has been called and the client shutdown has completed.",
+          "symbol": "Client.destroyed"
+        },
+        {
+          "docs": "Property to get and set the pipelining factor.",
+          "symbol": "Client.pipelining"
+        },
+        {
+          "docs": "Aggregate stats for a Client.",
+          "symbol": "Client.stats"
+        }
+      ],
+      "id": "package:undici-types/client.d.ts"
+    },
+    {
+      "exports": [
+        {
+          "docs": "Parse a string to a {@link MIMEType} object. Returns `failure` if the string\ncouldn't be parsed.\n@see https://mimesniff.spec.whatwg.org/#parse-a-mime-type",
+          "symbol": "parseMIMEType"
+        },
+        {
+          "docs": "Convert a MIMEType object to a string.\n@see https://mimesniff.spec.whatwg.org/#serialize-a-mime-type",
+          "symbol": "serializeAMimeType"
+        }
+      ],
+      "id": "package:undici-types/content-type.d.ts"
+    },
+    {
+      "exports": [
+        {
+          "docs": "@deprecated This method is not recommended for parsing multipart/form-data bodies in server environments.\nIt is recommended to use a library such as [@fastify/busboy](https://www.npmjs.com/package/@fastify/busboy) as follows:\n\n@example\n```js\nimport { Busboy } from '@fastify/busboy'\nimport { Readable } from 'node:stream'\n\nconst response = await fetch('...')\nconst busboy = new Busboy({ headers: { 'content-type': response.headers.get('content-type') } })\n\n// handle events emitted from `busboy`\n\nReadable.fromWeb(response.body).pipe(busboy)\n```",
+          "symbol": "BodyMixin.formData"
+        }
+      ],
+      "id": "package:undici-types/fetch.d.ts"
+    },
+    {
+      "exports": [
+        {
+          "docs": "Provides a way to easily construct a set of key/value pairs representing form fields and their values, which can then be easily sent using fetch().",
+          "symbol": "FormData"
+        },
+        {
+          "docs": "An alias for FormData#entries()",
+          "symbol": "FormData.[Symbol.iterator]"
+        },
+        {
+          "docs": "Appends a new value onto an existing key inside a FormData object,\nor adds the key if it does not already exist.\n\nThe difference between `set()` and `append()` is that if the specified key already exists, `set()` will overwrite all existing values with the new one, whereas `append()` will append the new value onto the end of the existing set of values.\n\n@param name The name of the field whose data is contained in `value`.\n@param value The field's value. This can be [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob)\n    or [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File). If none of these are specified the value is converted to a string.\n@param fileName The filename reported to the server, when a Blob or File is passed as the second parameter. The default filename for Blob objects is \"blob\". The default filename for File objects is the file's filename.",
+          "symbol": "FormData.append"
+        },
+        {
+          "docs": "Deletes a key and its value(s) from a `FormData` object.\n\n@param name The name of the key you want to delete.",
+          "symbol": "FormData.delete"
+        },
+        {
+          "docs": "Returns an [`iterator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Iteration_protocols) allowing to go through the `FormData` key/value pairs.\nThe key of each pair is a string; the value is a [`FormDataValue`](https://developer.mozilla.org/en-US/docs/Web/API/FormDataEntryValue).",
+          "symbol": "FormData.entries"
+        },
+        {
+          "docs": "Executes given callback function for each field of the FormData instance",
+          "symbol": "FormData.forEach"
+        },
+        {
+          "docs": "Returns the first value associated with a given key from within a `FormData` object.\nIf you expect multiple values and want all of them, use the `getAll()` method instead.\n\n@param {string} name A name of the value you want to retrieve.\n\n@returns A `FormDataEntryValue` containing the value. If the key doesn't exist, the method returns null.",
+          "symbol": "FormData.get"
+        },
+        {
+          "docs": "Returns all the values associated with a given key from within a `FormData` object.\n\n@param {string} name A name of the value you want to retrieve.\n\n@returns An array of `FormDataEntryValue` whose key matches the value passed in the `name` parameter. If the key doesn't exist, the method returns an empty list.",
+          "symbol": "FormData.getAll"
+        },
+        {
+          "docs": "Returns a boolean stating whether a `FormData` object contains a certain key.\n\n@param name A string representing the name of the key you want to test for.\n\n@return A boolean value.",
+          "symbol": "FormData.has"
+        },
+        {
+          "docs": "Returns an [`iterator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Iteration_protocols) allowing to go through all keys contained in this `FormData` object.\nEach key is a `string`.",
+          "symbol": "FormData.keys"
+        },
+        {
+          "docs": "Set a new value for an existing key inside FormData,\nor add the new field if it does not already exist.\n\n@param name The name of the field whose data is contained in `value`.\n@param value The field's value. This can be [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob)\n    or [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File). If none of these are specified the value is converted to a string.\n@param fileName The filename reported to the server, when a Blob or File is passed as the second parameter. The default filename for Blob objects is \"blob\". The default filename for File objects is the file's filename.",
+          "symbol": "FormData.set"
+        },
+        {
+          "docs": "Returns an [`iterator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Iteration_protocols) allowing to go through all values contained in this object `FormData` object.\nEach value is a [`FormDataValue`](https://developer.mozilla.org/en-US/docs/Web/API/FormDataEntryValue).",
+          "symbol": "FormData.values"
+        }
+      ],
+      "id": "package:undici-types/formdata.d.ts"
+    },
+    {
+      "exports": [
+        {
+          "docs": "A basic H2C client, mapped on top a single TCP connection. Pipelining is disabled by default.",
+          "symbol": "H2CClient"
+        },
+        {
+          "docs": "`true` after `client.close()` has been called.",
+          "symbol": "H2CClient.closed"
+        },
+        {
+          "docs": "`true` after `client.destroyed()` has been called or `client.close()` has been called and the client shutdown has completed.",
+          "symbol": "H2CClient.destroyed"
+        },
+        {
+          "docs": "Property to get and set the pipelining factor.",
+          "symbol": "H2CClient.pipelining"
+        }
+      ],
+      "id": "package:undici-types/h2c-client.d.ts"
+    },
+    {
+      "exports": [
+        {
+          "docs": "The header type declaration of `undici`.",
+          "symbol": "IncomingHttpHeaders"
+        },
+        {
+          "docs": "The header type declaration of `undici` for outgoing requests.",
+          "symbol": "OutgoingHttpHeaders"
+        }
+      ],
+      "id": "package:undici-types/header.d.ts"
+    }
+  ],
+  "dependencies": [],
+  "facadePath": "packages/core/src/normalize/index.ts",
+  "fingerprint": {
+    "compilerOptionsHash": "sha256:733b0de60903c3a6ff99040ca855c84b231f4a33ec486b0681a52c9fd9c80560",
+    "generationFingerprint": "sha256:86ff80af08c4b56b0fbe527c9e5f30b9d9e73acefcb3d821862d414679822382",
+    "ir": "contract-ir/1-draft.2",
+    "protocol": "jaunt-ts/1-draft.2",
+    "toolVersion": "1.6.3",
+    "typescriptVersion": "5.9.3",
+    "workerVersion": "0.1.0-alpha.0"
+  },
+  "implementationPath": "packages/core/src/normalize/__generated__/index.ts",
+  "moduleId": "ts:packages/core/src/normalize/index",
+  "options": {},
+  "packageOwner": "packages/core",
+  "project": "packages/core/tsconfig.json",
+  "proseDigest": "sha256:fe36c3763b8865671942e43121b369178cedb891ef3436c7263ba68da757b456",
+  "schema": "contract-ir/1-draft.2",
+  "specPath": "packages/core/src/normalize/index.jaunt.ts",
+  "state": "built",
+  "structuralDigest": "sha256:2e97c5687938af9f6e2975de77e3a2ba6ad92f2fe21a0719674811c7f4280ddf",
+  "symbols": [
+    {
+      "docs": "Normalize spacing in a title.\n\nTrim leading and trailing ASCII whitespace and replace each non-empty run of\nASCII whitespace characters with one literal space. Return an empty string\nwhen the input is empty or contains only ASCII whitespace.\n\n@example normalizeSpacing(\"  Jaunt\\tTS  \") // => \"Jaunt TS\"",
+      "id": "ts:packages/core/src/normalize/index#normalizeSpacing",
+      "kind": "function",
+      "members": [],
+      "modifiers": [
+        "export"
+      ],
+      "name": "normalizeSpacing",
+      "options": {},
+      "signatures": [
+        {
+          "parameters": [
+            {
+              "name": "value",
+              "optional": false,
+              "rest": false,
+              "type": {
+                "kind": "string"
+              }
+            }
+          ],
+          "returnType": {
+            "kind": "string"
+          },
+          "typeParameters": []
+        }
+      ],
+      "typeParameters": []
+    }
+  ],
+  "typeDeclarations": [],
+  "typeImports": []
+}

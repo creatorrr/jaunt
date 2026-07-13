@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import glob
 import hashlib
 import json
 import os
@@ -15,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
@@ -33,7 +34,18 @@ from jaunt.errors import (
     JauntDiscoveryError,
     JauntGenerationError,
 )
-from jaunt.init_template import INIT_SPEC_TEMPLATE, INIT_TEMPLATE
+from jaunt.init_template import (
+    INIT_SPEC_TEMPLATE,
+    INIT_TEMPLATE,
+    TYPESCRIPT_COMMONJS_TSCONFIG_TEMPLATE,
+    TYPESCRIPT_CONTEXT_TEMPLATE,
+    TYPESCRIPT_FACADE_TEMPLATE,
+    TYPESCRIPT_INIT_TEMPLATE,
+    TYPESCRIPT_SPEC_TEMPLATE,
+    TYPESCRIPT_TSCONFIG_TEMPLATE,
+    TYPESCRIPT_TEST_SPEC_TEMPLATE,
+    TYPESCRIPT_TEST_TSCONFIG_TEMPLATE,
+)
 from jaunt.progress import ProgressBar
 from jaunt.status_core import (
     compute_magic_status,
@@ -45,6 +57,8 @@ from jaunt.status_core import (
 
 if TYPE_CHECKING:  # pragma: no cover
     from jaunt.config import JauntConfig
+    from jaunt.cost import CostTracker
+    from jaunt.generate.base import GeneratorBackend
     from jaunt.jobs import JobRecord
     from jaunt.registry import SpecEntry
     from jaunt.spec_ref import SpecRef
@@ -80,6 +94,12 @@ def _add_common_flags(p: argparse.ArgumentParser) -> None:
         action="append",
         default=[],
         help="Restrict to MODULE[:QUALNAME] (repeatable).",
+    )
+    p.add_argument(
+        "--language",
+        choices=("py", "ts"),
+        default=None,
+        help="Restrict a version-2 workspace command to Python or TypeScript.",
     )
     p.add_argument(
         "--no-infer-deps",
@@ -185,16 +205,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "semantic gate). Layer A linter-resistance still applies.",
     )
 
-    test_p = subparsers.add_parser("test", help="Generate tests and run pytest.")
+    test_p = subparsers.add_parser("test", help="Generate tests and run the target test runner.")
     _add_common_flags(test_p)
     _add_build_generation_flags(test_p)
     test_p.add_argument("--no-build", action="store_true", help="Skip `jaunt build`.")
-    test_p.add_argument("--no-run", action="store_true", help="Skip running pytest.")
+    test_p.add_argument("--no-run", action="store_true", help="Skip running pytest or Vitest.")
     test_p.add_argument(
         "--pytest-args",
         action="append",
         default=[],
-        help="Extra args appended to pytest (repeatable).",
+        help="Extra args appended to pytest for Python targets (repeatable).",
     )
     test_p.add_argument(
         "--no-semantic-gate",
@@ -219,6 +239,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Directory in which to create jaunt.toml (defaults to cwd).",
     )
     init_p.add_argument("--force", action="store_true", help="Overwrite existing jaunt.toml.")
+    init_p.add_argument(
+        "--language",
+        choices=("py", "ts"),
+        default="py",
+        help="Scaffold a Python or TypeScript project (default: py).",
+    )
     init_p.add_argument(
         "--json",
         action="store_true",
@@ -250,6 +276,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Remove only orphaned generated artifacts (spec no longer exists).",
     )
     clean_p.add_argument(
+        "--target",
+        action="append",
+        default=[],
+        help="Restrict TypeScript cleanup to ts:<spec-path>[#symbol] (repeatable).",
+    )
+    clean_p.add_argument(
+        "--language",
+        choices=("py", "ts"),
+        default=None,
+        help="Restrict cleanup to one version-2 target language.",
+    )
+    clean_p.add_argument(
         "--json",
         action="store_true",
         dest="json_output",
@@ -266,6 +304,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Project root (defaults to searching upward for jaunt.toml).",
     )
     migrate_p.add_argument("--config", type=str, default=None, help="Path to jaunt.toml.")
+    migrate_p.add_argument(
+        "--language",
+        choices=("py", "ts"),
+        default=None,
+        help="Restrict migration to one version-2 target language.",
+    )
     migrate_p.add_argument(
         "--apply",
         action="store_true",
@@ -289,6 +333,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Plan/apply consolidation of tracked descendant jaunt.toml files.",
     )
     migrate_p.add_argument(
+        "--config-v2",
+        action="store_true",
+        dest="config_v2",
+        help="Plan/apply the deterministic version-1 to version-2 config migration.",
+    )
+    migrate_p.add_argument(
         "--json",
         action="store_true",
         dest="json_output",
@@ -302,6 +352,24 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="magic_only",
         help="Probe only @jaunt.magic freshness; skip contract checks and repo-map drift.",
+    )
+
+    sync_p = subparsers.add_parser(
+        "sync",
+        help="Render TypeScript API mirrors and unbuilt placeholders without a model call.",
+    )
+    _add_common_flags(sync_p)
+
+    design_p = subparsers.add_parser(
+        "design",
+        help="Propose or apply a TypeScript declaration for an @jauntDesign contract.",
+    )
+    _add_common_flags(design_p)
+    design_p.set_defaults(language="ts")
+    design_p.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply the previously reviewed declaration patch without another model call.",
     )
 
     log_p = subparsers.add_parser("log", help="Show the JAUNT_LOG change journal.")
@@ -505,12 +573,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_common_flags(reconcile_p)
 
-    adopt_p = subparsers.add_parser("adopt", help="Add @jaunt.contract to a function and derive.")
-    adopt_p.add_argument("ref", help="Spec ref 'module:func'.")
+    adopt_p = subparsers.add_parser("adopt", help="Adopt committed code and derive a battery.")
+    adopt_p.add_argument("ref", help="Python 'module:func' or TypeScript 'path.ts#symbol' ref.")
     _add_common_flags(adopt_p)
 
-    eject_p = subparsers.add_parser("eject", help="Remove contract tracking; leave plain pytest.")
-    eject_p.add_argument("ref", nargs="?", default=None, help="Spec ref 'module:func'.")
+    eject_p = subparsers.add_parser(
+        "eject", help="Remove Jaunt tracking; leave ordinary code and tests."
+    )
+    eject_p.add_argument(
+        "ref", nargs="?", default=None, help="Python 'module:func' or TypeScript target ref."
+    )
     eject_p.add_argument("--all", action="store_true", help="Eject all contract functions.")
     _add_common_flags(eject_p)
 
@@ -602,6 +674,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Restrict output to a single module.",
+    )
+    specs_p.add_argument(
+        "--language",
+        choices=("py", "ts"),
+        default=None,
+        help="Restrict listing to one version-2 target language.",
     )
     specs_p.add_argument(
         "--no-infer-deps",
@@ -735,6 +813,1789 @@ def _load_config(args: argparse.Namespace) -> tuple[Path, JauntConfig]:
     return root, cfg
 
 
+def _target_dispatch_mode(args: argparse.Namespace, cfg: JauntConfig) -> str:
+    """Return ``py``, ``ts``, or ``mixed`` without changing v1 defaults."""
+
+    requested = getattr(args, "language", None)
+    if cfg.version == 1:
+        if requested == "ts":
+            raise JauntConfigError("--language ts requires a version-2 jaunt.toml with [target.ts]")
+        return "py"
+    configured = cfg.target_languages
+    if requested is not None:
+        if requested not in configured:
+            raise JauntConfigError(f"No [target.{requested}] is configured in jaunt.toml")
+        return str(requested)
+    if configured == ("ts",):
+        return "ts"
+    if configured == ("py",):
+        return "py"
+    if configured == ("py", "ts"):
+        return "mixed"
+    raise JauntConfigError("Version-2 jaunt.toml must configure [target.py] or [target.ts]")
+
+
+def _typescript_target_ids(args: argparse.Namespace) -> tuple[str, ...]:
+    values = tuple(str(value) for value in (getattr(args, "target", []) or []))
+    invalid = [value for value in values if not value.startswith("ts:")]
+    if invalid:
+        raise JauntConfigError(
+            "TypeScript targets use `ts:<root-relative-spec-path>[#symbol]`: " + ", ".join(invalid)
+        )
+    return values
+
+
+def _emit_typescript_payload(payload: dict[str, object], *, json_mode: bool) -> None:
+    if json_mode:
+        _emit_json(payload)
+        return
+    from jaunt.typescript.cli_bridge import human_lines
+
+    for line in human_lines(payload):
+        print(line)
+
+
+def _typescript_response_cache(args: argparse.Namespace, root: Path):
+    from jaunt.cache import ResponseCache
+
+    return ResponseCache(
+        root / ".jaunt" / "cache",
+        enabled=not bool(getattr(args, "no_cache", False)),
+    )
+
+
+def _typescript_builtin_skill_names(args: argparse.Namespace, cfg: JauntConfig) -> tuple[str, ...]:
+    if not cfg.skills.builtin or bool(getattr(args, "no_builtin_skills", False)):
+        return ()
+    return tuple(cfg.skills.builtin_skills)
+
+
+def _typescript_auto_skills_enabled(args: argparse.Namespace, cfg: JauntConfig) -> bool:
+    return bool(cfg.skills.auto) and not bool(getattr(args, "no_auto_skills", False))
+
+
+def _typescript_error(command: str, error: Exception, *, json_mode: bool, code: int) -> int:
+    _print_error(error)
+    if json_mode:
+        diagnostic_code = getattr(error, "code", type(error).__name__)
+        diagnostics = getattr(error, "diagnostics", ())
+        _emit_json(
+            {
+                "schema_version": 2,
+                "command": command,
+                "ok": False,
+                "error": {
+                    "code": str(diagnostic_code),
+                    "message": str(error),
+                    "diagnostics": [
+                        {
+                            "code": getattr(item, "code", "JAUNT_TS_DIAGNOSTIC"),
+                            "message": getattr(item, "message", str(item)),
+                            "severity": getattr(item, "severity", "error"),
+                            "path": getattr(item, "path", None),
+                        }
+                        for item in diagnostics
+                    ],
+                },
+            }
+        )
+    return code
+
+
+def _typescript_command_context(
+    args: argparse.Namespace,
+) -> tuple[Path, JauntConfig, str] | None:
+    """Probe target dispatch while leaving v1 error rendering untouched."""
+
+    try:
+        root, cfg = _load_config(args)
+    except (JauntConfigError, KeyError):
+        return None
+    try:
+        mode = _target_dispatch_mode(args, cfg)
+    except JauntConfigError as error:
+        args._target_dispatch_error = error
+        mode = "error"
+    return root, cfg, mode
+
+
+def _target_dispatch_failure(args: argparse.Namespace, mode: str) -> int | None:
+    if mode != "error":
+        return None
+    error = getattr(args, "_target_dispatch_error", JauntConfigError("Invalid target selection"))
+    return _typescript_error(
+        str(getattr(args, "command", "command")),
+        error,
+        json_mode=_is_json_mode(args),
+        code=EXIT_CONFIG_OR_DISCOVERY,
+    )
+
+
+def _cmd_typescript_build_loaded(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> int:
+    from jaunt.typescript.builder import run_build
+    from jaunt.typescript.cli_bridge import build_payload
+
+    json_mode = _is_json_mode(args)
+    try:
+        report = asyncio.run(
+            run_build(
+                root,
+                cfg,
+                target_ids=_typescript_target_ids(args),
+                force=bool(getattr(args, "force", False)),
+                response_cache=_typescript_response_cache(args, root),
+                jobs=getattr(args, "jobs", None),
+                build_instructions=_effective_build_instructions(cfg, args),
+                semantic_gate_enabled=(
+                    False if bool(getattr(args, "no_semantic_gate", False)) else None
+                ),
+                repo_map_enabled=bool(cfg.context.repo_map)
+                and not bool(getattr(args, "no_repo_map", False)),
+                auto_skills_enabled=_typescript_auto_skills_enabled(args, cfg),
+                builtin_skill_names=_typescript_builtin_skill_names(args, cfg),
+            )
+        )
+        payload = build_payload(report)
+        _emit_typescript_payload(payload, json_mode=json_mode)
+        return report.exit_code
+    except JauntGenerationError as error:
+        return _typescript_error("build", error, json_mode=json_mode, code=EXIT_GENERATION_ERROR)
+    except (JauntConfigError, JauntDiscoveryError, KeyError) as error:
+        return _typescript_error("build", error, json_mode=json_mode, code=EXIT_CONFIG_OR_DISCOVERY)
+
+
+def _cmd_typescript_test_loaded(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> int:
+    from jaunt.typescript.cli_bridge import test_payload
+    from jaunt.typescript.tester import run_test
+
+    json_mode = _is_json_mode(args)
+    try:
+        report = asyncio.run(
+            run_test(
+                root,
+                cfg,
+                target_ids=_typescript_target_ids(args),
+                no_build=bool(getattr(args, "no_build", False)),
+                no_run=bool(getattr(args, "no_run", False)),
+                no_redact_derived=bool(getattr(args, "no_redact_derived", False)),
+                force=bool(getattr(args, "force", False)),
+                response_cache=_typescript_response_cache(args, root),
+                jobs=getattr(args, "jobs", None),
+                build_instructions=_effective_build_instructions(cfg, args),
+                semantic_gate_enabled=(
+                    False if bool(getattr(args, "no_semantic_gate", False)) else None
+                ),
+                repo_map_enabled=bool(cfg.context.repo_map)
+                and not bool(getattr(args, "no_repo_map", False)),
+                auto_skills_enabled=_typescript_auto_skills_enabled(args, cfg),
+                builtin_skill_names=_typescript_builtin_skill_names(args, cfg),
+            )
+        )
+        payload = test_payload(report)
+        _emit_typescript_payload(payload, json_mode=json_mode)
+        return report.exit_code
+    except JauntGenerationError as error:
+        return _typescript_error("test", error, json_mode=json_mode, code=EXIT_GENERATION_ERROR)
+    except (JauntConfigError, JauntDiscoveryError, KeyError) as error:
+        return _typescript_error("test", error, json_mode=json_mode, code=EXIT_CONFIG_OR_DISCOVERY)
+
+
+def cmd_sync(args: argparse.Namespace) -> int:
+    from jaunt.typescript.builder import run_sync
+    from jaunt.typescript.cli_bridge import sync_payload
+
+    json_mode = _is_json_mode(args)
+    try:
+        root, cfg = _load_config(args)
+        mode = _target_dispatch_mode(args, cfg)
+        if mode == "py":
+            raise JauntConfigError("`jaunt sync` currently operates on [target.ts]")
+        report = asyncio.run(run_sync(root, cfg, target_ids=_typescript_target_ids(args)))
+        payload = sync_payload(report)
+        _emit_typescript_payload(payload, json_mode=json_mode)
+        return report.exit_code
+    except (JauntConfigError, JauntDiscoveryError, KeyError) as error:
+        return _typescript_error("sync", error, json_mode=json_mode, code=EXIT_CONFIG_OR_DISCOVERY)
+
+
+def cmd_design(args: argparse.Namespace) -> int:
+    from jaunt.typescript.cli_bridge import design_payload
+    from jaunt.typescript.design import run_design
+
+    json_mode = _is_json_mode(args)
+    try:
+        root, cfg = _load_config(args)
+        mode = _target_dispatch_mode(args, cfg)
+        if mode == "py":
+            raise JauntConfigError("`jaunt design` is TypeScript-only")
+        target_ids = _typescript_target_ids(args)
+        if len(target_ids) > 1:
+            raise JauntConfigError("`jaunt design` accepts at most one --target")
+        report = asyncio.run(
+            run_design(
+                root,
+                cfg,
+                target_id=target_ids[0] if target_ids else None,
+                apply=bool(getattr(args, "apply", False)),
+                force=bool(getattr(args, "force", False)),
+            )
+        )
+        payload = design_payload(report)
+        _emit_typescript_payload(payload, json_mode=json_mode)
+        return report.exit_code
+    except JauntGenerationError as error:
+        return _typescript_error("design", error, json_mode=json_mode, code=EXIT_GENERATION_ERROR)
+    except (JauntConfigError, JauntDiscoveryError, KeyError) as error:
+        return _typescript_error(
+            "design", error, json_mode=json_mode, code=EXIT_CONFIG_OR_DISCOVERY
+        )
+
+
+def _cmd_typescript_adopt_loaded(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> int:
+    from jaunt.typescript.cli_bridge import lifecycle_payload
+    from jaunt.typescript.contracts import run_adopt
+
+    json_mode = _is_json_mode(args)
+    try:
+        report = asyncio.run(
+            run_adopt(
+                root,
+                cfg,
+                target=str(args.ref),
+                apply=True,
+                response_cache=_typescript_response_cache(args, root),
+                auto_skills_enabled=_typescript_auto_skills_enabled(args, cfg),
+                builtin_skill_names=_typescript_builtin_skill_names(args, cfg),
+            )
+        )
+        _emit_typescript_payload(lifecycle_payload(report), json_mode=json_mode)
+        return report.exit_code
+    except JauntGenerationError as error:
+        return _typescript_error("adopt", error, json_mode=json_mode, code=EXIT_GENERATION_ERROR)
+    except (JauntConfigError, JauntDiscoveryError, KeyError) as error:
+        return _typescript_error("adopt", error, json_mode=json_mode, code=EXIT_CONFIG_OR_DISCOVERY)
+
+
+def _cmd_typescript_reconcile_loaded(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> int:
+    from jaunt.typescript.cli_bridge import lifecycle_payload
+    from jaunt.typescript.contracts import run_reconcile
+
+    json_mode = _is_json_mode(args)
+    try:
+        report = asyncio.run(
+            run_reconcile(
+                root,
+                cfg,
+                target_ids=_typescript_target_ids(args),
+                response_cache=_typescript_response_cache(args, root),
+                auto_skills_enabled=_typescript_auto_skills_enabled(args, cfg),
+                builtin_skill_names=_typescript_builtin_skill_names(args, cfg),
+            )
+        )
+        _emit_typescript_payload(lifecycle_payload(report), json_mode=json_mode)
+        return report.exit_code
+    except JauntGenerationError as error:
+        return _typescript_error(
+            "reconcile", error, json_mode=json_mode, code=EXIT_GENERATION_ERROR
+        )
+    except (JauntConfigError, JauntDiscoveryError, KeyError) as error:
+        return _typescript_error(
+            "reconcile", error, json_mode=json_mode, code=EXIT_CONFIG_OR_DISCOVERY
+        )
+
+
+def _cmd_typescript_eject_loaded(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> int:
+    from jaunt.typescript.cli_bridge import lifecycle_payload
+    from jaunt.typescript.contracts import run_eject
+
+    json_mode = _is_json_mode(args)
+    try:
+        if bool(getattr(args, "all", False)) or not getattr(args, "ref", None):
+            raise JauntConfigError(
+                "TypeScript ejection requires one path#symbol or ts:module target"
+            )
+        report = asyncio.run(run_eject(root, cfg, target=str(args.ref)))
+        _emit_typescript_payload(lifecycle_payload(report), json_mode=json_mode)
+        return report.exit_code
+    except JauntGenerationError as error:
+        return _typescript_error("eject", error, json_mode=json_mode, code=EXIT_GENERATION_ERROR)
+    except (JauntConfigError, JauntDiscoveryError, KeyError) as error:
+        return _typescript_error("eject", error, json_mode=json_mode, code=EXIT_CONFIG_OR_DISCOVERY)
+
+
+def _cmd_typescript_status_loaded(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> int:
+    from jaunt.typescript.cli_bridge import status_payload
+    from jaunt.typescript.status import run_status
+
+    json_mode = _is_json_mode(args)
+    try:
+        report = asyncio.run(run_status(root, cfg, target_ids=_typescript_target_ids(args)))
+        payload = status_payload(report)
+        _emit_typescript_payload(payload, json_mode=json_mode)
+        return EXIT_OK
+    except (JauntConfigError, JauntDiscoveryError, KeyError) as error:
+        return _typescript_error(
+            "status", error, json_mode=json_mode, code=EXIT_CONFIG_OR_DISCOVERY
+        )
+
+
+def _cmd_typescript_check_loaded(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> int:
+    from jaunt.typescript.cli_bridge import check_payload
+    from jaunt.typescript.status import run_check
+
+    json_mode = _is_json_mode(args)
+    try:
+        report = asyncio.run(
+            run_check(
+                root,
+                cfg,
+                target_ids=_typescript_target_ids(args),
+                magic_only=bool(getattr(args, "magic_only", False)),
+                contracts_only=bool(getattr(args, "contracts_only", False)),
+            )
+        )
+        payload = check_payload(report)
+        _emit_typescript_payload(payload, json_mode=json_mode)
+        return report.exit_code
+    except (JauntConfigError, JauntDiscoveryError, KeyError) as error:
+        return _typescript_error("check", error, json_mode=json_mode, code=EXIT_CONFIG_OR_DISCOVERY)
+
+
+def _cmd_typescript_specs_loaded(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> int:
+    from jaunt.typescript.cli_bridge import specs_payload
+    from jaunt.typescript.status import run_specs
+
+    json_mode = _is_json_mode(args)
+    try:
+        target_ids = _typescript_target_ids(args)
+        module_filter = getattr(args, "module", None)
+        if module_filter:
+            target_ids = (*target_ids, str(module_filter))
+        report = asyncio.run(run_specs(root, cfg, target_ids=target_ids))
+        payload = specs_payload(report)
+        _emit_typescript_payload(payload, json_mode=json_mode)
+        return EXIT_OK
+    except (JauntConfigError, JauntDiscoveryError, KeyError) as error:
+        return _typescript_error("specs", error, json_mode=json_mode, code=EXIT_CONFIG_OR_DISCOVERY)
+
+
+def _cmd_typescript_clean_loaded(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> int:
+    from jaunt.typescript.cli_bridge import clean_payload
+    from jaunt.typescript.status import run_clean
+
+    json_mode = _is_json_mode(args)
+    try:
+        report = asyncio.run(
+            run_clean(
+                root,
+                cfg,
+                target_ids=_typescript_target_ids(args),
+                orphans_only=bool(getattr(args, "orphans", False)),
+                dry_run=bool(getattr(args, "dry_run", False)),
+            )
+        )
+        payload = clean_payload(report)
+        _emit_typescript_payload(payload, json_mode=json_mode)
+        return report.exit_code
+    except (JauntConfigError, JauntDiscoveryError, KeyError) as error:
+        return _typescript_error("clean", error, json_mode=json_mode, code=EXIT_CONFIG_OR_DISCOVERY)
+
+
+def _capture_python_json(
+    command: Callable[[argparse.Namespace], int], args: argparse.Namespace
+) -> tuple[int, dict[str, object]]:
+    """Run the unchanged Python renderer in JSON mode for v2 aggregation."""
+
+    import contextlib
+    import io
+
+    child = argparse.Namespace(**vars(args))
+    child.language = "py"
+
+    def empty_payload() -> dict[str, object]:
+        return {
+            "command": str(getattr(args, "command", "")),
+            "ok": True,
+            "generated": [],
+            "skipped": [],
+            "refrozen": [],
+            "failed": {},
+            "fresh": [],
+            "stale": [],
+            "stale_changes": {},
+            "orphans": [],
+            "checked": [],
+            "blocked": [],
+            "specs": [],
+            "dependency_graph": {},
+            "magic": {},
+        }
+
+    if hasattr(child, "target"):
+        original_targets = list(getattr(child, "target", []) or [])
+        child.target = [
+            str(value).removeprefix("py:")
+            for value in original_targets
+            if not str(value).startswith("ts:")
+        ]
+        if original_targets and not child.target:
+            return 0, empty_payload()
+    module_filter = getattr(child, "module", None)
+    if isinstance(module_filter, str):
+        if module_filter.startswith("ts:"):
+            return 0, empty_payload()
+        child.module = module_filter.removeprefix("py:")
+    child.json_output = True
+    child.no_progress = True
+    child.progress = "none"
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        exit_code = command(child)
+    for line in reversed(output.getvalue().splitlines()):
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return exit_code, cast("dict[str, object]", value)
+    return exit_code, {"ok": exit_code == 0}
+
+
+def _qualify_python_ids(values: object) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    return [str(item) if str(item).startswith("py:") else f"py:{item}" for item in values]
+
+
+def _payload_list(payload: dict[str, object], key: str) -> list[object]:
+    value = payload.get(key, [])
+    return list(value) if isinstance(value, list) else []
+
+
+def _aggregate_cost_payloads(*values: object) -> dict[str, object]:
+    costs = [cast("dict[str, object]", value) for value in values if isinstance(value, dict)]
+    if not costs:
+        return {}
+    integer_fields = (
+        "api_calls",
+        "cache_hits",
+        "prompt_tokens",
+        "cached_prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+    )
+    combined: dict[str, object] = {}
+    for field in integer_fields:
+        total = 0
+        for cost in costs:
+            raw = cost.get(field)
+            if isinstance(raw, int):
+                total += raw
+        combined[field] = total
+    estimated_cost = 0.0
+    for cost in costs:
+        raw = cost.get("estimated_cost_usd")
+        if isinstance(raw, (int, float)):
+            estimated_cost += float(raw)
+    combined["estimated_cost_usd"] = round(estimated_cost, 6)
+    return combined
+
+
+def _mixed_typescript_targets(args: argparse.Namespace) -> tuple[str, ...] | None:
+    """Return selected TS IDs, or ``None`` when explicit targets select only Python."""
+
+    values = tuple(str(value) for value in (getattr(args, "target", []) or []))
+    selected = tuple(value for value in values if value.startswith("ts:"))
+    return None if values and not selected else selected
+
+
+def _mixed_runtime_args(
+    args: argparse.Namespace,
+    cfg: JauntConfig,
+    *,
+    command: Literal["build", "test", "reconcile"],
+) -> argparse.Namespace:
+    """Clone CLI args with one shared model-call runtime for both targets."""
+
+    from jaunt.targets.runtime import MixedTargetRuntime
+
+    configured_jobs = cfg.test.jobs if command == "test" else cfg.build.jobs
+    jobs = int(args.jobs) if getattr(args, "jobs", None) is not None else int(configured_jobs)
+    if jobs < 1:
+        raise JauntConfigError("Mixed-target jobs must be >= 1")
+    child = argparse.Namespace(**vars(args))
+    child._mixed_runtime = MixedTargetRuntime(
+        jobs=jobs,
+        max_cost=cfg.llm.max_cost_per_build,
+    )
+    return child
+
+
+async def _await_mixed_with_signals(operation, runtime):
+    """Turn SIGTERM into task cancellation so process-tree cleanup can run."""
+
+    import signal
+
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    installed = False
+    previous = None
+    if task is not None:
+        try:
+            previous = signal.getsignal(signal.SIGTERM)
+            loop.add_signal_handler(signal.SIGTERM, task.cancel)
+            installed = True
+        except (NotImplementedError, RuntimeError, ValueError):
+            installed = False
+    try:
+        return await operation
+    except asyncio.CancelledError:
+        runtime.cancel()
+        raise
+    finally:
+        if installed:
+            loop.remove_signal_handler(signal.SIGTERM)
+            assert previous is not None
+            signal.signal(signal.SIGTERM, previous)
+
+
+def _prepare_mixed_repo_map(
+    args: argparse.Namespace,
+    root: Path,
+    cfg: JauntConfig,
+) -> None:
+    """Render one deterministic repo map for both concurrent language builds."""
+
+    enabled = bool(cfg.context.repo_map) and not bool(getattr(args, "no_repo_map", False))
+    args._mixed_repo_map_enabled = enabled
+    if not enabled:
+        args._mixed_repo_map_block = None
+        return
+    if cfg.context.enrich:
+        _eprint(
+            "warn: deferred model-enriched repo-map descriptions for this mixed-target "
+            "command; run `jaunt tree --enrich` separately"
+        )
+    try:
+        from jaunt.repo_context import api as rc_api
+        from jaunt.repo_context import block as rc_block
+
+        repo_map_doc, _ = rc_api.sync_tree(
+            root=root,
+            cfg=cfg,
+            today=_today(),
+            # The legacy enrich backend is not command-runtime aware.  One
+            # shared AST map keeps both targets deterministic and model-free.
+            enrich=False,
+        )
+        args._mixed_repo_map_block = rc_block.render_repo_map(
+            repo_map_doc,
+            max_chars=cfg.context.max_chars,
+        )
+    except Exception:  # noqa: BLE001 - repo map remains best-effort
+        args._mixed_repo_map_block = ""
+
+
+def _prepare_mixed_typescript_skills(
+    args: argparse.Namespace,
+    root: Path,
+    cfg: JauntConfig,
+) -> None:
+    """Seed deterministic npm skills before either language fingerprints them."""
+
+    builtin_enabled = bool(cfg.skills.builtin) and not bool(
+        getattr(args, "no_builtin_skills", False)
+    )
+    args._mixed_builtin_skill_names = tuple(cfg.skills.builtin_skills) if builtin_enabled else ()
+    auto_enabled = bool(cfg.skills.auto) and not bool(getattr(args, "no_auto_skills", False))
+    args._mixed_npm_skill_metadata = {}
+    if not auto_enabled:
+        return
+    from jaunt.skills_npm import ensure_npm_skills, typescript_package_owners
+
+    target = cfg.typescript_target
+    if target is None:
+        return
+    result = ensure_npm_skills(
+        project_root=root,
+        package_owners=typescript_package_owners(root, target),
+        max_readme_chars=cfg.skills.max_chars_per_skill,
+    )
+    args._mixed_npm_skill_metadata = {
+        "generated": result.generated,
+        "skipped": result.skipped,
+        "removed": result.removed,
+        "warnings": result.warnings,
+    }
+    for warning in result.warnings:
+        _eprint(f"warn: {warning}")
+
+
+def _merge_exit_codes(*codes: int) -> int:
+    from jaunt.targets.orchestrator import aggregate_exit_code
+
+    return aggregate_exit_code(codes)
+
+
+def _mixed_operation_error(
+    command: str,
+    error: Exception,
+    args: argparse.Namespace,
+    *,
+    python_code: int,
+    python_payload: dict[str, object],
+) -> int:
+    """Render one structured failure when the TS half of a mixed command aborts."""
+
+    typescript_code = (
+        EXIT_GENERATION_ERROR
+        if isinstance(error, JauntGenerationError)
+        else EXIT_CONFIG_OR_DISCOVERY
+    )
+    exit_code = _merge_exit_codes(python_code, typescript_code)
+    diagnostic = {
+        "code": str(getattr(error, "code", type(error).__name__)),
+        "message": str(error),
+    }
+    python_target: dict[str, object] = dict(python_payload)
+    typescript_target: dict[str, object] = {"ok": False, "error": diagnostic}
+    runtime = getattr(args, "_mixed_runtime", None)
+    aggregate_cost: dict[str, object] = {}
+    if runtime is not None:
+        python_cost = runtime.summary("py")
+        typescript_cost = runtime.summary("ts")
+        python_target["cost"] = python_cost
+        typescript_target["cost"] = typescript_cost
+        aggregate_cost = _aggregate_cost_payloads(python_cost, typescript_cost)
+    payload: dict[str, object] = {
+        "schema_version": 2,
+        "command": command,
+        "ok": False,
+        "error": diagnostic,
+        "targets": {
+            "py": python_target,
+            "ts": typescript_target,
+        },
+    }
+    if aggregate_cost:
+        payload["cost"] = aggregate_cost
+    _print_error(error)
+    if _is_json_mode(args):
+        _emit_json(payload)
+    else:
+        print(f"Python {command}: {'ok' if python_code == 0 else 'failed'}")
+        print(f"TypeScript {command}: failed")
+    return exit_code
+
+
+def _mixed_typescript_preflight(
+    root: Path,
+    cfg: JauntConfig,
+    target_ids: tuple[str, ...],
+    *,
+    reject_pending_designs: bool = True,
+    for_test: bool = False,
+) -> object:
+    """Finish TS config/discovery before a mixed command may mutate Python outputs."""
+
+    from jaunt.typescript.builder import analyze, worker_session
+
+    async def inspect_workspace():
+        async with worker_session(root, cfg) as (client, initialized):
+            target_analysis = await analyze(client, initialized, target_ids=target_ids)
+            pending_designs = [
+                str(module.get("moduleId", module.get("id", "")))
+                for module in target_analysis.modules
+                if "@jauntDesign" in str(module.get("specSource", ""))
+            ]
+            if reject_pending_designs and pending_designs:
+                raise JauntConfigError(
+                    "TypeScript declarations still require reviewable design; run "
+                    "`jaunt design --target <module#symbol>` first: "
+                    + ", ".join(sorted(pending_designs))
+                )
+            analysis = (
+                await analyze(client, initialized) if for_test and target_ids else target_analysis
+            )
+            if for_test:
+                from jaunt.typescript.tester import (
+                    _group_test_files,
+                    _module_id,
+                    _owner_project_for_source,
+                    _runner_path,
+                    _selected_generated_test_files,
+                    _selected_test_modules,
+                    _selected_test_specs,
+                    _test_output,
+                    _validate_test_owner_dependencies,
+                    _workspace_test_file_owners,
+                )
+
+                _runner_path(client)
+                target = cfg.typescript_target
+                assert target is not None
+                modules = {_module_id(module): module for module in analysis.modules}
+                test_specs = _selected_test_specs(
+                    root,
+                    cfg,
+                    analysis.workspace,
+                    modules,
+                    target_ids=target_ids,
+                )
+                files = set(
+                    _selected_generated_test_files(
+                        root,
+                        cfg,
+                        test_specs,
+                        target_ids=target_ids,
+                    )
+                )
+                owners = dict(_workspace_test_file_owners(root, cfg, analysis.workspace))
+                require_fast_check = False
+                for spec in test_specs:
+                    path = str(spec.get("path", ""))
+                    owner = spec.get("project")
+                    if not isinstance(owner, str):
+                        owner = _owner_project_for_source(
+                            root,
+                            cfg,
+                            analysis.workspace,
+                            path,
+                        )
+                    for tier in ("example", "derived"):
+                        output = _test_output(path, target.generated_dir, tier)
+                        files.add(output)
+                        owners[output] = owner
+                    source = spec.get("syntheticSource")
+                    if not isinstance(source, str):
+                        source = (root / path).read_text(encoding="utf-8")
+                    contract_sources = (
+                        str(module.get("specSource", ""))
+                        for module in _selected_test_modules(spec, modules)
+                    )
+                    require_fast_check = require_fast_check or any(
+                        "@prop" in candidate for candidate in (source, *contract_sources)
+                    )
+                grouped = _group_test_files(
+                    root,
+                    cfg,
+                    analysis.workspace,
+                    tuple(sorted(files)),
+                    explicit_owners=owners,
+                )
+                if grouped:
+                    _validate_test_owner_dependencies(
+                        root,
+                        analysis.workspace,
+                        grouped,
+                        require_fast_check=require_fast_check,
+                    )
+            return analysis
+
+    return asyncio.run(inspect_workspace())
+
+
+def _mixed_python_preflight(command: str, args: argparse.Namespace) -> None:
+    """Run Python discovery/cycle checks before concurrent target mutation."""
+
+    raw_targets = tuple(str(item) for item in (getattr(args, "target", []) or []))
+    if raw_targets and all(item.startswith("ts:") for item in raw_targets):
+        return
+    if command == "test" and not bool(getattr(args, "no_run", False)):
+        from jaunt import tester
+
+        tester.ensure_pytest_available()
+    code, payload = _capture_python_json(cmd_status, args)
+    if code == EXIT_OK:
+        return
+    raw_error = payload.get("error", "Python target discovery failed")
+    if isinstance(raw_error, dict):
+        error_record = cast("dict[str, object]", raw_error)
+        message = str(error_record.get("message", "Python target discovery failed"))
+    else:
+        message = str(raw_error)
+    raise JauntDiscoveryError(message)
+
+
+def _validated_typescript_contract_targets(
+    analysis: object,
+    requested: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Validate/expand selected TS contract IDs from the preflight snapshot."""
+
+    if not requested:
+        return ()
+    workspace = getattr(analysis, "workspace", None)
+    if not isinstance(workspace, Mapping):
+        raise JauntDiscoveryError("TypeScript contract preflight returned no workspace snapshot")
+    records = workspace.get("contracts", [])
+    exact: set[str] = set()
+    by_module: dict[str, set[str]] = {}
+    if isinstance(records, list):
+        for record in records:
+            if not isinstance(record, Mapping) or not isinstance(record.get("path"), str):
+                continue
+            path = str(record["path"])
+            module_id = f"ts:{Path(path).with_suffix('').as_posix()}"
+            symbols = record.get("symbols", [])
+            if not isinstance(symbols, list):
+                continue
+            for raw_symbol in symbols:
+                symbol = (
+                    str(raw_symbol.get("name"))
+                    if isinstance(raw_symbol, Mapping)
+                    else str(raw_symbol)
+                )
+                target = f"{module_id}#{symbol}"
+                exact.add(target)
+                by_module.setdefault(module_id, set()).add(target)
+
+    expanded: list[str] = []
+    unmatched: list[str] = []
+    for target in requested:
+        if target in exact:
+            expanded.append(target)
+        elif target in by_module:
+            expanded.extend(sorted(by_module[target]))
+        else:
+            unmatched.append(target)
+    if unmatched:
+        raise JauntConfigError(
+            "No TypeScript contract matches target(s): " + ", ".join(sorted(unmatched))
+        )
+    return tuple(dict.fromkeys(expanded))
+
+
+def _mixed_preflight_error(
+    command: str,
+    error: Exception,
+    args: argparse.Namespace,
+    *,
+    language: Literal["py", "ts"] = "ts",
+) -> int:
+    diagnostic = {
+        "code": str(getattr(error, "code", type(error).__name__)),
+        "message": str(error),
+    }
+    other_language = "py" if language == "ts" else "ts"
+    skipped = {
+        "ok": False,
+        "skipped": True,
+        "reason": f"{language.upper()} preflight failed before {other_language} execution",
+    }
+    payload: dict[str, object] = {
+        "schema_version": 2,
+        "command": command,
+        "ok": False,
+        "error": diagnostic,
+        "generated": [],
+        "skipped": [],
+        "refrozen": [],
+        "failed": {f"{language}:workspace": [diagnostic]},
+        "targets": {
+            language: {"ok": False, "error": diagnostic},
+            other_language: skipped,
+        },
+    }
+    _print_error(error)
+    if _is_json_mode(args):
+        _emit_json(payload)
+    else:
+        failed_label = "Python" if language == "py" else "TypeScript"
+        skipped_label = "TypeScript" if language == "py" else "Python"
+        print(f"{skipped_label} {command}: not run")
+        print(f"{failed_label} {command}: preflight failed")
+    return EXIT_CONFIG_OR_DISCOVERY
+
+
+def _emit_mixed_payload(
+    payload: dict[str, object],
+    *,
+    json_mode: bool,
+    python_payload: dict[str, object],
+    typescript_payload: dict[str, object],
+) -> None:
+    if json_mode:
+        _emit_json(payload)
+        return
+    print(f"Python {payload['command']}:")
+    for key in ("generated", "skipped", "refrozen", "fresh", "stale", "unbuilt"):
+        values = python_payload.get(key)
+        if isinstance(values, list):
+            print(f"  {key}: {len(values)}")
+            for value in values:
+                print(f"    - {value}")
+    from jaunt.typescript.cli_bridge import human_lines
+
+    for line in human_lines(typescript_payload):
+        print(line)
+
+
+def _mixed_build_payload(
+    command: str,
+    python_payload: dict[str, object],
+    typescript_payload: dict[str, object],
+    *,
+    exit_code: int,
+) -> dict[str, object]:
+    py_generated = _qualify_python_ids(python_payload.get("generated"))
+    py_skipped = _qualify_python_ids(python_payload.get("skipped"))
+    py_refrozen = _qualify_python_ids(python_payload.get("refrozen"))
+    ts_generated = list(cast("list[str]", typescript_payload.get("generated", [])))
+    ts_skipped = list(cast("list[str]", typescript_payload.get("skipped", [])))
+    ts_refrozen = list(cast("list[str]", typescript_payload.get("refrozen", [])))
+    failed: dict[str, object] = {}
+    py_failed = python_payload.get("failed", {})
+    if command == "test" and isinstance(python_payload.get("generation_failed"), dict):
+        py_failed = python_payload["generation_failed"]
+    if isinstance(py_failed, dict):
+        failed.update({f"py:{key}": value for key, value in py_failed.items()})
+    ts_failed = typescript_payload.get("failed", {})
+    if isinstance(ts_failed, dict):
+        failed.update({str(key): value for key, value in ts_failed.items()})
+    py_target = {
+        "generated": _payload_list(python_payload, "generated"),
+        "skipped": _payload_list(python_payload, "skipped"),
+        "refrozen": _payload_list(python_payload, "refrozen"),
+        "failed": py_failed,
+    }
+    py_cost = python_payload.get("cost")
+    ts_cost = typescript_payload.get("cost")
+    if isinstance(py_cost, dict):
+        py_target["cost"] = py_cost
+    if command == "test" and "pytest" in python_payload:
+        py_target["pytest"] = python_payload["pytest"]
+    if command == "test" and "generation_failed" in python_payload:
+        py_target["generation_failed"] = python_payload["generation_failed"]
+    if command == "test" and "owners" in python_payload:
+        py_target["owners"] = python_payload["owners"]
+    ts_targets = typescript_payload.get("targets", {})
+    ts_target = (
+        cast("dict[str, object]", ts_targets).get("ts", {}) if isinstance(ts_targets, dict) else {}
+    )
+    if isinstance(ts_target, dict) and isinstance(ts_cost, dict):
+        ts_target = {**ts_target, "cost": ts_cost}
+    payload: dict[str, object] = {
+        "schema_version": 2,
+        "command": command,
+        "ok": exit_code == 0,
+        "generated": sorted([*py_generated, *ts_generated]),
+        "skipped": sorted([*py_skipped, *ts_skipped]),
+        "refrozen": sorted([*py_refrozen, *ts_refrozen]),
+        "failed": failed,
+        "targets": {"py": py_target, "ts": ts_target},
+    }
+    if command == "test":
+        if "pytest" in python_payload:
+            payload["pytest"] = python_payload["pytest"]
+        if "vitest" in typescript_payload:
+            payload["vitest"] = typescript_payload["vitest"]
+        if "owners" in python_payload:
+            payload["owners"] = python_payload["owners"]
+    aggregate_cost = _aggregate_cost_payloads(py_cost, ts_cost)
+    if aggregate_cost:
+        payload["cost"] = aggregate_cost
+    return payload
+
+
+def _cmd_mixed_build(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> int:
+    from jaunt.typescript.builder import run_build
+    from jaunt.typescript.cli_bridge import build_payload
+
+    target_ids = _mixed_typescript_targets(args)
+    if target_ids is not None:
+        try:
+            _mixed_typescript_preflight(root, cfg, target_ids)
+        except (JauntConfigError, JauntDiscoveryError, KeyError) as error:
+            return _mixed_preflight_error("build", error, args)
+    try:
+        _mixed_python_preflight("build", args)
+    except (JauntConfigError, JauntDiscoveryError, KeyError) as error:
+        return _mixed_preflight_error("build", error, args, language="py")
+    if target_ids is None:
+        from jaunt.targets.base import TargetBuildReport
+
+        py_code, py_payload = _capture_python_json(cmd_build, args)
+        report = TargetBuildReport(language="ts")
+        ts_payload = build_payload(report)
+        exit_code = _merge_exit_codes(py_code)
+        payload = _mixed_build_payload("build", py_payload, ts_payload, exit_code=exit_code)
+        _emit_mixed_payload(
+            payload,
+            json_mode=_is_json_mode(args),
+            python_payload=py_payload,
+            typescript_payload=ts_payload,
+        )
+        return exit_code
+
+    try:
+        mixed_args = _mixed_runtime_args(args, cfg, command="build")
+    except JauntConfigError as error:
+        return _mixed_preflight_error("build", error, args)
+    _prepare_mixed_typescript_skills(mixed_args, root, cfg)
+    _prepare_mixed_repo_map(mixed_args, root, cfg)
+
+    async def run_both() -> tuple[object, object]:
+        try:
+            return cast(
+                "tuple[object, object]",
+                await asyncio.gather(
+                    asyncio.to_thread(_capture_python_json, cmd_build, mixed_args),
+                    mixed_args._mixed_runtime.run_operation(
+                        run_build(
+                            root,
+                            cfg,
+                            target_ids=target_ids,
+                            force=bool(getattr(args, "force", False)),
+                            generator=_command_backend(mixed_args, cfg, "ts"),
+                            cost_tracker=_command_cost_tracker(mixed_args, cfg, "ts"),
+                            response_cache=_typescript_response_cache(mixed_args, root),
+                            jobs=getattr(args, "jobs", None),
+                            build_instructions=_effective_build_instructions(cfg, args),
+                            semantic_gate_enabled=(
+                                False if bool(getattr(args, "no_semantic_gate", False)) else None
+                            ),
+                            semantic_gate_exec=_command_semantic_exec(
+                                mixed_args,
+                                language="ts",
+                                charge_usage=False,
+                            ),
+                            repo_map_enabled=bool(mixed_args._mixed_repo_map_enabled),
+                            repo_map_block_override=mixed_args._mixed_repo_map_block,
+                            auto_skills_enabled=False,
+                            builtin_skill_names=mixed_args._mixed_builtin_skill_names,
+                        ),
+                    ),
+                    return_exceptions=True,
+                ),
+            )
+        except BaseException:
+            mixed_args._mixed_runtime.cancel()
+            raise
+
+    python_result, typescript_result = asyncio.run(
+        _await_mixed_with_signals(run_both(), mixed_args._mixed_runtime)
+    )
+    if isinstance(python_result, asyncio.CancelledError):
+        ts_failed = (
+            isinstance(typescript_result, BaseException)
+            or int(getattr(typescript_result, "exit_code", 0)) != 0
+        )
+        if not ts_failed:
+            raise python_result
+        python_result = (
+            0,
+            {
+                "command": "build",
+                "ok": False,
+                "skipped": True,
+                "reason": "cancelled after TypeScript target failure",
+            },
+        )
+    if isinstance(typescript_result, asyncio.CancelledError):
+        py_failed = (
+            isinstance(python_result, tuple) and bool(python_result) and int(python_result[0]) != 0
+        )
+        if not py_failed:
+            raise typescript_result
+        from jaunt.targets.base import TargetBuildReport
+
+        typescript_result = TargetBuildReport(
+            language="ts",
+            metadata={"cancelled": True},
+        )
+    if isinstance(python_result, BaseException):
+        raise python_result
+    py_code, py_payload = cast("tuple[int, dict[str, object]]", python_result)
+    if isinstance(typescript_result, BaseException):
+        if not isinstance(typescript_result, Exception):
+            raise typescript_result
+        error = typescript_result
+        if not isinstance(
+            error,
+            (JauntConfigError, JauntDiscoveryError, JauntGenerationError, KeyError),
+        ):
+            raise error
+        return _mixed_operation_error(
+            "build", error, mixed_args, python_code=py_code, python_payload=py_payload
+        )
+    report = cast("TargetBuildReport", typescript_result)
+    ts_payload = build_payload(report)
+    py_payload["cost"] = mixed_args._mixed_runtime.summary("py")
+    ts_payload["cost"] = mixed_args._mixed_runtime.summary("ts")
+    if mixed_args._mixed_npm_skill_metadata:
+        ts_payload["npm_skills"] = mixed_args._mixed_npm_skill_metadata
+    exit_code = _merge_exit_codes(py_code, report.exit_code)
+    payload = _mixed_build_payload("build", py_payload, ts_payload, exit_code=exit_code)
+    _emit_mixed_payload(
+        payload,
+        json_mode=_is_json_mode(args),
+        python_payload=py_payload,
+        typescript_payload=ts_payload,
+    )
+    return exit_code
+
+
+def _cmd_mixed_test(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> int:
+    from jaunt.typescript.cli_bridge import test_payload
+    from jaunt.typescript.tester import run_test
+
+    target_ids = _mixed_typescript_targets(args)
+    if target_ids is not None:
+        try:
+            _mixed_typescript_preflight(root, cfg, target_ids, for_test=True)
+        except (JauntConfigError, JauntDiscoveryError, KeyError) as error:
+            return _mixed_preflight_error("test", error, args)
+    try:
+        _mixed_python_preflight("test", args)
+    except (JauntConfigError, JauntDiscoveryError, ImportError, KeyError) as error:
+        return _mixed_preflight_error("test", error, args, language="py")
+    if target_ids is None:
+        from jaunt.targets.base import TargetTestReport
+
+        py_code, py_payload = _capture_python_json(cmd_test, args)
+        report = TargetTestReport(language="ts")
+        ts_payload = test_payload(report)
+        exit_code = _merge_exit_codes(py_code)
+        payload = _mixed_build_payload("test", py_payload, ts_payload, exit_code=exit_code)
+        _emit_mixed_payload(
+            payload,
+            json_mode=_is_json_mode(args),
+            python_payload=py_payload,
+            typescript_payload=ts_payload,
+        )
+        return exit_code
+
+    try:
+        mixed_args = _mixed_runtime_args(args, cfg, command="test")
+    except JauntConfigError as error:
+        return _mixed_preflight_error("test", error, args)
+    _prepare_mixed_typescript_skills(mixed_args, root, cfg)
+    _prepare_mixed_repo_map(mixed_args, root, cfg)
+
+    async def run_both() -> tuple[object, object]:
+        try:
+            return cast(
+                "tuple[object, object]",
+                await asyncio.gather(
+                    asyncio.to_thread(_capture_python_json, cmd_test, mixed_args),
+                    mixed_args._mixed_runtime.run_operation(
+                        run_test(
+                            root,
+                            cfg,
+                            target_ids=target_ids,
+                            no_build=bool(getattr(args, "no_build", False)),
+                            no_run=bool(getattr(args, "no_run", False)),
+                            no_redact_derived=bool(getattr(args, "no_redact_derived", False)),
+                            force=bool(getattr(args, "force", False)),
+                            generator=_command_backend(mixed_args, cfg, "ts"),
+                            cost_tracker=_command_cost_tracker(mixed_args, cfg, "ts"),
+                            response_cache=_typescript_response_cache(mixed_args, root),
+                            jobs=getattr(args, "jobs", None),
+                            build_instructions=_effective_build_instructions(cfg, args),
+                            semantic_gate_enabled=(
+                                False if bool(getattr(args, "no_semantic_gate", False)) else None
+                            ),
+                            semantic_gate_exec=_command_semantic_exec(
+                                mixed_args,
+                                language="ts",
+                                charge_usage=False,
+                            ),
+                            repo_map_enabled=bool(mixed_args._mixed_repo_map_enabled),
+                            repo_map_block_override=mixed_args._mixed_repo_map_block,
+                            auto_skills_enabled=False,
+                            builtin_skill_names=mixed_args._mixed_builtin_skill_names,
+                        ),
+                    ),
+                    return_exceptions=True,
+                ),
+            )
+        except BaseException:
+            mixed_args._mixed_runtime.cancel()
+            raise
+
+    python_result, typescript_result = asyncio.run(
+        _await_mixed_with_signals(run_both(), mixed_args._mixed_runtime)
+    )
+    if isinstance(python_result, asyncio.CancelledError):
+        ts_failed = (
+            isinstance(typescript_result, BaseException)
+            or int(getattr(typescript_result, "exit_code", 0)) != 0
+        )
+        if not ts_failed:
+            raise python_result
+        python_result = (
+            0,
+            {
+                "command": "test",
+                "ok": False,
+                "skipped": True,
+                "reason": "cancelled after TypeScript target failure",
+            },
+        )
+    if isinstance(typescript_result, asyncio.CancelledError):
+        py_failed = (
+            isinstance(python_result, tuple) and bool(python_result) and int(python_result[0]) != 0
+        )
+        if not py_failed:
+            raise typescript_result
+        from jaunt.targets.base import TargetTestReport
+
+        typescript_result = TargetTestReport(
+            language="ts",
+            runner={"cancelled": True},
+        )
+    if isinstance(python_result, BaseException):
+        raise python_result
+    py_code, py_payload = cast("tuple[int, dict[str, object]]", python_result)
+    if isinstance(typescript_result, BaseException):
+        if not isinstance(typescript_result, Exception):
+            raise typescript_result
+        error = typescript_result
+        if not isinstance(
+            error,
+            (JauntConfigError, JauntDiscoveryError, JauntGenerationError, KeyError),
+        ):
+            raise error
+        return _mixed_operation_error(
+            "test", error, mixed_args, python_code=py_code, python_payload=py_payload
+        )
+    report = cast("TargetTestReport", typescript_result)
+    ts_payload = test_payload(report)
+    py_payload["cost"] = mixed_args._mixed_runtime.summary("py")
+    ts_cost = mixed_args._mixed_runtime.summary("ts")
+    ts_payload["cost"] = ts_cost
+    if mixed_args._mixed_npm_skill_metadata:
+        ts_payload["npm_skills"] = mixed_args._mixed_npm_skill_metadata
+    exit_code = _merge_exit_codes(py_code, report.exit_code)
+    payload = _mixed_build_payload("test", py_payload, ts_payload, exit_code=exit_code)
+    _emit_mixed_payload(
+        payload,
+        json_mode=_is_json_mode(args),
+        python_payload=py_payload,
+        typescript_payload=ts_payload,
+    )
+    return exit_code
+
+
+def _mixed_reconcile_payload(
+    python_payload: dict[str, object],
+    typescript_payload: dict[str, object],
+    *,
+    exit_code: int,
+) -> dict[str, object]:
+    py_reconciled_raw = python_payload.get("reconciled", [])
+    py_reconciled = py_reconciled_raw if isinstance(py_reconciled_raw, list) else []
+    qualified_reconciled = []
+    for item in py_reconciled:
+        if not isinstance(item, dict):
+            continue
+        record = cast("dict[str, object]", item)
+        ref = str(record.get("ref", ""))
+        qualified_reconciled.append(
+            {**record, "ref": ref if ref.startswith("py:") else f"py:{ref}"}
+        )
+    py_failed = python_payload.get("failed", [])
+    ts_diagnostics = typescript_payload.get("diagnostics", [])
+    ts_targets = typescript_payload.get("targets", {})
+    ts_target = (
+        cast("dict[str, object]", ts_targets).get("ts", {}) if isinstance(ts_targets, dict) else {}
+    )
+    if not isinstance(ts_target, dict):
+        ts_target = {}
+    ts_usage = typescript_payload.get("usage")
+    ts_ok = bool(typescript_payload.get("ok", False))
+    ts_target = {
+        **ts_target,
+        "ok": ts_ok,
+        "diagnostics": ts_diagnostics if isinstance(ts_diagnostics, list) else [],
+    }
+    if isinstance(ts_usage, dict):
+        ts_target = {**ts_target, "usage": ts_usage}
+    py_target: dict[str, object] = {
+        "ok": bool(python_payload.get("ok", False)),
+        "skipped": bool(python_payload.get("skipped", False)),
+        "reconciled": py_reconciled,
+        "failed": py_failed if isinstance(py_failed, list) else [],
+    }
+    py_cost = python_payload.get("cost")
+    if isinstance(py_cost, dict):
+        py_target["cost"] = py_cost
+    combined_failed = list(cast("list[object]", py_target["failed"]))
+    if not ts_ok and isinstance(ts_diagnostics, list):
+        combined_failed.append({"target": "ts", "diagnostics": ts_diagnostics})
+    payload: dict[str, object] = {
+        "schema_version": 2,
+        "command": "reconcile",
+        "ok": exit_code == 0,
+        "reconciled": qualified_reconciled,
+        "failed": combined_failed,
+        "changed": list(cast("list[object]", typescript_payload.get("changed", []))),
+        "diagnostics": ts_diagnostics if isinstance(ts_diagnostics, list) else [],
+        "targets": {"py": py_target, "ts": ts_target},
+    }
+    if isinstance(ts_usage, dict):
+        payload["usage"] = ts_usage
+    aggregate_cost = _aggregate_cost_payloads(py_cost, ts_usage)
+    if aggregate_cost:
+        payload["cost"] = aggregate_cost
+    strength = typescript_payload.get("strength")
+    if isinstance(strength, dict):
+        payload["strength"] = strength
+    return payload
+
+
+def _emit_mixed_reconcile_payload(
+    payload: dict[str, object],
+    *,
+    args: argparse.Namespace,
+    python_payload: dict[str, object],
+    typescript_payload: dict[str, object],
+) -> None:
+    if _is_json_mode(args):
+        _emit_json(payload)
+        return
+    reconciled = python_payload.get("reconciled", [])
+    failed = python_payload.get("failed", [])
+    print("Python reconcile:")
+    print(f"  reconciled: {len(reconciled) if isinstance(reconciled, list) else 0}")
+    print(f"  failed: {len(failed) if isinstance(failed, list) else 0}")
+    from jaunt.typescript.cli_bridge import human_lines
+
+    for line in human_lines(typescript_payload):
+        print(line)
+    changed = typescript_payload.get("changed", [])
+    if isinstance(changed, list):
+        print(f"  changed: {len(changed)}")
+        for path in changed:
+            print(f"    - {path}")
+
+
+def _cmd_mixed_reconcile(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> int:
+    """Reconcile every selected contract target with TS preflight first."""
+
+    from jaunt.typescript.cli_bridge import lifecycle_payload
+    from jaunt.typescript.contracts import LifecycleReport, run_reconcile
+
+    target_ids = _mixed_typescript_targets(args)
+    if target_ids is not None:
+        try:
+            # Contract selectors are path#symbol identities rather than magic
+            # module IDs.  Analyze the full TS workspace here; run_reconcile
+            # applies the contract-level filter after this mutation-free gate.
+            analysis = _mixed_typescript_preflight(
+                root,
+                cfg,
+                (),
+                reject_pending_designs=False,
+            )
+            target_ids = _validated_typescript_contract_targets(analysis, target_ids)
+        except (JauntConfigError, JauntDiscoveryError, KeyError) as error:
+            return _mixed_preflight_error("reconcile", error, args)
+    try:
+        _mixed_python_preflight("reconcile", args)
+    except (JauntConfigError, JauntDiscoveryError, KeyError) as error:
+        return _mixed_preflight_error("reconcile", error, args, language="py")
+
+    try:
+        mixed_args = _mixed_runtime_args(args, cfg, command="reconcile")
+    except JauntConfigError as error:
+        return _mixed_preflight_error("reconcile", error, args)
+
+    ts_skipped = target_ids is None
+
+    async def run_both() -> tuple[object, object]:
+        if target_ids is None:
+
+            async def skipped_typescript() -> LifecycleReport:
+                return LifecycleReport(command="reconcile")
+
+            typescript_operation = skipped_typescript()
+        else:
+            typescript_operation = mixed_args._mixed_runtime.run_operation(
+                run_reconcile(
+                    root,
+                    cfg,
+                    target_ids=target_ids,
+                    generator=_command_backend(mixed_args, cfg, "ts"),
+                    cost_tracker=_command_cost_tracker(mixed_args, cfg, "ts"),
+                    response_cache=_typescript_response_cache(mixed_args, root),
+                    auto_skills_enabled=_typescript_auto_skills_enabled(mixed_args, cfg),
+                    builtin_skill_names=_typescript_builtin_skill_names(mixed_args, cfg),
+                )
+            )
+        try:
+            return cast(
+                "tuple[object, object]",
+                await asyncio.gather(
+                    asyncio.to_thread(_capture_python_json, cmd_reconcile, mixed_args),
+                    typescript_operation,
+                    return_exceptions=True,
+                ),
+            )
+        except BaseException:
+            mixed_args._mixed_runtime.cancel()
+            raise
+
+    python_result, typescript_result = asyncio.run(
+        _await_mixed_with_signals(run_both(), mixed_args._mixed_runtime)
+    )
+    if isinstance(python_result, asyncio.CancelledError):
+        ts_failed = (
+            isinstance(typescript_result, BaseException)
+            or int(getattr(typescript_result, "exit_code", 0)) != 0
+        )
+        if not ts_failed:
+            raise python_result
+        python_result = (
+            0,
+            {
+                "command": "reconcile",
+                "ok": False,
+                "skipped": True,
+                "reason": "cancelled after TypeScript target failure",
+            },
+        )
+    if isinstance(typescript_result, asyncio.CancelledError):
+        py_failed = (
+            isinstance(python_result, tuple) and bool(python_result) and int(python_result[0]) != 0
+        )
+        if not py_failed:
+            raise typescript_result
+        typescript_result = LifecycleReport(command="reconcile")
+        ts_skipped = True
+    if isinstance(python_result, BaseException):
+        raise python_result
+    py_code, py_payload = cast("tuple[int, dict[str, object]]", python_result)
+    if isinstance(typescript_result, BaseException):
+        if not isinstance(typescript_result, Exception):
+            raise typescript_result
+        error = typescript_result
+        if not isinstance(
+            error,
+            (JauntConfigError, JauntDiscoveryError, JauntGenerationError, KeyError),
+        ):
+            raise error
+        return _mixed_operation_error(
+            "reconcile",
+            error,
+            mixed_args,
+            python_code=py_code,
+            python_payload=py_payload,
+        )
+    ts_report = cast("LifecycleReport", typescript_result)
+    raw_targets = tuple(str(item) for item in (getattr(args, "target", []) or []))
+    if raw_targets and all(item.startswith("ts:") for item in raw_targets):
+        py_payload = {
+            **py_payload,
+            "ok": True,
+            "skipped": True,
+            "reconciled": [],
+            "failed": [],
+        }
+    py_payload["cost"] = mixed_args._mixed_runtime.summary("py")
+    ts_payload = lifecycle_payload(ts_report)
+    ts_payload["usage"] = mixed_args._mixed_runtime.summary("ts")
+    if ts_skipped:
+        raw_targets = ts_payload.get("targets")
+        if isinstance(raw_targets, dict) and isinstance(raw_targets.get("ts"), dict):
+            cast("dict[str, object]", raw_targets["ts"])["skipped"] = True
+    exit_code = _merge_exit_codes(py_code, ts_report.exit_code)
+    payload = _mixed_reconcile_payload(py_payload, ts_payload, exit_code=exit_code)
+    _emit_mixed_reconcile_payload(
+        payload,
+        args=args,
+        python_payload=py_payload,
+        typescript_payload=ts_payload,
+    )
+    return exit_code
+
+
+def _cmd_mixed_status(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> int:
+    from jaunt.typescript.cli_bridge import status_payload
+    from jaunt.typescript.status import run_status
+
+    py_code, py_payload = _capture_python_json(cmd_status, args)
+    target_ids = _mixed_typescript_targets(args)
+    if target_ids is None:
+        from jaunt.targets.base import TargetStatus
+
+        report = TargetStatus(language="ts")
+    else:
+        try:
+            report = asyncio.run(run_status(root, cfg, target_ids=target_ids))
+        except (JauntConfigError, JauntDiscoveryError, KeyError) as error:
+            return _mixed_operation_error(
+                "status", error, args, python_code=py_code, python_payload=py_payload
+            )
+    ts_payload = status_payload(report)
+    exit_code = _merge_exit_codes(py_code)
+    py_stale_changes = python_payload_stale = py_payload.get("stale_changes", {})
+    if not isinstance(python_payload_stale, dict):
+        py_stale_changes = {}
+    ts_stale_changes = ts_payload.get("stale_changes", {})
+    stale_changes: dict[str, object] = {
+        f"py:{key}": value for key, value in cast("dict[str, object]", py_stale_changes).items()
+    }
+    if isinstance(ts_stale_changes, dict):
+        stale_changes.update(ts_stale_changes)
+    py_digests_raw = py_payload.get("digests", {})
+    py_digests = py_digests_raw if isinstance(py_digests_raw, dict) else {}
+    ts_digests_raw = ts_payload.get("digests", {})
+    ts_digests = ts_digests_raw if isinstance(ts_digests_raw, dict) else {}
+    digests: dict[str, object] = {
+        (str(key) if str(key).startswith("py:") else f"py:{key}"): value
+        for key, value in py_digests.items()
+    }
+    digests.update({str(key): value for key, value in ts_digests.items()})
+    targets = ts_payload.get("targets", {})
+    ts_target = targets.get("ts", {}) if isinstance(targets, dict) else {}
+    py_target = {
+        key: py_payload.get(key, default)
+        for key, default in (
+            ("fresh", []),
+            ("stale", []),
+            ("stale_changes", {}),
+            ("digests", {}),
+            ("orphans", []),
+            ("contracts", []),
+        )
+    }
+    payload: dict[str, object] = {
+        "schema_version": 2,
+        "command": "status",
+        "ok": exit_code == 0,
+        "fresh": sorted(
+            [
+                *_qualify_python_ids(py_payload.get("fresh")),
+                *cast("list[str]", ts_payload.get("fresh", [])),
+            ]
+        ),
+        "stale": sorted(
+            [
+                *_qualify_python_ids(py_payload.get("stale")),
+                *cast("list[str]", ts_payload.get("stale", [])),
+            ]
+        ),
+        "stale_changes": stale_changes,
+        "digests": digests,
+        "unbuilt": list(cast("list[str]", ts_payload.get("unbuilt", []))),
+        "invalid": ts_payload.get("invalid", {}),
+        "orphans": sorted(
+            [
+                *cast("list[str]", py_payload.get("orphans", [])),
+                *cast("list[str]", ts_payload.get("orphans", [])),
+            ]
+        ),
+        "targets": {"py": py_target, "ts": ts_target},
+    }
+    _emit_mixed_payload(
+        payload,
+        json_mode=_is_json_mode(args),
+        python_payload=py_payload,
+        typescript_payload=ts_payload,
+    )
+    return exit_code
+
+
+def _cmd_mixed_check(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> int:
+    from jaunt.typescript.cli_bridge import check_payload
+    from jaunt.typescript.status import run_check
+
+    py_code, py_payload = _capture_python_json(cmd_check, args)
+    target_ids = _mixed_typescript_targets(args)
+    if target_ids is None:
+        from jaunt.targets.base import TargetCheckReport
+
+        report = TargetCheckReport(language="ts")
+    else:
+        try:
+            report = asyncio.run(
+                run_check(
+                    root,
+                    cfg,
+                    target_ids=target_ids,
+                    magic_only=bool(getattr(args, "magic_only", False)),
+                    contracts_only=bool(getattr(args, "contracts_only", False)),
+                )
+            )
+        except (JauntConfigError, JauntDiscoveryError, KeyError) as error:
+            return _mixed_operation_error(
+                "check", error, args, python_code=py_code, python_payload=py_payload
+            )
+    ts_payload = check_payload(report)
+    exit_code = _merge_exit_codes(py_code, report.exit_code)
+    py_magic = py_payload.get("magic", {})
+    ts_magic_container = ts_payload.get("magic", {})
+    ts_magic = ts_magic_container.get("ts", {}) if isinstance(ts_magic_container, dict) else {}
+    py_diagnostics = py_payload.get("diagnostics", [])
+    ts_diagnostics = ts_payload.get("diagnostics", [])
+    combined_diagnostics = [
+        *(py_diagnostics if isinstance(py_diagnostics, list) else []),
+        *(ts_diagnostics if isinstance(ts_diagnostics, list) else []),
+    ]
+    payload: dict[str, object] = {
+        "schema_version": 2,
+        "command": "check",
+        "ok": exit_code == 0,
+        "blocked": [
+            *cast("list[object]", py_payload.get("blocked", [])),
+            *cast("list[object]", ts_payload.get("blocked", [])),
+        ],
+        "checked": [
+            *cast("list[object]", py_payload.get("checked", [])),
+            *cast("list[object]", ts_payload.get("checked", [])),
+        ],
+        "orphans": [
+            *cast("list[str]", py_payload.get("orphans", [])),
+            *cast("list[str]", ts_payload.get("orphans", [])),
+        ],
+        "diagnostics": combined_diagnostics,
+        "magic": {"py": py_magic, "ts": ts_magic},
+        "targets": {
+            "py": {"magic": py_magic, "diagnostics": py_diagnostics},
+            "ts": {"magic": ts_magic, "diagnostics": ts_diagnostics},
+        },
+    }
+    _emit_mixed_payload(
+        payload,
+        json_mode=_is_json_mode(args),
+        python_payload=py_payload,
+        typescript_payload=ts_payload,
+    )
+    return exit_code
+
+
+def _cmd_mixed_specs(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> int:
+    from jaunt.typescript.cli_bridge import specs_payload
+    from jaunt.typescript.status import run_specs
+
+    py_code, py_payload = _capture_python_json(cmd_specs, args)
+    target_ids = _mixed_typescript_targets(args)
+    module_filter = getattr(args, "module", None)
+    if isinstance(module_filter, str):
+        if module_filter.startswith("ts:") and target_ids is not None:
+            target_ids = (*target_ids, module_filter)
+        else:
+            target_ids = None
+    if target_ids is None:
+        from jaunt.targets.base import TargetWorkspace
+
+        report = TargetWorkspace(language="ts")
+    else:
+        try:
+            report = asyncio.run(run_specs(root, cfg, target_ids=target_ids))
+        except (JauntConfigError, JauntDiscoveryError, KeyError) as error:
+            return _mixed_operation_error(
+                "specs", error, args, python_code=py_code, python_payload=py_payload
+            )
+    ts_payload = specs_payload(report)
+    exit_code = _merge_exit_codes(py_code)
+    py_specs = py_payload.get("specs", [])
+    ts_specs = ts_payload.get("specs", [])
+    payload: dict[str, object] = {
+        "schema_version": 2,
+        "command": "specs",
+        "ok": exit_code == 0,
+        "specs": [
+            *(
+                [{**item, "language": "py"} for item in py_specs if isinstance(item, dict)]
+                if isinstance(py_specs, list)
+                else []
+            ),
+            *(
+                [{**item, "language": "ts"} for item in ts_specs if isinstance(item, dict)]
+                if isinstance(ts_specs, list)
+                else []
+            ),
+        ],
+        "dependency_graph": {
+            "py": py_payload.get("dependency_graph", {}),
+            "ts": ts_payload.get("dependency_graph", {}),
+        },
+        "targets": {
+            "py": {"specs": py_specs},
+            "ts": ts_payload.get("targets", {}).get("ts", {})
+            if isinstance(ts_payload.get("targets"), dict)
+            else {},
+        },
+    }
+    _emit_mixed_payload(
+        payload,
+        json_mode=_is_json_mode(args),
+        python_payload=py_payload,
+        typescript_payload=ts_payload,
+    )
+    return exit_code
+
+
+def _cmd_mixed_clean(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> int:
+    from jaunt.typescript.cli_bridge import clean_payload
+    from jaunt.typescript.status import run_clean
+
+    try:
+        target_ids = _typescript_target_ids(args)
+        _mixed_typescript_preflight(root, cfg, target_ids, reject_pending_designs=False)
+    except (JauntConfigError, JauntDiscoveryError, KeyError) as error:
+        return _mixed_preflight_error("clean", error, args)
+    if target_ids:
+        py_code = EXIT_OK
+        py_payload: dict[str, object] = {
+            "command": "clean",
+            "ok": True,
+            "removed": [],
+            "would_remove": [],
+        }
+    else:
+        try:
+            _mixed_python_preflight("clean", args)
+        except (JauntConfigError, JauntDiscoveryError, KeyError) as error:
+            return _mixed_preflight_error("clean", error, args, language="py")
+        py_code, py_payload = _capture_python_json(cmd_clean, args)
+    try:
+        report = asyncio.run(
+            run_clean(
+                root,
+                cfg,
+                target_ids=target_ids,
+                orphans_only=bool(getattr(args, "orphans", False)),
+                dry_run=bool(getattr(args, "dry_run", False)),
+            )
+        )
+    except (JauntConfigError, JauntDiscoveryError, KeyError) as error:
+        return _mixed_operation_error(
+            "clean", error, args, python_code=py_code, python_payload=py_payload
+        )
+    ts_payload = clean_payload(report)
+    exit_code = _merge_exit_codes(py_code, report.exit_code)
+    payload: dict[str, object] = {
+        "schema_version": 2,
+        "command": "clean",
+        "ok": exit_code == 0,
+        "removed": [
+            *cast("list[str]", py_payload.get("removed", [])),
+            *cast("list[str]", ts_payload.get("removed", [])),
+        ],
+        "would_remove": [
+            *cast("list[str]", py_payload.get("would_remove", [])),
+            *cast("list[str]", ts_payload.get("would_remove", [])),
+        ],
+        "targets": {
+            "py": py_payload,
+            "ts": ts_payload.get("targets", {}).get("ts", {})
+            if isinstance(ts_payload.get("targets"), dict)
+            else {},
+        },
+    }
+    _emit_mixed_payload(
+        payload,
+        json_mode=_is_json_mode(args),
+        python_payload=py_payload,
+        typescript_payload=ts_payload,
+    )
+    return exit_code
+
+
 def _effective_build_instructions(cfg: JauntConfig, args: argparse.Namespace) -> list[str]:
     configured = list(cfg.build.instructions)
     cli_values = [value.strip() for value in list(getattr(args, "instructions", []) or [])]
@@ -799,6 +2660,93 @@ def _build_backend(cfg: JauntConfig):
     from jaunt.generate.codex_backend import CodexBackend
 
     return CodexBackend(cfg.codex, cfg.llm, cfg.prompts)
+
+
+def _command_backend(
+    args: argparse.Namespace,
+    cfg: JauntConfig,
+    language: Literal["py", "ts"],
+) -> GeneratorBackend:
+    """Return the normal backend or the command's shared mixed-target wrapper."""
+
+    runtime = getattr(args, "_mixed_runtime", None)
+    if runtime is None:
+        return _build_backend(cfg)
+    return runtime.backend(language, lambda: _build_backend(cfg))
+
+
+def _command_cost_tracker(
+    args: argparse.Namespace,
+    cfg: JauntConfig,
+    language: Literal["py", "ts"],
+) -> CostTracker:
+    """Return a phase tracker charged to the mixed command's shared ledger."""
+
+    runtime = getattr(args, "_mixed_runtime", None)
+    if runtime is not None:
+        return runtime.cost_tracker(language)
+    from jaunt.cost import CostTracker
+
+    return CostTracker(max_cost=cfg.llm.max_cost_per_build)
+
+
+def _command_cost_summary(
+    args: argparse.Namespace,
+    language: Literal["py", "ts"],
+    tracker: CostTracker,
+) -> dict[str, object]:
+    runtime = getattr(args, "_mixed_runtime", None)
+    if runtime is not None:
+        return cast("dict[str, object]", runtime.summary(language))
+    return tracker.summary_dict()
+
+
+def _check_shared_command_budget(
+    args: argparse.Namespace,
+    language: Literal["py", "ts"],
+) -> None:
+    runtime = getattr(args, "_mixed_runtime", None)
+    if runtime is not None:
+        runtime.cost_tracker(language).check_budget()
+
+
+def _command_semantic_exec(
+    args: argparse.Namespace,
+    *,
+    language: Literal["py", "ts"] = "py",
+    charge_usage: bool = True,
+):
+    """Gate direct semantic-judge calls under the mixed model-call limit."""
+
+    runtime = getattr(args, "_mixed_runtime", None)
+    if runtime is None:
+        return None
+
+    from jaunt.generate.codex_backend import run_codex_exec
+
+    tracker = runtime.cost_tracker(language)
+
+    async def run_limited(**kwargs):
+        result = await runtime.run_call(run_codex_exec, **kwargs)
+        if charge_usage:
+            usage_input = getattr(result, "usage_input", None)
+            usage_output = getattr(result, "usage_output", None)
+            if isinstance(usage_input, int) and isinstance(usage_output, int):
+                from jaunt.generate.base import TokenUsage
+
+                tracker.record(
+                    "semantic-gate",
+                    TokenUsage(
+                        prompt_tokens=usage_input,
+                        completion_tokens=usage_output,
+                        model=str(kwargs.get("model", "")),
+                        provider="codex",
+                        cached_prompt_tokens=getattr(result, "usage_cached", None) or 0,
+                    ),
+                )
+        return result
+
+    return run_limited
 
 
 def _is_json_mode(args: argparse.Namespace) -> bool:
@@ -908,6 +2856,11 @@ def cmd_daemon(args: argparse.Namespace) -> int:
                             "module": job.module,
                             "state": job.state,
                             "phase": job.phase,
+                            **(
+                                {"language": job.language, "artifact_key": job.key}
+                                if job.language != "py"
+                                else {}
+                            ),
                         }
                         for job in records
                     ],
@@ -931,7 +2884,8 @@ def cmd_daemon(args: argparse.Namespace) -> int:
                 landing_mode = "propose-only"
             print(f"landing: {landing_mode}")
             for job in records[-10:]:
-                print(f"- {job.id} {job.module}: {_job_state_label(job)}")
+                label = job.key if job.language != "py" else job.module
+                print(f"- {job.id} {label}: {_job_state_label(job)}")
         return EXIT_OK
 
     if os.environ.get(daemon_mod.DISABLE_ENV):
@@ -989,7 +2943,31 @@ def _module_current_digest(root: Path, args: argparse.Namespace, module: str) ->
     return mstatus.digests.get(module)
 
 
+def _job_current_digest(
+    root: Path,
+    args: argparse.Namespace,
+    job: JobRecord,
+) -> str | None:
+    if job.language == "py":
+        return _module_current_digest(root, args, job.module)
+    from jaunt.daemon import CliRunner, ProbeError
+
+    try:
+        _stale, digests = CliRunner().probe(root)
+    except ProbeError as error:
+        raise JauntConfigError(f"TypeScript proposal freshness probe failed: {error}") from error
+    return digests.get(job.key)
+
+
 def _jobs_would_rebuild(root: Path, args: argparse.Namespace) -> dict[str, str]:
+    from jaunt.config import load_config
+
+    cfg = load_config(root=root)
+    if cfg.version == 2:
+        from jaunt.daemon import CliRunner
+
+        stale, _digests = CliRunner().probe(root)
+        return dict(sorted(stale.items()))
     mstatus = _jobs_magic_status(root, args, ())
     return {mod: mstatus.stale_changes.get(mod, "structural") for mod in sorted(mstatus.stale)}
 
@@ -1020,17 +2998,21 @@ def _wait_line(job: JobRecord) -> str:
         status = f"{job.state}: {job.error.splitlines()[0]}"
     elif job.phase:
         status = f"{job.state} — {job.phase}"
-    return f"[wait] {job.id} {job.module}: {status}"
+    label = job.key if job.language != "py" else job.module
+    return f"[wait] {job.id} {label}: {status}"
 
 
 def _wait_payload(job: JobRecord) -> dict[str, str]:
-    return {
+    payload = {
         "id": job.id,
         "module": job.module,
         "state": job.state,
         "phase": job.phase,
         "error": job.error,
     }
+    if job.language != "py":
+        payload.update({"language": job.language, "artifact_key": job.key})
+    return payload
 
 
 def _emit_jobs_wait_json(
@@ -1337,7 +3319,7 @@ def _cmd_jobs_list(args: argparse.Namespace) -> int:
     if not records:
         print("No job records.")
     for job in records:
-        print(f"- {job.id} {job.module}: {_job_state_label(job)}")
+        print(f"- {job.id} {_job_artifact_label(job)}: {_job_state_label(job)}")
         if job.battery:
             print(f"  battery {job.battery}")
         if job.error:
@@ -1388,6 +3370,48 @@ def _cmd_jobs_show(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _job_artifact_label(job: JobRecord) -> str:
+    return job.key if job.language != "py" else job.module
+
+
+def _revalidate_typescript_job_patch(
+    root: Path,
+    job: JobRecord,
+    patch: str,
+    patch_paths: Sequence[str],
+) -> tuple[bool, str]:
+    """Gate the exact TS proposal in a disposable worktree before landing."""
+
+    if job.language != "ts":
+        return True, ""
+    from jaunt import daemon as daemon_mod
+    from jaunt import landing
+    from jaunt.config import load_config
+
+    cfg = load_config(root=root)
+    runner = daemon_mod.CliRunner()
+
+    def validate(worktree: Path) -> tuple[bool, str]:
+        with daemon_mod._typescript_tool_link(root, worktree, cfg, enabled=True):
+            outcome = runner.gate(
+                worktree,
+                job.module,
+                language=job.language,
+                artifact_key=job.key,
+            )
+        return outcome.ok, outcome.detail
+
+    try:
+        return landing.validate_patch(
+            root,
+            patch,
+            patch_paths=patch_paths,
+            validator=validate,
+        )
+    except (landing.LandingError, JauntConfigError) as error:
+        return False, str(error).splitlines()[0][:200]
+
+
 def _cmd_jobs_retry(args: argparse.Namespace) -> int:
     from jaunt import jobs as jobs_mod
     from jaunt import landing
@@ -1422,13 +3446,30 @@ def _cmd_jobs_retry(args: argparse.Namespace) -> int:
 
     patch = patch_file.read_text(encoding="utf-8")
     if not args.force:
-        current_digest = _module_current_digest(root, args, job.module)
+        try:
+            current_digest = _job_current_digest(root, args, job)
+        except JauntConfigError as error:
+            _eprint(f"error: {error}")
+            return EXIT_CONFIG_OR_DISCOVERY
         if current_digest is None or current_digest != job.spec_digest:
             _eprint(
-                f"error: {job.module} spec changed since this job parked; "
+                f"error: {_job_artifact_label(job)} spec changed since this job parked; "
                 "the daemon will rebuild it -- use --force to land anyway"
             )
             return EXIT_PYTEST_FAILURE
+
+    valid, validation_detail = _revalidate_typescript_job_patch(
+        root,
+        job,
+        patch,
+        patch_paths_raw,
+    )
+    if not valid:
+        _eprint(
+            f"error: refusing to land {job.id}; target-scoped TypeScript check failed: "
+            f"{validation_detail or 'jaunt check failed'}"
+        )
+        return EXIT_PYTEST_FAILURE
 
     try:
         expected_head = landing.git_out(root, "rev-parse", "HEAD").strip()
@@ -1437,7 +3478,7 @@ def _cmd_jobs_retry(args: argparse.Namespace) -> int:
             patch,
             patch_paths=patch_paths_raw,
             message=landing.build_commit_message(
-                job.module,
+                _job_artifact_label(job),
                 "retry landing",
                 job.id,
                 job.spec_digest,
@@ -1522,14 +3563,30 @@ def _land_one_proposal(
         )
 
     patch = patch_file.read_text(encoding="utf-8")
-    current_digest = _module_current_digest(root, args, job.module)
+    try:
+        current_digest = _job_current_digest(root, args, job)
+    except JauntConfigError as error:
+        return _fail(EXIT_CONFIG_OR_DISCOVERY, f"error: {error}", aborted=True)
     if current_digest is None or current_digest != job.spec_digest:
         jobs_mod.mark(root, job, jobs_mod.SUPERSEDED)
         return _fail(
             EXIT_PYTEST_FAILURE,
-            f"superseded: {job.module} spec moved since generation; "
+            f"superseded: {_job_artifact_label(job)} spec moved since generation; "
             "the daemon will propose a fresh build",
             state=jobs_mod.SUPERSEDED,
+        )
+
+    valid, validation_detail = _revalidate_typescript_job_patch(
+        root,
+        job,
+        patch,
+        patch_paths_raw,
+    )
+    if not valid:
+        return _fail(
+            EXIT_PYTEST_FAILURE,
+            f"error: refusing to land {job.id}; target-scoped TypeScript check failed: "
+            f"{validation_detail or 'jaunt check failed'}",
         )
 
     try:
@@ -1572,7 +3629,7 @@ def _land_one_proposal(
             [
                 journal_mod.JournalEvent(
                     "refreeze" if job.refrozen else "build",
-                    job.module,
+                    _job_artifact_label(job),
                     f"{job.cause or 'spec change'}; battery {job.battery or '-'}",
                     job.id,
                 )
@@ -1587,7 +3644,7 @@ def _land_one_proposal(
             patch,
             patch_paths=patch_paths_raw,
             message=landing.build_commit_message(
-                job.module,
+                _job_artifact_label(job),
                 job.cause or "spec change",
                 job.id,
                 job.spec_digest,
@@ -1730,7 +3787,7 @@ def _cmd_jobs_discard(args: argparse.Namespace) -> int:
     (jobs_mod.jobs_dir(root) / f"{job.id}.patch").unlink(missing_ok=True)
     journal_mod.append_events(
         root,
-        [journal_mod.JournalEvent("job-discard", job.module, "discarded", job.id)],
+        [journal_mod.JournalEvent("job-discard", _job_artifact_label(job), "discarded", job.id)],
     )
     if json_mode:
         _emit_json(
@@ -1787,6 +3844,9 @@ def cmd_init(args: argparse.Namespace) -> int:
             _emit_json({"command": "init", "ok": False, "error": msg})
         return EXIT_CONFIG_OR_DISCOVERY
 
+    if getattr(args, "language", "py") == "ts":
+        return _cmd_init_typescript(root=root, toml_path=toml_path, json_mode=json_mode)
+
     # Ensure default directories exist.
     (root / "src").mkdir(parents=True, exist_ok=True)
     (root / "tests").mkdir(parents=True, exist_ok=True)
@@ -1812,6 +3872,113 @@ def cmd_init(args: argparse.Namespace) -> int:
             payload["spec_path"] = str(spec_path)
         _emit_json(payload)
 
+    return EXIT_OK
+
+
+def _cmd_init_typescript(*, root: Path, toml_path: Path, json_mode: bool) -> int:
+    """Scaffold a static-first TypeScript project without installing packages."""
+
+    from jaunt import journal as _journal
+
+    package_path = root / "package.json"
+    package_mode: Literal["esm", "commonjs"] = "esm"
+    package_init_command: str | None
+    if not package_path.exists():
+        package_init_command = "npm init -y && npm pkg set type=module"
+    else:
+        try:
+            package_manifest = json.loads(package_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            msg = f"Cannot scaffold TypeScript from invalid {package_path}: {error}"
+            _eprint(f"error: {msg}")
+            if json_mode:
+                _emit_json({"command": "init", "ok": False, "error": msg})
+            return EXIT_CONFIG_OR_DISCOVERY
+        if not isinstance(package_manifest, dict):
+            msg = f"Cannot scaffold TypeScript: {package_path} must contain a JSON object."
+            _eprint(f"error: {msg}")
+            if json_mode:
+                _emit_json({"command": "init", "ok": False, "error": msg})
+            return EXIT_CONFIG_OR_DISCOVERY
+
+        package_type = package_manifest.get("type")
+        if package_type == "commonjs":
+            package_mode = "commonjs"
+            package_init_command = None
+        elif package_type == "module":
+            package_init_command = None
+        elif package_type is None:
+            # Keep package.json user-owned and tell the caller how to opt the
+            # existing package into the default ESM scaffold.
+            package_init_command = "npm pkg set type=module"
+        else:
+            msg = (
+                "Cannot scaffold TypeScript: package.json type must be "
+                f'"module" or "commonjs", not {package_type!r}.'
+            )
+            _eprint(f"error: {msg}")
+            if json_mode:
+                _emit_json({"command": "init", "ok": False, "error": msg})
+            return EXIT_CONFIG_OR_DISCOVERY
+
+    root.mkdir(parents=True, exist_ok=True)
+    created: list[Path] = []
+
+    def write_new(path: Path, content: str) -> None:
+        if path.exists():
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        created.append(path)
+
+    toml_path.write_text(TYPESCRIPT_INIT_TEMPLATE, encoding="utf-8")
+    created.append(toml_path)
+    write_new(root / "src" / "index.jaunt.ts", TYPESCRIPT_SPEC_TEMPLATE)
+    write_new(root / "src" / "index.context.ts", TYPESCRIPT_CONTEXT_TEMPLATE)
+    write_new(root / "src" / "index.ts", TYPESCRIPT_FACADE_TEMPLATE)
+    write_new(root / "tests" / "index.jaunt-test.ts", TYPESCRIPT_TEST_SPEC_TEMPLATE)
+    tsconfig_template = (
+        TYPESCRIPT_COMMONJS_TSCONFIG_TEMPLATE
+        if package_mode == "commonjs"
+        else TYPESCRIPT_TSCONFIG_TEMPLATE
+    )
+    write_new(root / "tsconfig.json", tsconfig_template)
+    write_new(root / "tsconfig.test.json", TYPESCRIPT_TEST_TSCONFIG_TEMPLATE)
+
+    (root / _journal.JOURNAL_FILE).touch(exist_ok=True)
+    _journal.ensure_union_merge_attribute(root)
+    gitignore = root / ".gitignore"
+    existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+    if ".jaunt/" not in existing.splitlines():
+        joiner = "" if (not existing or existing.endswith("\n")) else "\n"
+        gitignore.write_text(existing + joiner + ".jaunt/\n", encoding="utf-8")
+
+    if (root / "pnpm-lock.yaml").exists():
+        install_command = (
+            "pnpm add -D @usejaunt/ts@next 'typescript@^5.9' vitest fast-check @types/node"
+        )
+    else:
+        install_command = (
+            "npm install -D @usejaunt/ts@next 'typescript@^5.9' vitest fast-check @types/node"
+        )
+    if json_mode:
+        _emit_json(
+            {
+                "command": "init",
+                "ok": True,
+                "language": "ts",
+                "path": str(toml_path),
+                "created": [str(path) for path in created],
+                "package_init_command": package_init_command,
+                "install_command": install_command,
+            }
+        )
+    else:
+        print(f"Initialized TypeScript Jaunt project at {root}.")
+        if package_init_command:
+            print(f"Configure the npm package manifest:\n  {package_init_command}")
+        print(f"Install the project-local analyzer and compiler:\n  {install_command}")
+        print("Then run `jaunt sync` before the first model-backed build.")
     return EXIT_OK
 
 
@@ -2126,6 +4293,16 @@ def cmd_tree(args: argparse.Namespace) -> int:
 
 def cmd_clean(args: argparse.Namespace) -> int:
     import shutil
+
+    context = _typescript_command_context(args)
+    if context is not None:
+        root, cfg, mode = context
+        if (failure := _target_dispatch_failure(args, mode)) is not None:
+            return failure
+        if mode == "ts":
+            return _cmd_typescript_clean_loaded(args, root, cfg)
+        if mode == "mixed":
+            return _cmd_mixed_clean(args, root, cfg)
 
     json_mode = _is_json_mode(args)
     try:
@@ -2498,8 +4675,147 @@ def _migrate_candidate_files(root: Path, cfg: JauntConfig) -> dict[Path, str]:
     }
 
 
+def _cmd_migrate_config_v2(args: argparse.Namespace, *, json_mode: bool) -> int:
+    """Plan or atomically apply the Python-neutral config-v2 rewrite."""
+
+    try:
+        root, _cfg = _load_config(args)
+        from jaunt.typescript.migrate import apply_config_v2, plan_config_v2
+
+        config_path = Path(args.config).resolve() if args.config else root / "jaunt.toml"
+        plan = plan_config_v2(root, config_path)
+        details = plan.to_json(root)
+        if not bool(getattr(args, "apply", False)):
+            if json_mode:
+                _emit_json(
+                    {
+                        "command": "migrate",
+                        "ok": True,
+                        "applied": False,
+                        **details,
+                        **({"content": plan.source} if plan.changed else {}),
+                    }
+                )
+            elif not plan.changed:
+                print("jaunt.toml already uses config version 2.")
+            else:
+                print(f"Would migrate {details['path']} to config version 2:")
+                print(plan.source, end="")
+            return EXIT_OK
+
+        if plan.changed and not bool(getattr(args, "force", False)) and _is_dirty_worktree(root):
+            error = "dirty working tree"
+            if json_mode:
+                _emit_json(
+                    {
+                        "command": "migrate",
+                        "ok": False,
+                        "applied": False,
+                        "error": error,
+                        **details,
+                    }
+                )
+            else:
+                _eprint(
+                    "error: refusing to migrate config; git working tree is dirty (use --force)"
+                )
+            return EXIT_CONFIG_OR_DISCOVERY
+        applied = apply_config_v2(plan)
+        if json_mode:
+            _emit_json(
+                {
+                    "command": "migrate",
+                    "ok": True,
+                    "applied": applied,
+                    **details,
+                }
+            )
+        elif applied:
+            print("Migrated jaunt.toml to config version 2 without changing Python routes.")
+        else:
+            print("jaunt.toml already uses config version 2.")
+        return EXIT_OK
+    except (JauntConfigError, JauntDiscoveryError, KeyError) as exc:
+        _print_error(exc)
+        if json_mode:
+            _emit_json({"command": "migrate", "ok": False, "error": str(exc)})
+        return EXIT_CONFIG_OR_DISCOVERY
+
+
+def _cmd_typescript_migrate_loaded(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> int:
+    """Plan or atomically apply worker-validated TypeScript artifact repairs."""
+
+    from jaunt.typescript.migrate import apply_typescript_migration, plan_typescript_migration
+
+    json_mode = _is_json_mode(args)
+    try:
+        plan = asyncio.run(plan_typescript_migration(root, cfg))
+        payload = plan.to_json()
+        if not bool(getattr(args, "apply", False)):
+            if json_mode:
+                _emit_json(payload)
+            elif not plan.actions:
+                print("No pending TypeScript migrations.")
+            else:
+                print("TypeScript migration plan (no files changed):")
+                for action in plan.actions:
+                    print(f"- {action.description}")
+            return EXIT_OK
+
+        if plan.blocked:
+            error = "TypeScript migration requires manual intervention; no artifacts were written"
+            if json_mode:
+                _emit_json({**payload, "ok": False, "applied": False, "error": error})
+            else:
+                _eprint(f"error: {error}")
+                for diagnostic in plan.diagnostics:
+                    if diagnostic.classification == "manual-intervention":
+                        _eprint(f"- {diagnostic.code}: {diagnostic.message}")
+            return EXIT_CONFIG_OR_DISCOVERY
+        if plan.writes and not bool(getattr(args, "force", False)) and _is_dirty_worktree(root):
+            error = "dirty working tree"
+            if json_mode:
+                _emit_json({**payload, "ok": False, "applied": False, "error": error})
+            else:
+                _eprint(
+                    "error: refusing to migrate TypeScript artifacts; "
+                    "git working tree is dirty (use --force)"
+                )
+            return EXIT_CONFIG_OR_DISCOVERY
+
+        applied_paths = apply_typescript_migration(plan)
+        applied_payload = plan.to_json(applied=True, applied_paths=applied_paths)
+        if json_mode:
+            _emit_json(applied_payload)
+        else:
+            if applied_paths:
+                print(f"Applied {len(applied_paths)} TypeScript artifact migration(s):")
+                for path in applied_paths:
+                    print(f"- {path}")
+            else:
+                print("No pending TypeScript migrations.")
+            for module_id in plan.requires_rebuild:
+                print(f"Needs model rebuild: {module_id}")
+        return EXIT_OK
+    except JauntGenerationError as error:
+        return _typescript_error("migrate", error, json_mode=json_mode, code=EXIT_GENERATION_ERROR)
+    except (JauntConfigError, JauntDiscoveryError, KeyError) as error:
+        return _typescript_error(
+            "migrate", error, json_mode=json_mode, code=EXIT_CONFIG_OR_DISCOVERY
+        )
+
+
 def cmd_migrate(args: argparse.Namespace) -> int:
     json_mode = _is_json_mode(args)
+    if bool(getattr(args, "config_v2", False)):
+        if bool(getattr(args, "merge_projects", False)):
+            error = "--config-v2 and --merge-projects are separate migrations"
+            if json_mode:
+                _emit_json({"command": "migrate", "ok": False, "error": error})
+            else:
+                _eprint(f"error: {error}")
+            return EXIT_CONFIG_OR_DISCOVERY
+        return _cmd_migrate_config_v2(args, json_mode=json_mode)
     if bool(getattr(args, "merge_projects", False)):
         try:
             root, _cfg = _load_config(args)
@@ -2555,6 +4871,9 @@ def cmd_migrate(args: argparse.Namespace) -> int:
 
     try:
         root, cfg = _load_config(args)
+        mode = _target_dispatch_mode(args, cfg)
+        if mode == "ts":
+            return _cmd_typescript_migrate_loaded(args, root, cfg)
         ctx = _discover_build_context(root, cfg, args)
     except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError, KeyError) as e:
         _print_error(e)
@@ -2781,6 +5100,16 @@ def _render_stale_reason(reason: str) -> str:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
+    context = _typescript_command_context(args)
+    if context is not None:
+        root, cfg, mode = context
+        if (failure := _target_dispatch_failure(args, mode)) is not None:
+            return failure
+        if mode == "ts":
+            return _cmd_typescript_check_loaded(args, root, cfg)
+        if mode == "mixed":
+            return _cmd_mixed_check(args, root, cfg)
+
     json_mode = _is_json_mode(args)
     try:
         root, cfg = _load_config(args)
@@ -3010,6 +5339,16 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 
 def cmd_reconcile(args: argparse.Namespace) -> int:
+    context = _typescript_command_context(args)
+    if context is not None:
+        root, cfg, mode = context
+        if (failure := _target_dispatch_failure(args, mode)) is not None:
+            return failure
+        if mode == "ts":
+            return _cmd_typescript_reconcile_loaded(args, root, cfg)
+        if mode == "mixed":
+            return _cmd_mixed_reconcile(args, root, cfg)
+
     json_mode = _is_json_mode(args)
     try:
         import importlib
@@ -3019,17 +5358,21 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
         root, cfg = _load_config(args)
         from jaunt.contract import runner
         from jaunt.contract.derive import extract_blocks_via_model
-        from jaunt.generate.base import GeneratorBackend
 
         _backend_box: list[GeneratorBackend] = []
+        cost_tracker = _command_cost_tracker(args, cfg, "py")
 
         def _model_extract(prose: str, func_name: str = "f"):
             if not _backend_box:
-                _backend_box.append(_build_backend(cfg))
+                _backend_box.append(_command_backend(args, cfg, "py"))
             backend = _backend_box[0]
 
             async def _complete(system: str, user: str) -> str:
-                return await backend.complete_text(system=system, user=user)
+                text, usage = await backend.complete_text_with_usage(system=system, user=user)
+                if usage is not None:
+                    cost_tracker.record(f"contract:{func_name}", usage)
+                    cost_tracker.check_budget()
+                return text
 
             return asyncio.run(
                 extract_blocks_via_model(prose, complete=_complete, func_name=func_name)
@@ -3061,23 +5404,24 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
 
         failed = [r for r in results if not r.ok]
         if json_mode:
-            _emit_json(
-                {
-                    "command": "reconcile",
-                    "ok": not failed,
-                    "reconciled": [
-                        {
-                            "ref": r.spec_ref,
-                            "strength": r.strength,
-                            "strength_excluded": r.strength_excluded,
-                            "wrote": r.wrote,
-                        }
-                        for r in results
-                        if r.ok
-                    ],
-                    "failed": [{"ref": r.spec_ref, "failures": r.failures} for r in failed],
-                }
-            )
+            payload: dict[str, object] = {
+                "command": "reconcile",
+                "ok": not failed,
+                "reconciled": [
+                    {
+                        "ref": r.spec_ref,
+                        "strength": r.strength,
+                        "strength_excluded": r.strength_excluded,
+                        "wrote": r.wrote,
+                    }
+                    for r in results
+                    if r.ok
+                ],
+                "failed": [{"ref": r.spec_ref, "failures": r.failures} for r in failed],
+            }
+            if getattr(args, "_mixed_runtime", None) is not None:
+                payload["cost"] = _command_cost_summary(args, "py", cost_tracker)
+            _emit_json(payload)
         else:
             for r in results:
                 if r.ok:
@@ -3096,9 +5440,29 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
         if json_mode:
             _emit_json({"command": "reconcile", "ok": False, "error": str(e)})
         return EXIT_CONFIG_OR_DISCOVERY
+    except JauntGenerationError as e:
+        _print_error(e)
+        if json_mode:
+            payload = {"command": "reconcile", "ok": False, "error": str(e)}
+            runtime = getattr(args, "_mixed_runtime", None)
+            if runtime is not None:
+                payload["cost"] = runtime.summary("py")
+            _emit_json(payload)
+        return EXIT_GENERATION_ERROR
 
 
 def cmd_adopt(args: argparse.Namespace) -> int:
+    context = _typescript_command_context(args)
+    if context is not None:
+        root, cfg, mode = context
+        if (failure := _target_dispatch_failure(args, mode)) is not None:
+            return failure
+        if mode == "ts" or (
+            mode == "mixed"
+            and (str(getattr(args, "ref", "")).startswith("ts:") or "#" in str(args.ref))
+        ):
+            return _cmd_typescript_adopt_loaded(args, root, cfg)
+
     json_mode = _is_json_mode(args)
     try:
         import importlib
@@ -3189,6 +5553,20 @@ def cmd_adopt(args: argparse.Namespace) -> int:
 
 
 def cmd_eject(args: argparse.Namespace) -> int:
+    context = _typescript_command_context(args)
+    if context is not None:
+        root, cfg, mode = context
+        if (failure := _target_dispatch_failure(args, mode)) is not None:
+            return failure
+        if mode == "ts" or (
+            mode == "mixed"
+            and (
+                str(getattr(args, "ref", "")).startswith("ts:")
+                or "#" in str(getattr(args, "ref", ""))
+            )
+        ):
+            return _cmd_typescript_eject_loaded(args, root, cfg)
+
     json_mode = _is_json_mode(args)
     try:
         from jaunt.contract import runner
@@ -3291,6 +5669,16 @@ def cmd_instructions(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
+    context = _typescript_command_context(args)
+    if context is not None:
+        root, cfg, mode = context
+        if (failure := _target_dispatch_failure(args, mode)) is not None:
+            return failure
+        if mode == "ts":
+            return _cmd_typescript_status_loaded(args, root, cfg)
+        if mode == "mixed":
+            return _cmd_mixed_status(args, root, cfg)
+
     json_mode = _is_json_mode(args)
     try:
         root, cfg = _load_config(args)
@@ -3610,7 +5998,16 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
         )
         builtin_skill_names = tuple(cfg.skills.builtin_skills) if builtin_on else ()
         auto_skills_on = bool(cfg.skills.auto) and not bool(getattr(args, "no_auto_skills", False))
-        if auto_skills_on:
+        if auto_skills_on and getattr(args, "_mixed_runtime", None) is not None:
+            # Auto-skill elaboration owns its own Codex executor and predates
+            # command-level runtime injection.  Defer missing/updated skills in
+            # mixed mode rather than letting those calls escape the shared jobs
+            # and budget boundary.  Existing seeded skills remain available.
+            _eprint(
+                "warn: deferred automatic PyPI skill generation for this mixed-target "
+                "command; run `jaunt build --language py` to refresh external-library skills"
+            )
+        elif auto_skills_on:
             try:
                 from jaunt import skills_auto
 
@@ -3632,7 +6029,38 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
         if cfg.context.repo_map and not bool(getattr(args, "no_repo_map", False)):
             from jaunt.repo_context import api as rc_api
 
-            repo_map_block = rc_api.repo_map_block_for_build(root=root, cfg=cfg, today=_today())
+            precomputed_repo_map = getattr(args, "_mixed_repo_map_block", None)
+            if isinstance(precomputed_repo_map, str):
+                repo_map_block = precomputed_repo_map
+            elif cfg.context.enrich and getattr(args, "_mixed_runtime", None) is not None:
+                # Repo-map enrichment also owns a legacy standalone Codex
+                # backend.  Keep AST repo-map maintenance enabled, but defer
+                # enrichment so no unmetered model call escapes mixed runtime.
+                _eprint(
+                    "warn: deferred model-enriched repo-map descriptions for this "
+                    "mixed-target command; run `jaunt tree --enrich` separately"
+                )
+                try:
+                    from jaunt.repo_context import block as rc_block
+
+                    repo_map_doc, _ = rc_api.sync_tree(
+                        root=root,
+                        cfg=cfg,
+                        today=_today(),
+                        enrich=False,
+                    )
+                    repo_map_block = rc_block.render_repo_map(
+                        repo_map_doc,
+                        max_chars=cfg.context.max_chars,
+                    )
+                except Exception:  # noqa: BLE001 - repo map remains best-effort
+                    repo_map_block = ""
+            else:
+                repo_map_block = rc_api.repo_map_block_for_build(
+                    root=root,
+                    cfg=cfg,
+                    today=_today(),
+                )
 
         from jaunt.skill_seed import skills_fingerprint
 
@@ -3691,11 +6119,10 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
 
         module_specs = registry.get_specs_by_module("magic")
 
-        from jaunt.cost import CostTracker
-
         # Created up front so a (best-effort) project-overview model call is charged
         # against the same budget/summary as the per-module build calls below.
-        cost_tracker = CostTracker(max_cost=cfg.llm.max_cost_per_build)
+        cost_tracker = _command_cost_tracker(args, cfg, "py")
+        backend = _command_backend(args, cfg, "py")
 
         overview_block = ""
         if cfg.context.overview:
@@ -3706,7 +6133,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                 cfg=cfg,
                 module_specs=module_specs,
                 repo_map_block=repo_map_block,
-                backend=_build_backend(cfg),
+                backend=backend,
                 cost_tracker=cost_tracker,
             )
             # Abort early if generating the overview already blew the budget.
@@ -3846,8 +6273,13 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                 cfg=cfg.semantic_gate,
                 gate_enabled=cfg.semantic_gate.enabled
                 and not bool(getattr(args, "no_semantic_gate", False)),
+                run_exec=_command_semantic_exec(args),
                 module_output_bases=workspace.output_bases,
             )
+            # The Python semantic gate predates cost reporting.  Mixed commands
+            # charge its direct Codex usage to the outer ledger, then enforce
+            # that shared ceiling here even though the gate itself fails closed.
+            cost_tracker.check_budget()
             refrozen_modules = set(plan.refrozen)
             expanded_stale = set(plan.rebuild)
             # The planner already rolled MEANINGFUL verdicts up the dependency
@@ -3898,7 +6330,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             stale_modules=stale,
             changed_modules=api_changed,
             allowed_modules=allowed_modules,
-            backend=_build_backend(cfg),
+            backend=backend,
             generation_fingerprint=build_generation_fingerprint,
             repo_map_block=repo_map_block,
             project_overview_block=overview_block,
@@ -3993,7 +6425,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                 "skipped": sorted(report.skipped),
                 "refrozen": sorted(refrozen_modules),
                 "failed": {k: v for k, v in sorted(report.failed.items())},
-                "cost": cost_tracker.summary_dict(),
+                "cost": _command_cost_summary(args, "py", cost_tracker),
                 "cache": {"hits": response_cache.hits, "misses": response_cache.misses},
                 "context_stats": {k: v for k, v in sorted(report.context_stats.items())},
             }
@@ -4029,6 +6461,15 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
 
 
 def cmd_build(args: argparse.Namespace) -> int:
+    context = _typescript_command_context(args)
+    if context is not None:
+        root, cfg, mode = context
+        if (failure := _target_dispatch_failure(args, mode)) is not None:
+            return failure
+        if mode == "ts":
+            return _cmd_typescript_build_loaded(args, root, cfg)
+        if mode == "mixed":
+            return _cmd_mixed_build(args, root, cfg)
     return asyncio.run(_cmd_build_async(args))
 
 
@@ -4328,7 +6769,9 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
                 test_roots=existing_test_dirs,
                 gate_enabled=cfg.semantic_gate.enabled
                 and not bool(getattr(args, "no_semantic_gate", False)),
+                run_exec=_command_semantic_exec(args),
             )
+            _check_shared_command_budget(args, "py")
             test_refrozen_modules = set(test_plan.refrozen)
             stale = set(test_plan.rebuild)
 
@@ -4336,13 +6779,12 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
         progress = _make_progress(args, label="test", total=total, json_mode=json_mode)
 
         from jaunt.cache import ResponseCache
-        from jaunt.cost import CostTracker
 
         cache_dir = root / ".jaunt" / "cache"
         no_cache = bool(getattr(args, "no_cache", False))
         response_cache = ResponseCache(cache_dir, enabled=not no_cache)
-        cost_tracker = CostTracker(max_cost=cfg.llm.max_cost_per_build)
-        backend = _build_backend(cfg)
+        cost_tracker = _command_cost_tracker(args, cfg, "py")
+        backend = _command_backend(args, cfg, "py")
 
         build_generation_fingerprint = generation_fingerprint(
             cfg,
@@ -4451,6 +6893,10 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
                 "refrozen": sorted(test_refrozen_modules),
                 "generation_failed": {k: v for k, v in sorted(gen_failed.items())},
             }
+            if getattr(args, "_mixed_runtime", None) is not None:
+                test_payload["cost"] = _command_cost_summary(args, "py", cost_tracker)
+                test_payload["generated"] = sorted(result.generated)
+                test_payload["skipped"] = sorted(result.skipped)
             if getattr(result, "advisories", None):
                 test_payload["advisories"] = {
                     k: list(v) for k, v in sorted(result.advisories.items())
@@ -4546,18 +6992,45 @@ async def _cmd_test_workspace_async(args: argparse.Namespace) -> int:
         else EXIT_OK
     )
     if _is_json_mode(args):
-        _emit_json(
-            {
-                "command": "test",
-                "ok": rc == EXIT_OK,
-                "exit_code": rc,
-                "owners": owner_results,
-            }
-        )
+        payload: dict[str, object] = {
+            "command": "test",
+            "ok": rc == EXIT_OK,
+            "exit_code": rc,
+            "owners": owner_results,
+        }
+        runtime = getattr(args, "_mixed_runtime", None)
+        if runtime is not None:
+            payload["cost"] = runtime.summary("py")
+            generated: set[str] = set()
+            skipped: set[str] = set()
+            generation_failed: dict[str, object] = {}
+            for owner_result in owner_results:
+                result_payload = owner_result.get("result")
+                if not isinstance(result_payload, dict):
+                    continue
+                result_record = cast("dict[str, object]", result_payload)
+                generated.update(str(item) for item in _payload_list(result_record, "generated"))
+                skipped.update(str(item) for item in _payload_list(result_record, "skipped"))
+                failures = result_record.get("generation_failed", {})
+                if isinstance(failures, dict):
+                    generation_failed.update({str(key): value for key, value in failures.items()})
+            payload["generated"] = sorted(generated)
+            payload["skipped"] = sorted(skipped)
+            payload["generation_failed"] = generation_failed
+        _emit_json(payload)
     return rc
 
 
 def cmd_test(args: argparse.Namespace) -> int:
+    context = _typescript_command_context(args)
+    if context is not None:
+        root, cfg, mode = context
+        if (failure := _target_dispatch_failure(args, mode)) is not None:
+            return failure
+        if mode == "ts":
+            return _cmd_typescript_test_loaded(args, root, cfg)
+        if mode == "mixed":
+            return _cmd_mixed_test(args, root, cfg)
     return asyncio.run(_cmd_test_workspace_async(args))
 
 
@@ -4611,6 +7084,14 @@ def cmd_cache(args: argparse.Namespace) -> int:
 def cmd_watch(args: argparse.Namespace) -> int:
     json_mode = _is_json_mode(args)
 
+    try:
+        root, cfg = _load_config(args)
+    except (JauntConfigError, KeyError) as e:
+        _print_error(e)
+        if json_mode:
+            _emit_json({"command": "watch", "ok": False, "error": str(e)})
+        return EXIT_CONFIG_OR_DISCOVERY
+
     from jaunt.watcher import check_watchfiles_available
 
     try:
@@ -4621,30 +7102,112 @@ def cmd_watch(args: argparse.Namespace) -> int:
             _emit_json({"command": "watch", "ok": False, "error": str(e)})
         return EXIT_CONFIG_OR_DISCOVERY
 
-    try:
-        root, cfg = _load_config(args)
-    except (JauntConfigError, KeyError) as e:
-        _print_error(e)
-        if json_mode:
-            _emit_json({"command": "watch", "ok": False, "error": str(e)})
-        return EXIT_CONFIG_OR_DISCOVERY
-
     from jaunt.watcher import (
         WatchCycleResult,
+        WatchScope,
         build_cycle_runner,
         format_watch_cycle_json,
         make_watchfiles_iter,
         run_watch_loop,
     )
 
-    from jaunt.workspace import resolve_workspace
+    def expand_directories(entries: Sequence[str]) -> list[Path]:
+        expanded: set[Path] = set()
+        for entry in entries:
+            matches = list(root.glob(entry)) if glob.has_magic(entry) else [root / entry]
+            expanded.update(path.resolve() for path in matches if path.is_dir())
+        return sorted(expanded)
 
-    workspace = resolve_workspace(root, cfg)
-    source_roots = list(workspace.source_roots)
-    test_roots = (
-        [route.root for route in workspace.test_roots] if getattr(args, "test", False) else []
+    def expand_files(entries: Sequence[str]) -> list[Path]:
+        expanded: set[Path] = set()
+        for entry in entries:
+            matches = list(root.glob(entry)) if glob.has_magic(entry) else [root / entry]
+            expanded.update(path.resolve() for path in matches if path.is_file())
+        return sorted(expanded)
+
+    run_tests = bool(getattr(args, "test", False))
+    _, explicit_config_path = _resolve_root_and_config(args)
+    watched_config_path = explicit_config_path or root / "jaunt.toml"
+
+    def make_watch_scope(config: JauntConfig) -> WatchScope:
+        source_roots: list[Path] = []
+        test_roots: list[Path] = []
+        if config.version == 1 or config.python_target is not None:
+            from jaunt.workspace import resolve_workspace
+
+            workspace = resolve_workspace(root, config)
+            source_roots = list(workspace.source_roots)
+            test_roots = [route.root for route in workspace.test_roots] if run_tests else []
+
+        ts_source_roots: list[Path] = []
+        ts_test_roots: list[Path] = []
+        config_paths: list[Path] = [watched_config_path]
+        ts_generated_dir = "__generated__"
+        if config.typescript_target is not None:
+            target = config.typescript_target
+            ts_source_roots = expand_directories(target.source_roots)
+            # Test specs and fixtures affect generated batteries even when --test
+            # is toggled later during a long-lived watch session.
+            ts_test_roots = expand_directories(target.test_roots)
+            config_paths.extend(expand_files([*target.projects, *target.test_projects]))
+            if target.vitest_config:
+                config_paths.extend(expand_files([target.vitest_config]))
+            config_paths.extend(
+                Path(value).resolve()
+                for value in (
+                    config.typescript_prompts.build_system,
+                    config.typescript_prompts.build_module,
+                    config.typescript_prompts.test_system,
+                    config.typescript_prompts.test_module,
+                    config.typescript_prompts.design_system,
+                    config.typescript_prompts.design_user,
+                )
+                if value
+            )
+            ts_generated_dir = target.generated_dir
+
+        return WatchScope(
+            source_roots=tuple(source_roots),
+            test_roots=tuple(test_roots),
+            generated_dir=config.paths.generated_dir,
+            typescript_source_roots=tuple(ts_source_roots),
+            typescript_test_roots=tuple(ts_test_roots),
+            typescript_generated_dir=ts_generated_dir,
+            workspace_root=root,
+            config_paths=tuple(sorted(set(config_paths))),
+        )
+
+    watch_scope = make_watch_scope(cfg)
+
+    def current_watch_scope() -> WatchScope:
+        refreshed_root, refreshed_config = _load_config(args)
+        if refreshed_root.resolve() != root.resolve():
+            raise JauntConfigError(
+                f"Watch root changed from {root.resolve()} to {refreshed_root.resolve()}; "
+                "restart `jaunt watch`."
+            )
+        return make_watch_scope(refreshed_config)
+
+    watch_paths = sorted(
+        {
+            path
+            for path in [
+                *watch_scope.source_roots,
+                *watch_scope.test_roots,
+                *watch_scope.typescript_source_roots,
+                *watch_scope.typescript_test_roots,
+            ]
+            if path.exists()
+        }
     )
-    watch_paths = [d for d in (source_roots + test_roots) if d.exists()]
+    # The workspace-root watch is intentional: the filtering scope can change
+    # after jaunt.toml is edited, and watchfiles cannot otherwise observe a new
+    # sibling root (for example source_roots changing from src to src2).
+    watch_paths.append(root)
+    for config_path in watch_scope.config_paths:
+        if not config_path.resolve().is_relative_to(root.resolve()):
+            watch_paths.append(config_path.resolve().parent)
+    watch_paths = sorted(set(watch_paths))
 
     if not watch_paths:
         msg = "No existing source or test roots to watch."
@@ -4653,7 +7216,6 @@ def cmd_watch(args: argparse.Namespace) -> int:
             _emit_json({"command": "watch", "ok": False, "error": msg})
         return EXIT_CONFIG_OR_DISCOVERY
 
-    run_tests = bool(getattr(args, "test", False))
     runner = build_cycle_runner(args, run_tests=run_tests)
 
     def on_event(msg: str) -> None:
@@ -4680,9 +7242,15 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 on_event=on_event,
                 on_cycle_result=on_cycle_result,
                 on_error=on_error,
-                source_roots=source_roots,
-                test_roots=test_roots,
-                generated_dir=cfg.paths.generated_dir,
+                source_roots=watch_scope.source_roots,
+                test_roots=watch_scope.test_roots,
+                generated_dir=watch_scope.generated_dir,
+                typescript_source_roots=watch_scope.typescript_source_roots,
+                typescript_test_roots=watch_scope.typescript_test_roots,
+                typescript_generated_dir=watch_scope.typescript_generated_dir,
+                workspace_root=watch_scope.workspace_root,
+                config_paths=watch_scope.config_paths,
+                watch_scope_provider=current_watch_scope,
             )
         )
     except KeyboardInterrupt:
@@ -5102,6 +7670,16 @@ def cmd_skill(args: argparse.Namespace) -> int:
 
 def cmd_specs(args: argparse.Namespace) -> int:
     """List discovered @jaunt.magic specs and their dependency graph."""
+    context = _typescript_command_context(args)
+    if context is not None:
+        root, cfg, mode = context
+        if (failure := _target_dispatch_failure(args, mode)) is not None:
+            return failure
+        if mode == "ts":
+            return _cmd_typescript_specs_loaded(args, root, cfg)
+        if mode == "mixed":
+            return _cmd_mixed_specs(args, root, cfg)
+
     json_mode = _is_json_mode(args)
     try:
         root, cfg = _load_config(args)
@@ -5185,19 +7763,139 @@ def cmd_specs(args: argparse.Namespace) -> int:
         return EXIT_CONFIG_OR_DISCOVERY
 
 
-def _guard_generated_dir(args: argparse.Namespace, payload: dict[str, object]) -> str:
-    if args.generated_dir:
-        return str(args.generated_dir)
+def _guard_configuration(
+    payload: dict[str, object],
+) -> tuple[Path | None, JauntConfig | None]:
     try:
         from jaunt.config import find_project_root, load_config
 
         cwd = payload.get("cwd")
         start = Path(str(cwd)) if cwd else Path.cwd()
         root = find_project_root(start)
-        cfg = load_config(root=root)
-        return cfg.paths.generated_dir
+        return root, load_config(root=root)
     except Exception:  # noqa: BLE001 - hooks must never break the harness
-        return "__generated__"
+        return None, None
+
+
+def _guard_generated_dirs(
+    args: argparse.Namespace,
+    cfg: JauntConfig | None,
+) -> tuple[str, ...]:
+    if args.generated_dir:
+        return (str(args.generated_dir),)
+    if cfg is None:
+        return ("__generated__",)
+    candidates = [cfg.paths.generated_dir]
+    if cfg.typescript_target is not None:
+        candidates.append(cfg.typescript_target.generated_dir)
+    return tuple(dict.fromkeys(candidate for candidate in candidates if candidate))
+
+
+def _guard_generated_dir(args: argparse.Namespace, payload: dict[str, object]) -> str:
+    """Backward-compatible single-dir view used by older callers/tests."""
+
+    _root, cfg = _guard_configuration(payload)
+    return _guard_generated_dirs(args, cfg)[0]
+
+
+def _guard_payload_path(payload: dict[str, object]) -> str | None:
+    try:
+        tool_input = payload.get("tool_input") or {}
+        if not isinstance(tool_input, dict):
+            return None
+        tool_input = cast("dict[str, object]", tool_input)
+        for key in ("file_path", "path", "notebook_path"):
+            value = tool_input.get(key)
+            if value:
+                return str(value)
+    except (AttributeError, TypeError):
+        return None
+    return None
+
+
+def _typescript_spec_hint(
+    payload: dict[str, object],
+    *,
+    root: Path,
+    generated_dir: str,
+) -> str | None:
+    """Map a generated TS implementation, mirror, or sidecar back to its spec."""
+
+    raw = _guard_payload_path(payload)
+    if raw is None:
+        return None
+    try:
+        cwd = Path(str(payload.get("cwd") or root)).resolve()
+        target = Path(raw)
+        target = target.resolve() if target.is_absolute() else (cwd / target).resolve()
+        relative = target.relative_to(root.resolve())
+    except (OSError, ValueError):
+        return None
+
+    generated_parts = Path(generated_dir).parts
+    if not generated_parts:
+        return None
+    parts = relative.parts
+    index = next(
+        (
+            offset
+            for offset in range(len(parts) - len(generated_parts) + 1)
+            if parts[offset : offset + len(generated_parts)] == generated_parts
+        ),
+        None,
+    )
+    if index is None or index + len(generated_parts) >= len(parts):
+        return None
+
+    artifact = Path(*parts[index + len(generated_parts) :])
+    name = artifact.name
+    source_exts: tuple[str, ...]
+    if name.endswith(".api.tsx"):
+        stem, source_exts = name[: -len(".api.tsx")], (".tsx", ".ts")
+    elif name.endswith(".api.ts"):
+        stem, source_exts = name[: -len(".api.ts")], (".ts", ".tsx")
+    elif name.endswith(".jaunt.json"):
+        stem, source_exts = name[: -len(".jaunt.json")], (".ts", ".tsx")
+    elif name.endswith(".tsx"):
+        stem, source_exts = name[: -len(".tsx")], (".tsx", ".ts")
+    elif name.endswith(".ts"):
+        stem, source_exts = name[: -len(".ts")], (".ts", ".tsx")
+    else:
+        return None
+
+    owner = Path(*parts[:index], *artifact.parts[:-1])
+    candidates = [owner / f"{stem}.jaunt{extension}" for extension in source_exts]
+    existing = next((candidate for candidate in candidates if (root / candidate).is_file()), None)
+    return (existing or candidates[0]).as_posix()
+
+
+def _guard_with_typescript_hint(
+    output: dict,
+    payload: dict[str, object],
+    *,
+    root: Path | None,
+    cfg: JauntConfig | None,
+    generated_dir: str,
+) -> dict:
+    if root is None or cfg is None or cfg.typescript_target is None:
+        return output
+    if generated_dir != cfg.typescript_target.generated_dir:
+        return output
+    hint = _typescript_spec_hint(payload, root=root, generated_dir=generated_dir)
+    if hint is None:
+        return output
+    try:
+        decision = output["hookSpecificOutput"]
+        path = _guard_payload_path(payload)
+        if not isinstance(decision, dict) or path is None:
+            return output
+        decision["permissionDecisionReason"] = (
+            f"{path} is machine-owned generated TypeScript (jaunt). Edit the spec instead: "
+            f"{hint}. Changes here are overwritten on the next build."
+        )
+    except (KeyError, TypeError):
+        return output
+    return output
 
 
 def cmd_guard(args: argparse.Namespace) -> int:
@@ -5208,9 +7906,23 @@ def cmd_guard(args: argparse.Namespace) -> int:
     except Exception:  # noqa: BLE001 - hooks must never break the harness
         return EXIT_OK
     payload = cast("dict[str, object]", payload_obj) if isinstance(payload_obj, dict) else {}
-    out = guard_mod.evaluate(payload, generated_dir=_guard_generated_dir(args, payload))
-    if out is not None:
-        print(json.dumps(out))
+    root, cfg = _guard_configuration(payload)
+    for generated_dir in _guard_generated_dirs(args, cfg):
+        out = guard_mod.evaluate(payload, generated_dir=generated_dir)
+        if out is None:
+            continue
+        print(
+            json.dumps(
+                _guard_with_typescript_hint(
+                    out,
+                    payload,
+                    root=root,
+                    cfg=cfg,
+                    generated_dir=generated_dir,
+                )
+            )
+        )
+        break
     return EXIT_OK
 
 
@@ -5392,6 +8104,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_migrate(args)
     if args.command == "status":
         return cmd_status(args)
+    if args.command == "sync":
+        return cmd_sync(args)
+    if args.command == "design":
+        return cmd_design(args)
     if args.command == "log":
         return cmd_log(args)
     if args.command == "daemon":

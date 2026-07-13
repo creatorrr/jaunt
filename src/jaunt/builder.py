@@ -2067,6 +2067,11 @@ async def run_build(
                     initial_error_context=(initial_error_context_by_module or {}).get(module_name),
                     progress=lambda stage, detail: _phase(module_name, stage, detail),
                 )
+            # Token spend is real even when the candidate is absent or fails
+            # validation. Record it before every failure return so command
+            # budgets and summaries cannot undercount rejected generations.
+            if cost_tracker is not None and result.usage is not None:
+                cost_tracker.record(module_name, result.usage)
             if result.source is None:
                 return False, None, result.errors or ["No source returned."]
             if result.errors:
@@ -2080,9 +2085,6 @@ async def run_build(
 
             if result.advisories:
                 module_advisories.setdefault(module_name, []).extend(result.advisories)
-
-            if cost_tracker is not None and result.usage is not None:
-                cost_tracker.record(module_name, result.usage)
 
             if response_cache is not None and ck is not None:
                 import time

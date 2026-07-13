@@ -5,6 +5,31 @@ description: "Where generated code lands, the provenance header, and .pyi stubs.
 
 ## Generated paths
 
+### TypeScript target
+
+A TypeScript spec is a private static input. Jaunt writes the declaration mirror,
+implementation, and sidecar under the configured generated directory; production
+code imports the committed facade next to the spec:
+
+```text
+src/slug/
+  index.jaunt.ts
+  index.context.ts
+  index.ts
+  __generated__/
+    index.api.ts
+    index.ts
+    index.jaunt.json
+```
+
+The generated implementation and mirror carry `jaunt:module`, structural, prose, and
+API digests. The sidecar records the same contract identity plus exact artifact
+hashes. `jaunt sync` may re-stamp those header lines after deterministic validation,
+but it does not rewrite a built body or public boundary. Do not edit any of the three
+machine-owned files by hand.
+
+### Python target
+
 For a spec module inside a package, the generated code lands in a
 `__generated__/` dir beside the source, keeping the package structure:
 

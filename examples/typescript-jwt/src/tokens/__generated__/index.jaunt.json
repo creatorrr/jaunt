@@ -1,0 +1,507 @@
+{
+  "apiDigest": "sha256:fc47b3f9b77ec6f05296ec589683f99f07cb2cea6b88eaed56b908d9d3e97853",
+  "apiMirrorPath": "src/tokens/__generated__/index.api.ts",
+  "artifactHashes": {
+    "src/tokens/__generated__/index.api.ts": "sha256:076acf24442695d8a0344d9bd4489d74d4e9ba04a4aed7b11e7b9e7529aa359a",
+    "src/tokens/__generated__/index.ts": "sha256:b15a06364f13d94fa3085ae87ba244ba0cb747c33f3a646930753d33b951b8de",
+    "src/tokens/index.ts": "sha256:a557dfccc4f76ec1b590833f5dd02d7ccb5c8d3d8aa40b85d6a5149d6f22a5c6"
+  },
+  "contextDocs": [
+    {
+      "exports": [
+        {
+          "docs": "A basic HTTP/1.1 client, mapped on top a single TCP/TLS connection. Pipelining is disabled by default.",
+          "symbol": "Client"
+        },
+        {
+          "docs": "`true` after `client.close()` has been called.",
+          "symbol": "Client.closed"
+        },
+        {
+          "docs": "`true` after `client.destroyed()` has been called or `client.close()` has been called and the client shutdown has completed.",
+          "symbol": "Client.destroyed"
+        },
+        {
+          "docs": "Property to get and set the pipelining factor.",
+          "symbol": "Client.pipelining"
+        }
+      ],
+      "id": "package:undici-types/client.d.ts"
+    },
+    {
+      "exports": [
+        {
+          "docs": "Parse a string to a {@link MIMEType} object. Returns `failure` if the string\ncouldn't be parsed.\n@see https://mimesniff.spec.whatwg.org/#parse-a-mime-type",
+          "symbol": "parseMIMEType"
+        },
+        {
+          "docs": "Convert a MIMEType object to a string.\n@see https://mimesniff.spec.whatwg.org/#serialize-a-mime-type",
+          "symbol": "serializeAMimeType"
+        }
+      ],
+      "id": "package:undici-types/content-type.d.ts"
+    },
+    {
+      "exports": [
+        {
+          "docs": "@deprecated This method is not recommended for parsing multipart/form-data bodies in server environments.\nIt is recommended to use a library such as [@fastify/busboy](https://www.npmjs.com/package/@fastify/busboy) as follows:\n\n@example\n```js\nimport { Busboy } from '@fastify/busboy'\nimport { Readable } from 'node:stream'\n\nconst response = await fetch('...')\nconst busboy = new Busboy({ headers: { 'content-type': response.headers.get('content-type') } })\n\n// handle events emitted from `busboy`\n\nReadable.fromWeb(response.body).pipe(busboy)\n```",
+          "symbol": "BodyMixin.formData"
+        }
+      ],
+      "id": "package:undici-types/fetch.d.ts"
+    },
+    {
+      "exports": [
+        {
+          "docs": "Creates a new File instance.\n\n@param fileBits An `Array` strings, or [`ArrayBuffer`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/ArrayBuffer), [`ArrayBufferView`](https://developer.mozilla.org/en-US/docs/Web/API/ArrayBufferView), [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob) objects, or a mix of any of such objects, that will be put inside the [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File).\n@param fileName The name of the file.\n@param options An options object containing optional attributes for the file.",
+          "symbol": "File.constructor"
+        },
+        {
+          "docs": "The last modified date of the file as the number of milliseconds since the Unix epoch (January 1, 1970 at midnight). Files without a known last modified date return the current date.",
+          "symbol": "File.lastModified"
+        },
+        {
+          "docs": "Name of the file referenced by the File object.",
+          "symbol": "File.name"
+        },
+        {
+          "docs": "The last modified date of the file as the number of milliseconds since the Unix epoch (January 1, 1970 at midnight). Files without a known last modified date return the current date.",
+          "symbol": "FilePropertyBag.lastModified"
+        }
+      ],
+      "id": "package:undici-types/file.d.ts"
+    },
+    {
+      "exports": [
+        {
+          "docs": "Provides a way to easily construct a set of key/value pairs representing form fields and their values, which can then be easily sent using fetch().",
+          "symbol": "FormData"
+        },
+        {
+          "docs": "An alias for FormData#entries()",
+          "symbol": "FormData.[Symbol.iterator]"
+        },
+        {
+          "docs": "Appends a new value onto an existing key inside a FormData object,\nor adds the key if it does not already exist.\n\nThe difference between `set()` and `append()` is that if the specified key already exists, `set()` will overwrite all existing values with the new one, whereas `append()` will append the new value onto the end of the existing set of values.\n\n@param name The name of the field whose data is contained in `value`.\n@param value The field's value. This can be [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob)\n    or [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File). If none of these are specified the value is converted to a string.\n@param fileName The filename reported to the server, when a Blob or File is passed as the second parameter. The default filename for Blob objects is \"blob\". The default filename for File objects is the file's filename.",
+          "symbol": "FormData.append"
+        },
+        {
+          "docs": "Deletes a key and its value(s) from a `FormData` object.\n\n@param name The name of the key you want to delete.",
+          "symbol": "FormData.delete"
+        },
+        {
+          "docs": "Returns an [`iterator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Iteration_protocols) allowing to go through the `FormData` key/value pairs.\nThe key of each pair is a string; the value is a [`FormDataValue`](https://developer.mozilla.org/en-US/docs/Web/API/FormDataEntryValue).",
+          "symbol": "FormData.entries"
+        },
+        {
+          "docs": "Executes given callback function for each field of the FormData instance",
+          "symbol": "FormData.forEach"
+        },
+        {
+          "docs": "Returns the first value associated with a given key from within a `FormData` object.\nIf you expect multiple values and want all of them, use the `getAll()` method instead.\n\n@param {string} name A name of the value you want to retrieve.\n\n@returns A `FormDataEntryValue` containing the value. If the key doesn't exist, the method returns null.",
+          "symbol": "FormData.get"
+        },
+        {
+          "docs": "Returns all the values associated with a given key from within a `FormData` object.\n\n@param {string} name A name of the value you want to retrieve.\n\n@returns An array of `FormDataEntryValue` whose key matches the value passed in the `name` parameter. If the key doesn't exist, the method returns an empty list.",
+          "symbol": "FormData.getAll"
+        },
+        {
+          "docs": "Returns a boolean stating whether a `FormData` object contains a certain key.\n\n@param name A string representing the name of the key you want to test for.\n\n@return A boolean value.",
+          "symbol": "FormData.has"
+        },
+        {
+          "docs": "Returns an [`iterator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Iteration_protocols) allowing to go through all keys contained in this `FormData` object.\nEach key is a `string`.",
+          "symbol": "FormData.keys"
+        },
+        {
+          "docs": "Set a new value for an existing key inside FormData,\nor add the new field if it does not already exist.\n\n@param name The name of the field whose data is contained in `value`.\n@param value The field's value. This can be [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob)\n    or [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File). If none of these are specified the value is converted to a string.\n@param fileName The filename reported to the server, when a Blob or File is passed as the second parameter. The default filename for Blob objects is \"blob\". The default filename for File objects is the file's filename.",
+          "symbol": "FormData.set"
+        },
+        {
+          "docs": "Returns an [`iterator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Iteration_protocols) allowing to go through all values contained in this object `FormData` object.\nEach value is a [`FormDataValue`](https://developer.mozilla.org/en-US/docs/Web/API/FormDataEntryValue).",
+          "symbol": "FormData.values"
+        }
+      ],
+      "id": "package:undici-types/formdata.d.ts"
+    },
+    {
+      "exports": [
+        {
+          "docs": "The header type declaration of `undici`.",
+          "symbol": "IncomingHttpHeaders"
+        }
+      ],
+      "id": "package:undici-types/header.d.ts"
+    }
+  ],
+  "contextPath": "src/tokens/index.context.ts",
+  "dependencies": [
+    "ts:src/tokens/index#createToken",
+    "ts:src/tokens/index#verifyToken"
+  ],
+  "facadePath": "src/tokens/index.ts",
+  "fingerprint": {
+    "compilerOptionsHash": "sha256:b9ea51a23f8558ef7cc2b60bf6e4f944cebcd9735dfe803ab6d8dcab9a13a61a",
+    "generationFingerprint": "sha256:86ff80af08c4b56b0fbe527c9e5f30b9d9e73acefcb3d821862d414679822382",
+    "ir": "contract-ir/1-draft.2",
+    "protocol": "jaunt-ts/1-draft.2",
+    "toolVersion": "1.6.3",
+    "typescriptVersion": "5.9.3",
+    "workerVersion": "0.1.0-alpha.0"
+  },
+  "implementationPath": "src/tokens/__generated__/index.ts",
+  "moduleId": "ts:src/tokens/index",
+  "options": {},
+  "packageOwner": ".",
+  "project": "tsconfig.json",
+  "proseDigest": "sha256:616b419f63caf931be25251541e08d964b503d846e7f0c727d8dbc6468bcce3c",
+  "schema": "contract-ir/1-draft.2",
+  "specPath": "src/tokens/index.jaunt.ts",
+  "state": "built",
+  "structuralDigest": "sha256:c134eff9f071a78e297afcc875062b6a7fb5a9807ed93b22915e5cf815451b56",
+  "symbols": [
+    {
+      "docs": "Create an HS256-signed JWT.\n\nStructure: base64url(header) + \".\" + base64url(payload) + \".\" +\nbase64url(signature), where base64url omits \"=\" padding.\n- Header is exactly `{\"alg\":\"HS256\",\"typ\":\"JWT\"}`.\n- Payload is `{\"sub\":userId,\"iat\":now,\"exp\":now+ttl}` with integer unix\n  seconds; default ttl is 3600 seconds, and a non-integer `ttlSeconds` is\n  truncated to whole seconds so iat/exp stay integers.\n- Sign with HMAC-SHA256 using `secret` as the key.\n- Allow any ttl, including negative, so tests can mint expired tokens.\n\n@throws RangeError if `userId` is empty.",
+      "id": "ts:src/tokens/index#createToken",
+      "kind": "function",
+      "members": [],
+      "modifiers": [
+        "export"
+      ],
+      "name": "createToken",
+      "options": {},
+      "signatures": [
+        {
+          "parameters": [
+            {
+              "name": "userId",
+              "optional": false,
+              "rest": false,
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "name": "secret",
+              "optional": false,
+              "rest": false,
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "name": "opts",
+              "optional": true,
+              "rest": false,
+              "type": {
+                "kind": "object",
+                "members": [
+                  {
+                    "kind": "property",
+                    "name": "ttlSeconds",
+                    "optional": true,
+                    "readonly": false,
+                    "type": {
+                      "kind": "number"
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "returnType": {
+            "kind": "string"
+          },
+          "typeParameters": []
+        }
+      ],
+      "typeParameters": []
+    },
+    {
+      "docs": "Verify an existing token and issue a fresh one for the same subject.\n\nVerification errors propagate unchanged. The new token has strictly greater\n`iat` and `exp` values even when the clock has not advanced or the requested\nttl is shorter than the original token's remaining lifetime.",
+      "id": "ts:src/tokens/index#rotateToken",
+      "kind": "function",
+      "members": [],
+      "modifiers": [
+        "export"
+      ],
+      "name": "rotateToken",
+      "options": {
+        "deps": [
+          "ts:src/tokens/index#createToken",
+          "ts:src/tokens/index#verifyToken"
+        ]
+      },
+      "signatures": [
+        {
+          "parameters": [
+            {
+              "name": "token",
+              "optional": false,
+              "rest": false,
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "name": "secret",
+              "optional": false,
+              "rest": false,
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "name": "opts",
+              "optional": true,
+              "rest": false,
+              "type": {
+                "kind": "object",
+                "members": [
+                  {
+                    "kind": "property",
+                    "name": "ttlSeconds",
+                    "optional": true,
+                    "readonly": false,
+                    "type": {
+                      "kind": "number"
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "returnType": {
+            "kind": "string"
+          },
+          "typeParameters": []
+        }
+      ],
+      "typeParameters": []
+    },
+    {
+      "docs": "In-memory store of issued tokens with TTL eviction.\n\nExpired entries are invisible to every read, whether or not `sweep` ran.\nReads never delete an expired entry; only `sweep` removes it, so a later\nsweep still reports every expired entry that it evicts.\nThe clock is injectable in unix seconds; omission selects real time.\n\nThis reviewed declaration is the output of the proposed `jaunt design` flow.",
+      "id": "ts:src/tokens/index#TokenStore",
+      "kind": "class",
+      "members": [
+        {
+          "docs": "",
+          "kind": "constructor",
+          "name": "constructor",
+          "optional": false,
+          "preserved": false,
+          "readonly": false,
+          "signatures": [
+            {
+              "parameters": [
+                {
+                  "name": "clock",
+                  "optional": true,
+                  "rest": false,
+                  "type": {
+                    "kind": "function",
+                    "parameters": [],
+                    "returnType": {
+                      "kind": "number"
+                    },
+                    "typeParameters": []
+                  }
+                }
+              ],
+              "returnType": {
+                "kind": "void"
+              },
+              "typeParameters": []
+            }
+          ],
+          "static": false
+        },
+        {
+          "docs": "Record the live token for a subject, replacing any previous one.",
+          "kind": "method",
+          "name": "put",
+          "optional": false,
+          "preserved": false,
+          "readonly": false,
+          "signatures": [
+            {
+              "parameters": [
+                {
+                  "name": "subject",
+                  "optional": false,
+                  "rest": false,
+                  "type": {
+                    "kind": "string"
+                  }
+                },
+                {
+                  "name": "token",
+                  "optional": false,
+                  "rest": false,
+                  "type": {
+                    "kind": "string"
+                  }
+                },
+                {
+                  "name": "exp",
+                  "optional": false,
+                  "rest": false,
+                  "type": {
+                    "kind": "number"
+                  }
+                }
+              ],
+              "returnType": {
+                "kind": "void"
+              },
+              "typeParameters": []
+            }
+          ],
+          "static": false
+        },
+        {
+          "docs": "The live token for a subject, or null. This read never removes an expired entry.",
+          "kind": "method",
+          "name": "get",
+          "optional": false,
+          "preserved": false,
+          "readonly": false,
+          "signatures": [
+            {
+              "parameters": [
+                {
+                  "name": "subject",
+                  "optional": false,
+                  "rest": false,
+                  "type": {
+                    "kind": "string"
+                  }
+                }
+              ],
+              "returnType": {
+                "kind": "union",
+                "types": [
+                  {
+                    "kind": "literal",
+                    "value": null
+                  },
+                  {
+                    "kind": "string"
+                  }
+                ]
+              },
+              "typeParameters": []
+            }
+          ],
+          "static": false
+        },
+        {
+          "docs": "Drop every expired entry and return how many were removed.",
+          "kind": "method",
+          "name": "sweep",
+          "optional": false,
+          "preserved": false,
+          "readonly": false,
+          "signatures": [
+            {
+              "parameters": [],
+              "returnType": {
+                "kind": "number"
+              },
+              "typeParameters": []
+            }
+          ],
+          "static": false
+        },
+        {
+          "docs": "Count of live entries without deleting expired entries or requiring a sweep.",
+          "kind": "getter",
+          "name": "size",
+          "optional": false,
+          "preserved": false,
+          "readonly": true,
+          "signatures": [
+            {
+              "parameters": [],
+              "returnType": {
+                "kind": "number"
+              },
+              "typeParameters": []
+            }
+          ],
+          "static": false
+        }
+      ],
+      "modifiers": [
+        "export"
+      ],
+      "name": "TokenStore",
+      "options": {},
+      "signatures": [],
+      "typeParameters": []
+    },
+    {
+      "docs": "Verify an HS256-signed JWT and return its claims.\n\n1. Split on \".\"; there must be exactly three non-empty base64url segments.\n2. Recompute HMAC-SHA256 over `header.payload` and compare it in constant time.\n3. Require header `{ alg: \"HS256\", typ: \"JWT\" }`.\n4. Parse exactly the {@link Claims} fields with their declared types.\n5. Require `exp` to be strictly greater than the current time.\n\n@throws JwtError with code `malformed` for structural problems.\n@throws JwtError with code `invalid-signature` when the HMAC differs.\n@throws JwtError with code `expired` when `exp` has passed.",
+      "id": "ts:src/tokens/index#verifyToken",
+      "kind": "function",
+      "members": [],
+      "modifiers": [
+        "export"
+      ],
+      "name": "verifyToken",
+      "options": {
+        "deps": [
+          "ts:src/tokens/index#createToken"
+        ]
+      },
+      "signatures": [
+        {
+          "parameters": [
+            {
+              "name": "token",
+              "optional": false,
+              "rest": false,
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "name": "secret",
+              "optional": false,
+              "rest": false,
+              "type": {
+                "kind": "string"
+              }
+            }
+          ],
+          "returnType": {
+            "kind": "reference",
+            "name": "Claims",
+            "typeArguments": []
+          },
+          "typeParameters": []
+        }
+      ],
+      "typeParameters": []
+    }
+  ],
+  "typeDeclarations": [
+    {
+      "digest": "sha256:2cd972a6dc26337e3c1d3d302a7ce1d47267fbe92e4dc3e44c6c4955edc57302",
+      "docs": "Decoded token payload.",
+      "kind": "interface",
+      "name": "Claims",
+      "source": "export interface Claims {\n  /** subject (user id) */\n  sub: string;\n  /** issued-at (unix seconds) */\n  iat: number;\n  /** expiry (unix seconds) */\n  exp: number;\n}",
+      "typeParameters": []
+    },
+    {
+      "digest": "sha256:f4dc8c324fd5920ed425c4b3e4e692e0876230355cb138a2648ea61866224aac",
+      "docs": "",
+      "kind": "type",
+      "name": "JwtErrorCode",
+      "source": "export type JwtErrorCode = \"malformed\" | \"invalid-signature\" | \"expired\";",
+      "typeParameters": []
+    }
+  ],
+  "typeImports": []
+}

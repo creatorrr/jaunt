@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
+import shutil
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -45,6 +46,55 @@ def extract_patch(
     if violations:
         raise LandingError(f"job touched paths outside allowlist: {', '.join(sorted(violations))}")
     return git_out(worktree, "diff", "--cached", "--binary", base_commit, "--", *paths)
+
+
+def validate_patch(
+    repo: Path,
+    patch: str,
+    *,
+    patch_paths: Sequence[str],
+    validator: Callable[[Path], tuple[bool, str]],
+) -> tuple[bool, str]:
+    """Apply a proposal in a disposable worktree and run a scoped gate.
+
+    Proposal landing can happen long after generation.  Revalidating away from
+    the developer's checkout keeps failure atomic and prevents a force/retry
+    path from bypassing target conformance.
+    """
+
+    if not patch or not patch_paths:
+        return False, "proposal has no patch"
+    parent = Path(tempfile.mkdtemp(prefix="jaunt-land-"))
+    worktree = parent / "worktree"
+    patch_file = parent / "proposal.patch"
+    try:
+        git_out(repo, "worktree", "add", "--detach", str(worktree), "HEAD")
+        patch_file.write_text(patch, encoding="utf-8")
+        applied = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(worktree),
+                "apply",
+                "--3way",
+                *_apply_include_args(patch_paths),
+                str(patch_file),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if applied.returncode != 0:
+            return False, "proposal no longer applies cleanly"
+        return validator(worktree)
+    finally:
+        subprocess.run(
+            ["git", "-C", str(repo), "worktree", "remove", "--force", str(worktree)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        shutil.rmtree(parent, ignore_errors=True)
 
 
 def build_commit_message(module: str, cause: str, job_id: str, spec_digest: str) -> str:

@@ -41,9 +41,11 @@ skills and hooks.
 - `first-build-reviewer`: read-only review for contract-silence divergence.
 
 The SessionStart hook injects a bounded freshness summary. The PreToolUse hook
-keeps Claude's approval-style guard for generated implementations and existing
-provenance-headed `.pyi` files. Both hooks fail open on malformed input,
-missing configuration, unavailable tools, or timeouts.
+keeps Claude's approval-style guard for each target's generated directory and
+existing provenance-headed `.pyi` files. TypeScript API mirrors,
+implementations, and sidecars point back to their private `*.jaunt.ts[x]`
+spec. Both hooks fail open on malformed input, missing configuration,
+unavailable tools, or timeouts.
 
 There is no MCP server. Jaunt's JSON CLI is the machine interface.
 

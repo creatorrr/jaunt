@@ -10,6 +10,7 @@ project's config and build freshness.
 
 from __future__ import annotations
 
+import json
 from importlib import resources
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -26,6 +27,8 @@ COMMANDS: list[tuple[str, str]] = [
     ("build", "Generate implementations for `@jaunt.magic` specs."),
     ("test", "Generate tests for `@jaunt.test` specs and run pytest."),
     ("status", "Show which modules are stale vs fresh (and why)."),
+    ("sync", "Render TypeScript API mirrors and unbuilt placeholders without a model call."),
+    ("design", "Propose or apply a reviewed TypeScript public declaration."),
     ("specs", "List `@jaunt.magic` specs and their dependency graph."),
     ("log", "Show the `JAUNT_LOG` change journal (recent builds/adopts)."),
     ("daemon", "Run, stop, or inspect the background codegen daemon."),
@@ -87,6 +90,50 @@ def _exit_code_table() -> str:
     return "\n".join(rows)
 
 
+def _typescript_tool_metadata(root: Path, tool_owner: str) -> dict[str, str]:
+    owner = (root / tool_owner).resolve()
+    package_manager = "unknown"
+    try:
+        package = json.loads((owner / "package.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        package = {}
+    if isinstance(package, dict) and isinstance(package.get("packageManager"), str):
+        package_manager = str(package["packageManager"])
+    else:
+        for lockfile, name in (
+            ("pnpm-lock.yaml", "pnpm"),
+            ("yarn.lock", "yarn"),
+            ("bun.lock", "bun"),
+            ("bun.lockb", "bun"),
+            ("package-lock.json", "npm"),
+            ("npm-shrinkwrap.json", "npm"),
+        ):
+            if (owner / lockfile).is_file() or (root / lockfile).is_file():
+                package_manager = name
+                break
+
+    def version(package_path: Path) -> str:
+        current = owner
+        while current == root or current.is_relative_to(root):
+            path = current / "node_modules" / package_path / "package.json"
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                value = None
+            if isinstance(value, dict) and isinstance(value.get("version"), str):
+                return str(value["version"])
+            if current == root:
+                break
+            current = current.parent
+        return "unresolved"
+
+    return {
+        "package_manager": package_manager,
+        "worker_version": version(Path("@usejaunt") / "ts"),
+        "typescript_version": version(Path("typescript")),
+    }
+
+
 def render(*, project: dict | None, note: str | None = None) -> str:
     """Render the full primer markdown: static text + live project section."""
     text = render_template(
@@ -125,6 +172,20 @@ def _project_block(project: dict | None, note: str | None) -> str:
         f"- **Semantic gate:** {gate_txt}",
         f"- **Repo map:** {'on' if project['repo_map'] else 'off'}",
     ]
+    targets = project.get("targets")
+    if isinstance(targets, dict):
+        lines.insert(1, f"- **Target languages:** {', '.join(f'`{item}`' for item in targets)}")
+        typescript = targets.get("ts")
+        if isinstance(typescript, dict):
+            projects = " · ".join(f"`{item}`" for item in typescript.get("projects", []))
+            lines.append(f"- **TypeScript projects:** {projects or '(none)'}")
+            lines.append(f"- **TypeScript tool owner:** `{typescript.get('tool_owner', '.')}`")
+            lines.append(
+                "- **TypeScript tooling:** "
+                f"`@usejaunt/ts {typescript.get('worker_version', 'unresolved')}` · "
+                f"`TypeScript {typescript.get('typescript_version', 'unresolved')}` · "
+                f"package manager `{typescript.get('package_manager', 'unknown')}`"
+            )
 
     fresh = project["freshness"]
     if fresh is None:
@@ -150,7 +211,7 @@ def project_section(root: Path, cfg: JauntConfig) -> dict:
     probe is best-effort: any failure yields ``freshness == None`` rather than
     raising, so the primer always renders.
     """
-    return {
+    project: dict[str, object] = {
         "root": str(root),
         "paths": {
             "source_roots": list(cfg.paths.source_roots),
@@ -167,10 +228,35 @@ def project_section(root: Path, cfg: JauntConfig) -> dict:
         "repo_map": bool(cfg.context.repo_map),
         "freshness": _freshness(root, cfg),
     }
+    if cfg.version == 2:
+        targets: dict[str, object] = {}
+        if cfg.python_target is not None:
+            targets["py"] = {
+                "source_roots": list(cfg.python_target.source_roots),
+                "test_roots": list(cfg.python_target.test_roots),
+                "generated_dir": cfg.python_target.generated_dir,
+            }
+        if cfg.typescript_target is not None:
+            tool_metadata = _typescript_tool_metadata(
+                root.resolve(), cfg.typescript_target.tool_owner
+            )
+            targets["ts"] = {
+                "source_roots": list(cfg.typescript_target.source_roots),
+                "test_roots": list(cfg.typescript_target.test_roots),
+                "projects": list(cfg.typescript_target.projects),
+                "test_projects": list(cfg.typescript_target.test_projects),
+                "tool_owner": cfg.typescript_target.tool_owner,
+                "generated_dir": cfg.typescript_target.generated_dir,
+                **tool_metadata,
+            }
+        project["targets"] = targets
+    return project
 
 
 def _freshness(root: Path, cfg: JauntConfig) -> dict | None:
     """Best-effort stale/fresh summary; None if it cannot be computed cleanly."""
+    if cfg.version == 2 and cfg.python_target is None:
+        return None
     try:
         from jaunt.status_core import compute_magic_status
 

@@ -1,0 +1,8 @@
+{
+  "protocol": "jaunt-ts/1-draft.2",
+  "id": "orphans-1",
+  "method": "findOrphans",
+  "params": {
+    "moduleIds": ["ts:src/removed/index"]
+  }
+}

@@ -1,27 +1,66 @@
 {
   "name": "@usejaunt/ts",
-  "version": "0.0.0-alpha.0",
-  "description": "Static marker API for authoring Jaunt TypeScript specs",
+  "version": "0.1.0-alpha.0",
+  "description": "Static TypeScript analyzer and marker API for Jaunt",
   "type": "module",
   "license": "UNLICENSED",
   "sideEffects": false,
+  "engines": {
+    "node": ">=20.0.0 <25.0.0"
+  },
   "files": [
-    "index.js",
-    "index.cjs",
-    "index.d.ts",
+    "dist",
     "README.md"
   ],
+  "bin": {
+    "jaunt-ts-worker": "./dist/worker/main.js"
+  },
   "exports": {
     ".": {
-      "types": "./index.d.ts",
-      "import": "./index.js",
-      "require": "./index.cjs"
+      "import": {
+        "types": "./dist/spec.d.ts",
+        "default": "./dist/spec.js"
+      },
+      "require": {
+        "types": "./dist/spec.d.cts",
+        "default": "./dist/spec.cjs"
+      }
     },
     "./spec": {
-      "types": "./index.d.ts",
-      "import": "./index.js",
-      "require": "./index.cjs"
-    }
+      "import": {
+        "types": "./dist/spec.d.ts",
+        "default": "./dist/spec.js"
+      },
+      "require": {
+        "types": "./dist/spec.d.cts",
+        "default": "./dist/spec.cjs"
+      }
+    },
+    "./worker": {
+      "types": "./dist/worker/main.d.ts",
+      "import": "./dist/worker/main.js",
+      "default": "./dist/worker/main.js"
+    },
+    "./test-runner": {
+      "types": "./dist/test/runner.d.ts",
+      "import": "./dist/test/runner.js",
+      "default": "./dist/test/runner.js"
+    },
+    "./schema/protocol-v1": "./dist/schema/protocol-v1.schema.json",
+    "./schema/contract-ir-v1": "./dist/schema/contract-ir-v1.schema.json"
+  },
+  "scripts": {
+    "build": "node ./scripts/build.mjs",
+    "lint": "oxlint src test scripts",
+    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\" \"scripts/**/*.mjs\" \"*.{json,md}\" \"../../schemas/jaunt-ts/**/*.json\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\" \"scripts/**/*.mjs\" \"*.{json,md}\" \"../../schemas/jaunt-ts/**/*.json\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test": "npm run build && vitest run --testTimeout=10000",
+    "test:unit": "vitest run test/unit test/golden",
+    "test:e2e": "npm run build && vitest run test/e2e",
+    "benchmark:test": "node --test scripts/benchmark-lib.node-test.mjs",
+    "benchmark:watch": "npm run build && npm run benchmark:test && node ./scripts/benchmark-watch.mjs --assert",
+    "pack:check": "npm run build && node ./scripts/check-pack.mjs && node ./scripts/check-installed-pack.mjs"
   },
   "repository": {
     "type": "git",
@@ -39,5 +78,31 @@
   "publishConfig": {
     "access": "public",
     "tag": "next"
+  },
+  "peerDependencies": {
+    "fast-check": ">=4 <5",
+    "typescript": ">=5.8 <7",
+    "vitest": ">=3.2.4 <5"
+  },
+  "peerDependenciesMeta": {
+    "fast-check": {
+      "optional": true
+    },
+    "vitest": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/debug": "4.1.12",
+    "@types/node": "26.1.1",
+    "@typescript/typescript58": "npm:typescript@^5.8.3",
+    "@typescript/typescript6": "6.0.2",
+    "ajv": "8.20.0",
+    "esbuild": "0.28.1",
+    "fast-check": "4.9.0",
+    "oxlint": "1.73.0",
+    "prettier": "3.9.5",
+    "typescript": "7.0.2",
+    "vitest": "4.1.10"
   }
 }
