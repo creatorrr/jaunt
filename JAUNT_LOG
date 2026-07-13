@@ -39,3 +39,12 @@
 2026-07-10 16:37Z refreeze jaunt.guard — cosmetic (gate: EQUIVALENT)
 2026-07-10 16:37Z refreeze jaunt.heldout — cosmetic (gate: EQUIVALENT)
 2026-07-10 16:37Z refreeze jaunt.migrate — cosmetic (gate: EQUIVALENT)
+2026-07-13 05:29Z build    jaunt.contract.cases — rebuilt
+2026-07-13 05:29Z build    jaunt.contract.drift — rebuilt
+2026-07-13 05:29Z build    jaunt.contract.edits — rebuilt
+2026-07-13 05:29Z build    jaunt.contract.strength — rebuilt
+2026-07-13 05:29Z build    jaunt.guard — rebuilt
+2026-07-13 05:29Z build    jaunt.heldout — rebuilt
+2026-07-13 05:29Z build    jaunt.migrate — rebuilt
+2026-07-13 05:29Z advisory jaunt.contract.cases — “Strip a single trailing period” conflicts with prescribed `rstrip(".")`, which strips all; implementation follows `rstrip(".")`.
+2026-07-13 05:29Z advisory jaunt.heldout — `assign_opaque_ids` was required but absent from dependency stubs, so it was implemented locally.
