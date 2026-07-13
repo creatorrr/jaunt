@@ -188,14 +188,15 @@ jobs:
             # The fixture dependencies came from the committed lock above. Keep
             # package.json and the lock byte-identical because both participate
             # in TypeScript freshness, but replace the checkout worker with the
-            # exact npm candidate.
+            # exact npm candidate. Keep node_modules/.package-lock.json: npm uses
+            # that hidden lock to resolve the already-installed peer versions
+            # while it swaps the linked workspace package for the tarball.
             cp -a examples/typescript-jwt "$project"
             local metadata_before
             metadata_before="$(sha256sum "$project/package.json" "$project/package-lock.json")"
             rm -rf "$project/dist" "$project/.jaunt" \
               "$project/node_modules/@usejaunt/ts" \
-              "$project/node_modules/.bin/jaunt-ts-worker" \
-              "$project/node_modules/.package-lock.json"
+              "$project/node_modules/.bin/jaunt-ts-worker"
             npm install --prefix "$project" --offline --ignore-scripts --no-audit --no-fund \
               --no-save --package-lock=false "$tarball"
             test "$metadata_before" = \
