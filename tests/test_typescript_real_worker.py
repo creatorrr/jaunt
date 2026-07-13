@@ -872,7 +872,9 @@ export function slugify(title: string): string {
         "src/__generated__/slug.ts",
     ]
     assert built.generated == frozenset({"ts:src/base", "ts:src/slug"})
-    assert 'from "../base.js"' in (tmp_path / "src/__generated__/slug.ts").read_text()
+    assert 'from "../base.js"' in (tmp_path / "src/__generated__/slug.ts").read_text(
+        encoding="utf-8"
+    )
     assert (await run_status(tmp_path, config)).fresh == frozenset({"ts:src/base", "ts:src/slug"})
 
     generator.targets.clear()
@@ -891,7 +893,7 @@ export function slugify(title: string): string {
 
     base_spec = tmp_path / "src/base.jaunt.ts"
     base_spec.write_text(
-        base_spec.read_text().replace(
+        base_spec.read_text(encoding="utf-8").replace(
             "base(value: string): string",
             "base(value: string, suffix?: string): string",
         ),

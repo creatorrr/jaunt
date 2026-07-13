@@ -999,6 +999,9 @@ test("worker stays restricted", async () => {
       mode: "run",
       tier: "example",
       permissionSandbox: true,
+      // The configured component need not exist at the workspace root; keep
+      // that physical containment probe covered by the permission-model test.
+      generatedDir: "__generated__",
     }),
   );
   const stdout: Buffer[] = [];

@@ -2919,13 +2919,27 @@ async def _run_test_runner(
                         if parent.name == "node_modules":
                             readable.add(parent)
                             break
+            # Node 20's experimental permission model mishandles overlapping
+            # allow-fs-read entries: granting both a directory and one of its
+            # descendants can deny enumeration of the parent.  Ancestor grants
+            # already cover lexical descendants; separately resolved external
+            # package stores remain independent roots in this set.
+            minimal_readable = tuple(
+                sorted(
+                    path
+                    for path in readable
+                    if not any(
+                        path != ancestor and path.is_relative_to(ancestor) for ancestor in readable
+                    )
+                )
+            )
             command.extend(
                 [
                     permission_flag,
                     "--allow-addons",
                     "--allow-worker",
                     f"--require={permission_guard}",
-                    *(f"--allow-fs-read={path}" for path in sorted(readable)),
+                    *(f"--allow-fs-read={path}" for path in minimal_readable),
                     f"--allow-fs-write={runner_root}",
                 ]
             )

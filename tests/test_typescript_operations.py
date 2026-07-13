@@ -4776,11 +4776,7 @@ async def test_node_permission_runner_uses_only_physical_sandbox_paths(
         for arg in args
         if arg.startswith("--allow-fs-read=")
     }
-    assert physical_root in read_grants
-    assert physical_runner.parent in read_grants
-    assert physical_compiler.parent in read_grants
-    assert physical_root / package.relative_to(source) in read_grants
-    assert external_modules in read_grants
+    assert read_grants == {physical_root, external_modules}
     assert alias_parent not in read_grants
     assert physical_root.parent not in read_grants
     assert str(alias_parent) not in json.dumps(captured, default=str)
