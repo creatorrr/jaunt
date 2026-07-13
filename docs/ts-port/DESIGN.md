@@ -1,9 +1,14 @@
 # Jaunt-for-TypeScript — design
 
-Status: **validated architectural spike** — the direction survived one
-external design review (which reshaped substitution and designed APIs; see
-the decision log), and every choice below is exercised by the runnable
-preview in [`example/`](example/README.md). Not yet an implementation plan.
+Status: **reviewed architectural spike** — the direction survived two external
+design reviews. The runnable preview in [`example/`](example/README.md) proves
+the first-review facade and test feasibility; it does not yet exercise the
+second-review API mirror, synthetic class adapters, or project graph. Updating
+and rerunning that proof is the first implementation gate.
+
+Execution is specified in [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md),
+including the second-review corrections for class variance, context layering,
+transitive type freshness, project graphs, and publication artifacts.
 
 "Porting Jaunt to TypeScript" means building **Jaunt-for-TypeScript** — TS
 specs in, TS implementations and vitest tests out — not translating 31k
@@ -42,78 +47,72 @@ dies under tsc emission (`dist/*.js` paths never hit a source manifest), and
 it rides on release-candidate loader APIs. Substitution is therefore a
 **build-time layout**, not a runtime mechanism:
 
-```
+```text
 src/tokens/
-  spec.jaunt.ts        authored contracts + stubs; never imported at runtime
-  context.ts           handwritten executable context (ordinary module)
-  index.ts             ordinary public facade — what consumers import
+  index.jaunt.ts       authored contracts + stubs; never emitted or executed
+  index.context.ts     handwritten leaf dependencies (optional)
+  index.ts             ordinary committed public facade
   __generated__/
-    impl.ts            generated implementation, authored-type-annotated
+    index.api.ts       deterministic declaration mirror; no runtime behavior
+    index.ts           generated implementation
 ```
 
-- **`spec.jaunt.ts` is a build input, not a runtime module.** Types flow out
-  of it only through erased positions (`import type`,
-  `typeof import("./spec.jaunt.ts")`), so consumers carry no jaunt runtime
-  dependency and stubs never evaluate.
-- **Executable handwritten context lives in `context.ts`**, an ordinary
-  module the generated impl imports and the facade re-exports. Spec files
-  hold stubs plus *type* context (interfaces, type aliases) only. This
-  eliminates the lexical-binding trap by construction — code that consumes
-  governed functions imports the facade like any other consumer. The
-  scanner enforces it: executable declarations in a `*.jaunt.ts` file are
-  an error.
-- **`index.ts` is boring committed code**: `export * from "./context.ts";
-  export * from "./__generated__/impl.ts"; export type { ... } from
-  "./spec.jaunt.ts";`. One module graph; ordinary tsc, bundler, test, and
-  publish behavior; Bun/Deno/webpack/Next need nothing.
-- **A missing build is an honest compile failure** — the facade's import of
-  `__generated__/impl.ts` doesn't resolve — surfaced by `tsc`/`jaunt check`,
-  not a runtime mystery. (`jaunt init` may scaffold a throwing impl for
-  gentler onboarding; that's sugar, not architecture.)
-- The old resolve-hook design survives only as **optional dev convenience**
-  (`example/src/jaunt/register.mjs`): a scratch script importing a spec path
-  gets redirected to the sibling facade. Nothing correctness-critical may
-  depend on it. Package `exports` conditions remain available polish at
-  package boundaries.
+- **`index.jaunt.ts` is a private analysis input.** It is excluded from every
+  emitting program. Production code does not import it even in a type
+  position, so declaration output and packed libraries cannot leak a private
+  source path.
+- **Jaunt renders `index.api.ts` deterministically from contract IR.** The
+  facade, context, and generated implementation type against this mirror.
+  The analyzer separately proves that the mirror matches the original spec
+  Program and that the raw implementation matches the original authored
+  symbols; a renderer bug therefore cannot make both sides agree incorrectly.
+- **Executable handwritten context is a strict leaf.** The generated module
+  may import `index.context.ts`, but context may not value-import its own
+  facade, generated implementation, or a spec. Ordinary downstream code can
+  import the facade; the facade does not re-export that downstream consumer.
+- **`index.ts` is boring committed code** with normal exports from the API
+  mirror, optional context, and generated implementation. Source specifiers
+  follow the owning project's runtime convention (normally `.js` under
+  Node-style resolution), so ordinary tsc, bundler, test, and publish flows
+  need no Jaunt loader.
+- **A missing build is an honest compile failure.** For first-build analysis,
+  Jaunt supplies an in-memory typed throwing placeholder for only the exact
+  missing owned artifact. Nothing is scaffolded onto disk before the complete
+  project overlay validates.
+- Resolve hooks may survive only as **optional development convenience**.
+  Nothing in build, check, test, emit, publish, or consumer execution may
+  depend on one.
 
-## Conformance: authored-type-annotated exports
+## Conformance: deterministic boundaries plus semantic checks
 
-Enforcement is assignability, not text — but not via a separate check file.
-The generated module's own exports carry the authored type:
+Codex writes reserved internal bindings, not the public export boundary:
 
 ```ts
-const createTokenImpl = /* generated implementation */;
-export const createToken: typeof import("../spec.jaunt.ts").createToken =
-  createTokenImpl;
+const __jaunt_impl_createToken = /* generated implementation */;
 ```
 
-One mechanism, two guarantees, verified in the preview both positively and
-negatively (drifting a generated parameter type fails `tsc` on exactly the
-annotated line):
+Jaunt parses those bindings, rejects model-authored exports, and appends the
+TSDoc-bearing exports typed from `index.api.ts`. This pins what consumers see
+without giving the model a boundary at which to hide an assertion or
+suppression. Exact exports, overloads, generic constraints, modifiers,
+accessors, package provenance, and `any`/suppression/cast escape hatches are
+checked separately.
 
-1. **Enforcement** — a generated signature that isn't assignable to the
-   authored one is a compile error inside jaunt's validation pass.
-2. **Pinning** — consumers see exactly the authored contract type, never an
-   accidentally-wider generated type.
+Whole-class assignability is insufficient because TypeScript methods and
+constructors are bivariant. Jaunt therefore generates a non-emitted adapter
+for every authored constructor, method overload, accessor side, and generic
+environment. Each adapter accepts authored parameters and calls the raw
+implementation; the call checks inputs contravariantly and its annotated
+return checks outputs covariantly. Unsupported shapes fail discovery rather
+than falling back to unsound class assignment.
 
-For classes, the value export is annotated with the authored constructor
-type and the instance type is re-exported from the spec
-(`export type TokenStore = import("../spec.jaunt.ts").TokenStore`).
-
-Consequences, unchanged from the pre-review design: `@jaunt.sig` does not
-exist (conformance is the default); Liskov-shaped widening inside the impl
-is fine; the guidepost's *useful* freedom relocates to private members and
-internal helpers, invisible to the declared type; freedom in a public
-signature is declared as looseness in the type itself. Param names and
-default values get a cheap advisory AST lint. `@jaunt.preserve` as a
-*decorator* is gone too — native Node type-stripping rejects decorator
-syntax — so the rare "real method whose body looks like a stub" corner is
-marked with a `@jauntPreserve` TSDoc tag instead.
-
-Open proof obligations (from the review, deliberately not hand-waved):
-overloads, generics, and abstract classes need a conformance test matrix —
-`typeof` annotation covers the common cases, but the matrix decides where
-per-overload assertions or instance-side checks are additionally required.
+`@jaunt.sig` does not exist: conformance is the default. A real method that
+must be copied into generated output uses the `@jauntPreserve` TSDoc tag
+because native Node type stripping rejects decorator syntax. Governed
+parameter initializers are rejected in v1; authors express default behavior
+with an optional parameter plus TSDoc. Public abstract classes and authored
+nominal private/protected members are also deferred until their identity and
+construction semantics have a proven conformance model.
 
 ## Designed APIs: `jaunt design`
 
@@ -153,22 +152,23 @@ in the digest scheme.
 - **Digest inputs are jaunt-owned IR, not printer output.** The review is
   right that `ts.createPrinter` is not a semantic canonicalizer (it
   preserves original text for positioned nodes). Digests come from a
-  **versioned semantic JSON representation** — name, parameter list
-  (name/type-text/optionality/default-presence), return type, modifiers,
-  member records, prose — extracted from the AST under jaunt's own
-  normalization rules, exactly like Python's `normalized_contract`
-  field-splitting, with the scheme version carried in headers. New
-  ecosystem ⇒ no legacy-digest compatibility layer.
+  **versioned semantic JSON representation** — declaration kind, parameters,
+  recursively normalized types, overloads, modifiers, members, referenced
+  symbol IDs, and prose — extracted under Jaunt's own normalization rules.
+  A Merkle graph carries referenced public types transitively, including
+  recursive SCCs and project references. Printer output and
+  `checker.typeToString()` are never digest inputs; the scheme version is
+  carried in headers and sidecars.
 
 ## Test judge: Vitest
 
-- **Single runner** (programmatic API for the repair loop, custom reporters,
-  `test.extend` fixtures). Python's hybrid in-process-eval/pytest paths in
-  `contract/runner.py` collapse.
-- **Held-out tiers by filename** (`.example.test.ts` / `.derived.test.ts`) —
-  jaunt writes these files, so no marker plumbing. A ~100-line custom
-  reporter replaces the 391-line `heldout.py` pytest plugin: same JSON
-  report, same derived-tier redaction, same leak assertion.
+- **Single runner**: a disposable subprocess invokes Vitest's programmatic API
+  with explicit files and protected settings. Python's hybrid
+  in-process-eval/pytest paths in `contract/runner.py` collapse.
+- **Held-out tiers by filename and provenance** (`.example.test.ts` /
+  `.derived.test.ts`). Repair results are constructed from an allowlist of an
+  opaque case ID and normalized exception category; child output is captured,
+  user reporters are disabled, and a leak assertion is a second defense.
 - **Fixtures**: `tests/fixtures.ts` exporting `base.extend({...})` is the
   conftest analog; `@fixtures name` resolves to a property on a typed
   object, so a missing fixture is a *compile* error.
@@ -176,10 +176,10 @@ in the digest scheme.
   `numRuns` replaces `derandomize=True + database=None` (fast-check persists
   nothing — no shrink-cache redirection). `fc.asyncProperty` lifts the
   Python v1 async restriction.
-- **Mutation strength**: same mechanical AST mutants; execution moves to a
-  `worker_threads` pool with `worker.terminate()` on timeout — replaces
-  POSIX `SIGALRM`, kills sync *and* async runaways, gives fresh module state
-  per mutant, and parallelizes.
+- **Mutation strength**: same mechanical AST mutants; every mutant runs in a
+  disposable subprocess/process group with a hard timeout. A coordinator may
+  bound concurrency, but killing a mutant also kills its descendants and
+  guarantees fresh module state.
 
 ## Config: `jaunt.toml` stays canonical
 
@@ -190,49 +190,56 @@ executing user config violates static-first. TOML is not alien in JS tooling
 taplo/Even Better TOML. The decisive property: **one root `jaunt.toml`
 governs mixed repos** — shared `[codex]`/`[semantic_gate]`/`[daemon]`
 sections plus `[target.py]` / `[target.ts]` (the TS target adds
-`spec_suffix = ".jaunt.ts"`). Workspace routing needs *both* manifests:
-nearest `package.json` for dependency ownership, `tsconfig.json`/project
-references for compilation ownership. Rejected: a `"jaunt"` field in
-package.json (second config source, fragments digests).
+explicit production/test `projects`, a `tool_owner`, source/test roots, and
+per-target generated directories. Workspace routing needs *both* manifests:
+the containing package for dependency ownership and configured
+`tsconfig.json`/project references for compilation ownership. Every facade,
+spec, artifact, and test has one unambiguous project role. Rejected: a
+`"jaunt"` field in package.json (second config source, fragments digests).
 
-## Implementation strategy (open, review-recommended)
+## Implementation strategy
 
-The reviewer proposes retaining the **existing Python orchestration core**
-(builder scheduler, daemon, CLI, config, journal) and adding a **Node
+Retain the **existing Python orchestration core** (Codex integration, CLI,
+config, journal, cost, progress, watch, and daemon) and add a **Node
 worker over a versioned JSON protocol** for the TS-specific parts:
 `ts.Program` services, contract-IR extraction, conformance checking, and
-Vitest runs. That reuses the ~45% bucket outright instead of transcribing
-it, fits the mixed-repo direction (one daemon, one polyglot `jaunt check`),
-and confines TS code to the analysis/judge surface. The alternative is a
-full TS rewrite of the orchestration spine. Decision deferred to
-implementation planning; the worker approach is the current default.
+Vitest coordination. Python and TypeScript keep independent internal
+schedulers behind target adapters; an outer orchestrator shares the Codex
+semaphore and common services without inventing a cross-language dependency
+DAG. The analyzer uses the project-local TypeScript compiler and never
+executes application modules or user config.
 
 ## Decision log
 
-1. **Codex generates `.ts`** (not `.js`+`.d.ts`): one language, one
-   `ts.Program` for all validation, eject stays maintainable, Node 22.18+
-   type-stripping runs it directly.
+1. **Codex generates `.ts`** (not `.js`+`.d.ts`): one source language, native
+   checker validation, ordinary project emit, and maintainable ejection.
 2. **Idiomatic over Python-parity** wherever they conflict.
-3. **Support floor: Node ≥ 22.18**, Vite/Vitest, esbuild.
+3. **Tool-host and target-runtime compatibility are separate.** Freeze the
+   worker's Node/TypeScript range with its package and test target runtimes
+   independently.
 4. **`jaunt.toml` stays**; no `jaunt.config.ts`, no package.json field.
 5. **Tag naming**: prefixed markers (`@jauntContract`, `@jauntPreserve`),
    unprefixed sections (`@fixtures`, `@prop`).
-6. *(review round)* **Substitution = generated facade**, spec files never
-   imported at runtime, executable context split into `context.ts`;
-   resolve hooks demoted to optional dev sugar.
-7. *(review round)* **Conformance = authored-type-annotated exports** in
-   the generated module (enforce + pin), replacing the separate
-   `satisfies` check file.
+6. *(review round)* **Substitution = name-preserving generated facade**,
+   private specs excluded from emit, executable context a strict leaf, and
+   resolve hooks demoted to optional development sugar.
+7. *(review round, tightened in round two)* **Conformance = deterministic
+   API-mirror-typed exports plus semantic checks**, including synthetic class
+   adapters rather than whole-class assignability.
 8. *(review round)* **Designed APIs = `jaunt design`** declaration-patch
    flow; barrel-typed designed APIs dropped.
+9. *(second review)* **Publication types = deterministic API mirror**;
+   production and emitted declarations never import the raw spec.
+10. *(second review)* **Class conformance = per-member synthetic adapters**;
+    whole-class assignment is not accepted as proof.
+11. *(second review)* **Context = strict leaf**, with ordinary downstream
+    consumers outside the facade/context/generated cycle.
+12. *(implementation planning)* **Python core + project-local Node worker**,
+    selected projects, versioned JSONL protocol, and target adapters.
 
 ## Next steps
 
-1. Specify the versioned contract-IR (the digest input) — every other
-   subsystem hangs off it, and it doubles as the Node-worker protocol's
-   core payload.
-2. Build the conformance test matrix: overloads, generics, abstract
-   classes, getter/setter pairs, negative cases.
-3. Decide the implementation strategy (Python core + Node worker vs full
-   TS rewrite) and version the worker protocol.
-4. Prototype `jaunt design`'s patch-and-review UX on the example.
+Execute the phased plan in [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md).
+Phase 0 freezes protocol-v1, contract-IR-v1, package ownership, the corrected
+preview layout, and the complete positive/negative conformance matrix before
+the Python and Node foundations proceed in parallel.
