@@ -192,14 +192,38 @@ jobs:
             cp -a examples/typescript-jwt "$project"
             local metadata_before
             metadata_before="$(sha256sum "$project/package.json" "$project/package-lock.json")"
+            local typescript_before
+            typescript_before="$(node -p \
+              "require('${project}/node_modules/typescript/package.json').name + '@' + require('${project}/node_modules/typescript/package.json').version")"
+            test "$typescript_before" = \
+              "typescript@$(node -p "require('${project}/package-lock.json').packages['node_modules/typescript'].version")"
+            test ! -L "$project/node_modules/typescript"
             rm -rf "$project/dist" "$project/.jaunt" \
               "$project/node_modules/@usejaunt/ts" \
               "$project/node_modules/.bin/jaunt-ts-worker" \
               "$project/node_modules/.package-lock.json"
-            npm install --prefix "$project" --offline --ignore-scripts --no-audit --no-fund \
-              --no-save --package-lock=false "$tarball"
+            # FIXME(npm-11): npm cannot reliably rebuild a relocated
+            # file-linked fixture in offline mode. Materialize the dependency-free candidate in an
+            # isolated prefix, then move npm's package and bin link into the
+            # already-locked fixture. Peer bounds are validated above, and the
+            # locked compiler is asserted before and after the swap.
+            local candidate_prefix="${project}.candidate"
+            rm -rf "$candidate_prefix"
+            npm install --prefix "$candidate_prefix" --offline \
+              --ignore-scripts --no-audit --no-fund \
+              --no-save --package-lock=false --legacy-peer-deps "$tarball"
+            mkdir -p "$project/node_modules/@usejaunt" "$project/node_modules/.bin"
+            mv "$candidate_prefix/node_modules/@usejaunt/ts" \
+              "$project/node_modules/@usejaunt/ts"
+            mv "$candidate_prefix/node_modules/.bin/jaunt-ts-worker" \
+              "$project/node_modules/.bin/jaunt-ts-worker"
+            rm -rf "$candidate_prefix"
             test "$metadata_before" = \
               "$(sha256sum "$project/package.json" "$project/package-lock.json")"
+            test "$typescript_before" = \
+              "$(node -p \
+                "require('${project}/node_modules/typescript/package.json').name + '@' + require('${project}/node_modules/typescript/package.json').version")"
+            test ! -L "$project/node_modules/typescript"
             test ! -L "$project/node_modules/@usejaunt/ts"
             test "$(node -p "require('${project}/node_modules/@usejaunt/ts/package.json').version")" = \
               "${{ steps.versions.outputs.typescript-version }}"
