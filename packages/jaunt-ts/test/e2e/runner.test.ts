@@ -911,8 +911,19 @@ import { expect, test } from "vitest";
 test("worker stays restricted", async () => {
   const code = \`const { parentPort } = require("node:worker_threads");
     const fs = require("node:fs");
-    try { parentPort.postMessage(fs.readFileSync(${JSON.stringify(secret)}, "utf8")); }
-    catch (error) { parentPort.postMessage(error.code); }\`;
+    const inherited = {
+      execArgv: process.execArgv,
+      guardInstalled:
+        globalThis[Symbol.for("@usejaunt/ts/permission-guard-installed")] === true,
+    };
+    try {
+      parentPort.postMessage({
+        value: fs.readFileSync(${JSON.stringify(secret)}, "utf8"),
+        ...inherited,
+      });
+    } catch (error) {
+      parentPort.postMessage({ value: error.code, ...inherited });
+    }\`;
   const priorNodeOptions = process.env.NODE_OPTIONS;
   process.env.NODE_OPTIONS = ${JSON.stringify(disablePermissionFlag)};
   try {
@@ -928,7 +939,16 @@ test("worker stays restricted", async () => {
         worker.once("error", reject);
       })
     ));
-    expect(values).toEqual(["ERR_ACCESS_DENIED", "ERR_ACCESS_DENIED", "ERR_ACCESS_DENIED"]);
+    expect(values.map(({ value }) => value)).toEqual([
+      "ERR_ACCESS_DENIED",
+      "ERR_ACCESS_DENIED",
+      "ERR_ACCESS_DENIED",
+    ]);
+    for (const value of values) {
+      expect(value.guardInstalled).toBe(true);
+      expect(value.execArgv).toContain(${JSON.stringify(permissionFlag)});
+      expect(value.execArgv).not.toContain(${JSON.stringify(disablePermissionFlag)});
+    }
   } finally {
     if (priorNodeOptions === undefined) delete process.env.NODE_OPTIONS;
     else process.env.NODE_OPTIONS = priorNodeOptions;
@@ -980,9 +1000,15 @@ test("worker stays restricted", async () => {
     child.on("exit", resolveExit),
   );
   const result = JSON.parse(Buffer.concat(stdout).toString());
+  const failureContext = [
+    Buffer.concat(stderr).toString().trim(),
+    JSON.stringify(result),
+  ]
+    .filter(Boolean)
+    .join("\n");
 
-  expect(exitCode, Buffer.concat(stderr).toString()).toBe(0);
-  expect(result).toMatchObject({ ok: true, mode: "run" });
+  expect(exitCode, failureContext).toBe(0);
+  expect(result, failureContext).toMatchObject({ ok: true, mode: "run" });
   expect(JSON.stringify(result)).not.toContain(
     "NESTED-WORKER-HELD-OUT-SENTINEL",
   );

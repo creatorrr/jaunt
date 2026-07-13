@@ -7,14 +7,16 @@ const installed = Symbol.for("@usejaunt/ts/permission-guard-installed");
 
 if (!globalThis[installed]) {
   const OriginalWorker = workerThreads.Worker;
-  const trustedExecArgv = Object.freeze([...process.execArgv]);
 
   class PermissionPreservingWorker extends OriginalWorker {
     constructor(filename, options = {}) {
-      super(filename, {
-        ...options,
-        execArgv: [...trustedExecArgv],
-      });
+      const trustedOptions = { ...options };
+      delete trustedOptions.execArgv;
+      // Omitting execArgv uses Node's native inheritance path for the outer
+      // permission flags and this preload. Supplying them explicitly is not
+      // portable across worker implementations; accepting the caller's value
+      // would let generated code remove the permission model.
+      super(filename, trustedOptions);
     }
   }
 

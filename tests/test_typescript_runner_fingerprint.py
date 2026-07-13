@@ -64,6 +64,36 @@ def test_runner_fingerprint_is_portable_for_identical_managed_runtime(tmp_path: 
     )
 
 
+def test_runner_fingerprint_is_portable_through_a_pnpm_virtual_store_link(
+    tmp_path: Path,
+) -> None:
+    npm_root = tmp_path / "npm"
+    pnpm_root = tmp_path / "pnpm"
+    npm = _managed_client(npm_root)
+    pnpm = _managed_client(pnpm_root)
+
+    logical_package = pnpm.installation.package_root
+    virtual_package = (
+        pnpm_root / "node_modules/.pnpm/@usejaunt+ts@file+..+package/node_modules/@usejaunt/ts"
+    )
+    virtual_package.parent.mkdir(parents=True)
+    logical_package.rename(virtual_package)
+    logical_package.symlink_to(virtual_package, target_is_directory=True)
+
+    assert logical_package.resolve() == virtual_package.resolve()
+    assert npm.installation.package_root.resolve() != virtual_package.resolve()
+    assert _runner_fingerprint(npm_root, npm, _initialized()) == _runner_fingerprint(
+        pnpm_root, pnpm, _initialized()
+    )
+
+    (virtual_package / "dist/test/runner.js").write_text(
+        "export const changedRuntime = true;\n", encoding="utf-8"
+    )
+    assert _runner_fingerprint(npm_root, npm, _initialized()) != _runner_fingerprint(
+        pnpm_root, pnpm, _initialized()
+    )
+
+
 def test_runner_fingerprint_fails_closed_when_held_out_guard_is_missing(tmp_path: Path) -> None:
     client = _managed_client(tmp_path)
     (client.installation.package_root / "dist/test/heldout.js").unlink()
