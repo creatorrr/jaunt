@@ -1,15 +1,12 @@
 /**
- * Public surface of the tokens package (the barrel).
+ * Public facade of the tokens module — ordinary, committed, tool-free code.
+ * Consumers import this path; nothing here (or below it) depends on jaunt
+ * at runtime. One module graph, ordinary tsc/bundler/test/publish behavior.
  *
- * Two type-flow regimes (DESIGN.md, "guideposts done the TS way"):
- *  - Declared APIs re-export from the spec module: consumers typecheck
- *    against the signatures the author wrote, and at runtime the jaunt
- *    resolver serves the generated implementations through that same path.
- *  - Designed APIs (docstring-only specs, here TokenStore) re-export from
- *    __generated__: both the types and the runtime come from what the model
- *    designed. This replaces Python's `.pyi`-shadows-`.py` trick, which has
- *    no TS equivalent.
+ * If the module has never been built, `./__generated__/impl.ts` does not
+ * exist and this file is an honest compile/check failure — not a runtime
+ * mystery.
  */
-export { createToken, verifyToken, rotateToken, JwtError, nowSeconds } from "./specs.ts";
-export type { Claims, JwtErrorCode } from "./specs.ts";
-export { TokenStore } from "./__generated__/specs.ts";
+export * from "./context.ts";
+export * from "./__generated__/impl.ts";
+export type { Claims, JwtErrorCode } from "./spec.jaunt.ts";

@@ -6,11 +6,11 @@
 // route tiers to separate files instead of plumbing per-test marks. Failures
 // in this tier reach the implementer's repair loop in full detail.
 //
-// These tests import the spec module path; the jaunt vitest plugin resolves
-// it to the generated implementation, exactly as consumers experience it.
+// These tests import the ordinary public facade, exactly as consumers do —
+// no resolver, no plugin, one module graph.
 import { expect, test } from "vitest";
 
-import { JwtError, createToken, rotateToken, verifyToken } from "../../src/tokens/specs.ts";
+import { JwtError, createToken, rotateToken, verifyToken } from "../../src/tokens/index.ts";
 
 function capture(fn: () => unknown): unknown {
   try {

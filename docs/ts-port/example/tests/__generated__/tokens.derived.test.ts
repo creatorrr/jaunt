@@ -9,7 +9,7 @@ import { createHmac } from "node:crypto";
 
 import { expect, test } from "vitest";
 
-import { JwtError, createToken, rotateToken, verifyToken } from "../../src/tokens/specs.ts";
+import { JwtError, createToken, rotateToken, verifyToken } from "../../src/tokens/index.ts";
 
 const SECRET = "s3cret";
 

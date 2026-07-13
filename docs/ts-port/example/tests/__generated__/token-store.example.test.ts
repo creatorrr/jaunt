@@ -1,11 +1,11 @@
 // ⚙️ jaunt:generated — DO NOT EDIT. Regenerate with `jaunt test`.
 // jaunt:tier=example (designed-API coverage for TokenStore)
 //
-// Designed APIs are imported through the package *barrel* — their types
-// flow from the generated module (see src/tokens/index.ts). The `clock`
-// fixture comes from tests/fixtures.ts, the conftest.py analog; the
-// contract's "injectable clock" clause is what makes expiry testable
-// deterministically.
+// TokenStore's declaration was proposed by `jaunt design` and accepted into
+// the spec, so it is tested like any declared API — through the public
+// facade. The `clock` fixture comes from tests/fixtures.ts, the conftest.py
+// analog; the contract's "injectable clock" clause is what makes expiry
+// testable deterministically.
 import { expect } from "vitest";
 
 import { TokenStore } from "../../src/tokens/index.ts";

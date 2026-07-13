@@ -2,14 +2,21 @@
  * JWT tokens — a Jaunt-for-TypeScript spec module (the TS twin of
  * examples/jwt_auth/src/jwt_demo/specs.py).
  *
+ * The `.jaunt.ts` suffix marks this file as a spec *input*: it is never
+ * imported at runtime. Types flow out of it only through erased positions
+ * (`typeof import("./spec.jaunt.ts")` annotations in the generated
+ * implementation, `export type` in the facade), so consumers carry no jaunt
+ * runtime dependency and there is no raw-spec evaluation.
+ *
  * `jaunt.magicModule()` below governs every top-level export in this file.
  * Classification is by body shape, exactly like Python module-magic:
  *   - a body that is exactly `jaunt.magic(...)` is a spec stub;
- *   - a real body is handwritten context the model reads but never touches;
- *   - interfaces and type aliases are always handwritten context (they are
+ *   - interfaces and type aliases are handwritten *type* context (they are
  *     contracts by nature — there is nothing to generate);
- *   - a docstring-only class (empty body + TSDoc) asks the model to design
- *     the API.
+ *   - executable handwritten context does NOT live here — it goes in
+ *     ./context.ts, an ordinary module. That rule (spec files hold no
+ *     runtime code beyond stubs) is what eliminates the lexical-binding
+ *     trap: nothing in this file can accidentally call a stub.
  * The TSDoc block preceding each declaration is the behavioral contract:
  * its prose feeds the prose digest (semantic-gate judged), while the
  * declaration itself feeds the structural digest.
@@ -29,26 +36,6 @@ export interface Claims {
 }
 
 export type JwtErrorCode = "malformed" | "invalid-signature" | "expired";
-
-/**
- * Verification failure. Handwritten context (real body): the model uses it,
- * never regenerates it. Note `@throws JwtError` in the contracts below is
- * checker-resolvable — richer than Python's prose-only error contracts.
- */
-export class JwtError extends Error {
-  readonly code: JwtErrorCode;
-
-  constructor(code: JwtErrorCode) {
-    super(`jwt ${code}`);
-    this.name = "JwtError";
-    this.code = code;
-  }
-}
-
-/** Current unix time in whole seconds. Handwritten context. */
-export function nowSeconds(): number {
-  return Math.floor(Date.now() / 1000);
-}
 
 /**
  * Create an HS256-signed JWT.
@@ -84,9 +71,9 @@ export function createToken(
  *    keys with the declared types — extra keys are malformed.
  * 5. Require `exp` strictly greater than the current time.
  *
- * @throws JwtError code "malformed" for structural problems (wrong segment
- *   count, non-base64url characters, bad JSON, wrong header, wrong or
- *   extra payload fields).
+ * @throws JwtError (see ./context.ts) code "malformed" for structural
+ *   problems (wrong segment count, non-base64url characters, bad JSON,
+ *   wrong header, wrong or extra payload fields).
  * @throws JwtError code "invalid-signature" when the HMAC does not match.
  * @throws JwtError code "expired" when `exp` has passed.
  */
@@ -113,18 +100,40 @@ export function rotateToken(
 }
 
 /**
- * In-memory store of issued tokens with TTL eviction — a *designed* API
- * (docstring-only spec): jaunt designs the members from this contract.
+ * In-memory store of issued tokens with TTL eviction.
  *
- * Callers need to: record the live token issued to a subject (replacing any
- * previous one), look up a subject's live token, report how many live
- * tokens are held, and sweep expired entries in bulk. Expired entries must
- * be invisible to *every* read — lookups and counts alike — regardless of
- * whether a sweep has run. Take the clock as an injectable `() => number`
- * (unix seconds) defaulting to real time, so tests can control expiry
+ * Expired entries must be invisible to *every* read — lookups and counts
+ * alike — regardless of whether a sweep has run. The clock is injectable
+ * (unix seconds; omitted means real time) so tests control expiry
  * deterministically.
  *
- * Consumers import this through the package barrel (./index.ts), where its
- * types flow from the generated module — see DESIGN.md on designed APIs.
+ * This declaration started as a docstring-only spec; `jaunt design`
+ * proposed the member signatures below as a patch to this file, which was
+ * accepted in review (see DESIGN.md). From that point on it is an ordinary
+ * declared API: conformance-checked, types never lie.
  */
-export class TokenStore {}
+export class TokenStore {
+  constructor(clock?: () => number) {
+    jaunt.magic();
+  }
+
+  /** Record the live token for a subject, replacing any previous one. */
+  put(subject: string, token: string, exp: number): void {
+    jaunt.magic();
+  }
+
+  /** The live token for a subject, or null. Expired entries are invisible. */
+  get(subject: string): string | null {
+    return jaunt.magic();
+  }
+
+  /** Drop every expired entry; return how many were removed. */
+  sweep(): number {
+    return jaunt.magic();
+  }
+
+  /** Count of live entries — expiry is honored even without a sweep. */
+  get size(): number {
+    return jaunt.magic();
+  }
+}

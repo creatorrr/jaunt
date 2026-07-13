@@ -9,7 +9,7 @@
  * collects the stubs themselves (the analog of Python's `__test__ = False`).
  */
 import * as jaunt from "../src/jaunt/index.ts";
-import { createToken, rotateToken, verifyToken } from "../src/tokens/specs.ts";
+import { createToken, rotateToken, verifyToken } from "../src/tokens/spec.jaunt.ts";
 
 jaunt.magicModule();
 

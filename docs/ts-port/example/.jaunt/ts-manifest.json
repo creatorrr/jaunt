@@ -1,7 +1,0 @@
-{
-  "version": 1,
-  "note": "Written by `jaunt build` in the real port (derivable from jaunt.toml source_roots plus the magicModule() scan); committed by hand here because this preview has no builder.",
-  "modules": {
-    "src/tokens/specs.ts": "src/tokens/__generated__/specs.ts"
-  }
-}

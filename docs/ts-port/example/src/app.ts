@@ -1,11 +1,11 @@
 /**
- * Demo consumer.
+ * Demo consumer — plain `node src/app.ts`, no hooks, no jaunt runtime.
  *
- *   npm run demo           # with the jaunt resolver — everything works
- *   npm run demo:prebuild  # without it — the first spec call throws
- *                          # JauntNotBuiltError with a pointer to the fix
- *                          # (TokenStore still works: designed APIs bind to
- *                          # __generated__ directly through the barrel)
+ * Everything is reached through the ordinary public facade
+ * (./tokens/index.ts): one module graph, standard resolution. If the module
+ * had never been built, the facade's import of __generated__/impl.ts would
+ * be a compile/check failure — unbuilt state surfaces at typecheck time,
+ * not as a runtime mystery.
  */
 import { TokenStore, createToken, rotateToken, verifyToken } from "./tokens/index.ts";
 
@@ -21,4 +21,6 @@ console.log(`rotated: iat=${rotatedClaims.iat} (strictly > ${claims.iat})`);
 
 const store = new TokenStore();
 store.put(rotatedClaims.sub, rotated, rotatedClaims.exp);
-console.log(`store holds ${store.size} live token(s); user-42 -> ${store.get("user-42") === rotated ? "rotated token" : "??"}`);
+console.log(
+  `store holds ${store.size} live token(s); user-42 -> ${store.get("user-42") === rotated ? "rotated token" : "??"}`,
+);

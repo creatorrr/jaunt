@@ -20,8 +20,9 @@ model = "gpt-5.6-luna"
 [target.ts]
 source_roots = ["src"]
 test_roots = ["tests"]
-generated_dir = "__generated__"
-runtime = "node>=22.18"   # module.registerHooks + native type-stripping
+spec_suffix = ".jaunt.ts"       # spec inputs; never imported at runtime
+generated_dir = "__generated__" # per-module impl.ts; the facade (index.ts) is ordinary committed code
+runtime = "node>=22.18"         # native type-stripping (registerHooks only for the optional dev hook)
 test_runner = "vitest"
 
 # In a mixed repo, a Python target sits alongside and `jaunt check` gates

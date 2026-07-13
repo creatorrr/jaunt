@@ -10,8 +10,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "demo": "node --import ./src/jaunt/register.mjs src/app.ts",
-    "demo:prebuild": "node src/app.ts"
+    "demo": "node src/app.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
