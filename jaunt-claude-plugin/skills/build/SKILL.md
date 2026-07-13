@@ -1,6 +1,6 @@
 ---
 name: build
-description: Use when building or rebuilding Jaunt-governed modules, after a spec edit, or when jaunt check reports stale magic artifacts. Resolves the workspace, previews model work, builds, and verifies the result.
+description: Use when building or rebuilding Python or TypeScript Jaunt specs, after editing @jaunt.magic or *.jaunt.ts[x], or when check reports stale or unbuilt artifacts. Resolves the workspace, previews model work, builds, and verifies native tests and type checks.
 ---
 
 # Build Jaunt specs
@@ -12,12 +12,18 @@ bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" <spec-
 ```
 
 Change to the printed directory. A root workspace may own several packages;
-Jaunt routes each module to the nearest owning `pyproject.toml`.
+Python modules route to the nearest owning `pyproject.toml`. TypeScript modules
+use configured tsconfig projects for compilation and the nearest `package.json`
+for dependency ownership.
+
+Run every Jaunt command below through the same script with `--run`. It prefers
+a compatible installed `jaunt`, then `uv run --no-sync jaunt` when the workspace is a uv
+project, then `uvx jaunt` for a JavaScript-only checkout.
 
 ## 2. Preview the work
 
 ```bash
-uv run jaunt status --json --progress none
+bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" --run "$PWD" status --json --progress none
 ```
 
 Classify every stale module:
@@ -31,14 +37,18 @@ Classify every stale module:
 Tell the user which modules are likely to call a model and why. Do not quote a
 fixed dollar estimate. If a structural change looks accidental, stop before
 the model call. Clean deleted-spec artifacts with
-`uv run jaunt clean --orphans`.
+`clean --orphans` through the selected runner.
+
+For a new `*.jaunt.ts[x]` spec, run `sync --language ts` through the selected runner before the paid build.
+It writes the deterministic API mirror and an explicitly unbuilt throwing
+placeholder; it does not call Codex or make `jaunt check` green.
 
 ## 3. Build
 
 ```bash
-uv run jaunt build --json
+bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" --run "$PWD" build --json
 # or
-uv run jaunt build --target <module> --json
+bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" --run "$PWD" build --target <qualified-module> --json
 ```
 
 Review `newly_governed` before accepting the result.
@@ -47,16 +57,17 @@ Review `newly_governed` before accepting the result.
 
 1. Surface advisories verbatim.
 2. Report the actual cost from the completed build.
-3. Run `uv run jaunt check`.
-4. Run the package's unchanged tests, Ruff, and ty.
+3. Run `check` through the selected runner.
+4. Run the package's unchanged tests and target checks: Ruff/ty for Python;
+   TypeScript typecheck, emit, and Vitest for TypeScript.
 5. Review the generated diff as production code. Fix problems through the spec.
 
 ## 5. Review a first build
 
 For a module's first successful build, delegate exactly one read-only explorer
-subagent to the `$jaunt:first-build-reviewer` checklist. Give it the spec,
-generated implementation, and generated `.pyi` path. It may read and search
-but must not edit or build.
+subagent to the `$jaunt:first-build-reviewer` checklist. Give it the spec and
+generated implementation, plus the generated `.pyi` for Python or API mirror
+for TypeScript. It may read and search but must not edit or build.
 
 If delegation is unavailable, perform the same checklist in the main thread:
 compare contract to implementation for unpinned defaults, errors, ordering,

@@ -7,7 +7,7 @@ import hashlib
 import json
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -119,16 +119,38 @@ class TreeDoc:
         return True
 
 
-def _iter_entries(*, source_roots: list[Path], generated_dir: str) -> list[Path]:
-    out: list[Path] = []
+_SOURCE_SUFFIXES = frozenset({".py", ".ts", ".tsx"})
+_IGNORED_SOURCE_DIRS = frozenset(
+    {".git", ".jaunt", ".next", ".pnpm", ".yarn", "__pycache__", "coverage", "dist", "node_modules"}
+)
+
+
+def _generated_dir_names(generated_dir: str | Sequence[str]) -> frozenset[str]:
+    values = (generated_dir,) if isinstance(generated_dir, str) else generated_dir
+    return frozenset(Path(value).name for value in values if value and Path(value).name)
+
+
+def _iter_entries(
+    *,
+    source_roots: list[Path],
+    generated_dir: str | Sequence[str],
+) -> list[Path]:
+    out: set[Path] = set()
+    ignored_dirs = _IGNORED_SOURCE_DIRS | _generated_dir_names(generated_dir)
     for sr in source_roots:
         if not sr.exists():
             continue
-        for p in sr.rglob("*.py"):
-            if generated_dir in p.parts or "__pycache__" in p.parts:
-                continue
-            out.append(p)
-    return out
+        for dirpath, dirnames, filenames in os.walk(sr):
+            dirnames[:] = sorted(name for name in dirnames if name not in ignored_dirs)
+            directory = Path(dirpath)
+            for filename in sorted(filenames):
+                path = directory / filename
+                if path.suffix not in _SOURCE_SUFFIXES:
+                    continue
+                if filename.endswith((".d.ts", ".d.tsx")):
+                    continue
+                out.add(path)
+    return sorted(out)
 
 
 def _insert(tree: dict, parts: list[str], description: str, *, is_dir: bool) -> None:
@@ -194,7 +216,7 @@ def sync(
     *,
     repo_root: Path,
     source_roots: list[Path],
-    generated_dir: str,
+    generated_dir: str | Sequence[str],
     cache: TreeCache,
     project_name: str,
     project_version: str,
@@ -274,7 +296,7 @@ def is_drifted(
     *,
     repo_root: Path,
     source_roots: list[Path],
-    generated_dir: str,
+    generated_dir: str | Sequence[str],
     cache: TreeCache,
 ) -> bool:
     fresh, result = sync(

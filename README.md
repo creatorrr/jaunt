@@ -16,9 +16,10 @@
 >
 > -- William Blake, via Alfred Bester's *The Stars My Destination*
 
-Jaunt is a small Python library + CLI for **spec-driven code generation**. You
-write the intent — a signature and a docstring — and Jaunt writes the
-implementation under `__generated__/` using the OpenAI Codex CLI (`codex exec`).
+Jaunt is a CLI for **spec-driven code generation**. You write intent as typed
+contracts and Jaunt writes implementations under `__generated__/` using the OpenAI
+Codex CLI (`codex exec`). Python is stable; the TypeScript target is an alpha behind
+version-2 configuration.
 
 Call `jaunt.magic_module(__name__)` once at the top of a file and every top-level
 stub below it becomes a spec, with no per-symbol decorators:
@@ -95,6 +96,45 @@ def parse_mbox(raw: str) -> list[Email]:
 - **Async, tests, and contracts** — `async def` specs build and test through
   `build.async_runner`, `@jaunt.test` specs generate pytest batteries, and
   `@jaunt.contract` pins hand-written code with a derived, committed battery.
+
+### TypeScript alpha
+
+TypeScript specs are private static inputs. The project-local `@usejaunt/ts` worker
+parses them without executing application code, renders a deterministic API mirror,
+and validates generated candidates in a compiler overlay before Jaunt writes anything:
+
+```ts
+import * as jaunt from "@usejaunt/ts/spec";
+
+jaunt.magicModule();
+
+/** Convert a title to a stable URL slug. */
+export function slugify(title: string): string {
+  return jaunt.magic();
+}
+```
+
+```bash
+uvx jaunt init --language ts
+npm init -y && npm pkg set type=module
+npm install -D @usejaunt/ts@next 'typescript@^5.9' vitest fast-check @types/node
+uvx jaunt sync
+uvx jaunt migrate --language ts       # upgrade preview; plan-only and model-free
+uvx jaunt build --language ts
+uvx jaunt test --language ts
+uvx jaunt check --language ts
+```
+
+`jaunt init` leaves `package.json` untouched and prints the remaining package setup
+command. Existing packages without a `type` get `npm pkg set type=module`; explicit
+CommonJS packages keep CommonJS and receive a compatible NodeNext config.
+
+The Jaunt worker runs on Node `>=20 <25`; generated JavaScript may target a different
+deployment runtime according to the owning `tsconfig.json`.
+
+Generated programs use ordinary imports and keep running without Jaunt installed. See
+the [TypeScript guide](https://jaunt.ing/docs/guides/typescript) for the facade layout,
+supported compiler range, and version-2 config.
 
 ## Two Modes
 
@@ -240,7 +280,9 @@ https://jaunt.ing/docs/guides/claude-code-plugin.
 ## Background Daemon
 
 `jaunt daemon start` runs background codegen with commit-triggered isolated jobs
-and auto-commit on green. `jaunt daemon stop|status` stops or inspects it.
+and parks green jobs as proposals by default. Land them with `jaunt jobs land`,
+discard them with `jaunt jobs discard`, or opt into auto-commit in `jaunt.toml`.
+`jaunt daemon stop|status` stops or inspects it.
 Use `jaunt jobs` for job records, would-rebuild previews, `show <id> [--full]`,
 and `retry <id>`. `jaunt log` tails `JAUNT_LOG` (`-n N`, `--module X`), and
 `jaunt guard` warns when agents touch `__generated__` via the PreToolUse hook.
@@ -290,28 +332,31 @@ cd docs-site
 npm run dev
 ```
 
-## Publish to PyPI
+## Release
 
-If you keep your token in `.env` as `UV_PUBLISH_TOKEN=...`, load it into your shell first:
+Publishing runs through the repository's **Coordinated release** GitHub Actions
+workflow. It builds the Python and npm candidates once, tests those exact artifacts,
+publishes through PyPI and npm trusted publishing (OIDC), verifies the registry bytes,
+then creates the matching Git tags and GitHub releases. Do not upload a locally built
+wheel or tarball.
 
-```bash
-set -a
-source .env
-set +a
-```
+After the version, lockfiles, changelog, and generated artifacts are committed on
+`main`, run `.github/workflows/release.yml` from the Actions UI. Choose `python`,
+`typescript`, or `both`; leave `publish` off for a candidate-only rehearsal, or enable
+it to publish. TypeScript alpha releases use the `next` npm dist-tag (`beta` is also an
+explicit workflow choice).
 
-Build and validate artifacts:
-
-```bash
-uv build
-uvx twine check dist/*
-```
-
-Upload to PyPI:
+The equivalent GitHub CLI invocation is:
 
 ```bash
-uv publish --check-url https://pypi.org/simple/
+gh workflow run release.yml --ref main \
+  -f component=both \
+  -f publish=true \
+  -f npm_dist_tag=next
 ```
+
+The repository must have trusted-publisher entries for the `pypi` and `npm` GitHub
+environments. No long-lived PyPI or npm token is stored in Actions.
 
 ## Dev
 

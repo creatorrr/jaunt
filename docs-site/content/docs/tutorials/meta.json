@@ -1,4 +1,4 @@
 {
   "title": "Tutorials",
-  "pages": ["quickstart", "adopt-existing", "whole-class-daemon"]
+  "pages": ["quickstart", "typescript-quickstart", "adopt-existing", "whole-class-daemon"]
 }

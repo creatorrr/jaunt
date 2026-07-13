@@ -1,6 +1,6 @@
 interface:
   display_name: Working with Jaunt
-  short_description: Follow Jaunt authoring and generated-file rules.
-  default_prompt: Inspect this Jaunt change and apply the workspace and freshness rules.
+  short_description: Follow Python and TypeScript Jaunt authoring rules.
+  default_prompt: Inspect this Python or TypeScript Jaunt change and apply its workspace and freshness rules.
 policy:
   allow_implicit_invocation: true

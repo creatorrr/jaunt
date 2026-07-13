@@ -1,0 +1,8 @@
+{
+  "protocol": "jaunt-ts/1-draft.2",
+  "id": "contracts-1",
+  "method": "analyzeContracts",
+  "params": {
+    "moduleIds": ["ts:src/format/index"]
+  }
+}

@@ -1,26 +1,30 @@
 ---
 title: Contract Mode
-description: "Pin the behavior of committed code with @jaunt.contract and a derived pytest battery."
+description: "Pin committed Python or TypeScript behavior with a derived, reviewable test battery."
 ---
 
 You have code you want to keep hand-written — an adopted legacy function, a hot
 path you've tuned, anything the generator should not touch — but you still want
 its behavior pinned by a contract. That is contract mode. It is how
 [Jaunt pins its own build-critical core](/docs/self-hosting): fifteen framework
-modules run committed contract batteries derived this way.
+modules run committed Python contract batteries derived this way. TypeScript uses
+the same lifecycle with exported functions or concrete classes and committed Vitest
+batteries.
 
-Jaunt picks a mode per symbol from the decorator:
+Jaunt picks a mode per symbol from its marker:
 
-- **Magic mode** (`@jaunt.magic` / `@jaunt.test`): the docstring is canonical and
-  Jaunt generates the implementation under `__generated__/`.
-- **Contract mode** (`@jaunt.contract`): the **committed code is canonical**. The
-  decorator is a runtime no-op marker, the docstring is the contract, and Jaunt
-  derives a committed pytest battery under `tests/contract/` instead of
-  generating the body.
+- **Magic mode**: Python uses `@jaunt.magic` / `@jaunt.test`; TypeScript uses
+  private `*.jaunt.ts[x]` / `*.jaunt-test.ts[x]` inputs. The behavioral prose is
+  canonical and Jaunt generates the implementation or test battery.
+- **Contract mode**: the **committed code is canonical**. Python uses the runtime
+  no-op `@jaunt.contract` decorator and derives pytest. TypeScript `adopt` adds an
+  `@jauntContract` TSDoc marker and derives Vitest without moving the source behind
+  a generated facade.
 
-Contract mode covers top-level functions (sync or async) and whole classes.
+Python contract mode covers top-level functions (sync or async) and whole classes.
+TypeScript covers exported functions and concrete exported classes.
 
-## Writing A Contract
+## Write a Python contract
 
 ```python
 import re
@@ -55,7 +59,7 @@ The `Examples:` and `Raises:` prose is what Jaunt derives test cases from
 written to `tests/contract/` (configurable via `[contract] battery_dir`) and is
 **committed** — it's plain pytest that runs with or without Jaunt installed.
 
-## The Workflow
+## Python workflow
 
 ```bash
 jaunt adopt my_app.slug:slugify   # add @jaunt.contract to existing code + derive its battery
@@ -66,39 +70,63 @@ jaunt eject my_app.slug:slugify   # remove contract tracking; leave plain Python
 jaunt eject --all
 ```
 
-`jaunt reconcile` is the **only** contract command that calls the model.
-`jaunt check` is fully deterministic and offline, which makes it the CI gate: it
-exits `4` on any blocking drift state (unbuilt / stale-prose / signature-drift /
-behavior-drift).
+For Python, `jaunt reconcile` is the only contract command that can call the model;
+`adopt` derives supported structured cases deterministically. `jaunt check` is fully
+deterministic and offline, which makes it the CI gate: it exits `4` on any blocking
+drift state (unbuilt / stale-prose / signature-drift / behavior-drift).
 
 Structured docstring prose (call-form `Examples:` like the one above) can often
 be derived deterministically too, so `reconcile` doesn't always need the model.
 
-## Async Functions
+## TypeScript workflow
+
+Adopt a committed export by path and symbol:
+
+```bash
+jaunt adopt src/slug.ts#slugify --language ts
+jaunt reconcile --language ts
+jaunt check --language ts --contracts-only
+jaunt status --language ts
+jaunt eject src/slug.ts#slugify --language ts
+```
+
+`adopt` adds one `@jauntContract` tag to the export's TSDoc and derives its first
+battery. The worker projects the declaration without executing the module, and the
+battery imports the ordinary committed source. `reconcile` refreshes stale batteries;
+`adopt` and `reconcile` can call the test-generation model, while `check`, `status`,
+and `eject` do not. `check` typechecks and runs the committed batteries. `eject`
+removes the marker and its battery while leaving the implementation untouched.
+
+TypeScript batteries live under `[target.ts].contract_battery_dir` and are ordinary
+committed Vitest files. The source declaration and TSDoc are the contract. See the
+[TypeScript target guide](/docs/guides/typescript#design-and-contract-mode) for
+mutation strength, package-output checks, and magic-module ejection.
+
+## Python async functions and fixtures
 
 Contract mode covers `async def` functions. The derived test functions are
 `async def` and `await` the contract function (with `pytest-asyncio` auto
 mode). See `examples/contract_async/` in the repo.
-
-## Whole Classes
-
-A class-level `@jaunt.contract` pins the class's public behavior: the derived
-battery exercises the declared methods against the docstring contracts.
-
-## Fixtures
 
 Derived cases may declare pytest fixtures in the docstring
 (`Fixtures: db`), resolved from `tests/contract/conftest.py`. That's the seam
 for contracts that need setup — a database handle, a temp dir, a fake clock —
 without giving up deterministic derivation.
 
-## Strength Scoring
+## Whole classes
+
+A class-level Python `@jaunt.contract` pins the class's public behavior. TypeScript
+accepts a concrete exported class and derives cases from its declaration and TSDoc;
+abstract classes and authored `private` or `protected` members are outside the alpha.
+
+## Strength scoring
 
 With `[contract] strength = true` (the default), `jaunt reconcile` runs
 mutation-based strength scoring: it estimates how well your pinned examples
 actually constrain the implementation. A function with one weak example gets a
-low score, and `jaunt status` shows the gap so you know which contracts need
-more pinned cases.
+low score, and `jaunt status` shows the gap so you know which contracts need more
+pinned cases. TypeScript runs supported mutants in disposable overlays and blocks the
+transaction when a required mutant survives.
 
 ## Configuration
 
@@ -107,6 +135,17 @@ more pinned cases.
 battery_dir = "tests/contract"     # where derived batteries are written
 derive = ["examples", "errors"]    # case kinds derived from docstring prose
 strength = true                    # mutation-based strength scoring at reconcile
+```
+
+Version-2 workspaces move the language-local battery path under each target. Strength
+is shared; Python's `derive` list continues to select its Python case parsers:
+
+```toml
+[target.ts]
+contract_battery_dir = "tests/contract"
+
+[contract]
+strength = true
 ```
 
 Next: [Background Daemon](/docs/guides/daemon).

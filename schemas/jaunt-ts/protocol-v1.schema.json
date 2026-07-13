@@ -1,0 +1,622 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://usejaunt.dev/schemas/jaunt-ts/protocol-v1-draft.2.json",
+  "title": "Jaunt TypeScript worker protocol v1 draft 2",
+  "oneOf": [
+    { "$ref": "#/definitions/request" },
+    { "$ref": "#/definitions/success" },
+    { "$ref": "#/definitions/failure" }
+  ],
+  "definitions": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "stringArray": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "safeWorkspacePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?![A-Za-z]:/)(?!\\.\\.(?:/|$))(?!.*\/\\.\\.(?:/|$))(?!.*\\\\).+$"
+    },
+    "generatedWorkspacePath": {
+      "allOf": [
+        { "$ref": "#/definitions/safeWorkspacePath" },
+        { "not": { "const": "." } }
+      ]
+    },
+    "workspacePathArray": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/safeWorkspacePath" }
+    },
+    "emptyParams": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "moduleSelectionParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "moduleIds": { "$ref": "#/definitions/stringArray" }
+      }
+    },
+    "initializeParams": {
+      "type": "object",
+      "required": [
+        "root",
+        "projects",
+        "testProjects",
+        "sourceRoots",
+        "testRoots",
+        "generatedDir",
+        "toolOwner",
+        "compilerModulePath",
+        "clientVersion",
+        "toolVersion"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "root": { "type": "string", "minLength": 1 },
+        "projects": { "$ref": "#/definitions/workspacePathArray" },
+        "testProjects": { "$ref": "#/definitions/workspacePathArray" },
+        "sourceRoots": { "$ref": "#/definitions/workspacePathArray" },
+        "testRoots": { "$ref": "#/definitions/workspacePathArray" },
+        "generatedDir": { "$ref": "#/definitions/generatedWorkspacePath" },
+        "toolOwner": { "$ref": "#/definitions/safeWorkspacePath" },
+        "compilerModulePath": { "type": "string", "minLength": 1 },
+        "clientVersion": { "type": "string", "minLength": 1 },
+        "toolVersion": { "type": "string", "minLength": 1 },
+        "generationFingerprint": { "type": "string", "minLength": 1 }
+      }
+    },
+    "projectContractParams": {
+      "type": "object",
+      "required": ["source", "symbol", "fileName"],
+      "additionalProperties": false,
+      "properties": {
+        "source": { "type": "string", "minLength": 1 },
+        "symbol": { "type": "string", "minLength": 1 },
+        "fileName": { "$ref": "#/definitions/generatedWorkspacePath" }
+      }
+    },
+    "validateOverlayParams": {
+      "type": "object",
+      "required": [
+        "sessionId",
+        "expectedEpoch",
+        "expectedSnapshot",
+        "candidates"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "sessionId": { "type": "string", "minLength": 1 },
+        "expectedEpoch": { "type": "integer" },
+        "expectedSnapshot": { "type": "string", "minLength": 1 },
+        "candidates": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "moduleIds": { "$ref": "#/definitions/stringArray" },
+        "syncModuleIds": { "$ref": "#/definitions/stringArray" },
+        "restampModuleIds": { "$ref": "#/definitions/stringArray" }
+      }
+    },
+    "invalidateParams": {
+      "type": "object",
+      "required": ["paths"],
+      "additionalProperties": false,
+      "properties": {
+        "paths": { "$ref": "#/definitions/stringArray" }
+      }
+    },
+    "cancelParams": {
+      "type": "object",
+      "required": ["requestId"],
+      "additionalProperties": false,
+      "properties": {
+        "requestId": { "type": "string" }
+      }
+    },
+    "request": {
+      "type": "object",
+      "required": ["protocol", "id", "method", "params"],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "method": { "const": "initialize" },
+                "params": { "$ref": "#/definitions/initializeParams" }
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "method": { "const": "analyzeWorkspace" },
+                "params": { "$ref": "#/definitions/emptyParams" }
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "method": { "const": "analyzeContracts" },
+                "params": { "$ref": "#/definitions/moduleSelectionParams" }
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "method": { "const": "projectContract" },
+                "params": { "$ref": "#/definitions/projectContractParams" }
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "method": { "const": "validateOverlay" },
+                "params": { "$ref": "#/definitions/validateOverlayParams" }
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "method": { "const": "findOrphans" },
+                "params": { "$ref": "#/definitions/moduleSelectionParams" }
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "method": { "const": "invalidate" },
+                "params": { "$ref": "#/definitions/invalidateParams" }
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "method": { "const": "cancel" },
+                "params": { "$ref": "#/definitions/cancelParams" }
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "method": { "const": "shutdown" },
+                "params": { "$ref": "#/definitions/emptyParams" }
+              }
+            }
+          ]
+        }
+      ],
+      "properties": {
+        "protocol": { "const": "jaunt-ts/1-draft.2" },
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "method": {
+          "enum": [
+            "initialize",
+            "analyzeWorkspace",
+            "analyzeContracts",
+            "projectContract",
+            "validateOverlay",
+            "findOrphans",
+            "invalidate",
+            "cancel",
+            "shutdown"
+          ]
+        },
+        "params": { "type": "object" },
+        "deadlineMs": { "type": "integer", "minimum": 1, "maximum": 3600000 }
+      }
+    },
+    "sessionMetadata": {
+      "type": "object",
+      "required": ["sessionId", "epoch", "snapshot", "inputHashes"],
+      "properties": {
+        "sessionId": { "type": "string", "minLength": 1 },
+        "epoch": { "type": "integer", "minimum": 0 },
+        "snapshot": { "$ref": "#/definitions/digest" },
+        "inputHashes": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/definitions/digest" }
+        }
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "required": ["code", "severity", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "severity": { "enum": ["error", "warning", "info"] },
+        "message": { "type": "string" },
+        "path": { "type": "string" },
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 0 },
+        "line": { "type": "integer", "minimum": 1 },
+        "column": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "project": {
+      "type": "object",
+      "required": [
+        "id",
+        "configPath",
+        "role",
+        "references",
+        "rootFiles",
+        "compilerOptionsHash"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "configPath": { "type": "string" },
+        "role": { "enum": ["production", "test", "solution"] },
+        "references": { "$ref": "#/definitions/stringArray" },
+        "rootFiles": { "$ref": "#/definitions/stringArray" },
+        "compilerOptionsHash": { "$ref": "#/definitions/digest" }
+      }
+    },
+    "moduleRoute": {
+      "type": "object",
+      "required": [
+        "specPath",
+        "facadePath",
+        "apiMirrorPath",
+        "implementationPath",
+        "sidecarPath",
+        "moduleId",
+        "project",
+        "packageOwner"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "specPath": { "type": "string" },
+        "facadePath": { "type": "string" },
+        "apiMirrorPath": { "type": "string" },
+        "implementationPath": { "type": "string" },
+        "sidecarPath": { "type": "string" },
+        "contextPath": { "type": "string" },
+        "moduleId": { "type": "string", "pattern": "^ts:" },
+        "project": { "type": "string" },
+        "packageOwner": { "type": "string" }
+      }
+    },
+    "discoveredSpec": {
+      "type": "object",
+      "required": [
+        "moduleId",
+        "specPath",
+        "project",
+        "packageOwner",
+        "symbols"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "moduleId": { "type": "string", "pattern": "^ts:" },
+        "specPath": { "type": "string" },
+        "project": { "type": "string" },
+        "packageOwner": { "type": "string" },
+        "symbols": { "$ref": "#/definitions/stringArray" }
+      }
+    },
+    "discoveredTestSpec": {
+      "type": "object",
+      "required": ["path", "project", "targets"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string" },
+        "project": { "type": "string" },
+        "targets": { "$ref": "#/definitions/stringArray" }
+      }
+    },
+    "discoveredContract": {
+      "type": "object",
+      "required": ["path", "project", "symbols"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string" },
+        "project": { "type": "string" },
+        "symbols": { "$ref": "#/definitions/stringArray" }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "required": ["path", "content", "sha256", "kind", "moduleId"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string" },
+        "content": { "type": "string" },
+        "sha256": { "$ref": "#/definitions/digest" },
+        "kind": {
+          "enum": [
+            "api-mirror",
+            "implementation",
+            "placeholder",
+            "sidecar",
+            "facade",
+            "test"
+          ]
+        },
+        "moduleId": { "type": "string", "pattern": "^ts:" }
+      }
+    },
+    "orphan": {
+      "type": "object",
+      "required": ["path", "kind"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string" },
+        "kind": {
+          "enum": [
+            "api-mirror",
+            "implementation",
+            "placeholder",
+            "sidecar",
+            "facade",
+            "test"
+          ]
+        },
+        "moduleId": { "type": "string", "pattern": "^ts:" }
+      }
+    },
+    "initializeResult": {
+      "allOf": [{ "$ref": "#/definitions/sessionMetadata" }],
+      "type": "object",
+      "required": [
+        "workerVersion",
+        "protocol",
+        "typescriptVersion",
+        "packageManager",
+        "capabilities"
+      ],
+      "propertyNames": {
+        "enum": [
+          "sessionId",
+          "epoch",
+          "snapshot",
+          "inputHashes",
+          "workerVersion",
+          "protocol",
+          "typescriptVersion",
+          "packageManager",
+          "capabilities"
+        ]
+      },
+      "properties": {
+        "workerVersion": { "type": "string" },
+        "protocol": { "const": "jaunt-ts/1-draft.2" },
+        "typescriptVersion": { "type": "string" },
+        "packageManager": { "type": "string" },
+        "capabilities": {
+          "type": "array",
+          "minItems": 6,
+          "maxItems": 6,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "analyze",
+              "overlay",
+              "sync",
+              "orphans",
+              "invalidate",
+              "contract-projection"
+            ]
+          }
+        }
+      }
+    },
+    "analyzeWorkspaceResult": {
+      "allOf": [{ "$ref": "#/definitions/sessionMetadata" }],
+      "type": "object",
+      "required": [
+        "projects",
+        "routes",
+        "specs",
+        "testSpecs",
+        "contracts",
+        "diagnostics"
+      ],
+      "propertyNames": {
+        "enum": [
+          "sessionId",
+          "epoch",
+          "snapshot",
+          "inputHashes",
+          "projects",
+          "routes",
+          "specs",
+          "testSpecs",
+          "contracts",
+          "diagnostics"
+        ]
+      },
+      "properties": {
+        "projects": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/project" }
+        },
+        "routes": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/moduleRoute" }
+        },
+        "specs": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/discoveredSpec" }
+        },
+        "testSpecs": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/discoveredTestSpec" }
+        },
+        "contracts": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/discoveredContract" }
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/diagnostic" }
+        }
+      }
+    },
+    "analyzeContractsResult": {
+      "allOf": [{ "$ref": "#/definitions/sessionMetadata" }],
+      "type": "object",
+      "required": ["modules"],
+      "propertyNames": {
+        "enum": ["sessionId", "epoch", "snapshot", "inputHashes", "modules"]
+      },
+      "properties": {
+        "modules": {
+          "type": "array",
+          "items": {
+            "$ref": "https://usejaunt.dev/schemas/jaunt-ts/contract-ir-v1-draft.2.json#/definitions/contractAnalysisRecord"
+          }
+        }
+      }
+    },
+    "projectContractResult": {
+      "type": "object",
+      "required": [
+        "source",
+        "sourceDigest",
+        "symbol",
+        "kind",
+        "declarationStart",
+        "declarationEnd"
+      ],
+      "additionalProperties": false,
+      "dependencies": {
+        "docsStart": ["docsEnd"],
+        "docsEnd": ["docsStart"]
+      },
+      "properties": {
+        "source": { "type": "string", "minLength": 1 },
+        "sourceDigest": { "$ref": "#/definitions/digest" },
+        "symbol": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["function", "class"] },
+        "declarationStart": { "type": "integer", "minimum": 0 },
+        "declarationEnd": { "type": "integer", "minimum": 1 },
+        "docsStart": { "type": "integer", "minimum": 0 },
+        "docsEnd": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "validateOverlayResult": {
+      "allOf": [{ "$ref": "#/definitions/sessionMetadata" }],
+      "type": "object",
+      "required": ["valid", "artifacts", "diagnostics", "affectedProjects"],
+      "propertyNames": {
+        "enum": [
+          "sessionId",
+          "epoch",
+          "snapshot",
+          "inputHashes",
+          "valid",
+          "artifacts",
+          "diagnostics",
+          "affectedProjects"
+        ]
+      },
+      "properties": {
+        "valid": { "type": "boolean" },
+        "artifacts": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/artifact" }
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/diagnostic" }
+        },
+        "affectedProjects": { "$ref": "#/definitions/stringArray" }
+      }
+    },
+    "findOrphansResult": {
+      "allOf": [{ "$ref": "#/definitions/sessionMetadata" }],
+      "type": "object",
+      "required": ["artifacts"],
+      "propertyNames": {
+        "enum": ["sessionId", "epoch", "snapshot", "inputHashes", "artifacts"]
+      },
+      "properties": {
+        "artifacts": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/orphan" }
+        }
+      }
+    },
+    "invalidateResult": {
+      "allOf": [{ "$ref": "#/definitions/sessionMetadata" }],
+      "type": "object",
+      "required": ["invalidated"],
+      "propertyNames": {
+        "enum": ["sessionId", "epoch", "snapshot", "inputHashes", "invalidated"]
+      },
+      "properties": {
+        "invalidated": { "$ref": "#/definitions/stringArray" }
+      }
+    },
+    "cancelResult": {
+      "type": "object",
+      "required": ["cancelled"],
+      "additionalProperties": false,
+      "properties": { "cancelled": { "type": "string" } }
+    },
+    "shutdownResult": {
+      "type": "object",
+      "required": ["shutdown"],
+      "additionalProperties": false,
+      "properties": { "shutdown": { "const": true } }
+    },
+    "successResult": {
+      "oneOf": [
+        { "$ref": "#/definitions/initializeResult" },
+        { "$ref": "#/definitions/analyzeWorkspaceResult" },
+        { "$ref": "#/definitions/analyzeContractsResult" },
+        { "$ref": "#/definitions/projectContractResult" },
+        { "$ref": "#/definitions/validateOverlayResult" },
+        { "$ref": "#/definitions/findOrphansResult" },
+        { "$ref": "#/definitions/invalidateResult" },
+        { "$ref": "#/definitions/cancelResult" },
+        { "$ref": "#/definitions/shutdownResult" }
+      ]
+    },
+    "error": {
+      "type": "object",
+      "required": ["code", "message", "retryable", "diagnostics"],
+      "additionalProperties": false,
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "message": { "type": "string" },
+        "retryable": { "type": "boolean" },
+        "diagnostics": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/diagnostic" }
+        }
+      }
+    },
+    "success": {
+      "type": "object",
+      "required": ["protocol", "id", "ok", "result"],
+      "additionalProperties": false,
+      "properties": {
+        "protocol": { "const": "jaunt-ts/1-draft.2" },
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "ok": { "const": true },
+        "result": { "$ref": "#/definitions/successResult" }
+      }
+    },
+    "failure": {
+      "type": "object",
+      "required": ["protocol", "id", "ok", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "protocol": { "const": "jaunt-ts/1-draft.2" },
+        "id": { "type": "string" },
+        "ok": { "const": false },
+        "error": { "$ref": "#/definitions/error" }
+      }
+    }
+  }
+}

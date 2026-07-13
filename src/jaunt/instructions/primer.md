@@ -1,9 +1,9 @@
 # Jaunt — agent primer
 
-Jaunt is a spec-driven code generation framework for Python. You write
-**intent** as Python stubs — a signature and a docstring. Jaunt generates the
-**implementation** with the OpenAI Codex CLI (`codex exec`) and writes it under
-`__generated__/`.
+Jaunt is a spec-driven code generation framework for Python, with an alpha
+TypeScript target. You write **intent** as typed stubs and contract prose. Jaunt
+generates the **implementation** with the OpenAI Codex CLI (`codex exec`) and
+writes it under `__generated__/`.
 
 ## Your role (read this first)
 
@@ -52,6 +52,43 @@ Both coexist and are selected per symbol by decorator.
    spec docstring** (or add a `prompt=` hint) and rebuild — do not patch the
    output.
 5. `jaunt status` shows what is stale and needs rebuilding.
+
+## TypeScript target
+
+A version-2 `[target.ts]` project uses private `*.jaunt.ts[x]` inputs. Discovery
+is static: the project-local worker parses source and `tsconfig.json` without
+executing the spec or application code.
+
+```ts
+import * as jaunt from "@usejaunt/ts/spec";
+
+jaunt.magicModule();
+
+/** Convert a title to a stable URL slug. */
+export function slugify(title: string): string {
+  return jaunt.magic();
+}
+```
+
+Run `jaunt sync` before the first build. It creates a deterministic API mirror,
+an ordinary public facade when one is absent, and a typed throwing placeholder.
+This makes editor types available without a model call, but the module remains
+unbuilt until `jaunt build --language ts` validates and commits a real
+implementation.
+
+TypeScript rules:
+
+- Production code imports the public facade, never `*.jaunt.ts[x]` or a generated
+  private path.
+- Optional executable context lives in the paired `*.context.ts[x]` file and is a
+  one-way leaf: it cannot value-import its own facade, implementation, or spec.
+- Never edit generated implementations, `.api.ts` mirrors, `.jaunt.json`
+  sidecars, or generated Vitest batteries.
+- TSDoc is the behavioral contract. `@jauntPreserve` marks the rare real class
+  member copied into generated output. TypeScript has no `@jaunt.sig`; declared
+  signatures are always conformance-checked.
+- TypeScript targets use `ts:path/to/spec#symbol` IDs. `--language py|ts`
+  narrows a mixed version-2 workspace.
 
 ## Writing a good magic spec
 
@@ -152,7 +189,8 @@ the public contract. Include negative/error-path cases. Names must start with
 {{COMMAND_TABLE}}
 
 For exact flags on any command, run `jaunt <cmd> --help`. Common flags:
-`--root`, `--config`, `--json`, `--force`, `--target MODULE`, `--no-infer-deps`.
+`--root`, `--config`, `--json`, `--force`, `--target MODULE`,
+`--language {py,ts}`, `--no-infer-deps`.
 Progress: `--progress {auto,rich,plain,none}` (`auto` = rich on TTY, plain lines
 off-TTY; explicit `plain` works with `--json`).
 

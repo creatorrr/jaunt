@@ -13,7 +13,7 @@ export const metadata: Metadata = {
     default: 'Jaunt',
     template: '%s | Jaunt',
   },
-  description: 'Spec-driven code generation for Python.',
+  description: 'Spec-driven code generation for Python and TypeScript.',
 };
 
 export default function Layout({ children }: LayoutProps<'/'>) {

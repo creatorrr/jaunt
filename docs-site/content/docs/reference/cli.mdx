@@ -23,6 +23,7 @@ below list only the flags unique to that command.
 | `--config PATH` | Path to `jaunt.toml`. Default: `<root>/jaunt.toml`. |
 | `--jobs N` | Concurrency override. |
 | `--target MODULE[:QUALNAME]` | Restrict work to one or more modules (repeatable; filtering is module-level). |
+| `--language {py,ts}` | Restrict a version-2 workspace to one language. TypeScript targets use `ts:path#symbol`. |
 | `--no-infer-deps` | Disable AST dependency inference; explicit `deps=` still applies. |
 | `--progress {auto,rich,plain,none}` | Progress mode. `auto` is rich on a TTY, plain lines off it. |
 | `--no-progress` | Disable progress output. |
@@ -33,18 +34,22 @@ below list only the flags unique to that command.
 
 ### `jaunt init`
 
-Scaffold a `jaunt.toml`, source/test directories, and a starter spec.
+Scaffold a `jaunt.toml`, source/test directories, and a starter spec. The TypeScript
+starter intentionally leaves package metadata to the package manager; when no
+`package.json` exists, follow its printed `npm init` command before installing tools.
 
 ```bash
 jaunt init
 jaunt init --root /tmp/myproj
 jaunt init --force
+jaunt init --language ts
 ```
 
 | Flag | Effect |
 |------|--------|
 | `--root PATH` | Directory to create `jaunt.toml` in (default: cwd). |
 | `--force` | Overwrite an existing `jaunt.toml`. |
+| `--language {py,ts}` | Choose the starter target (default: `py`). |
 | `--json` | Machine-readable output. |
 
 `init` takes no other common flags.
@@ -77,6 +82,10 @@ Module-origin specs that have never been built print with a
 `[newly governed — first build]` marker, so the first build a `magic_module`
 scan commissions is never a surprise.
 
+For a TypeScript target, `specs` is static: the Node worker parses private
+`*.jaunt.ts[x]` inputs without executing them and reports `ts:` module and symbol
+IDs.
+
 ### `jaunt instructions`
 
 Print a project-aware agent primer: the authoring modes, the build/test loop,
@@ -101,6 +110,51 @@ snapshot (or `null` with no `jaunt.toml`).
 
 ## Building
 
+### `jaunt migrate --config-v2`
+
+Preview or apply the deterministic version-1 to version-2 configuration rewrite:
+
+```bash
+jaunt migrate --config-v2
+jaunt migrate --config-v2 --apply
+```
+
+The action moves Python-specific settings under `[target.py]`, verifies that the
+loaded Python compatibility view is unchanged, and makes no model call. It is separate
+from `--merge-projects`.
+
+### `jaunt sync`
+
+Render TypeScript API mirrors, missing canonical facades, and typed unbuilt
+placeholders without calling a model:
+
+```bash
+jaunt sync
+jaunt sync --target ts:src/tokens/index
+```
+
+The owner project must typecheck before the artifacts are committed. Existing custom
+facades are never overwritten. Sync may refresh the deterministic API mirror and its
+sidecar hash bookkeeping, but it never rewrites a built implementation's body or
+advances its provenance to a changed contract. Semantic and fingerprint re-stamps
+belong to `build`; compatible alpha artifact repairs belong to `migrate --language
+ts`. A synchronized placeholder keeps the editor green but remains `unbuilt` in
+`status` and `check`.
+
+### `jaunt design`
+
+Ask Codex to propose the declaration and TSDoc for one `@jauntDesign` contract:
+
+```bash
+jaunt design --target ts:src/store/index#TokenStore
+jaunt design --target ts:src/store/index#TokenStore --apply
+```
+
+The default prints a patch, leaves the spec unchanged, and records the exact proposal
+under `.jaunt/`. `--apply` requires that proposal, makes no model call, checks the
+source digest and dirty-tree policy, confines the patch to the marked declaration,
+and validates it before writing.
+
 ### `jaunt build`
 
 Generate implementation modules for `@jaunt.magic` specs. Stale dependents of a
@@ -111,6 +165,7 @@ jaunt build
 jaunt build --force
 jaunt build --target my_app.specs
 jaunt build --jobs 16
+jaunt build --language ts --target ts:src/tokens/index
 ```
 
 | Flag | Effect |
@@ -118,7 +173,7 @@ jaunt build --jobs 16
 | `--force` | Regenerate everything, ignoring digests. |
 | `--instruction "..."` | Extra build instruction appended to the prompt (repeatable). |
 | `--include-target-tests` / `--no-include-target-tests` | Include targeted test-spec source in build prompts (default from `[build] include_target_tests`). |
-| `--no-auto-skills` | Skip auto-generated PyPI skills this run. |
+| `--no-auto-skills` | Skip automatic PyPI or npm package skills this run. |
 | `--no-builtin-skills` | Don't seed the bundled builtin skills into the Codex workspace. |
 | `--no-repo-map` | Disable repo-map injection this run. See [Repo Context](/docs/concepts/repo-context). |
 | `--no-semantic-gate` | Rebuild on every real change; skip the Layer B gate (Layer A still applies). See [Change Detection](/docs/concepts/change-detection). |
@@ -133,7 +188,9 @@ before generation starts.
 
 ### `jaunt watch`
 
-Watch source and test roots and rebuild on relevant `.py` changes.
+Watch source and test roots and rebuild on relevant Python or TypeScript changes.
+For `[target.ts]`, Jaunt also watches the configured projects, package manifests,
+lockfiles, and Vitest config while excluding generated output.
 
 ```bash
 jaunt watch
@@ -158,7 +215,7 @@ jaunt status --magic-only
 
 | Flag | Effect |
 |------|--------|
-| `--magic-only` | Probe only `@jaunt.magic` freshness; skip contract and repo-map checks. |
+| `--magic-only` | Probe only generated-artifact freshness; skip contract and repo-map checks. |
 
 A module the next build resolves through the free re-stamp path reads
 `stale (re-stamp: free)` rather than `stale (structural)`; when that module also
@@ -168,8 +225,10 @@ in their own section, reported under `"orphans"` in `--json`.
 
 ### `jaunt clean`
 
-Remove `__generated__` directories and header-marked `.pyi` stubs under the
-configured roots.
+Remove target-owned generated artifacts under the configured roots. Python removes
+`__generated__` directories and header-marked `.pyi` stubs. TypeScript removes owned
+implementations, API mirrors, sidecars, and generated magic-test batteries while
+preserving private specs, public facades, and contract batteries.
 
 ```bash
 jaunt clean
@@ -194,47 +253,57 @@ preview without deleting or journaling.
 
 ### `jaunt test`
 
-Generate pytest coverage for `@jaunt.test` specs, then run pytest on the
-generated files (not the whole suite).
+Generate held-out batteries, then run the target's protected test runner on only the
+generated files. Python uses pytest; TypeScript uses project-local Vitest.
 
 ```bash
 jaunt test
 jaunt test --no-build
 jaunt test --no-run
 jaunt test --pytest-args=-k --pytest-args email
+jaunt test --language ts --target ts:src/tokens/index
 ```
 
 | Flag | Effect |
 |------|--------|
 | `--no-build` | Skip the `build` step. |
-| `--no-run` | Generate tests without running pytest. |
-| `--pytest-args ARG` | Extra arg appended to pytest (repeatable). |
+| `--no-run` | Generate tests without running the target's pytest or Vitest runner. |
+| `--pytest-args ARG` | Extra arg appended to pytest for Python targets (repeatable). TypeScript runner args are intentionally not accepted. |
 | `--no-semantic-gate` | Rebuild on every real change; skip the Layer B gate. |
 | `--no-redact-derived` | Debug only — feed full derived-tier failure detail into repair. |
 
-Generated tests split into a held-out set: cases anchored to the docstring's
-canonical examples are tagged `@pytest.mark.jaunt_tier("example")`; everything
-the generator derives itself is tagged `@pytest.mark.jaunt_tier("derived")`.
+Generated tests split into a held-out set: Python cases use
+`@pytest.mark.jaunt_tier("example" | "derived")`; TypeScript batteries carry the
+same tier in protected reporter metadata.
 When a test fails and Jaunt regenerates the implementation, derived failures are
-redacted to an opaque id plus exception class so the implementation generator
-never sees the value it would otherwise game; example failures keep full detail.
+redacted to a semantic case id and category so the implementation generator never
+sees the value, file, timing, or diagnostic location it could otherwise game;
+example failures keep authored evidence.
 `--no-redact-derived` disables that barrier and logs a warning — a debugging
 escape hatch only.
 
+Fresh TypeScript batteries skip generation but still typecheck and run. Changes only
+to the protected runner or Vitest fingerprint deterministically reheader the unchanged
+battery and appear under `refrozen`; content-affecting drift and `--force` regenerate it.
+
 ## Contract mode
 
-Adopt committed code under docstring contracts and keep a derived pytest battery
-in sync. See the [Contract Mode guide](/docs/guides/contract-mode).
+Adopt committed code under docstring/TSDoc contracts and keep a derived pytest or
+Vitest battery in sync. See the [Contract Mode guide](/docs/guides/contract-mode)
+and [TypeScript target guide](/docs/guides/typescript#design-and-contract-mode).
 
 ### `jaunt adopt`
 
-Add `@jaunt.contract` to a function and derive its battery.
+Add the target-language contract marker and derive its battery.
 
 ```bash
 jaunt adopt my_app.slug:slugify
+jaunt adopt src/slug.ts#slugify --language ts
 ```
 
-Takes a positional `ref` (`module:func`) plus the common flags.
+Takes a positional Python `module:func` or TypeScript `path.ts#symbol` ref plus the
+common flags. Python adopts whole classes; TypeScript supports committed exported
+functions and concrete classes described in the TypeScript guide.
 
 ### `jaunt reconcile`
 
@@ -243,15 +312,17 @@ command that calls the model.
 
 ```bash
 jaunt reconcile
+jaunt reconcile --language ts
 ```
 
 ### `jaunt check`
 
 The single deterministic CI gate for both modes — no model, no API key. It
-verifies committed contract batteries and `@jaunt.magic` freshness, exiting `4`
+verifies committed contract batteries and Python/TypeScript magic freshness, exiting `4`
 on any blocking drift: a contract that is unbuilt, stale-prose, signature-drift,
 or behavior-drift; or a magic module that is unbuilt or stale (including a
-missing or stale `.pyi` stub).
+missing or stale Python `.pyi` stub). TypeScript invalid-artifact diagnostics and
+unbuilt private spec modules block the same gate.
 
 ```bash
 jaunt check
@@ -262,7 +333,7 @@ jaunt check --magic-only
 | Flag | Effect |
 |------|--------|
 | `--contracts-only` | Gate only contract batteries. |
-| `--magic-only` | Gate only `@jaunt.magic` freshness. |
+| `--magic-only` | Gate only generated-artifact freshness for configured targets. |
 
 `check` also blocks on orphaned artifacts. A generated module, `.pyi`, or
 contract battery whose spec no longer exists exits `4` with a message naming the
@@ -278,10 +349,12 @@ and no contract drift exits `0`.
 
 ### `jaunt eject`
 
-Remove contract tracking; leave plain Python and plain pytest.
+Remove contract tracking; leave ordinary Python/pytest or TypeScript/Vitest code.
 
 ```bash
 jaunt eject my_app.slug:slugify
+jaunt eject src/slug.ts#slugify --language ts
+jaunt eject ts:src/slug/index --language ts
 jaunt eject --all
 ```
 
@@ -461,18 +534,19 @@ regenerates Jaunt-managed auto skills. Both drive `codex exec` under the hood.
 
 ### `jaunt migrate`
 
-Apply pending mechanical migrations to your spec source. This is the one jaunt
-command that edits files you wrote, so it plans by default: `jaunt migrate`
-prints what it would change and exits `0`, and `jaunt migrate --apply` writes the
-changes. Neither mode calls the model.
+Plan or apply mechanical migrations. The default is always a dry run:
+`jaunt migrate` prints what it would change and exits `0`, while
+`jaunt migrate --apply` writes the validated plan. Neither mode calls the model.
 
 ```bash
 jaunt migrate
 jaunt migrate --apply
 jaunt migrate --apply --allow-newly-governed
+jaunt migrate --language ts
+jaunt migrate --language ts --apply
 ```
 
-1.5 ships two migrations:
+For Python targets, the command handles two source and stub migrations:
 
 - **Legacy stub bodies.** A `raise RuntimeError("spec stub")` body — the form the
   old scaffold emitted — is rewritten to `...`, and the generated header is
@@ -486,12 +560,30 @@ jaunt migrate --apply --allow-newly-governed
   it without a build. This retires the 1.4.2 wart where `jaunt check` reported
   stubs stale until you ran `jaunt build` once.
 
+For a TypeScript-only version-2 root, plain `jaunt migrate` selects TypeScript.
+Use `--language ts` explicitly in a mixed Python/TypeScript root. The worker
+analyzes the current project and proposes only deterministic artifact work:
+
+- create or repair the API mirror, canonical facade, typed unbuilt placeholder,
+  and sidecar;
+- re-stamp a compatible built implementation when only its tool fingerprint or
+  deterministic artifacts are stale;
+- report `model-rebuild` when the contract changed or an alpha protocol, IR, or
+  route is incompatible.
+
+The TypeScript migration records exact input hashes and commits its complete
+write set through the recoverable artifact transaction. An apply refuses a stale
+plan or dirty worktree unless `--force` is present. Preview-era private specs,
+facades, or loader layouts that do not map unambiguously to the current route are
+reported as `manual-intervention`; Jaunt does not rename or rewrite them.
+
 | Flag | Effect |
 |------|--------|
 | `--apply` | Write the planned changes. Refuses on a dirty git tree unless `--force`. |
 | `--force` | Apply despite uncommitted changes. |
+| `--language {py,ts}` | Select one target. Plain migrate selects TypeScript only when `[target.ts]` is the sole configured target. |
 | `--allow-newly-governed` | Also rewrite legacy bodies that would newly govern a symbol. |
-| `--json` | Emit `{applied, actions: [...]}`; each action carries `migration`, `path`, `module`, `symbol`, `kind`, `classification`, and `description`. |
+| `--json` | Emit `{applied, actions: [...]}`. TypeScript plans also include `plan_digest`, `diagnostics`, `blocked`, and `requires_rebuild`. |
 
 Every applied change is printed file by file. After an apply on a legacy-body
 project, `jaunt status` reports the module fresh with no model call.
@@ -511,7 +603,7 @@ project, `jaunt status` reports the module fresh with no model call.
 | `0` | Success |
 | `2` | Config, discovery, or dependency-cycle error; bad or wrong-state job id |
 | `3` | Generation error (LLM / backend / validation / import) |
-| `4` | Pytest failure, contract `check`/`reconcile` block, stale `tree --check`, or a daemon job failed/parked during `jobs wait` |
+| `4` | Pytest/Vitest failure, contract `check`/`reconcile` block, stale `tree --check`, or a daemon job failed/parked during `jobs wait` |
 | `5` | Timeout while waiting for daemon jobs |
 
 Next: [Configuration](/docs/reference/config).

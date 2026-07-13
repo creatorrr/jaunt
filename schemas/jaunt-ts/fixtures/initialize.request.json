@@ -1,0 +1,19 @@
+{
+  "protocol": "jaunt-ts/1-draft.2",
+  "id": "init-1",
+  "method": "initialize",
+  "deadlineMs": 30000,
+  "params": {
+    "root": "/workspace",
+    "projects": ["tsconfig.json"],
+    "testProjects": [],
+    "sourceRoots": ["src"],
+    "testRoots": ["tests"],
+    "generatedDir": "__generated__",
+    "toolOwner": ".",
+    "compilerModulePath": "/workspace/node_modules/typescript/lib/typescript.js",
+    "clientVersion": "1.7.0",
+    "toolVersion": "0.1.0-alpha.0",
+    "generationFingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}

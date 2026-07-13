@@ -1,14 +1,15 @@
 ---
-title: Quickstart
-description: "Go from an empty directory to generated, tested code in about ten minutes."
+title: Python quickstart
+description: "Go from an empty directory to generated, tested Python code."
 ---
 
 You will write a JWT helper as a spec module: one `magic_module` call and two function signatures with their docstrings, no bodies. Jaunt turns that into real Python, you call it like any other module, and then you let Jaunt write the test too.
 
-Every command and every block of output on this page comes from a real run against jaunt 1.4.0.
+The generated snippets and representative output below come from a real run. Token use
+and cost vary with the contract, repository context, cache state, and configured model.
 
 <Callout type="warning">
-  `jaunt build` drives the OpenAI Codex CLI (`codex exec`) and spends tokens. Install the `codex` CLI and run `codex login` before you start. The build on this page cost about 30 cents.
+  `jaunt build` drives the OpenAI Codex CLI (`codex exec`) and spends tokens. Install the `codex` CLI and run `codex login` before you start. Jaunt previews likely model work before a build and reports actual usage afterward.
 </Callout>
 
 ## 1. Create a project
@@ -119,7 +120,6 @@ uv run jaunt build --progress plain
 Cost: 1 API call(s), 0 cache hit(s)
   Tokens: 134,368 prompt + 4,950 completion = 139,318 total
   Cached prompt tokens: 118,016
-  Estimated cost: $0.3083
 Emitted 1 .pyi stub(s).
 specs context: 3k chars (~765 tok) — preamble 91%, blueprint 5%, repo_map 3%, package_context 1%
 Built 1 module(s), skipped 0.
@@ -246,6 +246,7 @@ That is the whole loop: write intent, build, call, test. From here you keep edit
 ## Where to next
 
 <Cards>
+  <Card title="Try the TypeScript target" href="/docs/tutorials/typescript-quickstart" description="Sync a typed facade, generate ordinary TypeScript, and run a Vitest battery." />
   <Card title="Adopt jaunt in an existing project" href="/docs/tutorials/adopt-existing" description="Convert one function in a real repo without touching the rest." />
   <Card title="Whole-class specs and the daemon" href="/docs/tutorials/whole-class-daemon" description="Design a class from a docstring, then let a background daemon rebuild on commit." />
   <Card title="How jaunt works" href="/docs/concepts/how-jaunt-works" description="What runtime forwarding and incremental builds actually do." />

@@ -41,6 +41,14 @@ marked deterministic derive without a model or API key.
 | `contract_async/`      | Async functions and fixtures under contract mode                            |
 | `contract_properties/` | Hypothesis `properties` case kind: conservation, round-trips, bounds — and a bug examples can't catch (deterministic) |
 
+### TypeScript alpha
+
+| Directory                        | Description |
+| -------------------------------- | ----------- |
+| `typescript_slugify/`            | Real `gpt-5.6-sol` TypeScript generation, example/derived Vitest batteries, ordinary JS emit, and runtime demo |
+| `typescript_project_references/` | Composite core/app npm workspace with a cross-project spec dependency and emitted Node demo |
+| `typescript-jwt/`                | Generated JWT library with classes, held-out and contract batteries, mutation strength, packed-consumer smoke, and ejection coverage |
+
 ### Minimal
 
 | Shortcut | Directory   | Description                             |

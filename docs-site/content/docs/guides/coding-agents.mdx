@@ -23,7 +23,8 @@ jaunt instructions --json   # {command, ok, text, project} for tooling
 The output covers the framework rules — the two authoring modes, the build/test
 loop, how to write a good spec, the command and exit-code reference — followed
 by a live snapshot of the current project: resolved `[paths]`, engine and model,
-semantic-gate and repo-map settings, and which modules are stale. It ships with
+or version-2 target routes, semantic-gate and repo-map settings, and which Python or
+TypeScript modules are stale. It ships with
 the package, so the briefing always matches the installed version. The `--json`
 form is what you feed to a harness: `text` holds the primer, `project` holds the
 snapshot.
@@ -37,8 +38,8 @@ the full docs as one plain-text file, built for loading into an agent's context.
 
 ## Machine-Readable Output
 
-The commands agents drive — `build`, `test`, `status`, `specs`, `instructions`,
-`jobs`, `log`, `tree`, `clean`, `watch` — accept `--json` (structured output on
+The commands agents drive — including `sync`, `design`, `build`, `test`, `check`,
+`status`, `specs`, `instructions`, `jobs`, `log`, `tree`, `clean`, and `watch` — accept `--json` (structured output on
 stdout, errors on stderr). A few interactive/hook commands (`guard`,
 `daemon stop`, `skill show`) do not:
 

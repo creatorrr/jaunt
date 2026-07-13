@@ -5,7 +5,8 @@ description: "Use jaunt check as a deterministic, model-free CI gate that fails 
 
 You want CI to fail when someone commits a spec change without rebuilding, or
 lets committed code drift from its contract. You don't want CI to call a model,
-and you don't want to store an API key on the runner. `jaunt check` is that gate.
+and you don't want to store an API key on the runner. `jaunt check` is that gate
+for Python, TypeScript, and mixed workspaces.
 It is also the gate [Jaunt runs on itself](/docs/self-hosting): every pull
 request to the framework passes `jaunt check` over Jaunt's own self-hosted
 modules, keyless.
@@ -14,11 +15,11 @@ modules, keyless.
 
 `jaunt check` verifies two things and never calls the model:
 
-- **Contract batteries** — the committed pytest batteries derived from
-  `@jaunt.contract` docstrings still pass against the committed code.
-- **Magic freshness** — every `@jaunt.magic` spec has a matching, up-to-date
-  build in `__generated__/`. A spec edited without a rebuild is stale; a spec
-  never built is unbuilt.
+- **Contract batteries** — committed pytest or Vitest batteries still pass against
+  the committed code.
+- **Magic freshness** — Python magic specs and private TypeScript `*.jaunt.ts[x]`
+  specs have matching, up-to-date artifacts. A spec edited without a rebuild is
+  stale; a spec never built is unbuilt.
 
 It exits `4` on any blocking state and prints which module blocked and why:
 
@@ -29,9 +30,11 @@ Magic freshness: 1 unbuilt, 0 stale.
 [BLOCK] specs: unbuilt
 ```
 
-Because the check is deterministic and offline, the runner needs no
-`CODEX_API_KEY` and no network. `reconcile` and `build` call the model; `check`
-reads digests and runs committed tests.
+Because the check is deterministic and model-free, the runner needs no
+`CODEX_API_KEY`. `reconcile` and `build` call the model; `check` reads digests,
+validates generated artifacts, and runs committed tests. A TypeScript job must
+install its locked npm dependencies first, including the project-local worker,
+compiler, and Vitest.
 
 ## Exit codes
 
@@ -53,7 +56,7 @@ narrow it:
 
 ```bash
 jaunt check --contracts-only   # only the committed contract batteries
-jaunt check --magic-only       # only @jaunt.magic freshness
+jaunt check --magic-only       # only generated-artifact freshness
 ```
 
 On the same project as above, `--contracts-only` passes (there are no contracts
@@ -140,6 +143,42 @@ jobs:
 
 No secret is wired in, because `check` never reaches the network. If you also
 gate the repo map, add a `uvx --from jaunt jaunt tree --check` step.
+
+## TypeScript targets
+
+Install the Node dependencies from the package named by `[target.ts].tool_owner`,
+then run the same gate. This example uses Node 24; Jaunt's worker supports Node 20
+through 24.
+
+```yaml
+name: jaunt-typescript
+
+on: [push, pull_request]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - run: npm ci
+      - run: uvx --from jaunt jaunt check --language ts
+```
+
+`@usejaunt/ts`, a supported TypeScript compiler, and Vitest must be direct
+`devDependencies` of their owning packages. Add fast-check directly when generated
+property cases use `@prop`. For a mixed workspace, omit `--language ts` to gate both
+targets in one command, or split `--language py` and `--language ts` into separate
+jobs for clearer annotations.
 
 ## Guarding agents locally: `jaunt guard`
 

@@ -1,6 +1,6 @@
 interface:
   display_name: Jaunt Doctor
-  short_description: Check Jaunt workspace health without building.
-  default_prompt: Run Jaunt doctor for this repository and explain each finding.
+  short_description: Check Python and TypeScript Jaunt health without building.
+  default_prompt: Run Jaunt doctor, including the TypeScript toolchain checks, and explain each finding.
 policy:
   allow_implicit_invocation: true

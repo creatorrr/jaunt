@@ -1,0 +1,8 @@
+{
+  "protocol": "jaunt-ts/1-draft.2",
+  "id": "invalidate-1",
+  "method": "invalidate",
+  "params": {
+    "paths": ["src/slug/index.jaunt.ts"]
+  }
+}

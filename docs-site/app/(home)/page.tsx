@@ -55,7 +55,7 @@ const FEATURES: Feature[] = [
   },
   {
     title: 'Contract mode',
-    body: 'Keep hand-written code canonical and let jaunt derive a committed pytest battery from its docstring. The inverse of magic, for code you already trust.',
+    body: 'Keep hand-written code canonical and let jaunt derive a committed pytest or Vitest battery from its contract. The inverse of magic, for code you already trust.',
     href: '/docs/guides/contract-mode',
   },
   {
@@ -72,31 +72,37 @@ export default function HomePage() {
       <section className="px-6 pt-20 pb-14 text-center">
         <div className="mb-4 flex justify-center">
           <Link
-            href="/docs/self-hosting"
+            href="/docs/tutorials/typescript-quickstart"
             className="rounded-full border border-fd-border bg-fd-muted/50 px-4 py-1 text-xs font-medium text-fd-muted-foreground hover:text-fd-foreground"
           >
-            New in 1.5.2: Jaunt builds Jaunt →
+            New in 1.7: TypeScript alpha →
           </Link>
         </div>
         <p className="text-sm font-medium tracking-wide text-fd-muted-foreground">
-          Spec-driven code generation for Python
+          Spec-driven code generation for Python and TypeScript
         </p>
         <h1 className="mx-auto mt-3 max-w-3xl text-4xl font-bold sm:text-5xl">
-          Describe what you want. Jaunt writes the Python.
+          Describe what you want. Jaunt writes the implementation.
         </h1>
         <p className="mx-auto mt-5 max-w-2xl text-fd-muted-foreground">
-          Call <code>jaunt.magic_module(__name__)</code> at the top of a file and every typed stub
-          below it becomes a spec. Jaunt reads the signatures and docstrings and generates real,
-          reviewable Python into your repo. Need per-symbol control? Decorate just that symbol with{' '}
-          <code>@jaunt.magic</code>. It drives the OpenAI Codex CLI, the one supported engine, so you
-          install Codex and run <code>codex login</code> first.
+          Python specs are typed stubs governed by <code>jaunt.magic_module</code>. TypeScript specs
+          are private <code>*.jaunt.ts[x]</code> files analyzed by the project-local{' '}
+          <code>@usejaunt/ts</code> worker. Jaunt drives the OpenAI Codex CLI, validates each
+          candidate with the target&apos;s own toolchain, and commits ordinary reviewable source to
+          your repo.
         </p>
         <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
           <Link
             href="/docs/tutorials/quickstart"
             className="rounded-lg bg-fd-primary px-5 py-2.5 font-medium text-fd-primary-foreground"
           >
-            Quickstart
+            Python quickstart
+          </Link>
+          <Link
+            href="/docs/tutorials/typescript-quickstart"
+            className="rounded-lg border border-fd-border px-5 py-2.5 font-medium"
+          >
+            TypeScript quickstart
           </Link>
           <a
             href="https://github.com/creatorrr/jaunt"
@@ -107,10 +113,21 @@ export default function HomePage() {
             GitHub
           </a>
         </div>
-        <div className="mt-6 flex justify-center">
+        <div className="mt-6 flex flex-wrap justify-center gap-3">
           <a href="https://pypi.org/project/jaunt/" rel="noreferrer noopener" target="_blank">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src="https://img.shields.io/pypi/v/jaunt" alt="jaunt version on PyPI" />
+          </a>
+          <a
+            href="https://www.npmjs.com/package/@usejaunt/ts"
+            rel="noreferrer noopener"
+            target="_blank"
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="https://img.shields.io/npm/v/%40usejaunt%2Fts/next"
+              alt="@usejaunt/ts next version on npm"
+            />
           </a>
         </div>
       </section>
@@ -118,7 +135,9 @@ export default function HomePage() {
       {/* Wow gap */}
       <section className="px-6 pb-16">
         <div className="mx-auto max-w-5xl">
-          <h2 className="text-center text-xl font-semibold">A module of intent in, working code out</h2>
+          <h2 className="text-center text-xl font-semibold">
+            A Python module of intent in, working code out
+          </h2>
           <p className="mx-auto mt-2 max-w-2xl text-center text-sm text-fd-muted-foreground">
             The module on the left is what you commit: one <code>magic_module</code> call, a
             docstring-only <code>Email</code> class, a function stub, and a handwritten helper, all

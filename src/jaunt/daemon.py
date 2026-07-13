@@ -6,16 +6,17 @@ import json as _json
 import errno
 import inspect
 import os
+import contextlib
 import shutil
 import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import Executor, Future
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 from jaunt import jobs as jobs_mod
 from jaunt import journal as journal_mod
@@ -33,6 +34,7 @@ class BuildOutcome:
     error: str = ""
     advisories: tuple[str, ...] = ()
     newly_governed: tuple[str, ...] = ()
+    artifact_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -68,7 +70,10 @@ class Runner(Protocol):
     def probe(self, worktree: Path) -> tuple[dict[str, str], dict[str, str]]: ...
 
     def build(
-        self, worktree: Path, module: str, heartbeat: Heartbeat | None = None
+        self,
+        worktree: Path,
+        module: str,
+        heartbeat: Heartbeat | None = None,
     ) -> BuildOutcome: ...
 
     def gate(self, worktree: Path, module: str) -> GateOutcome: ...
@@ -102,14 +107,23 @@ class CliRunner:
             text=True,
             check=False,
         )
+        if not proc.stdout.strip():
+            return proc.returncode, {"ok": False, "error": (proc.stderr or "no output")[-500:]}
         try:
-            return proc.returncode, _json.loads(proc.stdout or "{}")
+            return proc.returncode, _json.loads(proc.stdout)
         except _json.JSONDecodeError:
             return proc.returncode, {"ok": False, "error": (proc.stderr or proc.stdout)[-500:]}
 
     def _run_build(
-        self, worktree: Path, module: str, heartbeat: Heartbeat | None
+        self,
+        worktree: Path,
+        module: str,
+        heartbeat: Heartbeat | None,
+        *,
+        language: str = "py",
+        artifact_key: str = "",
     ) -> tuple[int, dict]:
+        target = artifact_key if language == "ts" else module
         proc = subprocess.Popen(
             [
                 sys.executable,
@@ -117,7 +131,9 @@ class CliRunner:
                 "jaunt",
                 "build",
                 "--target",
-                module,
+                target,
+                "--language",
+                language,
                 "--json",
                 "--progress",
                 "plain",
@@ -147,8 +163,10 @@ class CliRunner:
         stdout_thread.join()
         stdout = "".join(stdout_parts)
         stderr = "".join(stderr_parts)
+        if not stdout.strip():
+            return proc.returncode, {"ok": False, "error": (stderr or "no output")[-500:]}
         try:
-            return proc.returncode, _json.loads(stdout or "{}")
+            return proc.returncode, _json.loads(stdout)
         except _json.JSONDecodeError:
             return proc.returncode, {"ok": False, "error": (stderr or stdout)[-500:]}
 
@@ -163,29 +181,120 @@ class CliRunner:
         stale = payload.get("stale", [])
         changes = payload.get("stale_changes", {})
         digests = payload.get("digests", {})
-        return {m: changes.get(m, "structural") for m in stale}, digests
+        stale_ids = [str(item) for item in stale] if isinstance(stale, list) else []
+        raw_unbuilt = payload.get("unbuilt", [])
+        unbuilt = {str(item) for item in raw_unbuilt} if isinstance(raw_unbuilt, list) else set()
+        stale_ids.extend(unbuilt)
+        invalid = payload.get("invalid", {})
+        if isinstance(invalid, dict):
+            stale_ids.extend(str(item) for item in invalid)
+
+        version_two = payload.get("schema_version") == 2
+
+        def qualify(value: str) -> str:
+            if value.startswith(("py:", "ts:")) or not version_two:
+                return value
+            return f"py:{value}"
+
+        change_map = changes if isinstance(changes, dict) else {}
+        digest_map = digests if isinstance(digests, dict) else {}
+        qualified_stale: dict[str, str] = {}
+        for item in stale_ids:
+            key = qualify(item)
+            reason = change_map.get(item, change_map.get(key))
+            if reason is None:
+                reason = "unbuilt" if item in unbuilt else "invalid"
+            qualified_stale[key] = str(reason)
+        qualified_digests = {qualify(str(key)): str(value) for key, value in digest_map.items()}
+        return qualified_stale, qualified_digests
 
     def build(
-        self, worktree: Path, module: str, heartbeat: Heartbeat | None = None
+        self,
+        worktree: Path,
+        module: str,
+        heartbeat: Heartbeat | None = None,
+        *,
+        language: str = "py",
+        artifact_key: str = "",
     ) -> BuildOutcome:
-        _, payload = self._run_build(worktree, module, heartbeat)
-        adv = tuple(payload.get("advisories", {}).get(module, ()))
-        ng = tuple(payload.get("newly_governed", {}).get(module, ()))
-        if module in payload.get("refrozen", []):
-            return BuildOutcome(ok=True, refrozen=True, advisories=adv, newly_governed=ng)
-        if module in payload.get("generated", []):
-            return BuildOutcome(ok=True, refrozen=False, advisories=adv, newly_governed=ng)
-        error = str(payload.get("failed", {}).get(module, payload.get("error", "build failed")))
-        return BuildOutcome(ok=False, refrozen=False, error=error.splitlines()[0][:200])
+        key = artifact_key or jobs_mod.qualified_artifact_key(language, module)
+        _, payload = self._run_build(
+            worktree,
+            module,
+            heartbeat,
+            language=language,
+            artifact_key=key,
+        )
+        advisories = payload.get("advisories", {})
+        newly_governed = payload.get("newly_governed", {})
+        adv = (
+            tuple(advisories.get(key, advisories.get(module, ())))
+            if isinstance(advisories, dict)
+            else ()
+        )
+        ng = (
+            tuple(newly_governed.get(key, newly_governed.get(module, ())))
+            if isinstance(newly_governed, dict)
+            else ()
+        )
+        raw_artifacts = payload.get("artifacts", [])
+        artifact_paths = (
+            tuple(str(path) for path in raw_artifacts if isinstance(path, str))
+            if isinstance(raw_artifacts, (list, tuple))
+            else ()
+        )
+        refrozen = payload.get("refrozen", [])
+        if isinstance(refrozen, list) and (key in refrozen or module in refrozen):
+            return BuildOutcome(
+                ok=True,
+                refrozen=True,
+                advisories=adv,
+                newly_governed=ng,
+                artifact_paths=artifact_paths,
+            )
+        generated = payload.get("generated", [])
+        if isinstance(generated, list) and (key in generated or module in generated):
+            return BuildOutcome(
+                ok=True,
+                refrozen=False,
+                advisories=adv,
+                newly_governed=ng,
+                artifact_paths=artifact_paths,
+            )
+        failures = payload.get("failed", {})
+        error = (
+            failures.get(key, failures.get(module, payload.get("error", "build failed")))
+            if isinstance(failures, dict)
+            else payload.get("error", "build failed")
+        )
+        return BuildOutcome(ok=False, refrozen=False, error=_one_line_detail(error))
 
-    def gate(self, worktree: Path, module: str) -> GateOutcome:
-        _, payload = self._run(worktree, "check", "--json")
+    def gate(
+        self,
+        worktree: Path,
+        module: str,
+        *,
+        language: str = "py",
+        artifact_key: str = "",
+    ) -> GateOutcome:
+        key = artifact_key or jobs_mod.qualified_artifact_key(language, module)
+        target = key if language == "ts" else module
+        _, payload = self._run(
+            worktree,
+            "check",
+            "--json",
+            "--magic-only",
+            "--language",
+            language,
+            "--target",
+            target,
+        )
         checked = payload.get("checked", [])
         blocked = payload.get("blocked", [])
         if payload.get("ok", False):
             battery = f"{len(checked) - len(blocked)}/{len(checked)}" if checked else "-"
             return GateOutcome(ok=True, battery=battery)
-        detail = str(payload.get("error", "jaunt check failed")).splitlines()[0][:200]
+        detail = _one_line_detail(payload.get("error", "jaunt check failed"))
         return GateOutcome(ok=False, detail=detail)
 
 
@@ -193,6 +302,10 @@ def _one_line_detail(detail: object, limit: int = 200) -> str:
     text = str(detail).replace("\r", "\n")
     line = next((part.strip() for part in text.splitlines() if part.strip()), "")
     return (line or "-")[:limit]
+
+
+def _job_label(job: jobs_mod.JobRecord) -> str:
+    return job.module if job.language == "py" else job.key
 
 
 class _JobHeartbeat:
@@ -391,20 +504,114 @@ def _remove_worktree(root: Path, path: Path) -> None:
 
 
 def _runner_build(
-    runner: Runner, worktree: Path, module: str, heartbeat: Heartbeat | None
+    runner: Runner,
+    worktree: Path,
+    job: jobs_mod.JobRecord,
+    heartbeat: Heartbeat | None,
 ) -> BuildOutcome:
-    if heartbeat is None:
-        return runner.build(worktree, module)
     try:
         parameters = inspect.signature(runner.build).parameters
     except (TypeError, ValueError):
-        return runner.build(worktree, module, heartbeat=heartbeat)
-    supports_heartbeat = "heartbeat" in parameters or any(
+        build = cast("Callable[..., BuildOutcome]", runner.build)
+        return build(
+            worktree,
+            job.module,
+            heartbeat=heartbeat,
+            language=job.language,
+            artifact_key=job.key,
+        )
+    supports_kwargs = any(
         param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()
     )
-    if supports_heartbeat:
-        return runner.build(worktree, module, heartbeat=heartbeat)
-    return runner.build(worktree, module)
+    kwargs: dict[str, object] = {}
+    if heartbeat is not None and ("heartbeat" in parameters or supports_kwargs):
+        kwargs["heartbeat"] = heartbeat
+    if "language" in parameters or supports_kwargs:
+        kwargs["language"] = job.language
+    if "artifact_key" in parameters or supports_kwargs:
+        kwargs["artifact_key"] = job.key
+    build = cast("Callable[..., BuildOutcome]", runner.build)
+    return build(worktree, job.module, **kwargs)
+
+
+def _runner_gate(runner: Runner, worktree: Path, job: jobs_mod.JobRecord) -> GateOutcome:
+    try:
+        parameters = inspect.signature(runner.gate).parameters
+    except (TypeError, ValueError):
+        gate = cast("Callable[..., GateOutcome]", runner.gate)
+        return gate(
+            worktree,
+            job.module,
+            language=job.language,
+            artifact_key=job.key,
+        )
+    supports_kwargs = any(
+        param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()
+    )
+    kwargs: dict[str, object] = {}
+    if "language" in parameters or supports_kwargs:
+        kwargs["language"] = job.language
+    if "artifact_key" in parameters or supports_kwargs:
+        kwargs["artifact_key"] = job.key
+    gate = cast("Callable[..., GateOutcome]", runner.gate)
+    return gate(worktree, job.module, **kwargs)
+
+
+@contextlib.contextmanager
+def _typescript_tool_link(
+    root: Path,
+    worktree: Path,
+    cfg: JauntConfig,
+    *,
+    enabled: bool,
+) -> Iterator[None]:
+    """Expose the ignored project-local Node installation inside a worktree.
+
+    The link is removed before patch extraction, so it can never enter a daemon
+    proposal.  Worker processes and analyzer state remain worktree-local.
+    """
+
+    target = cfg.typescript_target
+    if not enabled or target is None:
+        yield
+        return
+    source = (root / target.tool_owner / "node_modules").resolve()
+    destination = worktree / target.tool_owner / "node_modules"
+    created = False
+    if source.is_dir() and not destination.exists() and not destination.is_symlink():
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.symlink_to(source, target_is_directory=True)
+        created = True
+    try:
+        yield
+    finally:
+        if created:
+            destination.unlink(missing_ok=True)
+
+
+def _contains_parts(path: str, segment: str) -> bool:
+    parts = Path(path).parts
+    needle = Path(segment).parts
+    return any(parts[index : index + len(needle)] == needle for index in range(len(parts)))
+
+
+def _typescript_patch_allowlist(
+    cfg: JauntConfig,
+    build: BuildOutcome,
+) -> frozenset[str]:
+    """Exact worker-returned artifacts plus generated-dir agent notices."""
+
+    allowed = set(build.artifact_paths)
+    target = cfg.typescript_target
+    if target is None:
+        return frozenset(allowed)
+    for path in build.artifact_paths:
+        if not _contains_parts(path, target.generated_dir):
+            continue
+        parent = Path(path).parent
+        allowed.add((parent / "AGENTS.md").as_posix())
+        allowed.add((parent / "CLAUDE.md").as_posix())
+    return frozenset(allowed)
 
 
 def recover(root: Path) -> list[str]:
@@ -439,20 +646,29 @@ def _execute_job(
     landing.git_out(root, "worktree", "add", "--detach", str(wt), job.base_commit)
     heartbeat = _JobHeartbeat(root, job)
     try:
-        build = _runner_build(runner, wt, job.module, heartbeat)
-        heartbeat.flush()
-        if not build.ok:
-            return JobResult(job_id=job.id, build=build)
-        gate = runner.gate(wt, job.module)
-        if not gate.ok:
-            return JobResult(job_id=job.id, build=build, gate=gate)
+        with _typescript_tool_link(root, wt, cfg, enabled=job.language == "ts"):
+            build = _runner_build(runner, wt, job, heartbeat)
+            heartbeat.flush()
+            if not build.ok:
+                return JobResult(job_id=job.id, build=build)
+            gate = _runner_gate(runner, wt, job)
+            if not gate.ok:
+                return JobResult(job_id=job.id, build=build, gate=gate)
         gen = cfg.paths.generated_dir
 
         def _worker_ignored(path: str) -> bool:
             return path == journal_mod.JOURNAL_FILE
 
-        def _machine_owned(path: str) -> bool:
-            return f"/{gen}/" in f"/{path}"
+        if job.language == "ts":
+            allowed = _typescript_patch_allowlist(cfg, build)
+
+            def _machine_owned(path: str) -> bool:
+                return path in allowed
+
+        else:
+
+            def _machine_owned(path: str) -> bool:
+                return f"/{gen}/" in f"/{path}"
 
         patch = landing.extract_patch(
             wt,
@@ -468,12 +684,23 @@ def _execute_job(
         _remove_worktree(root, wt)
 
 
-def _probe_head(root: Path, head: str, runner: Runner) -> tuple[dict[str, str], dict[str, str]]:
+def _probe_head(
+    root: Path,
+    head: str,
+    cfg: JauntConfig,
+    runner: Runner,
+) -> tuple[dict[str, str], dict[str, str]]:
     probe = _worktrees_dir(root) / "probe"
     _remove_worktree(root, probe)
     landing.git_out(root, "worktree", "add", "--detach", str(probe), head)
     try:
-        return runner.probe(probe)
+        with _typescript_tool_link(
+            root,
+            probe,
+            cfg,
+            enabled=cfg.typescript_target is not None,
+        ):
+            return runner.probe(probe)
     finally:
         _remove_worktree(root, probe)
 
@@ -494,7 +721,7 @@ def _collect_finished(state: DaemonState, root: Path, cfg: JauntConfig) -> None:
                 updated = jobs_mod.mark(root, job, jobs_mod.FAILED, error=error, phase="")
                 _notify(cfg, updated)
                 journal_mod.append_events(
-                    root, [journal_mod.JournalEvent("job-fail", job.module, error, job.id)]
+                    root, [journal_mod.JournalEvent("job-fail", _job_label(job), error, job.id)]
                 )
             continue
         job = jobs_mod.load_job(root, job_id)
@@ -520,6 +747,8 @@ def _notify(
         os.environ,
         JAUNT_JOB_ID=job.id,
         JAUNT_JOB_MODULE=job.module,
+        JAUNT_JOB_LANGUAGE=job.language,
+        JAUNT_JOB_ARTIFACT_KEY=job.key,
         JAUNT_JOB_STATE=state_override or job.state,
     )
     try:
@@ -554,7 +783,7 @@ def _land_pending(root: Path, cfg: JauntConfig, state: DaemonState) -> None:
             updated = jobs_mod.mark(root, job, jobs_mod.FAILED, error=detail, phase="")
             _notify(cfg, updated)
             journal_mod.append_events(
-                root, [journal_mod.JournalEvent("job-fail", job.module, detail, job.id)]
+                root, [journal_mod.JournalEvent("job-fail", _job_label(job), detail, job.id)]
             )
             del state.pending[job_id]
             continue
@@ -564,17 +793,17 @@ def _land_pending(root: Path, cfg: JauntConfig, state: DaemonState) -> None:
         battery = result.gate.battery if result.gate else "-"
         n_adv = len(result.build.advisories)
         detail = f"{cause}; battery {battery}" + (f"; {n_adv} advisories" if n_adv else "")
-        message = landing.build_commit_message(job.module, cause, job.id, job.spec_digest)
+        message = landing.build_commit_message(_job_label(job), cause, job.id, job.spec_digest)
         if not cfg.daemon.auto_commit:
             (jobs_mod.jobs_dir(root) / f"{job.id}.patch").write_text(result.patch, encoding="utf-8")
-            prev = jobs_mod.proposed_for_module(root, job.module)
+            prev = jobs_mod.proposed_for_artifact(root, job.key)
             if prev is not None and prev.id != job.id:
                 jobs_mod.mark(root, prev, jobs_mod.SUPERSEDED)
                 journal_mod.append_events(
                     root,
                     [
                         journal_mod.JournalEvent(
-                            "job-supersede", prev.module, "newer proposal", prev.id
+                            "job-supersede", _job_label(prev), "newer proposal", prev.id
                         )
                     ],
                 )
@@ -590,7 +819,7 @@ def _land_pending(root: Path, cfg: JauntConfig, state: DaemonState) -> None:
             )
             journal_mod.append_events(
                 root,
-                [journal_mod.JournalEvent("job-propose", job.module, detail, job.id)],
+                [journal_mod.JournalEvent("job-propose", _job_label(job), detail, job.id)],
             )
             _notify(cfg, updated)
             del state.pending[job_id]
@@ -609,7 +838,7 @@ def _land_pending(root: Path, cfg: JauntConfig, state: DaemonState) -> None:
             snapshot_len = journal_path.stat().st_size
             journal_mod.append_events(
                 root,
-                [journal_mod.JournalEvent(action, job.module, detail, job.id)],
+                [journal_mod.JournalEvent(action, _job_label(job), detail, job.id)],
             )
             extra_paths = (journal_mod.JOURNAL_FILE,)
         try:
@@ -644,7 +873,8 @@ def _land_pending(root: Path, cfg: JauntConfig, state: DaemonState) -> None:
             )
             _notify(cfg, updated)
             journal_mod.append_events(
-                root, [journal_mod.JournalEvent("job-park", job.module, "landing conflict", job.id)]
+                root,
+                [journal_mod.JournalEvent("job-park", _job_label(job), "landing conflict", job.id)],
             )
         else:
             state.last_head = sha
@@ -664,7 +894,7 @@ def run_once(
     head = _head(root)
     if head != state.last_head:
         try:
-            stale, digests = _probe_head(root, head, runner)
+            stale, digests = _probe_head(root, head, cfg, runner)
         except ProbeError as err:
             detail = _one_line_detail(err)
             if detail != state.last_probe_error:
@@ -676,9 +906,12 @@ def run_once(
             state.last_probe_error = ""
             state.last_head = head
             branch = _branch(root)
-            for module, _change in sorted(stale.items()):
-                digest = digests.get(module, "")
-                existing = jobs_mod.active_for_module(root, module)
+            stale_keys: set[str] = set()
+            for raw_key, _change in sorted(stale.items()):
+                language, module, artifact_key = jobs_mod.split_artifact_key(raw_key)
+                stale_keys.add(artifact_key)
+                digest = digests.get(raw_key, digests.get(artifact_key, digests.get(module, "")))
+                existing = jobs_mod.active_for_artifact(root, artifact_key)
                 if existing is not None:
                     if existing.spec_digest == digest:
                         continue
@@ -688,7 +921,7 @@ def run_once(
                         [
                             journal_mod.JournalEvent(
                                 "job-supersede",
-                                existing.module,
+                                _job_label(existing),
                                 "active job stale; spec changed",
                                 existing.id,
                             )
@@ -696,7 +929,7 @@ def run_once(
                     )
                     state.futures.pop(existing.id, None)
                     state.pending.pop(existing.id, None)
-                parked = jobs_mod.parked_for_module(root, module)
+                parked = jobs_mod.parked_for_artifact(root, artifact_key)
                 if parked is not None:
                     if parked.spec_digest == digest:
                         continue
@@ -706,28 +939,33 @@ def run_once(
                         [
                             journal_mod.JournalEvent(
                                 "job-supersede",
-                                parked.module,
+                                _job_label(parked),
                                 "parked patch stale; spec changed",
                                 parked.id,
                             )
                         ],
                     )
                 job = jobs_mod.JobRecord.new(
-                    module=module, spec_digest=digest, base_commit=head, branch=branch
+                    module=module,
+                    spec_digest=digest,
+                    base_commit=head,
+                    branch=branch,
+                    language=language,
+                    artifact_key=artifact_key,
                 )
                 jobs_mod.save_job(root, job)
 
             # A module absent from the latest probe is no longer stale at this HEAD
             # (spec deleted/ejected/reverted): its in-flight job must never land.
             for job in jobs_mod.list_jobs(root, states=jobs_mod.ACTIVE_STATES):
-                if job.module not in stale:
+                if job.key not in stale_keys:
                     jobs_mod.mark(root, job, jobs_mod.SUPERSEDED, phase="")
                     journal_mod.append_events(
                         root,
                         [
                             journal_mod.JournalEvent(
                                 "job-supersede",
-                                job.module,
+                                _job_label(job),
                                 "module no longer stale; spec removed",
                                 job.id,
                             )

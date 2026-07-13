@@ -17,8 +17,30 @@ tooling that shells out to Jaunt. The payloads below are trimmed from real runs.
 - Progress bars are suppressed. To keep a progress display while parsing JSON,
   use `--progress plain` (progress on stderr, JSON on stdout).
 - `--json` is available on `build`, `test`, `status`, `check`, `specs`, `jobs`,
-  `clean`, `migrate`, `watch`, `instructions`, `init`, `log`, `tree`, `cache`,
-  and `skill`.
+  `sync`, `design`, `clean`, `migrate`, `watch`, `instructions`, `init`, `log`,
+  `tree`, `cache`, and `skill`.
+
+Version-1 Python projects keep these envelopes byte-for-byte. Version-2 workspaces
+add `"schema_version": 2`, qualify top-level IDs (`py:demo.specs`,
+`ts:src/slug/index`), and repeat language-local values under `targets.py` and
+`targets.ts`. TypeScript errors use a structured `{code, message, diagnostics}`
+record; version-1 errors remain strings.
+
+```json
+{
+  "schema_version": 2,
+  "command": "build",
+  "ok": true,
+  "generated": ["ts:src/slug/index"],
+  "skipped": ["py:demo.models"],
+  "refrozen": [],
+  "failed": {},
+  "targets": {
+    "py": {"generated": [], "skipped": ["demo.models"], "refrozen": [], "failed": {}},
+    "ts": {"generated": ["src/slug/index"], "skipped": [], "refrozen": [], "failed": {}}
+  }
+}
+```
 
 ## build
 
@@ -96,6 +118,40 @@ module through the free re-stamp path (text output renders this value as
 `re-stamp: free`). `orphans` lists generated artifacts whose spec no longer exists.
 `tree` reports repo-map drift, or is `null` when the tree is in sync.
 
+A TypeScript status also reports unbuilt and invalid artifacts plus structured
+diagnostics:
+
+```json
+{
+  "schema_version": 2,
+  "command": "status",
+  "ok": true,
+  "fresh": [],
+  "stale": ["ts:src/slug/index"],
+  "stale_changes": {"ts:src/slug/index": "structural"},
+  "unbuilt": ["ts:src/new/index"],
+  "invalid": {
+    "ts:src/bad/index": [
+      {"code": "JAUNT_TS_INVALID", "message": "artifact hash does not match", "severity": "error"}
+    ]
+  },
+  "diagnostics": [],
+  "targets": {
+    "ts": {
+      "fresh": [],
+      "stale": {"src/slug/index": "structural"},
+      "unbuilt": ["src/new/index"],
+      "invalid": {
+        "src/bad/index": [
+          {"code": "JAUNT_TS_INVALID", "message": "artifact hash does not match", "severity": "error"}
+        ]
+      },
+      "orphans": []
+    }
+  }
+}
+```
+
 ## check
 
 ```json
@@ -124,6 +180,10 @@ blocking drift — including an orphan of either kind — sets `ok: false` and e
 `4`. Before the first build the same project reports `"unbuilt": ["demo.specs"]`
 and exits `4`.
 
+In a version-2 TypeScript payload, `magic` is partitioned as `magic.ts` and includes
+`invalid`; `targets.ts.magic` repeats the same language-local state. Structured
+diagnostics remain available at the top level.
+
 ## specs
 
 ```json
@@ -142,6 +202,9 @@ and exits `4`.
 }
 ```
 
+TypeScript `specs` adds the resolved `projects`, package `owners`, and static routes.
+The same spec list, routes, and dependency graph are repeated under `targets.ts`.
+
 ## test
 
 ```json
@@ -154,8 +217,57 @@ and exits `4`.
 }
 ```
 
-`exit_code` is pytest's exit code. `ok` is true only when pytest passed and no
-generation failed. A generation failure exits `3`; a pytest failure exits `4`.
+For Python, `exit_code` is pytest's exit code. A TypeScript payload instead carries
+the protected runner report under `vitest` at both the top level and `targets.ts`.
+`ok` is true only when the target runner passed and no generation failed. A generation
+failure exits `3`; a pytest or Vitest failure exits `4`.
+
+## sync
+
+TypeScript `sync` is model-free. It lists each deterministic boundary artifact it
+wrote and repeats the same paths under `targets.ts`:
+
+```json
+{
+  "schema_version": 2,
+  "command": "sync",
+  "ok": true,
+  "mirrors": ["src/slug/__generated__/index.api.ts"],
+  "placeholders": ["src/slug/__generated__/index.ts"],
+  "created_facades": ["src/slug/index.ts"],
+  "failed": {},
+  "targets": {
+    "ts": {
+      "mirrors": ["src/slug/__generated__/index.api.ts"],
+      "placeholders": ["src/slug/__generated__/index.ts"],
+      "created_facades": ["src/slug/index.ts"],
+      "failed": {}
+    }
+  }
+}
+```
+
+## design
+
+`design` returns a declaration-only patch. The default records but does not apply the
+proposal; a later `--apply` returns the same target with `applied: true` and makes no
+second model call.
+
+```json
+{
+  "schema_version": 2,
+  "command": "design",
+  "ok": true,
+  "target": "ts:src/store/index#TokenStore",
+  "patch": "*** Begin Patch\n…\n*** End Patch",
+  "applied": false,
+  "diagnostics": [],
+  "usage": {"api_calls": 1},
+  "targets": {
+    "ts": {"target": "src/store/index#TokenStore", "applied": false}
+  }
+}
+```
 
 ## jobs
 
@@ -213,6 +325,39 @@ Each entry in `actions` describes one planned or applied change; `classification
 is `re-stamp` for an already-governed spec or `newly-governs` for a legacy body
 that would newly govern a symbol. Neither mode calls the model.
 
+For `jaunt migrate --language ts`, the plan is worker-validated and includes its
+input-bound digest and any work that cannot be completed mechanically:
+
+```json
+{
+  "schema_version": 2,
+  "command": "migrate",
+  "ok": true,
+  "language": "ts",
+  "applied": false,
+  "plan_digest": "sha256:…",
+  "blocked": false,
+  "actions": [
+    {
+      "migration": "typescript-artifacts-v1",
+      "module_id": "ts:src/slug/index",
+      "path": "src/slug/__generated__/index.api.ts",
+      "kind": "api-mirror",
+      "classification": "deterministic-rewrite",
+      "description": "[deterministic-rewrite] repair API mirror: src/slug/__generated__/index.api.ts"
+    }
+  ],
+  "diagnostics": [],
+  "requires_rebuild": []
+}
+```
+
+Possible TypeScript classifications are `deterministic-rewrite`,
+`free-restamp`, `model-rebuild`, and `manual-intervention`. A dry-run with a
+manual item still has `ok: true` because the analysis succeeded; an attempted
+apply returns `ok: false`, writes nothing, and includes an `error`. Successful
+applies also include `applied_paths`.
+
 ## instructions
 
 ```json
@@ -248,7 +393,7 @@ nested build or test documents.
 | `0` | Success |
 | `2` | Config, discovery, or dependency-cycle error; bad or wrong-state job id |
 | `3` | Generation error |
-| `4` | Pytest failure, contract `check`/`reconcile` block, stale `tree --check`, or a daemon job failed/parked during `jobs wait` |
+| `4` | Pytest/Vitest failure, contract `check`/`reconcile` block, stale `tree --check`, or a daemon job failed/parked during `jobs wait` |
 | `5` | Timeout while waiting for daemon jobs |
 
 Next: [Output Locations](/docs/reference/output-layout).

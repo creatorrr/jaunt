@@ -85,12 +85,16 @@ def _propose_job(
     cause: str = "spec change",
     battery: str = "-",
     refrozen: str = "",
+    language: str = "py",
+    artifact_key: str = "",
 ) -> jobs.JobRecord:
     job = jobs.JobRecord.new(
         module=module,
         spec_digest=spec_digest,
         base_commit=_git(root, "rev-parse", "HEAD"),
         branch="main",
+        language=language,
+        artifact_key=artifact_key,
     )
     patch_file = jobs.jobs_dir(root) / f"{job.id}.patch"
     patch_file.parent.mkdir(parents=True, exist_ok=True)
@@ -527,6 +531,58 @@ def test_jobs_discard_marks_and_removes_patch(
     assert reloaded is not None
     assert reloaded.state == jobs.DISCARDED
     assert not patch_file.exists()
+
+
+def test_typescript_proposal_land_revalidates_scoped_target_and_discard_remains_atomic(
+    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    scaffolded_project: Path,
+) -> None:
+    root = scaffolded_project
+    patch, _, paths = _patch_for(
+        root,
+        "src/tokens/machine/index.ts",
+        "// jaunt generated\nexport const token = 'ok';\n",
+    )
+    job = _propose_job(
+        root,
+        patch,
+        paths,
+        module="src/tokens/index",
+        language="ts",
+        artifact_key="ts:src/tokens/index",
+    )
+    checked: list[tuple[str, tuple[str, ...]]] = []
+    monkeypatch.setattr(jaunt.cli, "_job_current_digest", lambda *_args: "d")
+
+    def revalidate(_root, current, _patch, current_paths):
+        checked.append((current.key, tuple(current_paths)))
+        return True, ""
+
+    monkeypatch.setattr(jaunt.cli, "_revalidate_typescript_job_patch", revalidate)
+
+    assert main(["jobs", "land", job.id, "--root", str(root)]) == 0
+    capsys.readouterr()
+    assert checked == [("ts:src/tokens/index", tuple(paths))]
+    assert "regen(ts:src/tokens/index)" in _git(root, "log", "-1", "--format=%s")
+
+    discard_patch, _, discard_paths = _patch_for(
+        root,
+        "src/tokens/machine/other.ts",
+        "// discard me\n",
+    )
+    discarded = _propose_job(
+        root,
+        discard_patch,
+        discard_paths,
+        module="src/tokens/other",
+        language="ts",
+        artifact_key="ts:src/tokens/other",
+    )
+    assert main(["jobs", "discard", discarded.id, "--root", str(root)]) == 0
+    reloaded = jobs.load_job(root, discarded.id)
+    assert reloaded is not None and reloaded.state == jobs.DISCARDED
+    assert not (jobs.jobs_dir(root) / f"{discarded.id}.patch").exists()
 
 
 def test_jobs_discard_wrong_state_exits_2(capsys, monkeypatch, scaffolded_project: Path) -> None:

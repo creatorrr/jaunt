@@ -1,0 +1,23 @@
+{
+  "protocol": "jaunt-ts/1-draft.2",
+  "id": "init-1",
+  "ok": true,
+  "result": {
+    "workerVersion": "0.1.0-alpha.0",
+    "protocol": "jaunt-ts/1-draft.2",
+    "typescriptVersion": "6.0.2",
+    "packageManager": "npm@11",
+    "capabilities": [
+      "analyze",
+      "overlay",
+      "sync",
+      "orphans",
+      "invalidate",
+      "contract-projection"
+    ],
+    "sessionId": "session-1",
+    "epoch": 0,
+    "snapshot": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "inputHashes": {}
+  }
+}

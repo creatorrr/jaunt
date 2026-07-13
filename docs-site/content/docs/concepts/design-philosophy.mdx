@@ -18,9 +18,10 @@ teammate asks where a behavior is defined.
 
 Jaunt exists for the difference between those two situations:
 
-- **Specs are versioned.** A spec is real Python in your repo — signature,
-  types, docstring — not a chat transcript you'll lose. The intent lives next to
-  the code and moves through review and history like anything else.
+- **Specs are versioned.** A Python signature and docstring, or a private
+  TypeScript declaration and TSDoc, is ordinary source in your repo rather than a
+  chat transcript you'll lose. The intent moves through review and history like
+  anything else.
 - **Rebuilds are incremental.** Jaunt hashes each spec's contract and
   regenerates only what changed. Prompting by hand has no memory of what it
   produced last time, so every edit is a fresh, full re-generation you have to
@@ -28,25 +29,27 @@ Jaunt exists for the difference between those two situations:
 - **Dependencies are ordered.** Specs can depend on other specs. Jaunt builds a
   DAG, generates in the right order, and propagates staleness downstream. A chat
   window has no idea your helper changed.
-- **The call site stays plain.** You import the spec module and call it like
-  normal Python; `@jaunt.magic` forwards the call into the generated body. The
-  API you depend on doesn't move when the implementation does.
+- **The call site stays plain.** Python imports its spec module and forwards to the
+  generated body. TypeScript imports a committed facade that resolves through normal
+  compiler and runtime rules. The API you depend on doesn't move when the
+  implementation does.
 
 None of that is magic the model provides. It's the bookkeeping around the model
 that makes generated code something you can live with.
 
-## The docstring is the contract
+## The prose is the contract
 
-The signature is the API Jaunt has to match exactly — names, types, return type,
-`async` or not. The docstring is the behavioral spec: the rules, the edge cases,
-the errors. Together they are the contract, and the generated body is judged
-against them and nothing else.
+The typed declaration is the API Jaunt has to match: names, parameters, return type,
+members, and async behavior. The Python docstring or TypeScript TSDoc is the
+behavioral spec: rules, edge cases, and errors. Together they are the contract, and
+the generated body is judged against them and nothing else.
 
-This has a sharp consequence: if a behavior isn't in the docstring, the model
+This has a sharp consequence: if a behavior isn't in the contract prose, the model
 shouldn't invent it, and you shouldn't rely on it. Behavior that lives only in
 the generated code is behavior that will vanish on the next rebuild. When you
-find yourself wanting to edit `__generated__/`, that's the signal to edit the
-spec instead — otherwise your change isn't versioned, and it won't survive.
+find yourself wanting to edit a generated Python module, TypeScript implementation,
+API mirror, or sidecar, that's the signal to edit the spec instead. Otherwise your
+change isn't versioned, and it won't survive.
 
 ## What's deterministic, what isn't
 
@@ -57,18 +60,19 @@ non-determinism can't leak into your workflow.
 
 Deterministic, no model involved:
 
-- **Change detection.** The AST-normalized digest decides what's stale from the
-  contract text, the same way every time.
-- **Validation.** Every generated module passes AST and type checks before it's
-  written; a body that doesn't parse or typecheck never lands.
+- **Change detection.** A normalized Python AST or TypeScript contract IR decides
+  what's stale from the contract, the same way every time.
+- **Validation.** Python passes AST and type checks. TypeScript candidates are
+  composed behind a deterministic public boundary and checked in a compiler overlay.
+  A candidate that fails its target's checks never lands.
 - **`jaunt check`.** The CI gate verifies committed artifacts against their
   contracts with no API key and no model call. It gives the same verdict on your
   machine and in CI.
 
 Non-deterministic, model involved:
 
-- **Generation itself**, and the optional semantic gate that judges whether a
-  reworded docstring changed the contract.
+- **Generation itself**, and the optional semantic gate that judges whether
+  reworded docstring or TSDoc prose changed the contract.
 
 The upshot: the model proposes, and a deterministic layer decides whether to
 keep the result. An artifact stays frozen until one of its inputs changes, so
@@ -87,8 +91,8 @@ tool when:
   exact allocations and the exact loop, you want to be the author, not the
   reviewer.
 - **The invariants are too tight to write down.** Complex stateful systems whose
-  correctness lives in cross-cutting invariants are hard to pin in a docstring,
-  and what you can't specify, the model can't reliably hit.
+  correctness lives in cross-cutting invariants are hard to pin in behavioral
+  prose, and what you can't specify, the model can't reliably hit.
 - **You depend on fragile runtime behavior.** Code that leans on an exact
   library version or an undocumented quirk is a poor fit for a tool that
   regenerates freely.
@@ -103,10 +107,11 @@ specific sharp edges.
 
 ## What it costs
 
-Each stale module is one `codex exec` call, plus optional calls for PyPI skills
-and the project overview if you enabled them. Incremental builds mean you pay
-for what changed, not for the whole tree, and the semantic gate turns an
-equivalent docstring edit into one cheap judge call instead of a full rebuild.
+Each stale module that needs a new implementation is one `codex exec` call, plus
+optional model work for Python package skills and the project overview when enabled.
+Fingerprint-only drift re-stamps without generation; equivalent prose needs only the
+semantic judge. TypeScript npm skills are rendered locally from installed package
+metadata. Incremental builds mean you pay for what changed, not for the whole tree.
 
 `jaunt build` prints a cost summary per run, and `jaunt build --json` reports
 `context_stats` — how much context each module's prompt actually pulled in,

@@ -1,6 +1,6 @@
 ---
 title: How It Works
-description: "The mental model: discovery, DAG builds, prompts, digests, and runtime forwarding."
+description: "The mental model: target discovery, DAG builds, prompts, validation, and freshness."
 ---
 
 Jaunt has one loop: you write specs, Jaunt generates modules, you review, you
@@ -12,23 +12,30 @@ tool follows from it.
 ```text
 You write specs
   -> Jaunt discovers them (source_roots / test_roots)
-  -> builds a dependency graph (explicit deps + best-effort inference)
+  -> routes them through the Python or TypeScript target
+  -> builds a dependency graph
   -> for each module:
-       - build prompt = preamble + system template + your spec source (+ extras)
-       - Jaunt drives `codex exec` to generate Python
-       - Jaunt validates + writes to __generated__/
-  -> at runtime, @jaunt.magic forwards calls into __generated__/
+       - build prompt = target template + contract + project context
+       - Jaunt drives `codex exec` to propose an implementation
+       - the target validates the complete candidate
+       - Jaunt writes the artifact transaction
+  -> Python imports forward from the spec module
+  -> TypeScript consumers import the committed facade
 ```
+
+Python discovery imports prescreened spec modules and uses Python ASTs, ty, and
+pytest. TypeScript discovery does not execute application or spec modules: the
+project-local `@usejaunt/ts` worker parses private `*.jaunt.ts[x]` inputs with the
+owning TypeScript compiler. It validates candidates in an in-memory compiler overlay
+before any implementation, API mirror, or sidecar is replaced.
 
 ## What the model sees
 
 At build time Jaunt sends the model a prompt built from a few pieces:
 
-- A static Jaunt preamble that frames the framework and the
-  signature/docstring contract.
-- A system template (packaged under `src/jaunt/prompts/`).
-- Your spec's **source segment**: signature, docstring, type hints, decorator
-  options.
+- A target-specific system template (packaged under `src/jaunt/prompts/`).
+- Your spec's **source segment**: the Python signature/docstring/decorator options,
+  or the TypeScript declaration/TSDoc and marker options.
 - Optional per-spec context, such as `prompt="..."`.
 - A repo map rendered from `treedocs.yaml`, on by default (see
   [Repo Context](/docs/concepts/repo-context)).
@@ -42,12 +49,13 @@ nothing more.
 ## The Codex engine
 
 Jaunt has a single generation engine, the OpenAI **Codex CLI**. For each module
-Jaunt spawns one `codex exec` subprocess, hands it the rendered prompt, lets
-Codex edit inside a sandbox, then validates the result before writing it into
-`__generated__/`.
+Jaunt spawns one `codex exec` subprocess and hands it the rendered prompt. Python
+validates the proposed module before writing it. TypeScript composes the proposed
+internal bindings with its deterministic public boundary, then checks the complete
+overlay through the owning project and affected project references before writing.
 
 Everything around that step — discovery, staleness, validation, file locations,
-and the runtime forwarding model — belongs to Jaunt, not to Codex. See
+and runtime integration — belongs to Jaunt, not to Codex. See
 [Codex Engine](/docs/concepts/codex-engine).
 
 ## Incremental rebuilds
@@ -88,7 +96,12 @@ there is no barrier between "levels." A module that **fails** marks only its
 dependents failed (recursively); the rest of the graph keeps building. You get
 the partial result plus a precise list of what was skipped and why.
 
-## Runtime forwarding
+## Python runtime forwarding
+
+TypeScript does not use runtime forwarding or a loader hook. Production code imports
+the ordinary facade next to the private spec; normal `tsc`, bundler, and Node
+resolution take over from there. See the
+[TypeScript target guide](/docs/guides/typescript#author-a-module).
 
 A spec module does not generate code when you call it. It forwards your call
 into the generated module under `__generated__/`. If that module exists, your

@@ -3,6 +3,7 @@
   "pages": [
     "writing-magic-specs",
     "writing-test-specs",
+    "typescript",
     "dependencies",
     "spec-tips",
     "contract-mode",

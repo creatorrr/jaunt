@@ -1,0 +1,47 @@
+{
+  "protocol": "jaunt-ts/1-draft.2",
+  "id": "workspace-1",
+  "ok": true,
+  "result": {
+    "sessionId": "session-1",
+    "epoch": 0,
+    "snapshot": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "inputHashes": {
+      "tsconfig.json": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "projects": [
+      {
+        "id": "tsconfig.json",
+        "configPath": "tsconfig.json",
+        "role": "production",
+        "references": [],
+        "rootFiles": ["src/slug/index.jaunt.ts"],
+        "compilerOptionsHash": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      }
+    ],
+    "routes": [
+      {
+        "specPath": "src/slug/index.jaunt.ts",
+        "facadePath": "src/slug/index.ts",
+        "apiMirrorPath": "src/slug/__generated__/index.api.ts",
+        "implementationPath": "src/slug/__generated__/index.ts",
+        "sidecarPath": "src/slug/__generated__/index.jaunt.json",
+        "moduleId": "ts:src/slug/index",
+        "project": "tsconfig.json",
+        "packageOwner": "."
+      }
+    ],
+    "specs": [
+      {
+        "moduleId": "ts:src/slug/index",
+        "specPath": "src/slug/index.jaunt.ts",
+        "project": "tsconfig.json",
+        "packageOwner": ".",
+        "symbols": ["slugify"]
+      }
+    ],
+    "testSpecs": [],
+    "contracts": [],
+    "diagnostics": []
+  }
+}

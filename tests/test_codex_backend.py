@@ -642,3 +642,53 @@ def test_build_prompt_build_kind_has_implementer_section() -> None:
     prompt = backend._build_prompt(ctx, Path("pkg/__generated__/m.py"), None)
     assert "Implementer role:" in prompt
     assert "Tester role:" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_run_codex_exec_terminates_child_when_cancelled(monkeypatch) -> None:
+    import jaunt.generate.codex_backend as cb
+
+    started = asyncio.Event()
+
+    class BlockingProcess:
+        returncode: int | None = None
+        terminated = False
+        killed = False
+
+        async def communicate(self, _stdin: bytes) -> tuple[bytes, bytes]:
+            started.set()
+            await asyncio.Future()
+            raise AssertionError("unreachable")
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+
+        async def wait(self) -> int:
+            self.returncode = -15
+            return self.returncode
+
+    process = BlockingProcess()
+
+    async def fake_exec(*_args, **_kwargs):
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    task = asyncio.create_task(
+        cb.run_codex_exec(
+            prompt="work",
+            cwd="/tmp",
+            sandbox="read-only",
+            model="gpt-5.6-sol",
+            reasoning_effort="medium",
+        )
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert process.terminated is True
+    assert process.killed is False

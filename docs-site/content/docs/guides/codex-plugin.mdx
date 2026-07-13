@@ -4,7 +4,7 @@ description: "Install Jaunt's Codex plugin for workspace-aware build skills, fre
 ---
 
 Jaunt's Codex plugin packages five CLI-backed skills and two hooks. It does not
-run an MCP server or app connector. Version 1.0.0 is distributed from this
+run an MCP server or app connector. Version 1.1.0 is distributed from this
 repository's `.agents/plugins/marketplace.json`.
 
 ## Install
@@ -23,8 +23,12 @@ codex plugin add jaunt@jaunt-codex-plugins
 ```
 
 Local mode verifies `.agents/plugins/marketplace.json`, adds the clone root as
-the marketplace, and installs the same plugin reference. Both modes are
-idempotent.
+the marketplace, and installs the same plugin reference. On a rerun, Git mode
+upgrades the marketplace snapshot. Since Codex has no plugin-update command,
+the installer re-adds the plugin to refresh its cache. Current Codex releases
+refresh in place; if an older CLI reports an already-installed error, the
+installer removes and re-adds it. Local mode performs the same refresh without
+a Git upgrade.
 
 Start a new Codex session after installation. Open `/hooks` to inspect and
 trust the bundled hook definitions; changed hooks require review again.
@@ -38,8 +42,9 @@ that provides Bash).
   generated artifacts.
 - `$jaunt:build` resolves the workspace, previews likely model calls, builds,
   reports actual cost, and runs the gates.
-- `$jaunt:doctor` checks workspace health without building.
-- `$jaunt:convert` runs only when explicitly invoked.
+- `$jaunt:doctor` checks Python and TypeScript workspace health, including the
+  Node/npm/worker/compiler setup, without building.
+- `$jaunt:convert` converts Python or TypeScript only when explicitly invoked.
 - `$jaunt:first-build-reviewer` runs when explicitly invoked or delegated by
   the build workflow.
 
@@ -73,8 +78,9 @@ The build skill reports the actual cost after the command completes.
 
 ## Hooks
 
-The SessionStart hook reads `cwd` from its JSON payload and scans for at most
-twelve workspaces, injecting a one-line freshness and orphan summary for each.
+The SessionStart hook reads `cwd` from its JSON payload and scans for a bounded
+set of workspaces, injecting a one-line freshness and orphan summary for each.
+TypeScript summaries include unbuilt, invalid, and diagnostic state.
 `jaunt status` imports discovered spec modules, so trust the SessionStart hook
 only in workspaces whose Python code you trust.
 
@@ -88,6 +94,10 @@ corresponding `.py` spec.
 Malformed payloads, missing configuration, missing executables, command
 failures, and timeouts fail open. A hook is a useful guardrail, not a complete
 security boundary.
+
+Plugin commands select the runner in this order: a compatible installed `jaunt`,
+`uv run --no-sync jaunt` inside a uv project, then `uvx jaunt`. The final path
+keeps JavaScript-only projects independent of a Python project scaffold.
 
 See the official [plugin](https://learn.chatgpt.com/docs/build-plugins),
 [skill](https://learn.chatgpt.com/docs/build-skills), and

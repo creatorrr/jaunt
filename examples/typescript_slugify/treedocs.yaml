@@ -1,0 +1,13 @@
+# yaml-language-server: $schema=https://dandylyons.github.io/treedocs/schemas/0.2.0/treedocs.schema.json
+project:
+  last_updated: '2026-07-13'
+  name: typescript_slugify
+  version: '2'
+schema_version: 0.2.0
+signature: sha256:974595d8f437d75447d10c2c7f89c6d2a94e7be5358818aeba3a70c29ceadf8c
+tree:
+  src:
+    _doc: 'package: app, index, index.jaunt'
+    app.ts: TypeScript module
+    index.jaunt.ts: 'specs: slugify'
+    index.ts: TypeScript module

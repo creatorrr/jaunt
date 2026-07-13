@@ -19,12 +19,25 @@ def plugin_install_command() -> list[str]:
     return ["codex", "plugin", "add", PLUGIN_REF]
 
 
+def marketplace_upgrade_command() -> list[str]:
+    """Return argv for refreshing the configured Git marketplace snapshot."""
+    return ["codex", "plugin", "marketplace", "upgrade", MARKETPLACE_NAME]
+
+
+def plugin_remove_command() -> list[str]:
+    """Return argv for removing the cached plugin before a supported refresh."""
+    return ["codex", "plugin", "remove", PLUGIN_REF]
+
+
 def classify_result(returncode: int, stdout: str, stderr: str) -> str:
     """Classify success, an idempotent already-present result, or failure."""
+    combined = f"{stdout}\n{stderr}".lower()
+    if "different source" in combined or "remove it before" in combined:
+        return "error"
+    if "already" in combined:
+        return "already"
     if returncode == 0:
         return "ok"
-    if "already" in f"{stdout}\n{stderr}".lower():
-        return "already"
     return "error"
 
 

@@ -1,0 +1,27 @@
+{
+  "name": "jaunt-typescript-project-references",
+  "version": "0.0.0",
+  "description": "Jaunt TypeScript project-reference example",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "tooling:build": "npm --prefix ../../packages/jaunt-ts run build",
+    "emit": "tsc -b tsconfig.json --pretty false",
+    "typecheck": "npm run --silent emit && tsc -p tsconfig.test.json --noEmit --pretty false",
+    "test": "vitest run",
+    "demo": "npm run --silent emit && node packages/app/dist/demo.js"
+  },
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "@jaunt-examples/app": "0.0.0",
+    "@jaunt-examples/core": "0.0.0",
+    "@types/node": "^26.1.1",
+    "@usejaunt/ts": "file:../../packages/jaunt-ts",
+    "fast-check": "^4.9.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
+  }
+}

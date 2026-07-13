@@ -181,3 +181,119 @@ def greet(name: str) -> str:
     """
     ...
 '''
+
+
+TYPESCRIPT_INIT_TEMPLATE = """\
+version = 2
+
+[target.ts]
+source_roots = ["src"]
+test_roots = ["tests"]
+projects = ["tsconfig.json"]
+test_projects = ["tsconfig.test.json"]
+tool_owner = "."
+generated_dir = "__generated__"
+test_runner = "vitest"
+fast_check_runs = 50
+
+[build]
+jobs = 8
+
+[test]
+jobs = 4
+
+[codex]
+model = "gpt-5.6-sol"
+reasoning_effort = "medium"
+sandbox = "workspace-write"
+
+[semantic_gate]
+enabled = true
+model = "gpt-5.6-luna"
+reasoning_effort = "medium"
+"""
+
+
+TYPESCRIPT_SPEC_TEMPLATE = """\
+import * as jaunt from "@usejaunt/ts/spec";
+
+jaunt.magicModule();
+
+/** Return a friendly greeting for `name`, including the name verbatim. */
+export function greet(name: string): string {
+  return jaunt.magic();
+}
+"""
+
+
+TYPESCRIPT_CONTEXT_TEMPLATE = """\
+/**
+ * Handwritten runtime dependencies for generated implementations belong here.
+ *
+ * Keep this module a one-way leaf: do not value-import the public facade,
+ * generated implementation, or private Jaunt spec from it.
+ */
+export {};
+"""
+
+
+TYPESCRIPT_FACADE_TEMPLATE = """\
+export * from "./index.context.js";
+export * from "./__generated__/index.js";
+"""
+
+
+TYPESCRIPT_TEST_SPEC_TEMPLATE = """\
+import * as jaunt from "@usejaunt/ts/spec";
+import { greet } from "../src/index.jaunt.js";
+
+jaunt.magicModule();
+
+/** `greet("Ada")` includes "Ada" and reads as a friendly greeting. */
+export function greetExample(): void {
+  jaunt.testSpec({ targets: [greet] });
+}
+"""
+
+
+TYPESCRIPT_TSCONFIG_TEMPLATE = """\
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "declaration": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "types": ["node"],
+    "verbatimModuleSyntax": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx"],
+  "exclude": ["**/*.jaunt.ts", "**/*.jaunt.tsx", "**/*.jaunt-test.ts", "**/*.jaunt-test.tsx"]
+}
+"""
+
+
+# NodeNext derives a plain `.ts` file's module format from the nearest
+# package.json. Explicit CommonJS packages need TypeScript to lower authored
+# import/export syntax instead of preserving it for Node to reject at runtime.
+TYPESCRIPT_COMMONJS_TSCONFIG_TEMPLATE = TYPESCRIPT_TSCONFIG_TEMPLATE.replace(
+    '    "verbatimModuleSyntax": true,\n',
+    '    "verbatimModuleSyntax": false,\n',
+)
+
+
+TYPESCRIPT_TEST_TSCONFIG_TEMPLATE = """\
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "types": ["node", "vitest/globals"]
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "tests/**/*.ts", "tests/**/*.tsx"],
+  "exclude": ["**/*.jaunt.ts", "**/*.jaunt.tsx", "**/*.jaunt-test.ts", "**/*.jaunt-test.tsx"]
+}
+"""

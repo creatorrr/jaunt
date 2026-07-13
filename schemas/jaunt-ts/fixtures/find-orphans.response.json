@@ -1,0 +1,18 @@
+{
+  "protocol": "jaunt-ts/1-draft.2",
+  "id": "orphans-1",
+  "ok": true,
+  "result": {
+    "sessionId": "session-1",
+    "epoch": 0,
+    "snapshot": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "inputHashes": {},
+    "artifacts": [
+      {
+        "path": "src/removed/__generated__/index.ts",
+        "kind": "implementation",
+        "moduleId": "ts:src/removed/index"
+      }
+    ]
+  }
+}

@@ -1,27 +1,29 @@
 ---
-title: Skills (Builtin + Auto-Generated PyPI)
-description: "Jaunt seeds library 'skills' into the Codex workspace so the builder knows your third-party libraries."
+title: Package Skills
+description: "Jaunt seeds builtin and package-specific skills into the Codex workspace."
 ---
 
 Your specs import a third-party library and the generated code uses its API in a
-way that's subtly wrong or out of date. Skills fix that. Jaunt extracts real
-usage patterns from PyPI READMEs, turns them into short reference "skills", and
-makes them available to the builder so it writes against the actual API.
+way that's subtly wrong or out of date. Skills give Codex version-specific package
+context. Python projects can generate skills from PyPI metadata; TypeScript projects
+materialize deterministic skills from installed direct npm dependencies.
 
 `jaunt build` runs a best-effort pre-build step that generates a **skill** for
 each external library your project imports. Skills are not prompt text: Jaunt
 seeds them into the Codex workspace under `.agents/skills/`, where `codex exec`
 discovers them natively.
 
-There are two related skill workflows in Jaunt:
+There are three related skill workflows in Jaunt:
 
 - automatic PyPI skill generation during `jaunt build`
+- automatic npm skill materialization for TypeScript generation
 - explicit user-managed skill authoring through `jaunt skill build <name>`
 
-Both run through the Codex engine, so the skill-generation steps drive
-`codex exec` just like `jaunt build` and `jaunt test` do.
+PyPI generation and explicit user-managed authoring run through the Codex engine.
+TypeScript npm skills are rendered locally from installed package metadata and README
+text, so preparing them adds no model call.
 
-## What It Does
+## Python packages
 
 On every `jaunt build`:
 
@@ -38,6 +40,19 @@ On every `jaunt build`:
 
 If any piece fails (resolution, PyPI fetch, generation, write), Jaunt prints a warning and continues building without those missing skills.
 
+## TypeScript packages
+
+Before TypeScript generation, Jaunt reads each owning package's direct runtime
+`dependencies`, `peerDependencies`, and `optionalDependencies`. For each installed
+package it writes a versioned skill such as
+`.agents/skills/npm-zod/SKILL.md`, using only the installed manifest and README.
+Transitive packages, lockfile-only entries, and `devDependencies` are ignored.
+
+Only files carrying Jaunt's npm provenance fields are updated or removed. A
+user-authored `SKILL.md` at the same path is skipped. Missing packages and filesystem
+errors are warnings; they do not fail the build. The generated skill tells Codex to
+use public package exports and leaves the owning compiler and tests as the verdict.
+
 ## Where Skills Are Stored
 
 Skills are stored inside your project:
@@ -49,6 +64,8 @@ Skills are stored inside your project:
       requests/
         SKILL.md
       pydantic/
+        SKILL.md
+      npm-zod/
         SKILL.md
 ```
 
@@ -79,7 +96,7 @@ skills and seeds them by default:
 
 ```toml
 [skills]
-auto = true                 # auto-generate PyPI skills for imported libs
+auto = true                 # prepare package skills for the active target
 builtin = true              # seed Jaunt's bundled builtin skills
 builtin_skills = [          # the default set (override to trim/extend)
   "asyncpg", "dbos", "descope", "fastmcp", "openai", "pydantic", "pydantic-ai",
@@ -87,12 +104,15 @@ builtin_skills = [          # the default set (override to trim/extend)
 ]
 ```
 
-Disable per build with `jaunt build --no-auto-skills` (PyPI generation) or
-`--no-builtin-skills` (bundled skills).
+Disable package-specific skills per build with `jaunt build --no-auto-skills`, or
+disable bundled skills with `--no-builtin-skills`.
 
 ## Security Note (Prompt Injection Hygiene)
 
-PyPI READMEs are treated as **untrusted input**. The skill generator is instructed to ignore "instructions" inside READMEs and only extract factual usage and API patterns.
+Package READMEs are treated as **untrusted input**. Python's skill generator is
+instructed to extract factual usage rather than follow README instructions. npm skill
+text is bounded and rendered into a fixed template; the generated implementation is
+still checked by the TypeScript compiler and tests.
 
 ## Troubleshooting
 
@@ -100,6 +120,8 @@ PyPI READMEs are treated as **untrusted input**. The skill generator is instruct
   - `uv run python examples/run_example.py pydantic test`
 
 - "It didn't generate a skill": the import might be stdlib or internal, the dist might not be installed, or the README fetch/generation might have failed. Jaunt should emit a warning but still proceed with the build.
+- "It didn't create an npm skill": the package must be an installed direct runtime,
+  peer, or optional dependency of a configured TypeScript package owner.
 - "Wrong version": skills are keyed to what's installed in the environment running `jaunt build`. Update your environment, rerun build, and Jaunt should refresh generated skills.
 - "I want to edit a checked-in skill directly": use `jaunt skill build <name>` on a
   user-managed skill directory under `.agents/skills/<name>/`.

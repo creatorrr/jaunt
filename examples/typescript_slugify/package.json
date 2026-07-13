@@ -1,0 +1,21 @@
+{
+  "name": "jaunt-typescript-slugify",
+  "version": "0.0.0",
+  "description": "Jaunt TypeScript generated slugify example",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "emit": "tsc -p tsconfig.json",
+    "demo": "npm run --silent emit && node dist/app.js"
+  },
+  "license": "UNLICENSED",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "@usejaunt/ts": "file:../../packages/jaunt-ts",
+    "fast-check": "^4.9.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
+  }
+}

@@ -1,7 +1,7 @@
 {
   "name": "jaunt",
-  "version": "1.0.0",
-  "description": "Build and maintain Jaunt spec-driven Python projects with guarded generated files, workspace-aware status, and CLI-backed workflows.",
+  "version": "1.1.0",
+  "description": "Build and maintain Jaunt spec-driven Python and TypeScript projects with guarded generated files, workspace-aware status, and CLI-backed workflows.",
   "author": {
     "name": "Jaunt Contributors",
     "url": "https://github.com/creatorrr"
@@ -9,20 +9,20 @@
   "homepage": "https://jaunt.ing/docs/guides/codex-plugin",
   "repository": "https://github.com/creatorrr/jaunt",
   "license": "MIT",
-  "keywords": ["jaunt", "spec-driven", "code-generation", "python", "codex"],
+  "keywords": ["jaunt", "spec-driven", "code-generation", "python", "typescript", "codex"],
   "skills": "./skills/",
   "interface": {
     "displayName": "Jaunt",
-    "shortDescription": "Build and review Jaunt specs",
-    "longDescription": "Use Jaunt from Codex with workspace-aware build, conversion, doctor, and first-build review workflows. Bundled hooks summarize freshness and block direct edits to generated Python and provenance-headed stubs.",
+    "shortDescription": "Build Python and TypeScript Jaunt specs",
+    "longDescription": "Use Jaunt from Codex with workspace-aware Python and TypeScript build, conversion, doctor, and first-build review workflows. Bundled hooks report both targets and block direct edits to generated implementations, mirrors, sidecars, tests, and provenance-headed stubs.",
     "developerName": "Jaunt Contributors",
     "category": "Developer Tools",
     "capabilities": ["Read", "Write"],
     "websiteURL": "https://jaunt.ing",
     "defaultPrompt": [
-      "Check this Jaunt workspace before I edit a spec.",
-      "Build the stale Jaunt modules and verify the result.",
-      "Run Jaunt doctor and explain the findings."
+      "Check this Python or TypeScript Jaunt workspace before I edit a spec.",
+      "Build the stale Jaunt targets and verify their native tests.",
+      "Run Jaunt doctor and check the TypeScript toolchain."
     ]
   }
 }

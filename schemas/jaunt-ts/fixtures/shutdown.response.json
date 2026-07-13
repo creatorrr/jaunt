@@ -1,0 +1,8 @@
+{
+  "protocol": "jaunt-ts/1-draft.2",
+  "id": "shutdown-1",
+  "ok": true,
+  "result": {
+    "shutdown": true
+  }
+}

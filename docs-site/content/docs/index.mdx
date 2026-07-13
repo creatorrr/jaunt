@@ -1,18 +1,31 @@
 ---
 title: jaunt, don't code.
-description: "Spec-driven code generation for Python: write a typed stub with a docstring, and jaunt writes the implementation."
+description: "Spec-driven code generation for Python and TypeScript: write a typed contract, and Jaunt writes the implementation."
 ---
 
 > *Tyger Tyger, burning bright, / In the forests of the night*
 > -- William Blake, via Alfred Bester's *The Stars My Destination*
 
-Jaunt is a Python library and CLI for spec-driven code generation. You write a **spec** -- a real function or class with types and a docstring, but no body -- and jaunt generates the implementation into an `__generated__/` package next to your source. Call `jaunt.magic_module(__name__)` once at the top of a file and every typed stub below it is a spec; reach for the `@jaunt.magic` decorator when you want to govern a single symbol or pass per-symbol options.
+Jaunt is a CLI for spec-driven code generation in Python and TypeScript. Python is
+stable; the TypeScript target is an alpha in Jaunt 1.7. In either language, you write
+a typed contract and Jaunt generates a validated implementation beside it.
+
+In Python, call `jaunt.magic_module(__name__)` once and every typed stub below it is a
+spec; reach for `@jaunt.magic` when you need per-symbol options. In TypeScript, private
+`*.jaunt.ts` and `*.jaunt.tsx` files are parsed without execution by the project-local
+`@usejaunt/ts` worker. Production code imports a normal committed facade, and emitted
+JavaScript has no Jaunt runtime dependency.
 
 The spec is the contract. Jaunt reads your signature and docstring, drives the OpenAI Codex CLI to write the code, checks the result against the signature you declared, and stamps each file with a provenance header. Edit a docstring and rebuild: only the specs whose contract actually changed regenerate, because jaunt hashes each spec with its dependencies.
 
-There is a second mode for code you already trust. [`@jaunt.contract`](/docs/guides/contract-mode) keeps your committed implementation canonical and derives a pytest battery from its docstring, so the docstring stays honest as the code evolves. The name comes from Bester's 1956 novel, where to *jaunt* is to teleport by thinking about where you want to be.
+There is a second mode for code you already trust. Python's
+[`@jaunt.contract`](/docs/guides/contract-mode) derives a pytest battery from the
+committed implementation and its docstring. TypeScript contract mode adopts an
+exported function or concrete class and derives a committed Vitest battery from its
+declaration and TSDoc. The name comes from Bester's 1956 novel, where to *jaunt* is to
+teleport by thinking about where you want to be.
 
-## The gap it closes
+## Python in one file
 
 You write the stubs. Jaunt writes the rest. One `magic_module` call governs the whole file: the docstring-only class, the function stub, and nothing else. The handwritten constant and helper stay yours.
 
@@ -44,14 +57,18 @@ def _render_debug(email: Email) -> str:      # real body → handwritten helper
     return f"<{email.from_} -> {email.to}>"
 ```
 
-The [quickstart](/docs/tutorials/quickstart) runs a full module end to end and shows the generated body, the cost line, and the test jaunt writes for it.
+The [Python quickstart](/docs/tutorials/quickstart) runs a full module end to end. The
+[TypeScript quickstart](/docs/tutorials/typescript-quickstart) starts from an empty
+directory, synchronizes the typed facade, builds the implementation, and runs the
+generated Vitest battery.
 
 And since 1.5.2, [jaunt builds jaunt](/docs/self-hosting): parts of the framework you install are generated from their own docstring specs, and `jaunt check` gates the framework's own drift in CI.
 
 ## Find your way around
 
 <Cards>
-  <Card title="Start here" href="/docs/tutorials/quickstart" description="The quickstart: an empty directory to a generated, tested module in about ten minutes." />
+  <Card title="Python quickstart" href="/docs/tutorials/quickstart" description="An empty directory to a generated, tested Python module." />
+  <Card title="TypeScript quickstart" href="/docs/tutorials/typescript-quickstart" description="Install @usejaunt/ts, sync the typed boundary, then build and test ordinary TypeScript." />
   <Card title="Jaunt builds Jaunt" href="/docs/self-hosting" description="Since 1.5.2 the framework is its own adopter — the proof, the boundaries, and the bugs dogfooding caught." />
   <Card title="Get things done" href="/docs/guides/writing-magic-specs" description="Task-first guides: writing specs, dependencies, contract mode, the daemon, and CI." />
   <Card title="Understand it" href="/docs/concepts/how-jaunt-works" description="How runtime forwarding, incremental builds, and the Codex engine actually work." />
@@ -60,6 +77,9 @@ And since 1.5.2, [jaunt builds jaunt](/docs/self-hosting): parts of the framewor
 
 ## Two ways in
 
-**Evaluating jaunt?** Start with the [quickstart](/docs/tutorials/quickstart), then read [design philosophy](/docs/concepts/design-philosophy) and the honest [limitations](/docs/reference/limitations) before you commit to it.
+**Evaluating Jaunt?** Pick the [Python quickstart](/docs/tutorials/quickstart) or the
+[TypeScript quickstart](/docs/tutorials/typescript-quickstart), then read
+[design philosophy](/docs/concepts/design-philosophy) and the honest
+[limitations](/docs/reference/limitations) before you commit to it.
 
 **Building an agent that drives jaunt?** The [coding agents guide](/docs/guides/coding-agents) covers `jaunt instructions` -- the canonical machine-readable project primer -- and the `--json` contract that every command speaks.

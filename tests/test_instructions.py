@@ -144,6 +144,41 @@ def test_freshness_degrades_to_none_on_probe_failure(tmp_path: Path, monkeypatch
     assert "run `jaunt status`" in text
 
 
+def test_typescript_project_section_reports_local_tool_identity(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "jaunt.toml",
+        """version = 2
+
+[target.ts]
+source_roots = ["src"]
+test_roots = ["tests"]
+projects = ["tsconfig.json"]
+tool_owner = "."
+""",
+    )
+    _write(tmp_path / "package.json", '{"packageManager":"pnpm@10.1.0"}\n')
+    _write(tmp_path / "tsconfig.json", "{}\n")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    _write(
+        tmp_path / "node_modules" / "@usejaunt" / "ts" / "package.json",
+        '{"version":"0.1.0-alpha.0"}\n',
+    )
+    _write(
+        tmp_path / "node_modules" / "typescript" / "package.json",
+        '{"version":"6.0.2"}\n',
+    )
+
+    section = instructions.project_section(tmp_path, load_config(root=tmp_path))
+    typescript = section["targets"]["ts"]
+    assert typescript["package_manager"] == "pnpm@10.1.0"
+    assert typescript["worker_version"] == "0.1.0-alpha.0"
+    assert typescript["typescript_version"] == "6.0.2"
+    rendered = instructions.render(project=section)
+    assert "@usejaunt/ts 0.1.0-alpha.0" in rendered
+    assert "package manager `pnpm@10.1.0`" in rendered
+
+
 # --------------------------------------------------------------------------- #
 # CLI wiring
 # --------------------------------------------------------------------------- #

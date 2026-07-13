@@ -3,6 +3,27 @@
 All notable changes to jaunt. Generated from conventional commits by
 [git-cliff](https://git-cliff.org); one section per published PyPI release.
 
+## [1.7.0] - 2026-07-13
+
+### Features
+
+- Add the first alpha TypeScript target. Private `*.jaunt.ts[x]` specs are
+  analyzed without execution by the project-local `@usejaunt/ts` worker, then
+  generated implementations are checked against the owning TypeScript project
+  before Jaunt writes them.
+- Add deterministic `jaunt sync` and TypeScript migrations, declaration design,
+  Vitest batteries, contract mode, project-reference support, and the ordinary
+  lifecycle commands (`build`, `test`, `status`, `check`, `watch`, daemon jobs,
+  `clean`, and `eject`) under stable `ts:` target identities.
+- Add version-2 configuration for Python-only, TypeScript-only, and mixed
+  workspaces. Existing version-1 Python projects keep their configuration and
+  output layout.
+
+### Release
+
+- Add coordinated, exact-artifact release checks for the Python distribution
+  and the independently versioned `@usejaunt/ts` npm package.
+
 ## [1.6.3] - 2026-07-13
 
 ### Chores

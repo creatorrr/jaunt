@@ -98,6 +98,89 @@ class FakeRunner:
         return daemon.GateOutcome(ok=True, battery="3/3")
 
 
+class FakeTypeScriptRunner:
+    def __init__(self, *, touch_unplanned: bool = False) -> None:
+        self.key = "ts:src/tokens/index"
+        self.digest = "ts-digest-v1"
+        self.built = False
+        self.touch_unplanned = touch_unplanned
+        self.calls: list[tuple[str, str, str]] = []
+
+    def probe(self, worktree: Path) -> tuple[dict[str, str], dict[str, str]]:
+        if self.built:
+            return {}, {}
+        return {self.key: "unbuilt"}, {self.key: self.digest}
+
+    def build(
+        self,
+        worktree: Path,
+        module: str,
+        heartbeat: daemon.Heartbeat | None = None,
+        *,
+        language: str = "py",
+        artifact_key: str = "",
+    ) -> daemon.BuildOutcome:
+        self.calls.append(("build", language, artifact_key))
+        generated = worktree / "src" / "tokens" / "machine"
+        generated.mkdir(parents=True, exist_ok=True)
+        paths = (
+            "src/tokens/machine/index.ts",
+            "src/tokens/machine/index.api.ts",
+            "src/tokens/machine/index.jaunt.json",
+            "src/tokens/index.ts",
+        )
+        for path in paths:
+            target = worktree / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(f"// {path}\n", encoding="utf-8")
+        if self.touch_unplanned:
+            (generated / "surprise.ts").write_text("export {};\n", encoding="utf-8")
+        self.built = True
+        return daemon.BuildOutcome(
+            ok=True,
+            refrozen=False,
+            artifact_paths=paths,
+        )
+
+    def gate(
+        self,
+        worktree: Path,
+        module: str,
+        *,
+        language: str = "py",
+        artifact_key: str = "",
+    ) -> daemon.GateOutcome:
+        self.calls.append(("gate", language, artifact_key))
+        return daemon.GateOutcome(ok=True, battery="-")
+
+
+def _configure_typescript_repo(repo: Path) -> JauntConfig:
+    (repo / "src" / "tokens").mkdir(parents=True)
+    (repo / "src" / "tokens" / "index.jaunt.ts").write_text(
+        "export function token(): string { throw new Error('spec'); }\n",
+        encoding="utf-8",
+    )
+    (repo / "tsconfig.json").write_text("{}\n", encoding="utf-8")
+    (repo / "jaunt.toml").write_text(
+        """\
+version = 2
+
+[target.ts]
+source_roots = ["src"]
+test_roots = []
+projects = ["tsconfig.json"]
+generated_dir = "machine"
+
+[daemon]
+auto_commit = false
+""",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "configure TypeScript")
+    return load_config(root=repo)
+
+
 def _spec_commit(repo: Path, body: str = '"""spec v2"""\n') -> None:
     (repo / "src" / "app.py").write_text(body, encoding="utf-8")
     _git(repo, "add", "-A")
@@ -135,7 +218,7 @@ def _cycle(
     repo: Path,
     cfg: JauntConfig,
     state: daemon.DaemonState,
-    runner: FakeRunner,
+    runner: daemon.Runner,
     pool: ThreadPoolExecutor,
     n: int = 3,
 ) -> None:
@@ -368,6 +451,47 @@ def test_green_job_proposes_when_auto_commit_false(repo: Path) -> None:
     assert job.battery == "3/3"
     assert not jobs.list_jobs(repo, states={jobs.LANDED})
     assert "regen" not in _git(repo, "log", "-1", "--format=%s")
+
+
+def test_typescript_job_uses_qualified_identity_and_exact_worker_artifacts(repo: Path) -> None:
+    cfg = _configure_typescript_repo(repo)
+    runner = FakeTypeScriptRunner()
+    state = daemon.DaemonState()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        _cycle(repo, cfg, state, runner, pool)
+
+    proposed = jobs.list_jobs(repo, states={jobs.PROPOSED})
+    assert len(proposed) == 1
+    job = proposed[0]
+    assert job.language == "ts"
+    assert job.module == "src/tokens/index"
+    assert job.key == "ts:src/tokens/index"
+    assert json.loads(job.patch_paths) == [
+        "src/tokens/index.ts",
+        "src/tokens/machine/index.api.ts",
+        "src/tokens/machine/index.jaunt.json",
+        "src/tokens/machine/index.ts",
+    ]
+    assert runner.calls == [
+        ("build", "ts", "ts:src/tokens/index"),
+        ("gate", "ts", "ts:src/tokens/index"),
+    ]
+
+
+def test_typescript_job_rejects_unplanned_file_inside_generated_dir(repo: Path) -> None:
+    cfg = _configure_typescript_repo(repo)
+    runner = FakeTypeScriptRunner(touch_unplanned=True)
+    state = daemon.DaemonState()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        _cycle(repo, cfg, state, runner, pool)
+
+    failed = jobs.list_jobs(repo, states={jobs.FAILED})
+    assert len(failed) == 1
+    assert "outside allowlist" in failed[0].error
+    assert "surprise.ts" in failed[0].error
+    assert not jobs.list_jobs(repo, states={jobs.PROPOSED, jobs.LANDED})
 
 
 def test_newer_proposal_supersedes_older(repo: Path) -> None:
@@ -874,6 +998,74 @@ def test_cli_runner_probe_raises_on_failed_status(monkeypatch: pytest.MonkeyPatc
     assert runner.probe(Path("/tmp/worktree")) == ({"m": "prose"}, {"m": "d"})
 
 
+def test_cli_runner_probe_reads_v2_qualified_unbuilt_and_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = daemon.CliRunner()
+    monkeypatch.setattr(
+        runner,
+        "_run",
+        lambda *_args: (
+            0,
+            {
+                "schema_version": 2,
+                "ok": True,
+                "stale": ["py:api.models"],
+                "stale_changes": {"py:api.models": "prose"},
+                "unbuilt": ["ts:packages/web/src/token"],
+                "invalid": {"ts:packages/web/src/cache": []},
+                "digests": {
+                    "py:api.models": "p",
+                    "ts:packages/web/src/token": "t",
+                    "ts:packages/web/src/cache": "c",
+                },
+            },
+        ),
+    )
+
+    stale, digests = runner.probe(Path("/tmp/worktree"))
+
+    assert stale == {
+        "py:api.models": "prose",
+        "ts:packages/web/src/cache": "invalid",
+        "ts:packages/web/src/token": "unbuilt",
+    }
+    assert digests["ts:packages/web/src/token"] == "t"
+
+
+def test_cli_runner_gates_only_qualified_typescript_magic_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = daemon.CliRunner()
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(_worktree: Path, *argv: str):
+        calls.append(argv)
+        return 0, {"ok": True, "checked": [], "blocked": []}
+
+    monkeypatch.setattr(runner, "_run", fake_run)
+
+    outcome = runner.gate(
+        Path("/tmp/worktree"),
+        "packages/web/src/token",
+        language="ts",
+        artifact_key="ts:packages/web/src/token",
+    )
+
+    assert outcome.ok is True
+    assert calls == [
+        (
+            "check",
+            "--json",
+            "--magic-only",
+            "--language",
+            "ts",
+            "--target",
+            "ts:packages/web/src/token",
+        )
+    ]
+
+
 def test_cli_runner_build_streams_stderr_heartbeats(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -944,6 +1136,57 @@ def test_cli_runner_build_drains_stdout_while_stderr_is_open(
 
     assert returncode == 0
     assert payload == {"ok": True, "generated": ["app"], "failed": {}}
+
+
+def test_cli_runner_build_passes_qualified_typescript_target_and_returns_exact_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[str] = []
+
+    class FakeStdout:
+        def read(self) -> str:
+            return json.dumps(
+                {
+                    "ok": True,
+                    "generated": ["ts:src/token/index"],
+                    "failed": {},
+                    "artifacts": [
+                        "src/token/machine/index.ts",
+                        "src/token/machine/index.api.ts",
+                        "src/token/machine/index.jaunt.json",
+                    ],
+                }
+            )
+
+    class FakeProc:
+        stdout = FakeStdout()
+        stderr: tuple[str, ...] = ()
+        returncode = 0
+
+        def wait(self) -> int:
+            return 0
+
+    def fake_popen(argv: list[str], **_kwargs):
+        captured.extend(argv)
+        return FakeProc()
+
+    monkeypatch.setattr(daemon.subprocess, "Popen", fake_popen)
+
+    outcome = daemon.CliRunner().build(
+        tmp_path,
+        "src/token/index",
+        language="ts",
+        artifact_key="ts:src/token/index",
+    )
+
+    assert captured[captured.index("--language") + 1] == "ts"
+    assert captured[captured.index("--target") + 1] == "ts:src/token/index"
+    assert outcome.artifact_paths == (
+        "src/token/machine/index.ts",
+        "src/token/machine/index.api.ts",
+        "src/token/machine/index.jaunt.json",
+    )
 
 
 def test_job_heartbeat_throttles_and_last_line_wins(

@@ -114,3 +114,33 @@ def test_old_job_records_load_without_new_fields(tmp_path: Path):
     assert loaded is not None
     assert loaded.cause == ""
     assert loaded.refrozen == ""
+
+
+def test_old_job_records_default_to_qualified_python_identity(tmp_path: Path):
+    job = _mk(tmp_path, module="m")
+    raw = json.loads((jobs.jobs_dir(tmp_path) / f"{job.id}.json").read_text(encoding="utf-8"))
+    del raw["language"], raw["artifact_key"]
+    (jobs.jobs_dir(tmp_path) / f"{job.id}.json").write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = jobs.load_job(tmp_path, job.id)
+
+    assert loaded is not None
+    assert loaded.language == "py"
+    assert loaded.key == "py:m"
+
+
+def test_artifact_lookups_do_not_collide_across_languages(tmp_path: Path):
+    py_job = _mk(tmp_path, module="pkg.token", digest="py")
+    ts_job = jobs.JobRecord.new(
+        module="pkg.token",
+        language="ts",
+        artifact_key="ts:pkg.token",
+        spec_digest="ts",
+        base_commit="deadbeef",
+        branch="main",
+    )
+    jobs.save_job(tmp_path, ts_job)
+
+    assert jobs.active_for_artifact(tmp_path, "py:pkg.token") == py_job
+    assert jobs.active_for_artifact(tmp_path, "ts:pkg.token") == ts_job
+    assert py_job.id != ts_job.id

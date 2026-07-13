@@ -22,8 +22,39 @@ ACTIVE_STATES = frozenset({QUEUED, RUNNING, GREEN})
 PHASE_CLEAR_STATES = frozenset({GREEN, LANDED, PARKED, FAILED, SUPERSEDED, PROPOSED, DISCARDED})
 
 
-def new_job_id(module: str, spec_digest: str, base_commit: str) -> str:
-    return hashlib.sha256(f"{module}\x00{spec_digest}\x00{base_commit}".encode()).hexdigest()[:8]
+def qualified_artifact_key(language: str, module: str) -> str:
+    """Return the stable cross-language identity used by daemon scheduling.
+
+    Persisted pre-TypeScript jobs have only ``module``.  Treat those records as
+    Python while keeping the qualified key separate from the legacy display
+    field so existing notification and JSON consumers continue to see the same
+    module name.
+    """
+
+    normalized_language = language or "py"
+    prefix = f"{normalized_language}:"
+    return module if module.startswith(prefix) else f"{prefix}{module}"
+
+
+def split_artifact_key(value: str) -> tuple[str, str, str]:
+    """Return ``(language, legacy module, qualified key)`` for a probe ID."""
+
+    language, separator, module = value.partition(":")
+    if separator and language in {"py", "ts"} and module:
+        return language, module, value
+    return "py", value, qualified_artifact_key("py", value)
+
+
+def new_job_id(
+    module: str,
+    spec_digest: str,
+    base_commit: str,
+    *,
+    language: str = "py",
+    artifact_key: str = "",
+) -> str:
+    key = artifact_key or qualified_artifact_key(language, module)
+    return hashlib.sha256(f"{key}\x00{spec_digest}\x00{base_commit}".encode()).hexdigest()[:8]
 
 
 @dataclass(frozen=True)
@@ -36,6 +67,8 @@ class JobRecord:
     state: str
     created: float
     updated: float
+    language: str = "py"
+    artifact_key: str = ""
     phase: str = ""
     gate: str = ""
     battery: str = ""
@@ -49,10 +82,26 @@ class JobRecord:
     newly_governed: str = ""  # JSON-encoded list; set at green time
 
     @classmethod
-    def new(cls, *, module: str, spec_digest: str, base_commit: str, branch: str) -> JobRecord:
+    def new(
+        cls,
+        *,
+        module: str,
+        spec_digest: str,
+        base_commit: str,
+        branch: str,
+        language: str = "py",
+        artifact_key: str = "",
+    ) -> JobRecord:
         now = time.time()
+        key = artifact_key or qualified_artifact_key(language, module)
         return cls(
-            id=new_job_id(module, spec_digest, base_commit),
+            id=new_job_id(
+                module,
+                spec_digest,
+                base_commit,
+                language=language,
+                artifact_key=key,
+            ),
             module=module,
             spec_digest=spec_digest,
             base_commit=base_commit,
@@ -60,7 +109,15 @@ class JobRecord:
             state=QUEUED,
             created=now,
             updated=now,
+            language=language,
+            artifact_key=key,
         )
+
+    @property
+    def key(self) -> str:
+        """Qualified identity, including for records written before this field."""
+
+        return self.artifact_key or qualified_artifact_key(self.language, self.module)
 
 
 def jobs_dir(root: Path) -> Path:
@@ -102,22 +159,46 @@ def list_jobs(root: Path, states: frozenset[str] | set[str] | None = None) -> li
 
 
 def active_for_module(root: Path, module: str) -> JobRecord | None:
+    key = qualified_artifact_key("py", module)
     for job in list_jobs(root, states=ACTIVE_STATES):
-        if job.module == module:
+        if job.key == key:
+            return job
+    return None
+
+
+def active_for_artifact(root: Path, artifact_key: str) -> JobRecord | None:
+    for job in list_jobs(root, states=ACTIVE_STATES):
+        if job.key == artifact_key:
             return job
     return None
 
 
 def parked_for_module(root: Path, module: str) -> JobRecord | None:
+    key = qualified_artifact_key("py", module)
     for job in list_jobs(root, states={PARKED}):
-        if job.module == module:
+        if job.key == key:
+            return job
+    return None
+
+
+def parked_for_artifact(root: Path, artifact_key: str) -> JobRecord | None:
+    for job in list_jobs(root, states={PARKED}):
+        if job.key == artifact_key:
             return job
     return None
 
 
 def proposed_for_module(root: Path, module: str) -> JobRecord | None:
+    key = qualified_artifact_key("py", module)
     for job in list_jobs(root, states={PROPOSED}):
-        if job.module == module:
+        if job.key == key:
+            return job
+    return None
+
+
+def proposed_for_artifact(root: Path, artifact_key: str) -> JobRecord | None:
+    for job in list_jobs(root, states={PROPOSED}):
+        if job.key == artifact_key:
             return job
     return None
 

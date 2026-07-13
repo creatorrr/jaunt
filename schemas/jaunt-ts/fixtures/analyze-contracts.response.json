@@ -1,0 +1,202 @@
+{
+  "protocol": "jaunt-ts/1-draft.2",
+  "id": "contracts-1",
+  "ok": true,
+  "result": {
+    "sessionId": "session-1",
+    "epoch": 0,
+    "snapshot": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "inputHashes": {},
+    "modules": [
+      {
+        "schema": "contract-ir/1-draft.2",
+        "moduleId": "ts:src/format/index",
+        "specPath": "src/format/index.jaunt.ts",
+        "facadePath": "src/format/index.ts",
+        "apiMirrorPath": "src/format/__generated__/index.api.ts",
+        "implementationPath": "src/format/__generated__/index.ts",
+        "contextPath": "src/format/index.context.ts",
+        "project": "tsconfig.json",
+        "packageOwner": ".",
+        "symbols": [
+          {
+            "id": "ts:src/format/index#format",
+            "kind": "function",
+            "name": "format",
+            "modifiers": ["export"],
+            "docs": "Format a value.",
+            "typeParameters": [],
+            "signatures": [
+              {
+                "typeParameters": [
+                  {
+                    "name": "T",
+                    "constraint": { "kind": "unknown" },
+                    "default": { "kind": "string" }
+                  }
+                ],
+                "parameters": [
+                  {
+                    "name": "value",
+                    "type": {
+                      "kind": "reference",
+                      "name": "T",
+                      "typeArguments": []
+                    },
+                    "optional": false,
+                    "rest": false
+                  }
+                ],
+                "returnType": {
+                  "kind": "conditional",
+                  "check": {
+                    "kind": "reference",
+                    "name": "T",
+                    "typeArguments": []
+                  },
+                  "extends": { "kind": "string" },
+                  "trueType": { "kind": "literal", "value": "text" },
+                  "falseType": { "kind": "number" }
+                }
+              }
+            ],
+            "members": [],
+            "options": {
+              "deps": ["ts:src/base/index#Base"],
+              "prompt": "Keep formatting stable.",
+              "inferDeps": true,
+              "test": true
+            }
+          },
+          {
+            "id": "ts:src/format/index#Box",
+            "kind": "class",
+            "name": "Box",
+            "modifiers": ["export"],
+            "docs": "Store one typed value.",
+            "typeParameters": [{ "name": "T" }],
+            "heritage": {
+              "baseName": "Base",
+              "implementationName": "Base",
+              "typeArguments": [
+                {
+                  "kind": "reference",
+                  "name": "T",
+                  "typeArguments": []
+                }
+              ],
+              "resolvedBaseId": "ts:src/base/index#Base"
+            },
+            "signatures": [],
+            "members": [
+              {
+                "kind": "constructor",
+                "name": "constructor",
+                "static": false,
+                "readonly": false,
+                "optional": false,
+                "signatures": [],
+                "docs": "",
+                "preserved": false,
+                "synthetic": true,
+                "inheritedConstructor": true
+              },
+              {
+                "kind": "property",
+                "name": "value",
+                "static": false,
+                "readonly": true,
+                "optional": false,
+                "signatures": [],
+                "type": {
+                  "kind": "reference",
+                  "name": "T",
+                  "typeArguments": []
+                },
+                "docs": "Stored value.",
+                "preserved": false
+              },
+              {
+                "kind": "method",
+                "name": "label",
+                "static": false,
+                "readonly": false,
+                "optional": false,
+                "signatures": [
+                  {
+                    "typeParameters": [],
+                    "parameters": [],
+                    "returnType": { "kind": "string" }
+                  }
+                ],
+                "docs": "Return a label.",
+                "preserved": true,
+                "preservedBody": "{ return \"box\"; }",
+                "preservedBodyDigest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+              }
+            ],
+            "options": {}
+          }
+        ],
+        "options": { "inferDeps": true },
+        "typeDeclarations": [
+          {
+            "name": "Payload",
+            "kind": "interface",
+            "typeParameters": [{ "name": "T" }],
+            "source": "export interface Payload<T> { value: T }",
+            "docs": "A public payload.",
+            "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+          }
+        ],
+        "typeImports": [
+          {
+            "specifier": "../base/index.js",
+            "typeOnly": false,
+            "runtime": true,
+            "defaultImport": "defaultBase",
+            "namedImports": [
+              { "imported": "Base", "local": "Base", "typeOnly": false },
+              { "imported": "Shape", "local": "Shape", "typeOnly": true }
+            ]
+          }
+        ],
+        "contextDocs": [
+          {
+            "id": "workspace:src/base/index.ts",
+            "exports": [{ "symbol": "Base", "docs": "Base behavior." }]
+          }
+        ],
+        "dependencies": ["ts:src/base/index#Base"],
+        "structuralDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+        "proseDigest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+        "apiDigest": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "fingerprint": {
+          "toolVersion": "1.7.0",
+          "workerVersion": "0.1.0-alpha.0",
+          "typescriptVersion": "6.0.2",
+          "compilerOptionsHash": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+          "generationFingerprint": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+          "protocol": "jaunt-ts/1-draft.2",
+          "ir": "contract-ir/1-draft.2"
+        },
+        "routes": {
+          "specPath": "src/format/index.jaunt.ts",
+          "facadePath": "src/format/index.ts",
+          "apiMirrorPath": "src/format/__generated__/index.api.ts",
+          "implementationPath": "src/format/__generated__/index.ts",
+          "sidecarPath": "src/format/__generated__/index.jaunt.json",
+          "contextPath": "src/format/index.context.ts",
+          "moduleId": "ts:src/format/index",
+          "project": "tsconfig.json",
+          "packageOwner": "."
+        },
+        "apiSource": "export declare function format<T>(value: T): string;\n",
+        "placeholderSource": "throw new Error(\"unbuilt\");\n",
+        "sidecar": "{}\n",
+        "specSource": "export function format<T>(value: T): string { throw new Error(); }\n",
+        "contextSource": "export const locale = \"en\";\n"
+      }
+    ]
+  }
+}

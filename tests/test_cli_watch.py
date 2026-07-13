@@ -180,6 +180,123 @@ def test_cmd_watch_runs_async_cycle_runner_once(tmp_path: Path, monkeypatch, cap
     assert "running event loop" not in captured.err
 
 
+def test_cmd_watch_typescript_scope_includes_workspace_inputs_and_excludes_custom_outputs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    (tmp_path / "src" / "tokens" / "machine").mkdir(parents=True)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tsconfig.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "jaunt.toml").write_text(
+        """\
+version = 2
+
+[target.ts]
+source_roots = ["src"]
+test_roots = ["tests"]
+projects = ["tsconfig.json"]
+generated_dir = "machine"
+""",
+        encoding="utf-8",
+    )
+
+    import jaunt.watcher
+
+    monkeypatch.setattr(jaunt.watcher, "check_watchfiles_available", lambda: None)
+
+    async def fake_changes(
+        watch_paths: list[Path],
+    ) -> AsyncIterator[set[tuple[int, str]]]:
+        assert tmp_path in watch_paths
+        assert tmp_path / "src" in watch_paths
+        yield {
+            (1, str(tmp_path / "src" / "tokens" / "machine" / "index.ts")),
+            (1, str(tmp_path / "package-lock.json")),
+        }
+
+    calls: list[WatchEvent] = []
+
+    def fake_build_cycle_runner(args, *, run_tests: bool):
+        async def runner(event: WatchEvent) -> WatchCycleResult:
+            calls.append(event)
+            return WatchCycleResult(0, None, 0.01, event.changed_paths)
+
+        return runner
+
+    monkeypatch.setattr(jaunt.watcher, "make_watchfiles_iter", fake_changes)
+    monkeypatch.setattr(jaunt.watcher, "build_cycle_runner", fake_build_cycle_runner)
+
+    ns = jaunt.cli.parse_args(["watch", "--root", str(tmp_path)])
+    assert jaunt.cli.cmd_watch(ns) == jaunt.cli.EXIT_OK
+
+    assert len(calls) == 1
+    assert calls[0].changed_paths == frozenset({tmp_path / "package-lock.json"})
+
+
+def test_cmd_watch_refreshes_typescript_roots_after_config_edit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src2").mkdir()
+    (tmp_path / "tsconfig.json").write_text("{}\n", encoding="utf-8")
+    config_path = tmp_path / "jaunt.toml"
+
+    def write_config(source_root: str) -> None:
+        config_path.write_text(
+            f"""\
+version = 2
+
+[target.ts]
+source_roots = ["{source_root}"]
+test_roots = []
+projects = ["tsconfig.json"]
+""",
+            encoding="utf-8",
+        )
+
+    write_config("src")
+
+    import jaunt.watcher
+
+    monkeypatch.setattr(jaunt.watcher, "check_watchfiles_available", lambda: None)
+
+    new_spec = tmp_path / "src2" / "fresh.jaunt.ts"
+
+    async def fake_changes(
+        watch_paths: list[Path],
+    ) -> AsyncIterator[set[tuple[int, str]]]:
+        # The root-level watch keeps future configured roots observable even
+        # though src2 was not one of the roots passed to watchfiles at startup.
+        assert tmp_path in watch_paths
+        assert tmp_path / "src2" not in watch_paths
+        write_config("src2")
+        yield {(1, str(config_path))}
+        new_spec.write_text("export declare function fresh(): string;\n", encoding="utf-8")
+        yield {(1, str(new_spec))}
+
+    calls: list[WatchEvent] = []
+
+    def fake_build_cycle_runner(args, *, run_tests: bool):
+        async def runner(event: WatchEvent) -> WatchCycleResult:
+            calls.append(event)
+            return WatchCycleResult(0, None, 0.01, event.changed_paths)
+
+        return runner
+
+    monkeypatch.setattr(jaunt.watcher, "make_watchfiles_iter", fake_changes)
+    monkeypatch.setattr(jaunt.watcher, "build_cycle_runner", fake_build_cycle_runner)
+
+    ns = jaunt.cli.parse_args(["watch", "--root", str(tmp_path)])
+    assert jaunt.cli.cmd_watch(ns) == jaunt.cli.EXIT_OK
+
+    assert [event.changed_paths for event in calls] == [
+        frozenset({config_path}),
+        frozenset({new_spec}),
+    ]
+
+
 def _raise_import_error() -> None:
     raise ImportError(
         "watchfiles is required for watch mode but is not available. "

@@ -54,6 +54,247 @@ jobs:
       - name: Pytest
         run: uv run pytest
 
+  typescript:
+    name: TypeScript host bounds (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 24]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: |
+            packages/jaunt-ts/package-lock.json
+            examples/typescript-jwt/package-lock.json
+            examples/typescript_slugify/package-lock.json
+            examples/typescript_project_references/package-lock.json
+            examples/typescript_project_references/pnpm-lock.yaml
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --frozen
+      - name: Install TypeScript worker dependencies
+        run: npm ci
+        working-directory: packages/jaunt-ts
+      - name: Typecheck and test TypeScript worker
+        run: npm run lint && npm run format:check && npm run typecheck && npm test
+        working-directory: packages/jaunt-ts
+      - name: Exercise Python adapter against the real worker
+        run: uv run pytest -q tests/test_typescript_real_worker.py
+      - name: Inspect npm tarball
+        run: npm run pack:check
+        working-directory: packages/jaunt-ts
+      - name: Install TypeScript architecture fixture
+        run: npm ci
+        working-directory: examples/typescript-jwt
+      - name: Check TypeScript architecture fixture freshness
+        run: uv run jaunt check --language ts --root examples/typescript-jwt
+        env:
+          JAUNT_TS_WORKER: packages/jaunt-ts/dist/worker/main.js
+      - name: Validate emitted and packed consumers
+        run: npm run typecheck && npm test && npm run emit && npm run demo && npm run smoke:consumer
+        working-directory: examples/typescript-jwt
+      - name: Install generated TypeScript example
+        run: npm ci
+        working-directory: examples/typescript_slugify
+      - name: Check and execute generated TypeScript example
+        run: |
+          uv run --project ../.. jaunt check --language ts
+          npm run typecheck
+          npm test
+          npm run demo
+        working-directory: examples/typescript_slugify
+        env:
+          JAUNT_TS_WORKER: ../../packages/jaunt-ts/dist/worker/main.js
+      - name: Install TypeScript project-reference example
+        run: npm ci
+        working-directory: examples/typescript_project_references
+      - name: Check and execute TypeScript project-reference example
+        run: |
+          uv run --project ../.. jaunt check --language ts
+          npm run typecheck
+          npm test
+          npm run demo
+        working-directory: examples/typescript_project_references
+        env:
+          JAUNT_TS_WORKER: ../../packages/jaunt-ts/dist/worker/main.js
+
+  typescript-watch-benchmark:
+    name: TypeScript 100-edit watch resource gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: packages/jaunt-ts/package-lock.json
+      - run: npm ci
+        working-directory: packages/jaunt-ts
+      - name: Benchmark pinned graph and assert leak budgets
+        run: >-
+          npm run benchmark:watch:ci --
+          --output "${RUNNER_TEMP}/jaunt-ts-watch-benchmark.json"
+        working-directory: packages/jaunt-ts
+      - name: Upload benchmark measurements
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jaunt-ts-watch-benchmark
+          path: ${{ runner.temp }}/jaunt-ts-watch-benchmark.json
+          if-no-files-found: error
+          retention-days: 30
+
+  typescript-watch-performance:
+    name: TypeScript pinned watch timing gate
+    if: ${{ vars.JAUNT_TS_STRICT_BENCHMARK_ENABLED == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, linux, x64, jaunt-ts-performance]
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.14.0
+          cache: npm
+          cache-dependency-path: packages/jaunt-ts/package-lock.json
+      - run: npm ci
+        working-directory: packages/jaunt-ts
+      - name: Assert the pinned 20-percent timing budgets
+        run: >-
+          npm run benchmark:watch --
+          --output "${RUNNER_TEMP}/jaunt-ts-watch-performance.json"
+        working-directory: packages/jaunt-ts
+      - name: Upload strict benchmark measurements
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jaunt-ts-watch-performance
+          path: ${{ runner.temp }}/jaunt-ts-watch-performance.json
+          if-no-files-found: error
+          retention-days: 30
+
+  typescript-platforms:
+    name: TypeScript paths (${{ matrix.os }}, Node ${{ matrix.node-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            node-version: 20
+          - os: macos-latest
+            node-version: 24
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: packages/jaunt-ts/package-lock.json
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --frozen
+      - run: npm ci
+        working-directory: packages/jaunt-ts
+      - name: Typecheck, test, and inspect the packed worker
+        run: npm run typecheck && npm run test:platform && npm run pack:check
+        working-directory: packages/jaunt-ts
+      - name: Exercise platform paths through the Python adapter
+        run: uv run pytest -q tests/test_typescript_real_worker.py
+
+  typescript-pnpm:
+    name: TypeScript pnpm workspace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: packages/jaunt-ts/package-lock.json
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --frozen
+      - run: npm ci
+        working-directory: packages/jaunt-ts
+      - run: npm run build
+        working-directory: packages/jaunt-ts
+      - run: npm install --global pnpm@11.5.0
+      - run: pnpm install --frozen-lockfile
+        working-directory: examples/typescript_project_references
+      - name: Check pnpm project references through the installed worker symlink
+        run: |
+          uv run --project ../.. jaunt check --language ts
+          pnpm run typecheck
+          pnpm test
+          pnpm run demo
+        working-directory: examples/typescript_project_references
+
+  typescript-peer-boundaries:
+    name: TypeScript peers (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: minimum
+            node-version: 20
+            vitest-version: 3.2.4
+            fast-check-version: 4.0.0
+          - label: maximum
+            node-version: 24
+            vitest-version: 4.1.10
+            fast-check-version: 4.9.0
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: packages/jaunt-ts/package-lock.json
+      - run: npm ci
+        working-directory: packages/jaunt-ts
+      - name: Install peer-boundary versions
+        run: >-
+          npm install --no-save
+          vitest@${{ matrix.vitest-version }}
+          fast-check@${{ matrix.fast-check-version }}
+        working-directory: packages/jaunt-ts
+      - name: Test peer-boundary versions
+        run: npm run typecheck && npm run test:peers
+        working-directory: packages/jaunt-ts
+
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+      - name: Build wheel and source distribution
+        run: uv build --out-dir "${RUNNER_TEMP}/jaunt-dist" --no-create-gitignore
+      - name: Inspect TypeScript resources in Python distributions
+        run: python tests/inspect_typescript_distribution.py "${RUNNER_TEMP}/jaunt-dist"
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: docs-site/package-lock.json
+      - run: npm ci
+        working-directory: docs-site
+      - name: Typecheck documentation
+        run: npm run types:check
+        working-directory: docs-site
+      - name: Build documentation
+        run: npm run build
+        working-directory: docs-site
+
   jaunt-check:
     runs-on: ubuntu-latest
     needs: [lint]

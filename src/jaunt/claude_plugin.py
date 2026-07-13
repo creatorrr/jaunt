@@ -8,6 +8,7 @@ the orchestration in ``cli.py`` stays thin and this stays unit-testable.
 from __future__ import annotations
 
 MARKETPLACE_REF = "creatorrr/jaunt"
+MARKETPLACE_NAME = "jaunt-plugins"
 PLUGIN_REF = "jaunt@jaunt-plugins"
 DOCS_URL = "https://jaunt.ing/docs/guides/claude-code-plugin"
 
@@ -27,6 +28,16 @@ def plugin_install_command() -> list[str]:
     return ["claude", "plugin", "install", PLUGIN_REF]
 
 
+def marketplace_update_command() -> list[str]:
+    """argv for refreshing the configured marketplace before a plugin update."""
+    return ["claude", "plugin", "marketplace", "update", MARKETPLACE_NAME]
+
+
+def plugin_update_command() -> list[str]:
+    """argv for updating an existing Jaunt plugin installation."""
+    return ["claude", "plugin", "update", PLUGIN_REF]
+
+
 def classify_result(returncode: int, stdout: str, stderr: str) -> str:
     """Classify a completed subprocess result.
 
@@ -34,11 +45,13 @@ def classify_result(returncode: int, stdout: str, stderr: str) -> str:
     because the marketplace/plugin was already present (idempotent re-run), and
     ``"error"`` for any other failure.
     """
-    if returncode == 0:
-        return "ok"
     combined = f"{stdout}\n{stderr}".lower()
+    if "different source" in combined or "remove it before" in combined:
+        return "error"
     if "already" in combined:
         return "already"
+    if returncode == 0:
+        return "ok"
     return "error"
 
 

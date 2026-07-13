@@ -1,0 +1,11 @@
+{
+  "protocol": "jaunt-ts/1-draft.2",
+  "id": "contract-1",
+  "method": "projectContract",
+  "deadlineMs": 30000,
+  "params": {
+    "source": "/** Public contract. */\nexport function value(): { ok: true } { return { ok: true }; }\n",
+    "symbol": "value",
+    "fileName": "src/value.ts"
+  }
+}

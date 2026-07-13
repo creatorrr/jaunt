@@ -1,82 +1,622 @@
-name: Publish to PyPI
+name: Coordinated release
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - pyproject.toml
+  workflow_dispatch:
+    inputs:
+      component:
+        description: Artifacts to publish
+        type: choice
+        options:
+          - both
+          - python
+          - typescript
+        default: both
+      publish:
+        description: Publish after building and testing the exact candidates
+        type: boolean
+        default: false
+      npm_dist_tag:
+        description: npm candidate dist-tag
+        type: choice
+        options:
+          - next
+          - beta
+        default: next
+
+concurrency:
+  group: coordinated-release
+  cancel-in-progress: false
 
 jobs:
-  pypi-publish:
-    name: Build and publish to PyPI
+  candidates:
+    name: Build and verify exact release candidates
     runs-on: ubuntu-latest
-    environment: pypi
     permissions:
-      id-token: write  # Required for OIDC Trusted Publishing
-      contents: write  # Tag the release + commit CHANGELOG.md
+      contents: read
+    outputs:
+      python-version: ${{ steps.versions.outputs.python-version }}
+      typescript-version: ${{ steps.versions.outputs.typescript-version }}
     steps:
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 0  # git-cliff needs full history + tags
-      - uses: astral-sh/setup-uv@v7
-
-      - name: Check whether this version is already on PyPI
-        id: version
+          fetch-depth: 0
+      - name: Verify publication authority
+        if: ${{ inputs.publish }}
+        shell: bash
         run: |
-          version="$(uvx --from toml-cli toml get --toml-path pyproject.toml project.version)"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          if curl -fsSL -H 'Accept: application/vnd.pypi.simple.v1+json' \
-              https://pypi.org/simple/jaunt/ | jq -e --arg v "$version" \
-              '.versions | index($v)' > /dev/null; then
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "Refusing to publish from ${GITHUB_REF}; dispatch the release from main." >&2
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          main_sha="$(git rev-parse refs/remotes/origin/main)"
+          if [[ "$GITHUB_SHA" != "$main_sha" ]]; then
+            echo "Refusing to publish ${GITHUB_SHA}; current main is ${main_sha}." >&2
+            exit 1
+          fi
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Pin trusted-publishing npm CLI
+        run: |
+          npm install --global npm@11.18.0
+          test "$(npm --version)" = "11.18.0"
+
+      - run: uv sync --frozen --all-extras
+      - run: npm ci
+        working-directory: packages/jaunt-ts
+      - name: Verify Python release gates
+        run: |
+          uv run pytest
+          uv run ruff check .
+          uv run ruff format --check .
+          uv run ty check
+          uv run jaunt check
+      - name: Verify TypeScript release gates
+        run: npm run lint && npm run format:check && npm run typecheck && npm test && npm run pack:check
+        working-directory: packages/jaunt-ts
+      - name: Verify TypeScript shared-runner leak gate
+        run: |
+          mkdir -p "${GITHUB_WORKSPACE}/release/benchmarks"
+          npm run benchmark:watch:ci -- \
+            --output "${GITHUB_WORKSPACE}/release/benchmarks/jaunt-ts-watch.json"
+        working-directory: packages/jaunt-ts
+      - name: Verify TypeScript architecture and generated examples
+        run: |
+          npm ci --prefix examples/typescript-jwt
+          JAUNT_TS_WORKER=packages/jaunt-ts/dist/worker/main.js \
+            uv run jaunt check --language ts --root examples/typescript-jwt
+          npm --prefix examples/typescript-jwt run typecheck
+          npm --prefix examples/typescript-jwt test
+          npm --prefix examples/typescript-jwt run emit
+          npm --prefix examples/typescript-jwt run demo
+          npm --prefix examples/typescript-jwt run smoke:consumer
+          npm ci --prefix examples/typescript_slugify
+          JAUNT_TS_WORKER=packages/jaunt-ts/dist/worker/main.js \
+            uv run jaunt check --language ts --root examples/typescript_slugify
+          npm --prefix examples/typescript_slugify run typecheck
+          npm --prefix examples/typescript_slugify test
+          npm --prefix examples/typescript_slugify run demo
+          npm ci --prefix examples/typescript_project_references
+          JAUNT_TS_WORKER=packages/jaunt-ts/dist/worker/main.js \
+            uv run jaunt check --language ts --root examples/typescript_project_references
+          npm --prefix examples/typescript_project_references run typecheck
+          npm --prefix examples/typescript_project_references test
+          npm --prefix examples/typescript_project_references run demo
+          npm install --global pnpm@11.5.0
+          pnpm --dir examples/typescript_project_references install --frozen-lockfile
+          uv run jaunt check --language ts --root examples/typescript_project_references
+          pnpm --dir examples/typescript_project_references run typecheck
+          pnpm --dir examples/typescript_project_references test
+          pnpm --dir examples/typescript_project_references run demo
+      - name: Verify documentation
+        run: |
+          npm ci --prefix docs-site
+          npm --prefix docs-site run types:check
+          npm --prefix docs-site run build
+
+      - name: Read candidate versions
+        id: versions
+        run: |
+          python_version="$(uvx --from toml-cli toml get --toml-path pyproject.toml project.version)"
+          typescript_version="$(node -p "require('./packages/jaunt-ts/package.json').version")"
+          if [[ "${{ inputs.publish }}" == "true" ]]; then
+            release_tags=()
+            if [[ "${{ inputs.component }}" != "typescript" ]]; then
+              release_tags+=("v${python_version}")
+            fi
+            if [[ "${{ inputs.component }}" != "python" ]]; then
+              release_tags+=("ts-v${typescript_version}")
+            fi
+            python scripts/verify_release_tags.py \
+              --expected-commit "$GITHUB_SHA" "${release_tags[@]}"
+          fi
+          if [[ "${{ inputs.publish }}" == "true" ]] && \
+             [[ "${{ inputs.component }}" != "typescript" ]] && \
+             curl -fsSL "https://pypi.org/pypi/jaunt/${python_version}/json" >/dev/null; then
+            published_commit="$(git rev-list -n 1 "v${python_version}" 2>/dev/null || true)"
+            # A prior attempt may have published the exact candidate before
+            # failing ahead of tag creation.  An existing, conflicting tag is
+            # fatal; an absent tag is allowed through so the post-build byte
+            # verification below can safely resume the release.
+            if [[ -n "$published_commit" && "$published_commit" != "$GITHUB_SHA" ]]; then
+              echo "jaunt ${python_version} is already published from another commit; bump project.version." >&2
+              exit 1
+            fi
+          fi
+          if [[ "${{ inputs.publish }}" == "true" ]] && \
+             [[ "${{ inputs.component }}" != "python" ]] && \
+             npm view "@usejaunt/ts@${typescript_version}" version >/dev/null 2>&1; then
+            published_commit="$(git rev-list -n 1 "ts-v${typescript_version}" 2>/dev/null || true)"
+            if [[ -n "$published_commit" && "$published_commit" != "$GITHUB_SHA" ]]; then
+              echo "@usejaunt/ts ${typescript_version} is already published from another commit; bump its version." >&2
+              exit 1
+            fi
+          fi
+          echo "python-version=${python_version}" >> "$GITHUB_OUTPUT"
+          echo "typescript-version=${typescript_version}" >> "$GITHUB_OUTPUT"
+
+      - name: Build candidates once
+        run: |
+          mkdir -p ../../release/python ../../release/npm
+          uv build ../.. --out-dir ../../release/python --no-create-gitignore
+          npm pack --json --ignore-scripts --pack-destination ../../release/npm > ../../release/npm/pack.json
+        working-directory: packages/jaunt-ts
+      - name: Inspect exact candidates
+        run: |
+          python tests/inspect_typescript_distribution.py release/python
+          tarball="$(find release/npm -maxdepth 1 -name '*.tgz' -print -quit)"
+          node packages/jaunt-ts/scripts/check-installed-pack.mjs "$tarball"
+          find release/python -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\0' \
+            | sort -z | (cd release/python && xargs -0 sha256sum > SHA256SUMS)
+          find release/npm -maxdepth 1 -type f ! -name pack.json ! -name SHA256SUMS -printf '%f\0' \
+            | sort -z | (cd release/npm && xargs -0 sha256sum > SHA256SUMS)
+          (cd release/python && sha256sum --check SHA256SUMS)
+          (cd release/npm && sha256sum --check SHA256SUMS)
+      - name: Smoke exact wheel, source distribution, and npm tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheel="$(find release/python -maxdepth 1 -name '*.whl' -print -quit)"
+          sdist="$(find release/python -maxdepth 1 -name '*.tar.gz' -print -quit)"
+          tarball="$(find release/npm -maxdepth 1 -name '*.tgz' -print -quit)"
+
+          prepare_project() {
+            local project="$1"
+            # The fixture dependencies came from the committed lock above. Keep
+            # package.json and the lock byte-identical because both participate
+            # in TypeScript freshness, but replace the checkout worker with the
+            # exact npm candidate.
+            cp -a examples/typescript-jwt "$project"
+            local metadata_before
+            metadata_before="$(sha256sum "$project/package.json" "$project/package-lock.json")"
+            rm -rf "$project/dist" "$project/.jaunt" \
+              "$project/node_modules/@usejaunt/ts" \
+              "$project/node_modules/.bin/jaunt-ts-worker" \
+              "$project/node_modules/.package-lock.json"
+            npm install --prefix "$project" --offline --ignore-scripts --no-audit --no-fund \
+              --no-save --package-lock=false "$tarball"
+            test "$metadata_before" = \
+              "$(sha256sum "$project/package.json" "$project/package-lock.json")"
+            test ! -L "$project/node_modules/@usejaunt/ts"
+            test "$(node -p "require('${project}/node_modules/@usejaunt/ts/package.json').version")" = \
+              "${{ steps.versions.outputs.typescript-version }}"
+          }
+
+          prepare_venv() {
+            local venv="$1"
+            local artifact="$2"
+            local offline="$3"
+            uv venv "$venv"
+            VIRTUAL_ENV="$venv" uv sync --active --frozen --no-dev --no-install-project --offline
+            if [[ "$offline" == "true" ]]; then
+              uv pip install --python "$venv/bin/python" --offline --no-deps "$artifact"
+            else
+              # The sdist is the exact candidate; its isolated hatchling build
+              # environment may resolve build-system requirements from PyPI.
+              uv pip install --python "$venv/bin/python" --no-deps "$artifact"
+            fi
+            test "$("$venv/bin/python" -c \
+              'import importlib.metadata; print(importlib.metadata.version("jaunt"))')" = \
+              "${{ steps.versions.outputs.python-version }}"
+          }
+
+          smoke_lifecycle() {
+            local jaunt_bin="$1"
+            local project="$2"
+            local init_project="$3"
+            "$jaunt_bin" init --language ts --root "$init_project" --json >/dev/null
+            "$jaunt_bin" check --language ts --root "$project"
+            npm --prefix "$project" run typecheck
+            npm --prefix "$project" test
+            "$jaunt_bin" eject ts:src/tokens/index --language ts --root "$project"
+            "$jaunt_bin" eject src/tokens/b64url.ts#encode --language ts --root "$project"
+            "$jaunt_bin" eject src/tokens/b64url.ts#decode --language ts --root "$project"
+            npm --prefix "$project" run typecheck
+            npm --prefix "$project" test
+            npm --prefix "$project" run emit
+            npm --prefix "$project" run smoke:consumer
+            mv "$project/node_modules/@usejaunt/ts" \
+              "$project/node_modules/@usejaunt/ts.disabled"
+            npm --prefix "$project" run demo
+            if rg -n '@usejaunt/ts|\.jaunt(?:-test)?\.' "$project/dist"; then
+              echo "Candidate output retained a Jaunt runtime/spec dependency." >&2
+              exit 1
+            fi
+          }
+
+          wheel_project="${RUNNER_TEMP}/combined-wheel-smoke"
+          wheel_init_project="${RUNNER_TEMP}/combined-wheel-init"
+          wheel_venv="${RUNNER_TEMP}/combined-wheel-venv"
+          prepare_project "$wheel_project"
+          prepare_venv "$wheel_venv" "$wheel" true
+          smoke_lifecycle "$wheel_venv/bin/jaunt" "$wheel_project" "$wheel_init_project"
+
+          sdist_project="${RUNNER_TEMP}/combined-sdist-smoke"
+          sdist_init_project="${RUNNER_TEMP}/combined-sdist-init"
+          sdist_venv="${RUNNER_TEMP}/combined-sdist-venv"
+          prepare_project "$sdist_project"
+          prepare_venv "$sdist_venv" "$sdist" false
+          smoke_lifecycle "$sdist_venv/bin/jaunt" "$sdist_project" "$sdist_init_project"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: jaunt-release-candidates
+          path: release
+          if-no-files-found: error
+          retention-days: 30
+
+  publish_npm:
+    name: Publish npm candidate with trusted publishing
+    if: >-
+      ${{ inputs.publish && github.ref == 'refs/heads/main' &&
+          (inputs.component == 'both' || inputs.component == 'typescript') }}
+    needs: candidates
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Recheck current main and TypeScript tag
+        run: |
+          git fetch --no-tags origin main
+          git fetch --force --tags origin
+          main_sha="$(git rev-parse refs/remotes/origin/main)"
+          if [[ "$GITHUB_SHA" != "$main_sha" ]]; then
+            echo "Refusing to publish ${GITHUB_SHA}; current main is ${main_sha}." >&2
+            exit 1
+          fi
+          python scripts/verify_release_tags.py --expected-commit "$GITHUB_SHA" \
+            "ts-v${{ needs.candidates.outputs.typescript-version }}"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Pin trusted-publishing npm CLI
+        run: |
+          npm install --global npm@11.18.0
+          test "$(npm --version)" = "11.18.0"
+      - uses: actions/download-artifact@v8
+        with:
+          name: jaunt-release-candidates
+          path: release
+      - name: Publish exact npm candidate
+        run: |
+          set -euo pipefail
+          version="${{ needs.candidates.outputs.typescript-version }}"
+          candidate_tag="${{ inputs.npm_dist_tag }}"
+          tarball="$(find release/npm -maxdepth 1 -name '*.tgz' -print -quit)"
+          if npm view "@usejaunt/ts@${version}" version >/dev/null 2>&1; then
+            published_integrity="$(npm view "@usejaunt/ts@${version}" dist.integrity)"
+            candidate_integrity="$(node -e \
+              'const {createHash}=require("node:crypto"); const {readFileSync}=require("node:fs"); console.log(`sha512-${createHash("sha512").update(readFileSync(process.argv[1])).digest("base64")}`)' \
+              "$tarball")"
+            if [[ "$published_integrity" != "$candidate_integrity" ]]; then
+              echo "Published @usejaunt/ts ${version} bytes differ from this release candidate." >&2
+              exit 1
+            fi
+            published_tag_version="$(npm view "@usejaunt/ts@${candidate_tag}" version 2>/dev/null || true)"
+            if [[ "$published_tag_version" != "$version" ]]; then
+              echo "Published @usejaunt/ts ${version} has matching bytes, but ${candidate_tag} points to ${published_tag_version:-nothing}." >&2
+              echo "OIDC publishing cannot repair dist-tags; fix the tag interactively or choose the tag used by the original publish." >&2
+              exit 1
+            fi
+            echo "@usejaunt/ts ${version} and dist-tag ${candidate_tag} already match the candidate."
+          else
+            # npm trusted publishing exchanges the GitHub OIDC token only for
+            # this command and adds provenance automatically.
+            npm publish "$tarball" --access public --tag "$candidate_tag"
+          fi
+
+  publish_python:
+    name: Publish Python candidate with trusted publishing
+    if: >-
+      ${{ !cancelled() && inputs.publish && github.ref == 'refs/heads/main' &&
+          needs.candidates.result == 'success' &&
+          ((inputs.component == 'python' && needs.publish_npm.result == 'skipped') ||
+           (inputs.component == 'both' && needs.publish_npm.result == 'success')) }}
+    needs:
+      - candidates
+      - publish_npm
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Verify Python publication authority and tag
+        run: |
+          git fetch --force --tags origin
+          # In a Python-only release this is the first irreversible registry
+          # write, so recheck main after the environment approval. In a
+          # coordinated release npm has already performed that check and
+          # published the exact candidate; allow the same run to finish even
+          # if main advances while the PyPI approval is pending.
+          if [[ "${{ inputs.component }}" == "python" ]]; then
+            git fetch --no-tags origin main
+            main_sha="$(git rev-parse refs/remotes/origin/main)"
+            if [[ "$GITHUB_SHA" != "$main_sha" ]]; then
+              echo "Refusing to publish ${GITHUB_SHA}; current main is ${main_sha}." >&2
+              exit 1
+            fi
+          fi
+          python scripts/verify_release_tags.py --expected-commit "$GITHUB_SHA" \
+            "v${{ needs.candidates.outputs.python-version }}"
+      - uses: actions/download-artifact@v8
+        with:
+          name: jaunt-release-candidates
+          path: release
+      - name: Check whether the Python version is already published
+        id: pypi
+        run: |
+          version="${{ needs.candidates.outputs.python-version }}"
+          if curl -fsSL "https://pypi.org/pypi/jaunt/${version}/json" >/dev/null; then
+            python scripts/verify_pypi_candidates.py \
+              --project jaunt --version "$version" --dist release/python
             echo "published=true" >> "$GITHUB_OUTPUT"
-            echo "jaunt ${version} is already on PyPI; skipping publish."
           else
             echo "published=false" >> "$GITHUB_OUTPUT"
           fi
-
-      - run: uv build
-        if: steps.version.outputs.published == 'false'
-      - name: Publish package distributions to PyPI
-        if: steps.version.outputs.published == 'false'
+      - name: Prepare Python publisher directory
+        if: ${{ steps.pypi.outputs.published == 'false' }}
+        run: |
+          mkdir -p release/pypi-upload
+          cp release/python/*.whl release/python/*.tar.gz release/pypi-upload/
+      - name: Publish exact Python candidate
+        if: ${{ steps.pypi.outputs.published == 'false' }}
         uses: pypa/gh-action-pypi-publish@release/v1
-
-      - name: Tag the release
-        if: steps.version.outputs.published == 'false'
-        run: |
-          tag="v${{ steps.version.outputs.version }}"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "$tag" -m "jaunt ${{ steps.version.outputs.version }}"
-          git push origin "$tag"
-
-      - name: Generate CHANGELOG.md
-        if: steps.version.outputs.published == 'false'
-        uses: orhun/git-cliff-action@v4
         with:
-          config: cliff.toml
-          args: --output CHANGELOG.md
+          # Keep SHA256SUMS with the component candidate, but expose only
+          # valid Python distributions to the publisher action.
+          packages-dir: release/pypi-upload
 
-      - name: Commit CHANGELOG.md
-        if: steps.version.outputs.published == 'false'
+  finalize_release:
+    name: Registry smoke, tags, and GitHub releases
+    if: >-
+      ${{ !cancelled() && inputs.publish && github.ref == 'refs/heads/main' &&
+          needs.candidates.result == 'success' &&
+          ((inputs.component == 'python' && needs.publish_python.result == 'success' &&
+            needs.publish_npm.result == 'skipped') ||
+           (inputs.component == 'typescript' && needs.publish_npm.result == 'success' &&
+            needs.publish_python.result == 'skipped') ||
+           (inputs.component == 'both' && needs.publish_npm.result == 'success' &&
+            needs.publish_python.result == 'success')) }}
+    needs:
+      - candidates
+      - publish_npm
+      - publish_python
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Recheck release tags before finalization
         run: |
-          git add CHANGELOG.md
-          # `git diff` alone is blind to a brand-new (untracked) CHANGELOG.md,
-          # so stage first and compare against HEAD.
-          if git diff --cached --quiet -- CHANGELOG.md; then
-            echo "CHANGELOG.md unchanged."
-            exit 0
+          git fetch --force --tags origin
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Every requested registry write has already succeeded. Finalize the
+          # immutable candidates from this run even if unrelated work landed
+          # on main while environment approval or registry propagation waited.
+          release_tags=()
+          if [[ "${{ inputs.component }}" != "typescript" ]]; then
+            release_tags+=("v${{ needs.candidates.outputs.python-version }}")
           fi
-          git commit -m "chore: update CHANGELOG.md for v${{ steps.version.outputs.version }} [skip ci]"
-          git pull --rebase origin main
-          git push origin HEAD:main
+          if [[ "${{ inputs.component }}" != "python" ]]; then
+            release_tags+=("ts-v${{ needs.candidates.outputs.typescript-version }}")
+          fi
+          python scripts/verify_release_tags.py \
+            --expected-commit "$GITHUB_SHA" "${release_tags[@]}"
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Pin trusted-publishing npm CLI
+        run: |
+          npm install --global npm@11.18.0
+          test "$(npm --version)" = "11.18.0"
+      - uses: actions/download-artifact@v8
+        with:
+          name: jaunt-release-candidates
+          path: release
 
-      - name: Create GitHub Release
-        if: steps.version.outputs.published == 'false'
+      - name: Smoke registry npm bytes
+        if: ${{ inputs.component == 'both' || inputs.component == 'typescript' }}
+        run: |
+          set -euo pipefail
+          version="${{ needs.candidates.outputs.typescript-version }}"
+          candidate_tag="${{ inputs.npm_dist_tag }}"
+          for attempt in 1 2 3 4 5 6; do
+            if [[ "$(npm view "@usejaunt/ts@${version}" version 2>/dev/null || true)" == "$version" ]] && \
+               [[ "$(npm view "@usejaunt/ts@${candidate_tag}" version 2>/dev/null || true)" == "$version" ]]; then
+              break
+            fi
+            sleep 10
+          done
+          test "$(npm view "@usejaunt/ts@${version}" version)" = "$version"
+          test "$(npm view "@usejaunt/ts@${candidate_tag}" version)" = "$version"
+          tarball="$(find release/npm -maxdepth 1 -name '*.tgz' -print -quit)"
+          candidate_integrity="$(node -e \
+            'const {createHash}=require("node:crypto"); const {readFileSync}=require("node:fs"); console.log(`sha512-${createHash("sha512").update(readFileSync(process.argv[1])).digest("base64")}`)' \
+            "$tarball")"
+          test "$(npm view "@usejaunt/ts@${version}" dist.integrity)" = "$candidate_integrity"
+          project="${RUNNER_TEMP}/npm-registry-smoke"
+          mkdir -p "$project"
+          npm install --prefix "$project" --ignore-scripts --no-audit --no-fund \
+            "@usejaunt/ts@${version}" "typescript@5.9"
+          node --input-type=module --eval \
+            "const m = await import('${project}/node_modules/@usejaunt/ts/dist/spec.js'); if (typeof m.magic !== 'function') process.exit(1)"
+
+      - name: Smoke registry Python bytes
+        if: ${{ inputs.component == 'both' || inputs.component == 'python' }}
+        run: |
+          version="${{ needs.candidates.outputs.python-version }}"
+          verified=false
+          for attempt in 1 2 3 4 5 6; do
+            if python scripts/verify_pypi_candidates.py \
+                --project jaunt --version "$version" --dist release/python; then
+              verified=true
+              break
+            fi
+            sleep 10
+          done
+          if [[ "$verified" != "true" ]]; then
+            python scripts/verify_pypi_candidates.py \
+              --project jaunt --version "$version" --dist release/python
+          fi
+          uvx --from "jaunt==${version}" jaunt --help >/dev/null
+
+      - name: Smoke the combined registry lifecycle
+        if: ${{ inputs.component == 'both' }}
+        run: |
+          python_version="${{ needs.candidates.outputs.python-version }}"
+          typescript_version="${{ needs.candidates.outputs.typescript-version }}"
+          project="${RUNNER_TEMP}/combined-registry-smoke"
+          init_project="${RUNNER_TEMP}/combined-registry-init"
+          venv="${RUNNER_TEMP}/combined-registry-venv"
+          cp -R examples/typescript-jwt "$project"
+          rm -rf "$project/node_modules" "$project/dist" "$project/.jaunt"
+          compiler_version="$(node -p "require('${project}/package-lock.json').packages['node_modules/typescript'].version")"
+          vitest_version="$(node -p "require('${project}/package-lock.json').packages['node_modules/vitest'].version")"
+          fast_check_version="$(node -p "require('${project}/package-lock.json').packages['node_modules/fast-check'].version")"
+          node_types_version="$(node -p "require('${project}/package-lock.json').packages['node_modules/@types/node'].version")"
+          npm install --prefix "$project" --ignore-scripts --no-audit --no-fund \
+            --no-save --package-lock=false \
+            "@usejaunt/ts@${typescript_version}" "typescript@${compiler_version}" \
+            "vitest@${vitest_version}" "fast-check@${fast_check_version}" \
+            "@types/node@${node_types_version}"
+          uv venv "$venv"
+          uv pip install --python "$venv/bin/python" "jaunt==${python_version}"
+          "$venv/bin/jaunt" init --language ts --root "$init_project"
+          "$venv/bin/jaunt" check --language ts --root "$project"
+          npm --prefix "$project" run typecheck
+          npm --prefix "$project" test
+          "$venv/bin/jaunt" eject ts:src/tokens/index --language ts --root "$project"
+          "$venv/bin/jaunt" eject src/tokens/b64url.ts#encode --language ts --root "$project"
+          "$venv/bin/jaunt" eject src/tokens/b64url.ts#decode --language ts --root "$project"
+          npm --prefix "$project" run typecheck
+          npm --prefix "$project" test
+          npm --prefix "$project" run emit
+          npm --prefix "$project" run smoke:consumer
+          npm uninstall --prefix "$project" --ignore-scripts --no-audit --no-fund @usejaunt/ts
+          npm --prefix "$project" run demo
+          if rg -n '@usejaunt/ts|\.jaunt(?:-test)?\.' "$project/dist"; then
+            echo "Combined registry output retained a Jaunt runtime/spec dependency." >&2
+            exit 1
+          fi
+
+      - name: Tag and release Python
+        if: ${{ inputs.component == 'both' || inputs.component == 'python' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="v${{ steps.version.outputs.version }}"
-          uvx --from git-cliff git-cliff --config cliff.toml --latest --strip all \
-            --output release-notes.md
-          gh release create "$tag" --title "jaunt ${{ steps.version.outputs.version }}" \
-            --notes-file release-notes.md
+          tag="v${{ needs.candidates.outputs.python-version }}"
+          git fetch --force --tags origin
+          if git rev-parse --verify --quiet "refs/tags/${tag}" >/dev/null; then
+            python scripts/verify_release_tags.py --expected-commit "$GITHUB_SHA" "$tag"
+          else
+            git tag -a "$tag" -m "jaunt ${{ needs.candidates.outputs.python-version }}"
+            git push origin "$tag"
+          fi
+          component_dir="release/python"
+          title="jaunt ${{ needs.candidates.outputs.python-version }}"
+          mapfile -d '' assets < <(
+            find "$component_dir" -maxdepth 1 -type f -print0 | sort -z
+          )
+          download_dir="${RUNNER_TEMP}/github-release-${tag}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            mkdir -p "$download_dir"
+            if [[ "$(gh release view "$tag" --json assets --jq '.assets | length')" != "0" ]]; then
+              gh release download "$tag" --dir "$download_dir"
+            fi
+            python scripts/verify_github_release_assets.py \
+              --expected-dir "$component_dir" --downloaded-dir "$download_dir" --allow-missing
+            for asset in "${assets[@]}"; do
+              if [[ ! -f "$download_dir/$(basename "$asset")" ]]; then
+                gh release upload "$tag" "$asset"
+              fi
+            done
+          else
+            gh release create "$tag" "${assets[@]}" --verify-tag \
+              --title "$title" --generate-notes
+          fi
+          rm -rf "$download_dir"
+          mkdir -p "$download_dir"
+          gh release download "$tag" --dir "$download_dir"
+          python scripts/verify_github_release_assets.py \
+            --expected-dir "$component_dir" --downloaded-dir "$download_dir"
+          (cd "$download_dir" && sha256sum --check SHA256SUMS)
+      - name: Tag and release TypeScript
+        if: ${{ inputs.component == 'both' || inputs.component == 'typescript' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="ts-v${{ needs.candidates.outputs.typescript-version }}"
+          git fetch --force --tags origin
+          if git rev-parse --verify --quiet "refs/tags/${tag}" >/dev/null; then
+            python scripts/verify_release_tags.py --expected-commit "$GITHUB_SHA" "$tag"
+          else
+            git tag -a "$tag" -m "@usejaunt/ts ${{ needs.candidates.outputs.typescript-version }}"
+            git push origin "$tag"
+          fi
+          component_dir="release/npm"
+          title="@usejaunt/ts ${{ needs.candidates.outputs.typescript-version }}"
+          mapfile -d '' assets < <(
+            find "$component_dir" -maxdepth 1 -type f ! -name pack.json -print0 | sort -z
+          )
+          download_dir="${RUNNER_TEMP}/github-release-${tag}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            mkdir -p "$download_dir"
+            if [[ "$(gh release view "$tag" --json assets --jq '.assets | length')" != "0" ]]; then
+              gh release download "$tag" --dir "$download_dir"
+            fi
+            python scripts/verify_github_release_assets.py \
+              --expected-dir "$component_dir" --downloaded-dir "$download_dir" --allow-missing
+            for asset in "${assets[@]}"; do
+              if [[ ! -f "$download_dir/$(basename "$asset")" ]]; then
+                gh release upload "$tag" "$asset"
+              fi
+            done
+          else
+            gh release create "$tag" "${assets[@]}" --verify-tag \
+              --title "$title" --generate-notes
+          fi
+          rm -rf "$download_dir"
+          mkdir -p "$download_dir"
+          gh release download "$tag" --dir "$download_dir"
+          python scripts/verify_github_release_assets.py \
+            --expected-dir "$component_dir" --downloaded-dir "$download_dir"
+          (cd "$download_dir" && sha256sum --check SHA256SUMS)

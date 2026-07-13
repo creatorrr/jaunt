@@ -1,0 +1,12 @@
+{
+  "protocol": "jaunt-ts/1-draft.2",
+  "id": "invalidate-1",
+  "ok": true,
+  "result": {
+    "sessionId": "session-1",
+    "epoch": 1,
+    "snapshot": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "inputHashes": {},
+    "invalidated": ["src/slug/index.jaunt.ts"]
+  }
+}
