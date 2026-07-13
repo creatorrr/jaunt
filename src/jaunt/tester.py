@@ -26,6 +26,7 @@ from jaunt.builder import (
     RefreezePlan,
     _build_expected_names,
     _header_field_matches,
+    _requires_removal_restamp_rebuild,
     _strip_header,
     expand_stale_modules,
 )
@@ -655,6 +656,7 @@ async def plan_test_refreeze_or_rebuild(
     refrozen: set[str] = set()
     failed_refreeze: set[str] = set()
     gate_modules: set[str] = set()
+    propagating_rebuilds: set[str] = set()
     validators = validators_by_module or {}
 
     for module_name in sorted(stale_modules):
@@ -663,7 +665,6 @@ async def plan_test_refreeze_or_rebuild(
             header_fields_by_module.get(module_name, {}),
             entries,
         )
-        snapshots = _compute_snapshots(entries)
         existing = _read_generated_test(
             project_dir,
             generated_dir,
@@ -674,6 +675,11 @@ async def plan_test_refreeze_or_rebuild(
         )
         if existing is None:
             rebuild.add(module_name)
+            propagating_rebuilds.add(module_name)
+            continue
+
+        if _requires_removal_restamp_rebuild(existing):
+            rebuild.add(module_name)
             continue
 
         scheme = extract_digest_scheme(existing)
@@ -681,22 +687,55 @@ async def plan_test_refreeze_or_rebuild(
             pass
         if scheme is None or scheme < 2:
             if _migration_test_header_matches(existing, header_fields):
-                outcome = refreeze_test_module(
-                    project_dir=project_dir,
-                    generated_dir=generated_dir,
-                    module_name=module_name,
-                    entries=entries,
-                    tests_package=tests_package,
-                    test_roots=test_roots,
-                    header_fields=header_fields,
-                    snapshots=snapshots,
-                    validate_body=validators.get(module_name),
-                )
-                if outcome.needs_rebuild:
-                    failed_refreeze.add(module_name)
-                    rebuild.add(module_name)
-                elif outcome.refrozen:
-                    refrozen.add(module_name)
+                # Defer the scheme migration until after rebuild propagation,
+                # matching the build planner. Writing here can stamp a dependent
+                # fresh before an upstream removal pulls it back into rebuild.
+                continue
+
+        try:
+            module_file = _test_output_path_for_module(
+                project_dir=project_dir,
+                module_name=module_name,
+                entries=entries,
+                generated_dir=generated_dir,
+                tests_package=tests_package,
+                test_roots=test_roots,
+            )
+        except Exception:
+            rebuild.add(module_name)
+            propagating_rebuilds.add(module_name)
+            continue
+        old_snapshots = read_contract_sidecar(sidecar_path(module_file))
+        current_refs = {str(entry.spec_ref) for entry in entries}
+        if set(old_snapshots) != current_refs:
+            # Removed test specs must delete their generated pytest functions.
+            # Re-stamping the old body would leave those tests collectable while
+            # the header and sidecar incorrectly report the module as current.
+            rebuild.add(module_name)
+            propagating_rebuilds.add(module_name)
+            continue
+
+        specs_unchanged = bool(entries) and all(
+            classify_change(old_snapshots.get(str(entry.spec_ref)), entry) == "none"
+            for entry in entries
+        )
+        if specs_unchanged:
+            fingerprint_matches = _header_field_matches(
+                existing,
+                header_fields,
+                "generation_fingerprint",
+                extract_generation_fingerprint,
+            )
+            context_matches = _header_field_matches(
+                existing,
+                header_fields,
+                "module_context_digest",
+                extract_module_context_digest,
+            )
+            if not context_matches:
+                rebuild.add(module_name)
+                continue
+            if not fingerprint_matches:
                 continue
         gate_modules.add(module_name)
 
@@ -729,10 +768,11 @@ async def plan_test_refreeze_or_rebuild(
         ):
             meaningful_modules.add(module_name)
 
+    rebuild_seeds = propagating_rebuilds | meaningful_modules
     rebuild |= expand_stale_modules(
         module_dag,
-        set(meaningful_modules),
-        changed_modules=set(meaningful_modules),
+        set(rebuild_seeds),
+        changed_modules=set(rebuild_seeds),
         allowed_modules=set(stale_modules),
     )
     rebuild &= set(stale_modules)
@@ -808,6 +848,10 @@ def detect_stale_test_modules(
         try:
             existing = out_path.read_text(encoding="utf-8")
         except Exception:
+            stale.add(module_name)
+            continue
+
+        if _requires_removal_restamp_rebuild(existing):
             stale.add(module_name)
             continue
 
