@@ -202,8 +202,8 @@ jobs:
               "$project/node_modules/@usejaunt/ts" \
               "$project/node_modules/.bin/jaunt-ts-worker" \
               "$project/node_modules/.package-lock.json"
-            # npm cannot reliably rebuild a relocated file-linked fixture in
-            # offline mode. Materialize the dependency-free candidate in an
+            # FIXME(npm-11): npm cannot reliably rebuild a relocated
+            # file-linked fixture in offline mode. Materialize the dependency-free candidate in an
             # isolated prefix, then move npm's package and bin link into the
             # already-locked fixture. Peer bounds are validated above, and the
             # locked compiler is asserted before and after the swap.
