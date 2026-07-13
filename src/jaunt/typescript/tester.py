@@ -2731,6 +2731,23 @@ def _bubblewrap_executable(environment: Mapping[str, str]) -> str | None:
     return shutil.which("bwrap", path=environment.get("PATH", ""))
 
 
+def _permission_path_aliases(*paths: Path) -> tuple[Path, ...]:
+    """Return every lexical and physical path spelling Node may observe.
+
+    macOS temporary directories commonly use the ``/var`` symlink while Vite
+    realpaths modules through ``/private/var``. Windows can similarly mix 8.3
+    short names with long paths. Node's permission model must allow both names
+    for the same directory, without granting their shared parent.
+    """
+
+    aliases: dict[str, Path] = {}
+    for path in paths:
+        lexical = Path(os.path.abspath(path))
+        for alias in (lexical, lexical.resolve()):
+            aliases.setdefault(os.path.normcase(str(alias)), alias)
+    return tuple(aliases[key] for key in sorted(aliases))
+
+
 async def _run_test_runner(
     client: Any,
     root: Path,
@@ -2868,11 +2885,7 @@ async def _run_test_runner(
                 raise JauntConfigError(
                     "Installed @usejaunt/ts is missing its protected worker permission guard"
                 )
-            readable = {
-                root.resolve(),
-                runner.parent.resolve(),
-                compiler_module_path.parent.resolve(),
-            }
+            readable = [root, runner.parent, compiler_module_path.parent]
             package_root_path = getattr(installation, "package_root", None)
             if isinstance(package_root_path, Path):
                 mapped_package = package_root_path
@@ -2881,7 +2894,7 @@ async def _run_test_runner(
                 with contextlib.suppress(ValueError):
                     mapped_package = root / lexical_package.relative_to(source)
                 if mapped_package.exists():
-                    readable.add(mapped_package.resolve())
+                    readable.append(mapped_package)
             for candidate in root.rglob("*"):
                 if not candidate.is_symlink():
                     continue
@@ -2891,16 +2904,18 @@ async def _run_test_runner(
                 except ValueError:
                     for parent in (physical, *physical.parents):
                         if parent.name == "node_modules":
-                            readable.add(parent)
+                            readable.append(parent)
                             break
+            readable_aliases = _permission_path_aliases(*readable)
+            writable_aliases = _permission_path_aliases(root)
             command.extend(
                 [
                     permission_flag,
                     "--allow-addons",
                     "--allow-worker",
                     f"--require={permission_guard}",
-                    *(f"--allow-fs-read={path}" for path in sorted(readable)),
-                    f"--allow-fs-write={root.resolve()}",
+                    *(f"--allow-fs-read={path}" for path in readable_aliases),
+                    *(f"--allow-fs-write={path}" for path in writable_aliases),
                 ]
             )
         source_text = str(isolated_from.resolve())

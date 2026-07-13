@@ -75,6 +75,7 @@ from jaunt.typescript.tester import (
     _implicit_class_test_specs,
     _isolated_test_workspace,
     _is_reviewable_example_battery,
+    _permission_path_aliases,
     _redact_runner_result,
     _runner_fingerprint,
     _run_test_runner,
@@ -4655,6 +4656,28 @@ async def test_windows_runner_timeout_terminates_the_process_tree(
     process = Process()
     await _terminate_runner_process(process, platform="nt")
     assert calls == [("taskkill", "/PID", "321", "/T", "/F")]
+
+
+def test_node_permission_paths_expand_aliases_deterministically(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lexical = (tmp_path / "lexical-workspace").absolute()
+    physical = (tmp_path / "physical-workspace").absolute()
+    path_type = type(lexical)
+    original_resolve = path_type.resolve
+
+    def resolve_alias(path: Path, *args: Any, **kwargs: Any) -> Path:
+        if path == lexical:
+            return physical
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(path_type, "resolve", resolve_alias)
+
+    aliases = _permission_path_aliases(lexical, physical, lexical)
+
+    assert set(aliases) == {lexical, physical}
+    assert aliases == tuple(sorted(aliases, key=lambda path: os.path.normcase(str(path))))
 
 
 def test_status_freshness_digest_invalidates_prose_and_fingerprint_changes() -> None:

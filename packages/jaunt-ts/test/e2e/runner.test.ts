@@ -39,6 +39,12 @@ function aliasedWorkspaceRoot(root: string): string {
   return alias;
 }
 
+function permissionPathAliases(...paths: string[]): string[] {
+  return [
+    ...new Set(paths.flatMap((path) => [resolve(path), realpathSync(path)])),
+  ].sort();
+}
+
 function managedTestSource(tier: "example" | "derived", body: string): string {
   const canonicalBody = `${body.trim()}\n`;
   return `// ⚙️ jaunt:generated — DO NOT EDIT. Regenerate with \`jaunt test\`.
@@ -961,8 +967,8 @@ test("worker stays restricted", async () => {
     packageRoot,
     "dist/test/permission_guard.cjs",
   );
-  const physicalWorkspace = realpathSync(workspace.root);
-  const physicalPackageRoot = realpathSync(packageRoot);
+  const workspaceAliases = permissionPathAliases(workspace.root);
+  const packageAliases = permissionPathAliases(packageRoot);
   const child = spawn(
     process.execPath,
     [
@@ -970,9 +976,9 @@ test("worker stays restricted", async () => {
       "--allow-addons",
       "--allow-worker",
       `--require=${permissionGuard}`,
-      `--allow-fs-read=${physicalWorkspace}`,
-      `--allow-fs-read=${physicalPackageRoot}`,
-      `--allow-fs-write=${physicalWorkspace}`,
+      ...workspaceAliases.map((path) => `--allow-fs-read=${path}`),
+      ...packageAliases.map((path) => `--allow-fs-read=${path}`),
+      ...workspaceAliases.map((path) => `--allow-fs-write=${path}`),
       resolve(packageRoot, "dist/test/runner.js"),
     ],
     {
