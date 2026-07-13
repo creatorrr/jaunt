@@ -249,6 +249,7 @@ def compute_magic_status(
     stale_changes = {
         m: _label_change_kind(
             generation_fingerprint=build_generation_fingerprint,
+            module_context_digest=build_module_context_digests.get(m, ""),
             module_name=m,
             package_dir=workspace.route_for(m).output_base,
             generated_dir=cfg.paths.generated_dir,
@@ -302,6 +303,7 @@ def _label_change_kind(
     generated_dir: str,
     module_specs: dict[str, list],
     generation_fingerprint: str = "",
+    module_context_digest: str = "",
 ) -> str:
     """Classify why a stale module changed: structural, prose, fingerprint, or re-stamp.
 
@@ -316,12 +318,20 @@ def _label_change_kind(
     """
     from jaunt import builder
     from jaunt.digest import prose_digest, structural_digest
-    from jaunt.header import extract_generation_fingerprint, extract_spec_digests
+    from jaunt.header import (
+        extract_generation_fingerprint,
+        extract_module_context_digest,
+        extract_spec_digests,
+    )
 
     existing = builder._read_generated(package_dir, generated_dir, module_name)
+    if existing and builder._requires_removal_restamp_rebuild(existing):
+        return "structural"
     on_disk = extract_spec_digests(existing) if existing else None
     entries = module_specs.get(module_name, [])
     if not on_disk:
+        return "structural"
+    if set(on_disk) != {str(entry.spec_ref) for entry in entries}:
         return "structural"
     any_prose = False
     for entry in entries:
@@ -334,6 +344,10 @@ def _label_change_kind(
             any_prose = True
     if any_prose:
         return "prose"
+    if module_context_digest and existing:
+        stored_context = _norm_digest(extract_module_context_digest(existing))
+        if stored_context != _norm_digest(module_context_digest):
+            return "structural"
     if generation_fingerprint and existing:
         stored_fp = _norm_digest(extract_generation_fingerprint(existing))
         if stored_fp is not None and stored_fp != _norm_digest(generation_fingerprint):

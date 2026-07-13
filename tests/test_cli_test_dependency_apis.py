@@ -30,6 +30,13 @@ class AssertingBackend(GeneratorBackend):
         return "\n".join(lines).rstrip() + "\n", None
 
 
+class ExplodingBackend(GeneratorBackend):
+    async def generate_module(
+        self, ctx: ModuleSpecContext, *, extra_error_context: list[str] | None = None
+    ) -> tuple[str, None]:
+        raise AssertionError("fingerprint-only targeted-test drift must re-stamp for free")
+
+
 def _restore_module(name: str, original, *, existed: bool) -> None:
     if existed:
         assert original is not None
@@ -58,9 +65,13 @@ def test_jaunt_test_passes_magic_dependency_apis_to_test_generation(
                 "[test]",
                 'pytest_args = ["-q"]',
                 "",
+                "[prompts]",
+                'test_module = "test_prompt.md"',
+                "",
             ]
         ),
     )
+    _write(project / "test_prompt.md", "Initial test prompt.\n")
 
     # src/api_mod.py includes a magic spec that should be discovered and threaded
     # into test generation as dependency_apis.
@@ -77,8 +88,9 @@ def test_jaunt_test_passes_magic_dependency_apis_to_test_generation(
                 "from __future__ import annotations",
                 "",
                 "import jaunt",
+                "import api_mod",
                 "",
-                "@jaunt.test()",
+                "@jaunt.test(targets=api_mod.foo)",
                 "def test_generated_smoke() -> None:",
                 "    raise AssertionError('spec stub')",
                 "",
@@ -100,6 +112,22 @@ def test_jaunt_test_passes_magic_dependency_apis_to_test_generation(
                 str(project),
                 "--no-build",
                 "--pytest-args=-q",
+            ]
+        )
+        assert rc == 0
+
+        # A prompt-only fingerprint change must retain the free re-stamp path
+        # even though targeted tests store a context digest combined with their
+        # target API digest.
+        _write(project / "test_prompt.md", "Updated test prompt.\n")
+        monkeypatch.setattr(jaunt.cli, "_build_backend", lambda cfg: ExplodingBackend())
+        rc = jaunt.cli.main(
+            [
+                "test",
+                "--root",
+                str(project),
+                "--no-build",
+                "--no-run",
             ]
         )
         assert rc == 0

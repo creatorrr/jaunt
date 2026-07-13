@@ -26,7 +26,15 @@ def _spec_project(tmp_path: Path, *, pkg: str, sig: str = "def greet(name: str) 
     )
 
 
-def _build_scheme2_module(tmp_path: Path, *, pkg: str, module_digest_override: str | None) -> None:
+def _build_scheme2_module(
+    tmp_path: Path,
+    *,
+    pkg: str,
+    module_digest_override: str | None,
+    tool_version: str = "0",
+    generation_fingerprint_override: str | None = None,
+    module_context_digest_override: str | None = None,
+) -> None:
     """Write a generated module carrying scheme-2 spec_digests over the CURRENT specs.
 
     When ``module_digest_override`` is supplied, the header module_digest is set
@@ -72,14 +80,13 @@ def _build_scheme2_module(tmp_path: Path, *, pkg: str, module_digest_override: s
         module_name=module_name,
         source="def greet(name: str) -> str:\n    return f'Hello, {name}!'\n",
         header_fields={
-            "tool_version": "0",
+            "tool_version": tool_version,
             "kind": "build",
             "source_module": module_name,
             "module_digest": module_digest_override or real_digest,
-            "generation_fingerprint": generation_fingerprint(
-                load_config(root=tmp_path), kind="build"
-            ),
-            "module_context_digest": ctx_digest,
+            "generation_fingerprint": generation_fingerprint_override
+            or generation_fingerprint(load_config(root=tmp_path), kind="build"),
+            "module_context_digest": module_context_digest_override or ctx_digest,
             "module_api_digest": module_api_digest(entries),
             "spec_refs": [str(e.spec_ref) for e in entries],
         },
@@ -140,6 +147,85 @@ def test_structural_change_still_labels_structural(tmp_path: Path, monkeypatch, 
 
     rc = _run(["status", "--json", "--magic-only", "--root", str(tmp_path)])
     out = json.loads(capsys.readouterr().out)
+    assert rc == cli.EXIT_OK
+    assert f"{pkg}.specs" in out["stale"]
+    assert out["stale_changes"][f"{pkg}.specs"] == "structural"
+
+
+def test_vulnerable_restamp_version_labels_structural(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setattr("jaunt.builder._tool_version", lambda: "1.6.3")
+    pkg = "restamp_vulnerable"
+    _spec_project(tmp_path, pkg=pkg)
+    monkeypatch.chdir(tmp_path)
+    sys.path.insert(0, str(tmp_path / "src"))
+    _build_scheme2_module(
+        tmp_path,
+        pkg=pkg,
+        module_digest_override=None,
+        tool_version="1.6.2",
+    )
+
+    rc = _run(["status", "--json", "--magic-only", "--root", str(tmp_path)])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == cli.EXIT_OK
+    assert f"{pkg}.specs" in out["stale"]
+    assert out["stale_changes"][f"{pkg}.specs"] == "structural"
+
+
+def test_context_change_takes_priority_over_fingerprint_change(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    pkg = "restamp_context_and_fingerprint"
+    _spec_project(tmp_path, pkg=pkg)
+    monkeypatch.chdir(tmp_path)
+    sys.path.insert(0, str(tmp_path / "src"))
+    _build_scheme2_module(
+        tmp_path,
+        pkg=pkg,
+        module_digest_override="sha256:" + "0" * 64,
+        generation_fingerprint_override="sha256:" + "1" * 64,
+        module_context_digest_override="sha256:" + "2" * 64,
+    )
+
+    rc = _run(["status", "--json", "--magic-only", "--root", str(tmp_path)])
+    out = json.loads(capsys.readouterr().out)
+
+    assert rc == cli.EXIT_OK
+    assert out["stale_changes"][f"{pkg}.specs"] == "structural"
+
+
+def test_removed_spec_labels_module_structural(tmp_path: Path, monkeypatch, capsys) -> None:
+    pkg = "restamp_removed"
+    _write(
+        tmp_path / "jaunt.toml",
+        'version = 1\n\n[paths]\nsource_roots = ["src"]\n\n[build]\nemit_stubs = false\n',
+    )
+    _write(tmp_path / "src" / pkg / "__init__.py", "")
+    spec_path = tmp_path / "src" / pkg / "specs.py"
+    _write(
+        spec_path,
+        "import jaunt\n\n"
+        "@jaunt.magic()\n"
+        "def first() -> int:\n"
+        '    """Return one."""\n'
+        "    ...\n\n"
+        "@jaunt.magic()\n"
+        "def second() -> int:\n"
+        '    """Return two."""\n'
+        "    ...\n",
+    )
+    monkeypatch.chdir(tmp_path)
+    sys.path.insert(0, str(tmp_path / "src"))
+    _build_scheme2_module(tmp_path, pkg=pkg, module_digest_override=None)
+
+    _write(
+        spec_path,
+        'import jaunt\n\n@jaunt.magic()\ndef second() -> int:\n    """Return two."""\n    ...\n',
+    )
+
+    rc = _run(["status", "--json", "--magic-only", "--root", str(tmp_path)])
+    out = json.loads(capsys.readouterr().out)
+
     assert rc == cli.EXIT_OK
     assert f"{pkg}.specs" in out["stale"]
     assert out["stale_changes"][f"{pkg}.specs"] == "structural"

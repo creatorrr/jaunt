@@ -70,6 +70,32 @@ from jaunt.validation import (
 _TY_CHECK_TIMEOUT_S = 20.0
 NEEDS_DEP_MARKER = "JAUNT-NEEDS-DEP:"
 
+# These releases could re-stamp a module after a spec was removed, replacing the
+# header and sidecar while leaving the deleted symbol's body in the generated
+# file. Once that provenance has been overwritten there is no reliable way to
+# distinguish the dead body from an intentional generated helper, so affected
+# artifacts need one paid rebuild on upgrade.
+_UNSAFE_REMOVAL_RESTAMP_TOOL_VERSIONS = frozenset(
+    {
+        "1.0.0rc7",
+        "1.0.0rc8",
+        "1.0.0",
+        "1.1.0",
+        "1.2.0",
+        "1.3.0",
+        "1.3.1",
+        "1.4.0",
+        "1.4.1",
+        "1.4.2",
+        "1.5.0",
+        "1.5.1",
+        "1.5.2",
+        "1.6.0",
+        "1.6.1",
+        "1.6.2",
+    }
+)
+
 
 def _scan_needs_dep_markers(source: str) -> list[str]:
     markers: list[str] = []
@@ -114,6 +140,15 @@ def _normalize_digest(digest: str | None) -> str | None:
     if digest.startswith("sha256:"):
         return digest.split(":", 1)[1]
     return digest
+
+
+def _requires_removal_restamp_rebuild(existing: str) -> bool:
+    parsed = header.parse_header(existing)
+    return bool(
+        parsed
+        and _tool_version() not in _UNSAFE_REMOVAL_RESTAMP_TOOL_VERSIONS
+        and parsed.get("tool_version") in _UNSAFE_REMOVAL_RESTAMP_TOOL_VERSIONS
+    )
 
 
 def _generated_relpath(module_name: str, *, generated_dir: str) -> Path:
@@ -268,6 +303,10 @@ def detect_stale_modules(
         try:
             existing = out_path.read_text(encoding="utf-8")
         except Exception:
+            stale.add(module_name)
+            continue
+
+        if _requires_removal_restamp_rebuild(existing):
             stale.add(module_name)
             continue
 
@@ -542,6 +581,7 @@ async def plan_refreeze_or_rebuild(
     refrozen: set[str] = set()
     failed_refreeze: set[str] = set()
     gate_modules: set[str] = set()
+    propagating_rebuilds: set[str] = set()
     validators = validators_by_module or {}
 
     for module_name in sorted(stale_modules):
@@ -549,6 +589,7 @@ async def plan_refreeze_or_rebuild(
             # A spec'd base's generated public API moved (or was never captured):
             # the generated body may genuinely need to change -- never refreeze.
             rebuild.add(module_name)
+            propagating_rebuilds.add(module_name)
             continue
         entries = module_specs.get(module_name, [])
         header_fields = _header_fields_with_spec_digests(
@@ -562,6 +603,11 @@ async def plan_refreeze_or_rebuild(
             module_output_bases=module_output_bases,
         )
         if existing is None:
+            rebuild.add(module_name)
+            propagating_rebuilds.add(module_name)
+            continue
+
+        if _requires_removal_restamp_rebuild(existing):
             rebuild.add(module_name)
             continue
 
@@ -593,10 +639,50 @@ async def plan_refreeze_or_rebuild(
         )
         relpath = _generated_relpath(module_name, generated_dir=generated_dir)
         old_snapshots = read_contract_sidecar(sidecar_path(module_dir / relpath))
-        if entries and all(
+        current_refs = {str(entry.spec_ref) for entry in entries}
+        if set(old_snapshots) != current_refs:
+            # A removed spec is a structural module change. Keeping the old body
+            # can leave the deleted implementation callable by surviving generated
+            # symbols even after the header and stub stop advertising it.
+            rebuild.add(module_name)
+            propagating_rebuilds.add(module_name)
+            continue
+
+        specs_unchanged = bool(entries) and all(
             classify_change(old_snapshots.get(str(entry.spec_ref)), entry) == "none"
             for entry in entries
-        ):
+        )
+        if specs_unchanged:
+            fingerprint_matches = _header_field_matches(
+                existing,
+                header_fields,
+                "generation_fingerprint",
+                extract_generation_fingerprint,
+            )
+            context_matches = _header_field_matches(
+                existing,
+                header_fields,
+                "module_context_digest",
+                extract_module_context_digest,
+            )
+            api_matches = _header_field_matches(
+                existing,
+                header_fields,
+                "module_api_digest",
+                extract_module_api_digest,
+            )
+
+            # A generation-fingerprint change is the deliberate free re-stamp
+            # route only when every other generated input still matches. A
+            # simultaneous context change (for example, a removed handwritten
+            # helper) still makes the old generated body unsafe to keep.
+            if not context_matches or not api_matches:
+                rebuild.add(module_name)
+                if not api_matches:
+                    propagating_rebuilds.add(module_name)
+                continue
+            if not fingerprint_matches:
+                continue
             continue
 
         gate_modules.add(module_name)
@@ -625,10 +711,11 @@ async def plan_refreeze_or_rebuild(
         ):
             meaningful_modules.add(module_name)
 
+    rebuild_seeds = propagating_rebuilds | meaningful_modules
     rebuild |= expand_stale_modules(
         module_dag,
-        set(meaningful_modules),
-        changed_modules=set(meaningful_modules),
+        set(rebuild_seeds),
+        changed_modules=set(rebuild_seeds),
         allowed_modules=set(stale_modules),
     )
     rebuild &= set(stale_modules)

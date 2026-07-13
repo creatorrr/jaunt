@@ -7,10 +7,23 @@ The rest of the reference is versionless. This page collects what changes
 between releases and what you have to do about it. For the complete log, see the
 [GitHub releases](https://github.com/creatorrr/jaunt/releases).
 
-**Compatibility promise:** patch releases (1.3.0 → 1.3.1) never invalidate
-built modules — your generated code stays fresh across the upgrade. Anything
-that would restale built modules lands in a minor version and is called out on
-this page.
+**Compatibility promise:** patch releases (1.3.0 → 1.3.1) do not normally
+invalidate built modules. The exception is a correctness repair for artifacts
+whose provenance was previously marked fresh incorrectly; that safety migration
+is called out explicitly below.
+
+## 1.6.3
+
+- Removing a magic or generated-test spec now rebuilds its module instead of
+  re-stamping the old body. This prevents deleted implementations and pytest
+  functions from surviving as dead generated text.
+- Generated artifacts last stamped by 1.0.0rc7 through 1.6.2 rebuild once on
+  upgrade because those releases could overwrite the evidence needed to detect
+  an earlier removal-only re-stamp. This is an intentional safety exception to
+  the usual patch-release freshness promise.
+- Context-only rebuilds stay local, while removal and public-API changes still
+  propagate to affected dependents. Pure fingerprint changes and semantically
+  equivalent prose edits retain the free re-stamp path.
 
 ## 1.6.2
 

@@ -4285,6 +4285,15 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
                 entries = module_specs.get(module_name)
                 if entries is None:
                     continue
+                test_module_context_digest = test_module_context_digests.get(module_name, "")
+                if test_target_api_digests:
+                    test_module_context_digest = (
+                        tester.combine_module_context_digest(
+                            test_module_context_digest,
+                            test_target_api_digests.get(module_name),
+                        )
+                        or test_module_context_digest
+                    )
                 test_header_fields_by_module[module_name] = {
                     "tool_version": builder._tool_version(),
                     "kind": "test",
@@ -4302,7 +4311,7 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
                         spec_graph,
                     ),
                     "generation_fingerprint": test_generation_fingerprint,
-                    "module_context_digest": test_module_context_digests.get(module_name, ""),
+                    "module_context_digest": test_module_context_digest,
                     "spec_refs": [str(e.spec_ref) for e in entries],
                 }
             test_plan = await tester.plan_test_refreeze_or_rebuild(
