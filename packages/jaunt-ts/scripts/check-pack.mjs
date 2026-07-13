@@ -26,7 +26,14 @@ assert(
 );
 const files = packed.files.map(({ path }) => path).sort();
 const fileSet = new Set(files);
-assert.deepEqual(packageJson.files, ["dist", "README.md"]);
+assert.deepEqual(packageJson.files, ["dist", "LICENSE", "README.md"]);
+assert.equal(packageJson.license, "MIT");
+assert.equal(
+  packageJson.repository?.url,
+  "git+https://github.com/creatorrr/jaunt.git",
+  "trusted publishing requires the exact GitHub repository URL",
+);
+assert.equal(packageJson.repository?.directory, "packages/jaunt-ts");
 assert.equal(packageJson.sideEffects, false);
 assert.equal(packageJson.type, "module");
 assert.equal(
@@ -35,6 +42,7 @@ assert.equal(
   "worker must not bundle runtime dependencies",
 );
 const required = [
+  "LICENSE",
   "README.md",
   "package.json",
   "dist/spec.js",

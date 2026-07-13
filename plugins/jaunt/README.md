@@ -1,11 +1,11 @@
 # Jaunt Codex Plugin
 
-The Jaunt plugin gives Codex the same authoring loop Jaunt expects: edit specs,
-preview stale work, build through the CLI, and review generated output without
-hand-editing machine-owned files.
+The Jaunt plugin gives Codex the same Python and TypeScript authoring loop Jaunt
+expects: edit specs, preview stale or unbuilt work, build through the CLI, and
+review generated output without hand-editing machine-owned files.
 
 It is CLI-backed. There is no MCP server, app connector, or public-directory
-submission in version 1.0.0.
+submission in version 1.1.0.
 
 ## Install
 
@@ -28,6 +28,11 @@ codex plugin marketplace add creatorrr/jaunt
 codex plugin add jaunt@jaunt-codex-plugins
 ```
 
+On a rerun, the installer upgrades the Git marketplace snapshot and re-adds
+the plugin, which refreshes the cache on current Codex releases. If an older
+CLI reports the plugin as already installed, the installer removes and re-adds
+it. Local mode skips the Git upgrade but performs the same cache refresh.
+
 Start a new Codex session after installation. Open `/hooks` to review and
 trust the bundled SessionStart and PreToolUse hooks.
 
@@ -39,7 +44,8 @@ trust the bundled SessionStart and PreToolUse hooks.
   run the deterministic gates.
 - `$jaunt:doctor`: read-only environment, authentication, freshness, orphan,
   and duplicate-hook checks.
-- `$jaunt:convert`: explicit-only conversion of handwritten Python to Jaunt.
+- `$jaunt:convert`: explicit-only conversion of handwritten Python or
+  TypeScript to Jaunt.
 - `$jaunt:first-build-reviewer`: explicit or delegated read-only review for
   behavior the contract leaves unstated.
 
@@ -50,7 +56,9 @@ thread otherwise.
 ## Hooks
 
 The SessionStart hook reads the session `cwd` and injects a bounded freshness
-summary for each discovered Jaunt workspace.
+summary for each discovered Jaunt workspace, including TypeScript unbuilt,
+invalid, and diagnostic counts. Doctor also checks Node, npm, the project-local
+`@usejaunt/ts` worker, and the supported compiler range without a model call.
 
 The PreToolUse hook inspects `apply_patch` paths. It denies direct edits to
 files under each configured target's generated directory and to existing
@@ -62,3 +70,6 @@ timeouts fail open. Review the hook source and trust decision in `/hooks`.
 The bundled command hooks require Bash (macOS, Linux, or a Windows environment
 that provides Bash). SessionStart runs `jaunt status`, which imports discovered
 spec modules; trust this hook only for workspaces whose Python code you trust.
+CLI calls prefer a compatible installed `jaunt`, use the existing uv environment for a uv
+project, and otherwise use `uvx jaunt`, so JavaScript-only projects do not need
+a `pyproject.toml`.

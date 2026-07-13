@@ -34,7 +34,8 @@ def _frontmatter(text: str) -> dict[str, str]:
 def test_plugin_manifest_shape():
     manifest = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())
     assert manifest["name"] == "jaunt"
-    assert manifest["version"] == "1.1.0"
+    assert manifest["version"] == "1.2.0"
+    assert "TypeScript" in manifest["description"]
 
 
 def test_marketplace_at_repo_root_points_at_plugin():
@@ -121,7 +122,11 @@ def _fake_jaunt_bin(tmp_path):
     jaunt = bin_dir / "jaunt"
     # Consumes the replayed stdin payload and prints a marker so the test can
     # assert the guard both found jaunt AND piped the payload through.
-    jaunt.write_text("#!/usr/bin/env bash\ncat >/dev/null\necho GUARD_RAN\n")
+    jaunt.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ "$1" = "--version" ]; then echo "jaunt 1.7.0"; exit 0; fi\n'
+        "cat >/dev/null\necho GUARD_RAN\n"
+    )
     jaunt.chmod(0o755)
     return bin_dir
 
@@ -180,7 +185,9 @@ def test_guard_rewrites_payload_cwd_to_owning_project(tmp_path):
     bin_dir = tmp_path / "fakebin"
     bin_dir.mkdir()
     echo_jaunt = bin_dir / "jaunt"
-    echo_jaunt.write_text("#!/usr/bin/env bash\ncat\n")  # echo payload back
+    echo_jaunt.write_text(
+        '#!/usr/bin/env bash\nif [ "$1" = "--version" ]; then echo "jaunt 1.7.0"; exit 0; fi\ncat\n'
+    )  # echo payload back
     echo_jaunt.chmod(0o755)
     env = {
         **os.environ,
@@ -205,13 +212,19 @@ def test_guard_falls_back_to_uv_when_path_jaunt_is_stale(tmp_path):
     root = tmp_path / "repo"
     (root / "__generated__").mkdir(parents=True)
     (root / "jaunt.toml").write_text("version = 1\n")
+    (root / "pyproject.toml").write_text("[project]\nname='sample'\nversion='0'\n")
     bin_dir = tmp_path / "fakebin"
     bin_dir.mkdir()
     stale = bin_dir / "jaunt"
     stale.write_text("#!/usr/bin/env bash\necho 'invalid choice: guard' >&2\nexit 2\n")
     stale.chmod(0o755)
     uv = bin_dir / "uv"
-    uv.write_text("#!/usr/bin/env bash\ncat >/dev/null\necho UV_FALLBACK_RAN\n")
+    uv.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ "$*" = "run --no-sync jaunt --version" ]; then '
+        'echo "jaunt 1.7.0"; exit 0; fi\n'
+        "cat >/dev/null\necho UV_FALLBACK_RAN\n"
+    )
     uv.chmod(0o755)
     env = {
         **os.environ,
@@ -222,6 +235,108 @@ def test_guard_falls_back_to_uv_when_path_jaunt_is_stale(tmp_path):
     result = _run_guard(payload, env=env)
     assert result.returncode == 0
     assert "UV_FALLBACK_RAN" in result.stdout
+
+
+@_needs_bash
+def test_guard_uses_uvx_for_javascript_only_workspace(tmp_path):
+    root = tmp_path / "repo"
+    (root / "__generated__").mkdir(parents=True)
+    (root / "jaunt.toml").write_text("version = 2\n")
+    (root / "package.json").write_text('{"name":"sample"}\n')
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    uvx = bin_dir / "uvx"
+    uvx.write_text("#!/usr/bin/env bash\ncat >/dev/null\necho UVX_FALLBACK_RAN\n")
+    uvx.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin",
+        "CLAUDE_PROJECT_DIR": str(root),
+    }
+    payload = json.dumps({"tool_input": {"file_path": str(root / "__generated__" / "mod.ts")}})
+    result = _run_guard(payload, env=env)
+    assert result.returncode == 0
+    assert "UVX_FALLBACK_RAN" in result.stdout
+
+
+@_needs_bash
+def test_guard_skips_stale_zero_exit_jaunt_for_v2(tmp_path):
+    root = tmp_path / "repo"
+    (root / "gen").mkdir(parents=True)
+    (root / "jaunt.toml").write_text("version = 2\n[target.ts]\ngenerated_dir='gen'\n")
+    (root / "pyproject.toml").write_text("[project]\nname='sample'\nversion='0'\n")
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    stale = bin_dir / "jaunt"
+    stale.write_text(
+        '#!/usr/bin/env bash\nif [ "$1" = "--version" ]; then echo "jaunt 1.6.3"; fi\n'
+    )
+    stale.chmod(0o755)
+    uv = bin_dir / "uv"
+    uv.write_text("#!/usr/bin/env bash\necho 'jaunt 1.6.3'\n")
+    uv.chmod(0o755)
+    uvx = bin_dir / "uvx"
+    uvx.write_text("#!/usr/bin/env bash\ncat >/dev/null\necho UVX_FALLBACK_RAN\n")
+    uvx.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin",
+        "CLAUDE_PROJECT_DIR": str(root),
+    }
+    payload = json.dumps({"tool_input": {"file_path": str(root / "gen" / "mod.ts")}})
+    result = _run_guard(payload, env=env)
+    assert "UVX_FALLBACK_RAN" in result.stdout
+
+
+@_needs_bash
+def test_guard_uv_probe_uses_owner_and_plugin_cache(tmp_path):
+    root = tmp_path / "session-root"
+    owner = root / "packages" / "app"
+    (owner / "gen").mkdir(parents=True)
+    (owner / "jaunt.toml").write_text("version = 2\n[target.ts]\ngenerated_dir='gen'\n")
+    (owner / "pyproject.toml").write_text("[project]\nname='app'\nversion='0'\n")
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    plugin_data = tmp_path / "plugin-data"
+    plugin_data.mkdir()
+    unwritable_home = tmp_path / "unwritable-home"
+    unwritable_home.mkdir()
+    unwritable_home.chmod(0o500)
+    stale = bin_dir / "jaunt"
+    stale.write_text("#!/usr/bin/env bash\necho 'jaunt 1.6.3'\n")
+    stale.chmod(0o755)
+    uv = bin_dir / "uv"
+    uv.write_text(
+        """#!/usr/bin/env bash
+if [ "$PWD" != "$EXPECTED_OWNER" ]; then exit 81; fi
+if [ "$UV_CACHE_DIR" != "$EXPECTED_CACHE" ]; then exit 82; fi
+if [ "$*" = "run --no-sync jaunt --version" ]; then echo "jaunt 1.7.0"; exit 0; fi
+python3 -c '
+import json, sys
+p = json.load(sys.stdin)
+print(json.dumps({"hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "ask",
+    "permissionDecisionReason": p["tool_input"]["file_path"] + " is generated",
+}}))
+'
+"""
+    )
+    uv.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin",
+        "HOME": str(unwritable_home),
+        "PLUGIN_DATA": str(plugin_data),
+        "EXPECTED_OWNER": str(owner),
+        "EXPECTED_CACHE": str(plugin_data),
+        "CLAUDE_PROJECT_DIR": str(root),
+    }
+    env.pop("UV_CACHE_DIR", None)
+    payload = json.dumps({"tool_input": {"file_path": str(owner / "gen" / "mod.ts")}})
+    result = _run_guard(payload, env=env)
+    specific = json.loads(result.stdout)["hookSpecificOutput"]
+    assert specific["permissionDecision"] == "ask"
 
 
 @_needs_bash

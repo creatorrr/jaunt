@@ -3,13 +3,14 @@
   "version": "0.1.0-alpha.0",
   "description": "Static TypeScript analyzer and marker API for Jaunt",
   "type": "module",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "sideEffects": false,
   "engines": {
     "node": ">=20.0.0 <25.0.0"
   },
   "files": [
     "dist",
+    "LICENSE",
     "README.md"
   ],
   "bin": {
@@ -55,11 +56,14 @@
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\" \"scripts/**/*.mjs\" \"*.{json,md}\" \"../../schemas/jaunt-ts/**/*.json\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\" \"scripts/**/*.mjs\" \"*.{json,md}\" \"../../schemas/jaunt-ts/**/*.json\"",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
-    "test": "npm run build && vitest run --testTimeout=10000",
+    "test": "npm run build && vitest run --testTimeout=30000 --hookTimeout=30000 --maxWorkers=2",
+    "test:platform": "npm run build && vitest run test/unit/compiler-options.test.ts test/e2e/project-references.test.ts test/e2e/runner.test.ts test/e2e/mutation-strength.test.ts --testTimeout=60000 --hookTimeout=60000 --maxWorkers=1",
+    "test:peers": "npm run build && vitest run test/unit/properties.test.ts test/unit/reporter.test.ts test/e2e/mutation-strength.test.ts --testTimeout=45000 --hookTimeout=45000 --maxWorkers=2",
     "test:unit": "vitest run test/unit test/golden",
     "test:e2e": "npm run build && vitest run test/e2e",
     "benchmark:test": "node --test scripts/benchmark-lib.node-test.mjs",
     "benchmark:watch": "npm run build && npm run benchmark:test && node ./scripts/benchmark-watch.mjs --assert",
+    "benchmark:watch:ci": "npm run build && npm run benchmark:test && node ./scripts/benchmark-watch.mjs --assert-leaks",
     "pack:check": "npm run build && node ./scripts/check-pack.mjs && node ./scripts/check-installed-pack.mjs"
   },
   "repository": {

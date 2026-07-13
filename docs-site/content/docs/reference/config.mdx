@@ -4,10 +4,9 @@ description: "Every jaunt.toml section and key, and how strict validation behave
 ---
 
 Jaunt finds the project root by walking upward from the current directory until
-it hits a `jaunt.toml`. `jaunt init` scaffolds a small, opinionated starter; the
-block below is the complete schema — every section and key the config loader
-accepts. It is kept in lock-step with the loader by a test, so nothing here is
-made up and nothing is missing.
+it hits a `jaunt.toml`. `jaunt init` scaffolds a small, opinionated starter. Version
+1 keeps Python paths under `[paths]`; version 2 moves language-local settings under
+`[target.py]` and `[target.ts]`. Both accepted shapes are documented below.
 
 A minimal config sets only paths:
 
@@ -60,6 +59,7 @@ contract_battery_dir = "tests/contract"
 
 [build]
 jobs = 8
+include_target_tests = false
 instructions = []
 
 [test]
@@ -71,6 +71,8 @@ build_preamble = ""
 build_module = ""
 test_system = ""
 test_module = ""
+project_overview_system = ""
+project_overview_user = ""
 
 [prompts.ts]
 build_system = ""
@@ -79,18 +81,28 @@ test_system = ""
 test_module = ""
 design_system = ""
 design_user = ""
+
+[contract]
+derive = ["examples", "errors"]
+strength = true
+property_max_examples = 50
 ```
 
 `[target.ts].projects` and `test_projects` are explicit; Jaunt does not guess the
 nearest `tsconfig.json`. `tool_owner` must directly declare `@usejaunt/ts` and a
 supported project-local TypeScript compiler. Version 2 cannot also contain `[paths]`.
-Version-1 files keep the behavior and JSON output documented below.
+
+The other shared sections (`llm`, `agent`, `codex`, `daemon`, `skills`,
+`semantic_gate`, and `context`) use the same keys and defaults shown in the version-1
+schema below. In version 2, `contract.battery_dir` moves to each target as
+`contract_battery_dir`; the remaining `[contract]` keys stay shared. Version-1 files
+keep their existing behavior and JSON output.
 
 Use `jaunt migrate --config-v2` to preview a deterministic version-1 rewrite and
 `jaunt migrate --config-v2 --apply` to commit it. The migration is model-free and
 refuses a dirty worktree unless `--force` is supplied.
 
-## Full schema
+## Version 1 full schema
 
 Every key outside `version` is optional and shown with its default.
 

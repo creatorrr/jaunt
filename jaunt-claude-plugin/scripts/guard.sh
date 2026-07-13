@@ -24,6 +24,51 @@ run_timeout() {
     "$@"
   fi
 }
+has_uv_project() {
+  local candidate="$1"
+  while [ "$candidate" != "/" ]; do
+    if [ -f "$candidate/pyproject.toml" ] || [ -f "$candidate/uv.lock" ]; then
+      return 0
+    fi
+    candidate=$(dirname "$candidate")
+  done
+  return 1
+}
+minimum_jaunt_version() {
+  python3 -c '
+import sys, tomllib
+try:
+    with open(sys.argv[1], "rb") as handle:
+        version = tomllib.load(handle).get("version")
+except Exception:
+    version = 2
+print("1.7.0" if version == 2 else "1.6.2")
+' "$1/jaunt.toml" 2>/dev/null
+}
+version_is_compatible() {
+  local minimum
+  minimum=$(minimum_jaunt_version "$2") || return 1
+  python3 - "$1" "$minimum" <<'PY' >/dev/null 2>&1
+import re, sys
+match = re.search(r"(?<![0-9])(\d+)\.(\d+)\.(\d+)", sys.argv[1])
+minimum = tuple(int(part) for part in sys.argv[2].split("."))
+raise SystemExit(0 if match and tuple(map(int, match.groups())) >= minimum else 1)
+PY
+}
+compatible_path_jaunt() {
+  local output
+  output=$(jaunt --version 2>/dev/null) || return 1
+  version_is_compatible "$output" "$1"
+}
+compatible_uv_jaunt() {
+  local dir="$1"
+  local output
+  output=$(
+    cd "$dir" &&
+      UV_CACHE_DIR="$uv_cache" run_timeout 8 uv run --no-sync jaunt --version 2>/dev/null
+  ) || return 1
+  version_is_compatible "$output" "$1"
+}
 
 payload=$(cat 2>/dev/null) || exit 0
 [ -z "$payload" ] && exit 0
@@ -86,13 +131,23 @@ print(json.dumps(p))
 [ -z "$payload" ] && exit 0
 # A jaunt on PATH may be stale (e.g. a version-manager shim for a pre-1.3
 # install with no `guard` subcommand). Trust it only when it exits 0;
-# otherwise fall back to the project env via uv.
-if command -v jaunt >/dev/null 2>&1; then
+# otherwise fall back to the project env via uv, then uvx for a JavaScript-only
+# workspace.
+if command -v jaunt >/dev/null 2>&1 && compatible_path_jaunt "$dir"; then
   out=$(printf '%s' "$payload" | run_timeout 8 jaunt guard 2>/dev/null)
   if [ $? -eq 0 ]; then
     printf '%s' "$out"
     exit 0
   fi
 fi
-printf '%s' "$payload" | UV_CACHE_DIR="$uv_cache" run_timeout 8 uv run --no-sync jaunt guard 2>/dev/null || true
+if command -v uv >/dev/null 2>&1 && has_uv_project "$dir" && compatible_uv_jaunt "$dir"; then
+  out=$(printf '%s' "$payload" | UV_CACHE_DIR="$uv_cache" run_timeout 8 uv run --no-sync jaunt guard 2>/dev/null)
+  if [ $? -eq 0 ]; then
+    printf '%s' "$out"
+    exit 0
+  fi
+fi
+if command -v uvx >/dev/null 2>&1; then
+  printf '%s' "$payload" | UV_CACHE_DIR="$uv_cache" run_timeout 8 uvx jaunt guard 2>/dev/null || true
+fi
 exit 0

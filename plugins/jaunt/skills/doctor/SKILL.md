@@ -1,6 +1,6 @@
 ---
 name: doctor
-description: Use when a Jaunt workspace misbehaves, before a large build, or when asked to health-check setup. Reports environment, workspace freshness reasons, orphans, authentication, and duplicate Claude/Codex hooks without building.
+description: Use when a Python or TypeScript Jaunt workspace misbehaves, before a large build, or when asked to health-check setup. Reports freshness, TS unbuilt/invalid diagnostics, Node/npm/worker/compiler readiness, authentication, orphans, and duplicate hooks without building.
 ---
 
 # Jaunt doctor
@@ -17,10 +17,12 @@ JAUNT_WORKSPACE_ROOT="$PWD" bash <absolute-plugin-root>/scripts/doctor.sh
 The report is read-only and makes no model calls. It checks:
 
 - Codex availability and authentication.
-- Jaunt and Python availability.
-- Every discovered workspace's current stale reasons and orphans.
+- Jaunt, Python, Node, and npm availability.
+- Every workspace's stale reasons, orphans, and TypeScript unbuilt, invalid,
+  and diagnostic state.
+- Project-local `@usejaunt/ts` worker and supported TypeScript compiler setup.
 - Hand-rolled Claude or Codex guards that duplicate the installed plugin hook.
 
-Use `uv run jaunt clean --orphans` for orphaned artifacts. For stale modules,
+Use `clean --orphans` through the workspace runner for orphaned artifacts. For stale modules,
 follow the build skill's taxonomy and preview likely model calls before
 building. Run `codex login` when authentication is missing.

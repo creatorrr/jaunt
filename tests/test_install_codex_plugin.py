@@ -46,8 +46,28 @@ def test_codex_plugin_commands_and_classification() -> None:
         "add",
         "jaunt@jaunt-codex-plugins",
     ]
+    assert codex_plugin.marketplace_upgrade_command() == [
+        "codex",
+        "plugin",
+        "marketplace",
+        "upgrade",
+        "jaunt-codex-plugins",
+    ]
+    assert codex_plugin.plugin_remove_command() == [
+        "codex",
+        "plugin",
+        "remove",
+        "jaunt@jaunt-codex-plugins",
+    ]
     assert codex_plugin.classify_result(0, "", "") == "ok"
     assert codex_plugin.classify_result(1, "", "already installed") == "already"
+    assert codex_plugin.classify_result(0, "already installed", "") == "already"
+    assert (
+        codex_plugin.classify_result(
+            1, "", "marketplace is already added from a different source; remove it before adding"
+        )
+        == "error"
+    )
     assert codex_plugin.classify_result(1, "", "network error") == "error"
 
 
@@ -91,25 +111,36 @@ def test_default_install_order_and_human_handoff(monkeypatch, capsys) -> None:
 
 def test_default_install_json_and_already_results(monkeypatch, capsys) -> None:
     monkeypatch.setattr(jaunt.cli.shutil, "which", lambda _name: "/usr/bin/codex")
+    calls: list[dict] = []
     monkeypatch.setattr(
         jaunt.cli.subprocess,
         "run",
         _record_run(
             [
                 _FakeResult(1, "", "marketplace already exists"),
+                _FakeResult(0, "marketplace upgraded"),
                 _FakeResult(1, "plugin already installed"),
+                _FakeResult(0, "plugin removed"),
+                _FakeResult(0, "plugin installed"),
             ],
-            [],
+            calls,
         ),
     )
     assert jaunt.cli.main(["install-codex-plugin", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {
         "command": "install-codex-plugin",
         "ok": True,
-        "marketplace": "already",
-        "plugin": "already",
+        "marketplace": "updated",
+        "plugin": "refreshed",
         "local": False,
     }
+    assert [call["argv"] for call in calls] == [
+        ["codex", "plugin", "marketplace", "add", "creatorrr/jaunt"],
+        ["codex", "plugin", "marketplace", "upgrade", "jaunt-codex-plugins"],
+        ["codex", "plugin", "add", "jaunt@jaunt-codex-plugins"],
+        ["codex", "plugin", "remove", "jaunt@jaunt-codex-plugins"],
+        ["codex", "plugin", "add", "jaunt@jaunt-codex-plugins"],
+    ]
 
 
 def test_local_install_requires_marketplace(monkeypatch, tmp_path, capsys) -> None:
@@ -140,6 +171,39 @@ def test_local_install_uses_root_and_json(monkeypatch, tmp_path, capsys) -> None
     assert calls[0]["argv"] == ["codex", "plugin", "marketplace", "add", str(tmp_path)]
 
 
+def test_local_existing_install_refreshes_without_git_upgrade(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    monkeypatch.setattr(jaunt.cli.shutil, "which", lambda _name: "/usr/bin/codex")
+    marketplace = tmp_path / ".agents" / "plugins" / "marketplace.json"
+    marketplace.parent.mkdir(parents=True)
+    marketplace.write_text("{}")
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        jaunt.cli.subprocess,
+        "run",
+        _record_run(
+            [
+                _FakeResult(0, "marketplace already exists"),
+                _FakeResult(0, "plugin already installed"),
+                _FakeResult(0, "plugin removed"),
+                _FakeResult(0, "plugin installed"),
+            ],
+            calls,
+        ),
+    )
+    assert (
+        jaunt.cli.main(["install-codex-plugin", "--local", "--root", str(tmp_path), "--json"]) == 0
+    )
+    assert json.loads(capsys.readouterr().out)["plugin"] == "refreshed"
+    assert [call["argv"] for call in calls] == [
+        ["codex", "plugin", "marketplace", "add", str(tmp_path)],
+        ["codex", "plugin", "add", "jaunt@jaunt-codex-plugins"],
+        ["codex", "plugin", "remove", "jaunt@jaunt-codex-plugins"],
+        ["codex", "plugin", "add", "jaunt@jaunt-codex-plugins"],
+    ]
+
+
 def test_subprocess_failure_and_timeout(monkeypatch, capsys) -> None:
     monkeypatch.setattr(jaunt.cli.shutil, "which", lambda _name: "/usr/bin/codex")
     monkeypatch.setattr(
@@ -159,3 +223,30 @@ def test_subprocess_failure_and_timeout(monkeypatch, capsys) -> None:
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
     assert "timed out" in payload["error"].lower()
+
+
+def test_refresh_reinstall_failure_is_actionable_and_preserves_order(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(jaunt.cli.shutil, "which", lambda _name: "/usr/bin/codex")
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        jaunt.cli.subprocess,
+        "run",
+        _record_run(
+            [
+                _FakeResult(1, "", "marketplace already exists"),
+                _FakeResult(0, "marketplace upgraded"),
+                _FakeResult(1, "plugin already installed"),
+                _FakeResult(0, "plugin removed"),
+                _FakeResult(1, "", "network unavailable"),
+            ],
+            calls,
+        ),
+    )
+    assert jaunt.cli.main(["install-codex-plugin", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert "removed the cached Jaunt plugin" in payload["error"]
+    assert "codex plugin add jaunt@jaunt-codex-plugins" in payload["error"]
+    assert [call["argv"] for call in calls][-2:] == [
+        ["codex", "plugin", "remove", "jaunt@jaunt-codex-plugins"],
+        ["codex", "plugin", "add", "jaunt@jaunt-codex-plugins"],
+    ]

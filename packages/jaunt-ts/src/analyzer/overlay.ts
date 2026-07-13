@@ -206,9 +206,13 @@ function validateSources(
           (diagnostic.code === 6059 ||
             diagnostic.code === 6305 ||
             diagnostic.code === 6307) &&
-          ([...referencedOverlayPaths].some((path) => message.includes(path)) ||
+          ([...referencedOverlayPaths].some((path) =>
+            diagnosticMentionsPath(compiler, message, path),
+          ) ||
             (diagnostic.file &&
-              referencedOverlayPaths.has(resolve(diagnostic.file.fileName))))
+              [...referencedOverlayPaths].some((path) =>
+                sameDiagnosticPath(compiler, diagnostic.file!.fileName, path),
+              )))
         )
       );
     });
@@ -249,7 +253,9 @@ function validateSources(
         (diagnostic.code === 6059 ||
           diagnostic.code === 6305 ||
           diagnostic.code === 6307) &&
-        [...referencedOverlayPaths].some((path) => message.includes(path))
+        [...referencedOverlayPaths].some((path) =>
+          diagnosticMentionsPath(compiler, message, path),
+        )
       ) {
         return false;
       }
@@ -464,6 +470,37 @@ function boundaryAnyDiagnostics(
 
 function absolute(root: string, path: string): string {
   return resolve(root, path);
+}
+
+function diagnosticPathValue(
+  compiler: typeof import("@typescript/typescript6"),
+  value: string,
+): string {
+  const normalized = value.replaceAll("\\", "/");
+  return compiler.sys.useCaseSensitiveFileNames
+    ? normalized
+    : normalized.toLowerCase();
+}
+
+function diagnosticMentionsPath(
+  compiler: typeof import("@typescript/typescript6"),
+  message: string,
+  path: string,
+): boolean {
+  return diagnosticPathValue(compiler, message).includes(
+    diagnosticPathValue(compiler, path),
+  );
+}
+
+function sameDiagnosticPath(
+  compiler: typeof import("@typescript/typescript6"),
+  left: string,
+  right: string,
+): boolean {
+  return (
+    diagnosticPathValue(compiler, resolve(left)) ===
+    diagnosticPathValue(compiler, resolve(right))
+  );
 }
 
 function candidatePackageImportResolver(
@@ -1177,8 +1214,8 @@ export function validateProjectOverlayClosure(
             if (
               owner !== project.id &&
               projectReferencesProject(projects, project.id, owner) &&
-              (message.includes(path) ||
-                resolve(diagnostic.file.fileName) === path)
+              (diagnosticMentionsPath(compiler, message, path) ||
+                sameDiagnosticPath(compiler, diagnostic.file.fileName, path))
             ) {
               return false;
             }

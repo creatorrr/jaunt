@@ -22,14 +22,6 @@ on:
           - next
           - beta
         default: next
-      promote_npm_latest:
-        description: Move npm latest after registry smoke succeeds
-        type: boolean
-        default: false
-
-permissions:
-  contents: write
-  id-token: write
 
 concurrency:
   group: coordinated-release
@@ -39,6 +31,8 @@ jobs:
   candidates:
     name: Build and verify exact release candidates
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       python-version: ${{ steps.versions.outputs.python-version }}
       typescript-version: ${{ steps.versions.outputs.typescript-version }}
@@ -64,8 +58,11 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
-          cache: npm
-          cache-dependency-path: packages/jaunt-ts/package-lock.json
+          package-manager-cache: false
+      - name: Pin trusted-publishing npm CLI
+        run: |
+          npm install --global npm@11.18.0
+          test "$(npm --version)" = "11.18.0"
 
       - run: uv sync --frozen --all-extras
       - run: npm ci
@@ -80,10 +77,10 @@ jobs:
       - name: Verify TypeScript release gates
         run: npm run lint && npm run format:check && npm run typecheck && npm test && npm run pack:check
         working-directory: packages/jaunt-ts
-      - name: Verify TypeScript performance and leak gate
+      - name: Verify TypeScript shared-runner leak gate
         run: |
           mkdir -p "${GITHUB_WORKSPACE}/release/benchmarks"
-          npm run benchmark:watch -- \
+          npm run benchmark:watch:ci -- \
             --output "${GITHUB_WORKSPACE}/release/benchmarks/jaunt-ts-watch.json"
         working-directory: packages/jaunt-ts
       - name: Verify TypeScript architecture and generated examples
@@ -125,11 +122,6 @@ jobs:
         run: |
           python_version="$(uvx --from toml-cli toml get --toml-path pyproject.toml project.version)"
           typescript_version="$(node -p "require('./packages/jaunt-ts/package.json').version")"
-          if [[ "$typescript_version" == *-* ]] && \
-             [[ "${{ inputs.promote_npm_latest }}" == "true" ]]; then
-            echo "Refusing to assign npm latest to prerelease ${typescript_version}." >&2
-            exit 1
-          fi
           if [[ "${{ inputs.publish }}" == "true" ]]; then
             release_tags=()
             if [[ "${{ inputs.component }}" != "typescript" ]]; then
@@ -177,8 +169,12 @@ jobs:
           python tests/inspect_typescript_distribution.py release/python
           tarball="$(find release/npm -maxdepth 1 -name '*.tgz' -print -quit)"
           node packages/jaunt-ts/scripts/check-installed-pack.mjs "$tarball"
-          find release -type f ! -name pack.json ! -name SHA256SUMS -print0 \
-            | sort -z | xargs -0 sha256sum > release/SHA256SUMS
+          find release/python -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\0' \
+            | sort -z | (cd release/python && xargs -0 sha256sum > SHA256SUMS)
+          find release/npm -maxdepth 1 -type f ! -name pack.json ! -name SHA256SUMS -printf '%f\0' \
+            | sort -z | (cd release/npm && xargs -0 sha256sum > SHA256SUMS)
+          (cd release/python && sha256sum --check SHA256SUMS)
+          (cd release/npm && sha256sum --check SHA256SUMS)
       - name: Smoke exact wheel, source distribution, and npm tarball
         shell: bash
         run: |
@@ -271,18 +267,22 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  publish:
-    name: Publish, registry-smoke, and tag
-    if: ${{ inputs.publish && github.ref == 'refs/heads/main' }}
+  publish_npm:
+    name: Publish npm candidate with trusted publishing
+    if: >-
+      ${{ inputs.publish && github.ref == 'refs/heads/main' &&
+          (inputs.component == 'both' || inputs.component == 'typescript') }}
     needs: candidates
     runs-on: ubuntu-latest
-    environment: pypi
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - name: Recheck current main before publication
-        shell: bash
+      - name: Recheck current main and TypeScript tag
         run: |
           git fetch --no-tags origin main
           git fetch --force --tags origin
@@ -291,6 +291,144 @@ jobs:
             echo "Refusing to publish ${GITHUB_SHA}; current main is ${main_sha}." >&2
             exit 1
           fi
+          python scripts/verify_release_tags.py --expected-commit "$GITHUB_SHA" \
+            "ts-v${{ needs.candidates.outputs.typescript-version }}"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Pin trusted-publishing npm CLI
+        run: |
+          npm install --global npm@11.18.0
+          test "$(npm --version)" = "11.18.0"
+      - uses: actions/download-artifact@v8
+        with:
+          name: jaunt-release-candidates
+          path: release
+      - name: Publish exact npm candidate
+        run: |
+          set -euo pipefail
+          version="${{ needs.candidates.outputs.typescript-version }}"
+          candidate_tag="${{ inputs.npm_dist_tag }}"
+          tarball="$(find release/npm -maxdepth 1 -name '*.tgz' -print -quit)"
+          if npm view "@usejaunt/ts@${version}" version >/dev/null 2>&1; then
+            published_integrity="$(npm view "@usejaunt/ts@${version}" dist.integrity)"
+            candidate_integrity="$(node -e \
+              'const {createHash}=require("node:crypto"); const {readFileSync}=require("node:fs"); console.log(`sha512-${createHash("sha512").update(readFileSync(process.argv[1])).digest("base64")}`)' \
+              "$tarball")"
+            if [[ "$published_integrity" != "$candidate_integrity" ]]; then
+              echo "Published @usejaunt/ts ${version} bytes differ from this release candidate." >&2
+              exit 1
+            fi
+            published_tag_version="$(npm view "@usejaunt/ts@${candidate_tag}" version 2>/dev/null || true)"
+            if [[ "$published_tag_version" != "$version" ]]; then
+              echo "Published @usejaunt/ts ${version} has matching bytes, but ${candidate_tag} points to ${published_tag_version:-nothing}." >&2
+              echo "OIDC publishing cannot repair dist-tags; fix the tag interactively or choose the tag used by the original publish." >&2
+              exit 1
+            fi
+            echo "@usejaunt/ts ${version} and dist-tag ${candidate_tag} already match the candidate."
+          else
+            # npm trusted publishing exchanges the GitHub OIDC token only for
+            # this command and adds provenance automatically.
+            npm publish "$tarball" --access public --tag "$candidate_tag"
+          fi
+
+  publish_python:
+    name: Publish Python candidate with trusted publishing
+    if: >-
+      ${{ !cancelled() && inputs.publish && github.ref == 'refs/heads/main' &&
+          needs.candidates.result == 'success' &&
+          ((inputs.component == 'python' && needs.publish_npm.result == 'skipped') ||
+           (inputs.component == 'both' && needs.publish_npm.result == 'success')) }}
+    needs:
+      - candidates
+      - publish_npm
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Verify Python publication authority and tag
+        run: |
+          git fetch --force --tags origin
+          # In a Python-only release this is the first irreversible registry
+          # write, so recheck main after the environment approval. In a
+          # coordinated release npm has already performed that check and
+          # published the exact candidate; allow the same run to finish even
+          # if main advances while the PyPI approval is pending.
+          if [[ "${{ inputs.component }}" == "python" ]]; then
+            git fetch --no-tags origin main
+            main_sha="$(git rev-parse refs/remotes/origin/main)"
+            if [[ "$GITHUB_SHA" != "$main_sha" ]]; then
+              echo "Refusing to publish ${GITHUB_SHA}; current main is ${main_sha}." >&2
+              exit 1
+            fi
+          fi
+          python scripts/verify_release_tags.py --expected-commit "$GITHUB_SHA" \
+            "v${{ needs.candidates.outputs.python-version }}"
+      - uses: actions/download-artifact@v8
+        with:
+          name: jaunt-release-candidates
+          path: release
+      - name: Check whether the Python version is already published
+        id: pypi
+        run: |
+          version="${{ needs.candidates.outputs.python-version }}"
+          if curl -fsSL "https://pypi.org/pypi/jaunt/${version}/json" >/dev/null; then
+            python scripts/verify_pypi_candidates.py \
+              --project jaunt --version "$version" --dist release/python
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Prepare Python publisher directory
+        if: ${{ steps.pypi.outputs.published == 'false' }}
+        run: |
+          mkdir -p release/pypi-upload
+          cp release/python/*.whl release/python/*.tar.gz release/pypi-upload/
+      - name: Publish exact Python candidate
+        if: ${{ steps.pypi.outputs.published == 'false' }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Keep SHA256SUMS with the component candidate, but expose only
+          # valid Python distributions to the publisher action.
+          packages-dir: release/pypi-upload
+
+  finalize_release:
+    name: Registry smoke, tags, and GitHub releases
+    if: >-
+      ${{ !cancelled() && inputs.publish && github.ref == 'refs/heads/main' &&
+          needs.candidates.result == 'success' &&
+          ((inputs.component == 'python' && needs.publish_python.result == 'success' &&
+            needs.publish_npm.result == 'skipped') ||
+           (inputs.component == 'typescript' && needs.publish_npm.result == 'success' &&
+            needs.publish_python.result == 'skipped') ||
+           (inputs.component == 'both' && needs.publish_npm.result == 'success' &&
+            needs.publish_python.result == 'success')) }}
+    needs:
+      - candidates
+      - publish_npm
+      - publish_python
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Recheck release tags before finalization
+        run: |
+          git fetch --force --tags origin
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Every requested registry write has already succeeded. Finalize the
+          # immutable candidates from this run even if unrelated work landed
+          # on main while environment approval or registry propagation waited.
           release_tags=()
           if [[ "${{ inputs.component }}" != "typescript" ]]; then
             release_tags+=("v${{ needs.candidates.outputs.python-version }}")
@@ -305,69 +443,31 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Pin trusted-publishing npm CLI
+        run: |
+          npm install --global npm@11.18.0
+          test "$(npm --version)" = "11.18.0"
       - uses: actions/download-artifact@v8
         with:
           name: jaunt-release-candidates
           path: release
-
-      - name: Publish npm candidate
-        if: ${{ inputs.component == 'both' || inputs.component == 'typescript' }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          set -euo pipefail
-          version="${{ needs.candidates.outputs.typescript-version }}"
-          candidate_tag="${{ inputs.npm_dist_tag }}"
-          if [[ "$candidate_tag" == "latest" ]]; then
-            echo "Refusing to publish directly to npm latest; use a candidate tag and promote after smoke." >&2
-            exit 1
-          fi
-          tarball="$(find release/npm -maxdepth 1 -name '*.tgz' -print -quit)"
-          if npm view "@usejaunt/ts@${version}" version >/dev/null 2>&1; then
-            published_integrity="$(npm view "@usejaunt/ts@${version}" dist.integrity)"
-            candidate_integrity="$(node -e \
-              'const {createHash}=require("node:crypto"); const {readFileSync}=require("node:fs"); console.log(`sha512-${createHash("sha512").update(readFileSync(process.argv[1])).digest("base64")}`)' \
-              "$tarball")"
-            if [[ "$published_integrity" != "$candidate_integrity" ]]; then
-              echo "Published @usejaunt/ts ${version} bytes differ from this release candidate." >&2
-              exit 1
-            fi
-            npm dist-tag add "@usejaunt/ts@${version}" "$candidate_tag"
-            echo "@usejaunt/ts ${version} is already published with matching bytes; staged under ${candidate_tag}."
-          else
-            npm publish "$tarball" --access public --tag "$candidate_tag" --provenance
-          fi
-
-      - name: Check whether the Python version is already published
-        if: ${{ inputs.component == 'both' || inputs.component == 'python' }}
-        id: pypi
-        run: |
-          version="${{ needs.candidates.outputs.python-version }}"
-          if curl -fsSL "https://pypi.org/pypi/jaunt/${version}/json" >/dev/null; then
-            python scripts/verify_pypi_candidates.py \
-              --project jaunt --version "$version" --dist release/python
-            echo "published=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "published=false" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Publish Python candidate
-        if: >-
-          ${{ (inputs.component == 'both' || inputs.component == 'python') &&
-              steps.pypi.outputs.published == 'false' }}
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: release/python
 
       - name: Smoke registry npm bytes
         if: ${{ inputs.component == 'both' || inputs.component == 'typescript' }}
         run: |
           set -euo pipefail
           version="${{ needs.candidates.outputs.typescript-version }}"
+          candidate_tag="${{ inputs.npm_dist_tag }}"
           for attempt in 1 2 3 4 5 6; do
-            npm view "@usejaunt/ts@${version}" version >/dev/null 2>&1 && break
+            if [[ "$(npm view "@usejaunt/ts@${version}" version 2>/dev/null || true)" == "$version" ]] && \
+               [[ "$(npm view "@usejaunt/ts@${candidate_tag}" version 2>/dev/null || true)" == "$version" ]]; then
+              break
+            fi
             sleep 10
           done
           test "$(npm view "@usejaunt/ts@${version}" version)" = "$version"
+          test "$(npm view "@usejaunt/ts@${candidate_tag}" version)" = "$version"
           tarball="$(find release/npm -maxdepth 1 -name '*.tgz' -print -quit)"
           candidate_integrity="$(node -e \
             'const {createHash}=require("node:crypto"); const {readFileSync}=require("node:fs"); console.log(`sha512-${createHash("sha512").update(readFileSync(process.argv[1])).digest("base64")}`)' \
@@ -438,14 +538,6 @@ jobs:
             exit 1
           fi
 
-      - name: Promote npm latest
-        if: >-
-          ${{ inputs.promote_npm_latest &&
-              (inputs.component == 'both' || inputs.component == 'typescript') }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm dist-tag add "@usejaunt/ts@${{ needs.candidates.outputs.typescript-version }}" latest
-
       - name: Tag and release Python
         if: ${{ inputs.component == 'both' || inputs.component == 'python' }}
         env:
@@ -459,11 +551,34 @@ jobs:
             git tag -a "$tag" -m "jaunt ${{ needs.candidates.outputs.python-version }}"
             git push origin "$tag"
           fi
-          if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" release/python/* release/SHA256SUMS \
-              --title "jaunt ${{ needs.candidates.outputs.python-version }}" \
-              --generate-notes
+          component_dir="release/python"
+          title="jaunt ${{ needs.candidates.outputs.python-version }}"
+          mapfile -d '' assets < <(
+            find "$component_dir" -maxdepth 1 -type f -print0 | sort -z
+          )
+          download_dir="${RUNNER_TEMP}/github-release-${tag}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            mkdir -p "$download_dir"
+            if [[ "$(gh release view "$tag" --json assets --jq '.assets | length')" != "0" ]]; then
+              gh release download "$tag" --dir "$download_dir"
+            fi
+            python scripts/verify_github_release_assets.py \
+              --expected-dir "$component_dir" --downloaded-dir "$download_dir" --allow-missing
+            for asset in "${assets[@]}"; do
+              if [[ ! -f "$download_dir/$(basename "$asset")" ]]; then
+                gh release upload "$tag" "$asset"
+              fi
+            done
+          else
+            gh release create "$tag" "${assets[@]}" --verify-tag \
+              --title "$title" --generate-notes
           fi
+          rm -rf "$download_dir"
+          mkdir -p "$download_dir"
+          gh release download "$tag" --dir "$download_dir"
+          python scripts/verify_github_release_assets.py \
+            --expected-dir "$component_dir" --downloaded-dir "$download_dir"
+          (cd "$download_dir" && sha256sum --check SHA256SUMS)
       - name: Tag and release TypeScript
         if: ${{ inputs.component == 'both' || inputs.component == 'typescript' }}
         env:
@@ -477,8 +592,31 @@ jobs:
             git tag -a "$tag" -m "@usejaunt/ts ${{ needs.candidates.outputs.typescript-version }}"
             git push origin "$tag"
           fi
-          if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" release/npm/*.tgz release/SHA256SUMS \
-              --title "@usejaunt/ts ${{ needs.candidates.outputs.typescript-version }}" \
-              --generate-notes
+          component_dir="release/npm"
+          title="@usejaunt/ts ${{ needs.candidates.outputs.typescript-version }}"
+          mapfile -d '' assets < <(
+            find "$component_dir" -maxdepth 1 -type f ! -name pack.json -print0 | sort -z
+          )
+          download_dir="${RUNNER_TEMP}/github-release-${tag}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            mkdir -p "$download_dir"
+            if [[ "$(gh release view "$tag" --json assets --jq '.assets | length')" != "0" ]]; then
+              gh release download "$tag" --dir "$download_dir"
+            fi
+            python scripts/verify_github_release_assets.py \
+              --expected-dir "$component_dir" --downloaded-dir "$download_dir" --allow-missing
+            for asset in "${assets[@]}"; do
+              if [[ ! -f "$download_dir/$(basename "$asset")" ]]; then
+                gh release upload "$tag" "$asset"
+              fi
+            done
+          else
+            gh release create "$tag" "${assets[@]}" --verify-tag \
+              --title "$title" --generate-notes
           fi
+          rm -rf "$download_dir"
+          mkdir -p "$download_dir"
+          gh release download "$tag" --dir "$download_dir"
+          python scripts/verify_github_release_assets.py \
+            --expected-dir "$component_dir" --downloaded-dir "$download_dir"
+          (cd "$download_dir" && sha256sum --check SHA256SUMS)

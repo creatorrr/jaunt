@@ -180,10 +180,15 @@ def test_release_stages_npm_and_lifecycle_smokes_both_python_distributions() -> 
         encoding="utf-8"
     )
 
-    assert 'if [[ "$candidate_tag" == "latest" ]]' in workflow
     assert 'npm publish "$tarball" --access public --tag "$candidate_tag"' in workflow
     assert "published_integrity=" in workflow
     assert "candidate_integrity=" in workflow
+    assert "published_tag_version=" in workflow
+    assert "environment: npm" in workflow
+    assert "npm install --global npm@11.18.0" in workflow
+    assert "id-token: write" in workflow
+    assert "NPM_TOKEN" not in workflow
+    assert "npm dist-tag add" not in workflow
     assert "sdist=\"$(find release/python -maxdepth 1 -name '*.tar.gz'" in workflow
     assert 'prepare_venv "$sdist_venv" "$sdist" false' in workflow
     assert (

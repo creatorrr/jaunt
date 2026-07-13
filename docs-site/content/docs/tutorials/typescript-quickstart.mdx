@@ -1,0 +1,177 @@
+---
+title: TypeScript quickstart
+description: "Go from an empty directory to generated, typechecked, and tested TypeScript."
+---
+
+This tutorial builds the starter `greet` function that `jaunt init` creates. The
+private spec is parsed without being executed. Application code imports an ordinary
+TypeScript facade, and the emitted JavaScript has no Jaunt runtime dependency.
+
+<Callout type="warning">
+  The TypeScript target is alpha. It requires Jaunt 1.7 or later and installs its
+  project-local worker separately as `@usejaunt/ts@next`. Alpha artifact formats can
+  change; the [upgrade notes](/docs/reference/upgrading#170) explain the deterministic
+  migration path.
+</Callout>
+
+## 1. Check the prerequisites
+
+You need:
+
+- Python 3.12 or later and [`uv`](https://docs.astral.sh/uv/)
+- Node 20 through 24
+- the OpenAI Codex CLI, authenticated with `codex login`
+
+Jaunt uses `codex exec` for `build` and `test`. `sync`, `status`, and `check` do not
+call a model.
+
+## 2. Scaffold the project
+
+```bash
+mkdir jaunt-ts-quickstart
+cd jaunt-ts-quickstart
+
+uvx jaunt init --language ts
+npm init -y
+npm pkg set type=module
+npm install -D @usejaunt/ts@next 'typescript@^5.9' vitest fast-check @types/node
+codex login
+```
+
+`jaunt init` does not edit `package.json`; it prints the package commands you still
+need to run. It creates a version-2 `jaunt.toml` with one TypeScript target:
+
+```toml
+version = 2
+
+[target.ts]
+source_roots = ["src"]
+test_roots = ["tests"]
+projects = ["tsconfig.json"]
+test_projects = ["tsconfig.test.json"]
+tool_owner = "."
+generated_dir = "__generated__"
+test_runner = "vitest"
+fast_check_runs = 50
+```
+
+`tool_owner` names the package that directly owns `@usejaunt/ts` and TypeScript.
+Jaunt uses that compiler rather than a global installation. The scaffold also writes
+separate production and test `tsconfig` files and excludes private Jaunt inputs from
+both emit paths.
+
+## 3. Read the starter spec
+
+The generated `src/index.jaunt.ts` is a private static input:
+
+```ts title="src/index.jaunt.ts"
+import * as jaunt from "@usejaunt/ts/spec";
+
+jaunt.magicModule();
+
+/** Return a friendly greeting for `name`, including the name verbatim. */
+export function greet(name: string): string {
+  return jaunt.magic();
+}
+```
+
+Production code never imports this file. It imports the committed facade instead:
+
+```ts title="src/index.ts"
+export * from "./index.context.js";
+export * from "./__generated__/index.js";
+```
+
+The `.js` specifiers are intentional for NodeNext projects. TypeScript resolves them
+to source `.ts` files, and the emitted JavaScript keeps valid runtime paths. Jaunt
+also supports private `.jaunt.tsx` specs when the owning project supplies its normal
+JSX configuration and runtime.
+
+## 4. Sync the typed boundary
+
+Run the model-free synchronization step before the first build:
+
+```bash
+uvx jaunt sync --language ts
+npx tsc -p tsconfig.json --noEmit
+uvx jaunt status --language ts
+```
+
+`sync` renders the API mirror and a typed throwing placeholder. Your editor and
+compiler can resolve `greet`, while `status` still reports the implementation as
+unbuilt.
+
+```text
+src/
+  index.jaunt.ts
+  index.context.ts
+  index.ts
+  __generated__/
+    index.api.ts
+    index.ts
+    index.jaunt.json
+```
+
+`index.api.ts`, the implementation, and `index.jaunt.json` are machine-owned. Commit
+them, but change the spec and regenerate instead of editing them.
+
+## 5. Build and run
+
+```bash
+uvx jaunt build --language ts
+npx tsc -p tsconfig.json
+node --input-type=module -e \
+  'import("./dist/index.js").then(({ greet }) => console.log(greet("Ada")))'
+```
+
+The build asks Codex for an implementation, checks it against the project-local
+compiler in an in-memory overlay, then writes the validated files as one transaction.
+The last command runs ordinary emitted JavaScript.
+
+## 6. Generate and run the test
+
+The scaffold includes test intent in `tests/index.jaunt-test.ts`:
+
+```ts title="tests/index.jaunt-test.ts"
+import * as jaunt from "@usejaunt/ts/spec";
+import { greet } from "../src/index.jaunt.js";
+
+jaunt.magicModule();
+
+/** `greet("Ada")` includes "Ada" and reads as a friendly greeting. */
+export function greetExample(): void {
+  jaunt.testSpec({ targets: [greet] });
+}
+```
+
+Generate the Vitest battery, run it, and finish with the offline drift gate:
+
+```bash
+uvx jaunt test --language ts
+uvx jaunt check --language ts
+```
+
+`test` calls the model only when the battery needs generation. A fresh battery is
+still typechecked and run on later calls. `check` never calls the model; it verifies
+the committed implementation, mirrors, sidecars, and Vitest batteries.
+
+## 7. Commit the result
+
+Commit the authored spec and test intent, `jaunt.toml`, both `tsconfig` files, the
+package manifest and lockfile, the public facade, `JAUNT_LOG`, and the generated
+artifacts. Keep `.jaunt/` ignored.
+
+In a mixed Python and TypeScript workspace, use version 2 with both `[target.py]` and
+`[target.ts]`. Plain commands cover both targets; `--language py` and `--language ts`
+narrow a run. See the [TypeScript target guide](/docs/guides/typescript#mixed-python-and-typescript-workspaces)
+for project references, pnpm workspaces, classes, contract mode, and current alpha
+limits.
+
+## Where to next
+
+<Cards>
+  <Card title="TypeScript target guide" href="/docs/guides/typescript" description="The full authoring model, workspace routing, classes, contracts, security boundary, and alpha limits." />
+  <Card title="Configuration" href="/docs/reference/config#version-2-language-targets" description="Every target.ts setting and the version-2 Python/TypeScript layout." />
+  <Card title="Gate it in CI" href="/docs/guides/ci#typescript-targets" description="Install the project-local toolchain and run the model-free check in GitHub Actions." />
+  <Card title="Runnable examples" href="https://github.com/creatorrr/jaunt/tree/main/examples/typescript_slugify" description="Start with slugify, then move to project references or the full JWT example." />
+</Cards>

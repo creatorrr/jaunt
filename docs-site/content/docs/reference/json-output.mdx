@@ -118,6 +118,40 @@ module through the free re-stamp path (text output renders this value as
 `re-stamp: free`). `orphans` lists generated artifacts whose spec no longer exists.
 `tree` reports repo-map drift, or is `null` when the tree is in sync.
 
+A TypeScript status also reports unbuilt and invalid artifacts plus structured
+diagnostics:
+
+```json
+{
+  "schema_version": 2,
+  "command": "status",
+  "ok": true,
+  "fresh": [],
+  "stale": ["ts:src/slug/index"],
+  "stale_changes": {"ts:src/slug/index": "structural"},
+  "unbuilt": ["ts:src/new/index"],
+  "invalid": {
+    "ts:src/bad/index": [
+      {"code": "JAUNT_TS_INVALID", "message": "artifact hash does not match", "severity": "error"}
+    ]
+  },
+  "diagnostics": [],
+  "targets": {
+    "ts": {
+      "fresh": [],
+      "stale": {"src/slug/index": "structural"},
+      "unbuilt": ["src/new/index"],
+      "invalid": {
+        "src/bad/index": [
+          {"code": "JAUNT_TS_INVALID", "message": "artifact hash does not match", "severity": "error"}
+        ]
+      },
+      "orphans": []
+    }
+  }
+}
+```
+
 ## check
 
 ```json
@@ -146,6 +180,10 @@ blocking drift — including an orphan of either kind — sets `ok: false` and e
 `4`. Before the first build the same project reports `"unbuilt": ["demo.specs"]`
 and exits `4`.
 
+In a version-2 TypeScript payload, `magic` is partitioned as `magic.ts` and includes
+`invalid`; `targets.ts.magic` repeats the same language-local state. Structured
+diagnostics remain available at the top level.
+
 ## specs
 
 ```json
@@ -164,6 +202,9 @@ and exits `4`.
 }
 ```
 
+TypeScript `specs` adds the resolved `projects`, package `owners`, and static routes.
+The same spec list, routes, and dependency graph are repeated under `targets.ts`.
+
 ## test
 
 ```json
@@ -176,8 +217,57 @@ and exits `4`.
 }
 ```
 
-`exit_code` is pytest's exit code. `ok` is true only when pytest passed and no
-generation failed. A generation failure exits `3`; a pytest failure exits `4`.
+For Python, `exit_code` is pytest's exit code. A TypeScript payload instead carries
+the protected runner report under `vitest` at both the top level and `targets.ts`.
+`ok` is true only when the target runner passed and no generation failed. A generation
+failure exits `3`; a pytest or Vitest failure exits `4`.
+
+## sync
+
+TypeScript `sync` is model-free. It lists each deterministic boundary artifact it
+wrote and repeats the same paths under `targets.ts`:
+
+```json
+{
+  "schema_version": 2,
+  "command": "sync",
+  "ok": true,
+  "mirrors": ["src/slug/__generated__/index.api.ts"],
+  "placeholders": ["src/slug/__generated__/index.ts"],
+  "created_facades": ["src/slug/index.ts"],
+  "failed": {},
+  "targets": {
+    "ts": {
+      "mirrors": ["src/slug/__generated__/index.api.ts"],
+      "placeholders": ["src/slug/__generated__/index.ts"],
+      "created_facades": ["src/slug/index.ts"],
+      "failed": {}
+    }
+  }
+}
+```
+
+## design
+
+`design` returns a declaration-only patch. The default records but does not apply the
+proposal; a later `--apply` returns the same target with `applied: true` and makes no
+second model call.
+
+```json
+{
+  "schema_version": 2,
+  "command": "design",
+  "ok": true,
+  "target": "ts:src/store/index#TokenStore",
+  "patch": "*** Begin Patch\n…\n*** End Patch",
+  "applied": false,
+  "diagnostics": [],
+  "usage": {"api_calls": 1},
+  "targets": {
+    "ts": {"target": "src/store/index#TokenStore", "applied": false}
+  }
+}
+```
 
 ## jobs
 
@@ -303,7 +393,7 @@ nested build or test documents.
 | `0` | Success |
 | `2` | Config, discovery, or dependency-cycle error; bad or wrong-state job id |
 | `3` | Generation error |
-| `4` | Pytest failure, contract `check`/`reconcile` block, stale `tree --check`, or a daemon job failed/parked during `jobs wait` |
+| `4` | Pytest/Vitest failure, contract `check`/`reconcile` block, stale `tree --check`, or a daemon job failed/parked during `jobs wait` |
 | `5` | Timeout while waiting for daemon jobs |
 
 Next: [Output Locations](/docs/reference/output-layout).

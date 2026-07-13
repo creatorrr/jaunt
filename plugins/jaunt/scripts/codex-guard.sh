@@ -22,6 +22,51 @@ run_timeout() {
     "$@"
   fi
 }
+has_uv_project() {
+  local candidate="$1"
+  while [ "$candidate" != "/" ]; do
+    if [ -f "$candidate/pyproject.toml" ] || [ -f "$candidate/uv.lock" ]; then
+      return 0
+    fi
+    candidate=$(dirname "$candidate")
+  done
+  return 1
+}
+minimum_jaunt_version() {
+  python3 -c '
+import sys, tomllib
+try:
+    with open(sys.argv[1], "rb") as handle:
+        version = tomllib.load(handle).get("version")
+except Exception:
+    version = 2
+print("1.7.0" if version == 2 else "1.6.2")
+' "$1/jaunt.toml" 2>/dev/null
+}
+version_is_compatible() {
+  local minimum
+  minimum=$(minimum_jaunt_version "$2") || return 1
+  python3 - "$1" "$minimum" <<'PY' >/dev/null 2>&1
+import re, sys
+match = re.search(r"(?<![0-9])(\d+)\.(\d+)\.(\d+)", sys.argv[1])
+minimum = tuple(int(part) for part in sys.argv[2].split("."))
+raise SystemExit(0 if match and tuple(map(int, match.groups())) >= minimum else 1)
+PY
+}
+compatible_path_jaunt() {
+  local output
+  output=$(jaunt --version 2>/dev/null) || return 1
+  version_is_compatible "$output" "$1"
+}
+compatible_uv_jaunt() {
+  local dir="$1"
+  local output
+  output=$(
+    cd "$dir" &&
+      UV_CACHE_DIR="$uv_cache" run_timeout 8 uv run --no-sync jaunt --version 2>/dev/null
+  ) || return 1
+  version_is_compatible "$output" "$1"
+}
 
 payload=$(cat 2>/dev/null) || exit 0
 [ -n "$payload" ] || exit 0
@@ -90,12 +135,17 @@ print(json.dumps({"tool_name": "Edit", "tool_input": {"file_path": sys.argv[1]},
 ' "$path" "$dir" 2>/dev/null) || continue
   out=""
   status=1
-  if command -v jaunt >/dev/null 2>&1; then
+  if command -v jaunt >/dev/null 2>&1 && compatible_path_jaunt "$dir"; then
     out=$(printf '%s' "$adapted" | (cd "$dir" && run_timeout 8 jaunt guard) 2>/dev/null)
     status=$?
   fi
-  if [ "$status" -ne 0 ] && command -v uv >/dev/null 2>&1; then
+  if [ "$status" -ne 0 ] && command -v uv >/dev/null 2>&1 && \
+    has_uv_project "$dir" && compatible_uv_jaunt "$dir"; then
     out=$(printf '%s' "$adapted" | (cd "$dir" && UV_CACHE_DIR="$uv_cache" run_timeout 8 uv run --no-sync jaunt guard) 2>/dev/null)
+    status=$?
+  fi
+  if [ "$status" -ne 0 ] && command -v uvx >/dev/null 2>&1; then
+    out=$(printf '%s' "$adapted" | (cd "$dir" && UV_CACHE_DIR="$uv_cache" run_timeout 8 uvx jaunt guard) 2>/dev/null)
     status=$?
   fi
   [ "$status" -eq 0 ] || continue

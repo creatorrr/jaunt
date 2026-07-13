@@ -1,6 +1,6 @@
 interface:
   display_name: Build Jaunt Specs
-  short_description: Preview, build, and verify stale Jaunt modules.
-  default_prompt: Build the stale Jaunt modules, surface advisories, and run the gates.
+  short_description: Build and verify Python or TypeScript Jaunt specs.
+  default_prompt: Build the stale or unbuilt Jaunt targets, surface advisories, and run their native gates.
 policy:
   allow_implicit_invocation: true

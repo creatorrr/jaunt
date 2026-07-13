@@ -9,6 +9,7 @@ from typing import Any
 ROOT = Path(__file__).parents[1]
 VERIFY_TAGS = ROOT / "scripts" / "verify_release_tags.py"
 VERIFY_PYPI = ROOT / "scripts" / "verify_pypi_candidates.py"
+VERIFY_GITHUB_ASSETS = ROOT / "scripts" / "verify_github_release_assets.py"
 
 
 def _git(root: Path, *args: str) -> str:
@@ -125,6 +126,83 @@ def test_pypi_candidate_digests_require_the_exact_file_set_and_bytes(tmp_path: P
     assert "candidate set differs" in missing.stderr
 
 
+def test_github_release_assets_are_component_scoped_and_resumable(tmp_path: Path) -> None:
+    expected = tmp_path / "expected"
+    downloaded = tmp_path / "downloaded"
+    expected.mkdir()
+    downloaded.mkdir()
+    wheel = expected / "jaunt-2.0.0-py3-none-any.whl"
+    sdist = expected / "jaunt-2.0.0.tar.gz"
+    wheel.write_bytes(b"wheel")
+    sdist.write_bytes(b"sdist")
+    manifest = expected / "SHA256SUMS"
+    manifest.write_text(
+        "".join(
+            f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n"
+            for path in (wheel, sdist)
+        ),
+        encoding="utf-8",
+    )
+    command = [
+        "python",
+        str(VERIFY_GITHUB_ASSETS),
+        "--expected-dir",
+        str(expected),
+        "--downloaded-dir",
+        str(downloaded),
+    ]
+
+    # An interrupted release can be checked before missing assets are uploaded.
+    (downloaded / wheel.name).write_bytes(wheel.read_bytes())
+    subprocess.run([*command, "--allow-missing"], check=True)
+    incomplete = subprocess.run(command, check=False, capture_output=True, text=True)
+    assert incomplete.returncode != 0
+    assert "missing assets" in incomplete.stderr
+
+    (downloaded / sdist.name).write_bytes(sdist.read_bytes())
+    (downloaded / manifest.name).write_bytes(manifest.read_bytes())
+    subprocess.run(command, check=True)
+
+    (downloaded / wheel.name).write_bytes(b"different")
+    mismatch = subprocess.run(command, check=False, capture_output=True, text=True)
+    assert mismatch.returncode != 0
+    assert "differs from the candidate" in mismatch.stderr
+
+    (downloaded / wheel.name).write_bytes(wheel.read_bytes())
+    (downloaded / "pack.json").write_text("{}\n", encoding="utf-8")
+    unexpected = subprocess.run(command, check=False, capture_output=True, text=True)
+    assert unexpected.returncode != 0
+    assert "unexpected assets" in unexpected.stderr
+
+
+def test_github_release_assets_reject_unsafe_or_cross_component_manifests(
+    tmp_path: Path,
+) -> None:
+    expected = tmp_path / "expected"
+    downloaded = tmp_path / "downloaded"
+    expected.mkdir()
+    downloaded.mkdir()
+    candidate = expected / "package.tgz"
+    candidate.write_bytes(b"npm")
+    (expected / "SHA256SUMS").write_text(
+        f"{hashlib.sha256(candidate.read_bytes()).hexdigest()}  release/npm/package.tgz\n",
+        encoding="utf-8",
+    )
+    command = [
+        "python",
+        str(VERIFY_GITHUB_ASSETS),
+        "--expected-dir",
+        str(expected),
+        "--downloaded-dir",
+        str(downloaded),
+        "--allow-missing",
+    ]
+
+    invalid = subprocess.run(command, check=False, capture_output=True, text=True)
+    assert invalid.returncode != 0
+    assert "invalid SHA256SUMS line" in invalid.stderr
+
+
 def test_workflows_gate_release_integrity_and_typescript_fixture_freshness() -> None:
     root = Path(__file__).parents[1]
     release = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
@@ -138,3 +216,32 @@ def test_workflows_gate_release_integrity_and_typescript_fixture_freshness() -> 
     assert 'if [[ -n "$published_commit" && "$published_commit" != "$GITHUB_SHA" ]]' in release
     assert "verify_pypi_candidates.py" in release
     assert 'published_integrity="$(npm view' in release
+    assert "environment: npm" in release
+    assert "environment: pypi" in release
+    assert "(inputs.component == 'both' && needs.publish_npm.result == 'success')" in release
+    assert release.count("needs.candidates.result == 'success'") == 2
+    assert "always()" not in release
+    assert release.count("!cancelled()") == 2
+    assert release.count("id-token: write") == 2
+    assert release.count("node-version: 24") == 3
+    assert release.count("npm install --global npm@11.18.0") == 3
+    assert 'npm publish "$tarball" --access public --tag "$candidate_tag"' in release
+    assert 'npm view "@usejaunt/ts@${candidate_tag}" version' in release
+    assert 'test "$(npm view "@usejaunt/ts@${candidate_tag}" version)" = "$version"' in release
+    assert "packages-dir: release/pypi-upload" in release
+    assert "cp release/python/*.whl release/python/*.tar.gz release/pypi-upload/" in release
+    assert "scripts/verify_github_release_assets.py" in release
+    assert "release/python && sha256sum --check SHA256SUMS" in release
+    assert "release/npm && sha256sum --check SHA256SUMS" in release
+    assert "npm run benchmark:watch:ci" in release
+    assert "JAUNT_TS_STRICT_BENCHMARK_ENABLED" in ci
+    assert "runs-on: [self-hosted, linux, x64, jaunt-ts-performance]" in ci
+    assert "node-version: 24.14.0" in ci
+    assert "npm run benchmark:watch --" in ci
+    assert 'if [[ "${{ inputs.component }}" == "python" ]]' in release
+    assert "Refusing to finalize" not in release
+    assert 'git config user.name "github-actions[bot]"' in release
+    assert "NODE_AUTH_TOKEN" not in release
+    assert "NPM_TOKEN" not in release
+    assert "npm dist-tag add" not in release
+    assert "promote_npm_latest" not in release

@@ -44,6 +44,7 @@ function parsePositiveInteger(raw, option) {
 export function parseArguments(argv) {
   const options = {
     assertBudgets: false,
+    assertPerformanceBudgets: false,
     cycles: WATCH_CYCLES,
     graphFiles: DEFAULT_GRAPH_FILES,
     output: undefined,
@@ -52,8 +53,13 @@ export function parseArguments(argv) {
     const argument = argv[index];
     if (argument === "--assert") {
       options.assertBudgets = true;
+      options.assertPerformanceBudgets = true;
+    } else if (argument === "--assert-leaks") {
+      options.assertBudgets = true;
+      options.assertPerformanceBudgets = false;
     } else if (argument === "--no-assert") {
       options.assertBudgets = false;
+      options.assertPerformanceBudgets = false;
     } else if (argument === "--cycles") {
       options.cycles = parsePositiveInteger(argv[++index], "--cycles");
     } else if (argument === "--graph-files") {
@@ -549,7 +555,7 @@ export async function runBenchmark(options) {
       incrementalEdits: summarize(cycleDurations),
       vitestStartup: vitestStartupMs,
     });
-    const performanceEvaluation = options.assertBudgets
+    const performanceEvaluation = options.assertPerformanceBudgets
       ? evaluatePerformanceBudgets(timingsMs)
       : { assertions: [], passed: true };
     const assertions = [
@@ -569,8 +575,9 @@ export async function runBenchmark(options) {
         projectGraphFiles: options.graphFiles,
         cycles: options.cycles,
       },
-      timingPolicy:
-        "The pinned Node 24 / TypeScript 6 lane blocks timing regressions above 20% from the rounded first-alpha baseline",
+      timingPolicy: options.assertPerformanceBudgets
+        ? "The pinned Node 24 / TypeScript 6 lane blocks timing regressions above 20% from the rounded first-alpha baseline"
+        : "Shared CI records absolute timings but gates only deterministic leak and process-lifecycle budgets",
       timingsMs,
       resources: metrics,
       baselines: { performanceMs: PERFORMANCE_BASELINES_MS },
@@ -579,6 +586,10 @@ export async function runBenchmark(options) {
         performanceMs: PERFORMANCE_BUDGETS,
       },
       assertions,
+      enforcement: {
+        leaks: options.assertBudgets,
+        performance: options.assertPerformanceBudgets,
+      },
       enforced: options.assertBudgets,
       passed: leakEvaluation.passed && performanceEvaluation.passed,
     };

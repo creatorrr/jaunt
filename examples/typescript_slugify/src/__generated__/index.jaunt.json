@@ -146,10 +146,10 @@
   "facadePath": "src/index.ts",
   "fingerprint": {
     "compilerOptionsHash": "sha256:675c129a2f6916705a4b5892acd260ec0dc719838ad83ecc17ac49a3890cbfaf",
-    "generationFingerprint": "sha256:86ff80af08c4b56b0fbe527c9e5f30b9d9e73acefcb3d821862d414679822382",
+    "generationFingerprint": "sha256:fd0ee9143bfe7d7d1b86323ff0aafaf27e374967ef096a604cfb76573881765a",
     "ir": "contract-ir/1-draft.2",
     "protocol": "jaunt-ts/1-draft.2",
-    "toolVersion": "1.6.3",
+    "toolVersion": "1.7.0",
     "typescriptVersion": "5.9.3",
     "workerVersion": "0.1.0-alpha.0"
   },

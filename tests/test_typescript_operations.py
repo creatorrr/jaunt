@@ -75,7 +75,6 @@ from jaunt.typescript.tester import (
     _implicit_class_test_specs,
     _isolated_test_workspace,
     _is_reviewable_example_battery,
-    _node_runtime_version,
     _redact_runner_result,
     _runner_fingerprint,
     _run_test_runner,
@@ -2718,7 +2717,7 @@ def test_runner_fingerprint_is_portable_between_override_and_installed_packages(
     ) == _runner_fingerprint(installed_workspace, installed_client, initialized)
 
 
-def test_runner_fingerprint_includes_actual_node_runtime_version(tmp_path: Path) -> None:
+def test_runner_fingerprint_is_portable_across_supported_node_runtimes(tmp_path: Path) -> None:
     package = tmp_path / "node_modules/@usejaunt/ts"
     (package / "dist/test").mkdir(parents=True)
     (package / "package.json").write_text(
@@ -2749,9 +2748,7 @@ def test_runner_fingerprint_includes_actual_node_runtime_version(tmp_path: Path)
             )
         )
 
-    assert _node_runtime_version(str(node_20)) == "v20.19.1"
-    assert _node_runtime_version(str(node_22)) == "v22.15.0"
-    assert _runner_fingerprint(tmp_path, client(node_20), initialized) != _runner_fingerprint(
+    assert _runner_fingerprint(tmp_path, client(node_20), initialized) == _runner_fingerprint(
         tmp_path, client(node_22), initialized
     )
 

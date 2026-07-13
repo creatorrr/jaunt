@@ -7983,10 +7983,18 @@ def cmd_install_claude_plugin(args: argparse.Namespace) -> int:
     )
     if err is not None:
         return _fail(err, 1)
+    if market_status == "already":
+        market_status, err = _step(claude_plugin.marketplace_update_command(), ok_label="updated")
+        if err is not None:
+            return _fail(err, 1)
 
     plugin_status, err = _step(claude_plugin.plugin_install_command(), ok_label="installed")
     if err is not None:
         return _fail(err, 1)
+    if plugin_status == "already":
+        plugin_status, err = _step(claude_plugin.plugin_update_command(), ok_label="updated")
+        if err is not None:
+            return _fail(err, 1)
 
     if json_mode:
         _emit_json(
@@ -7999,10 +8007,19 @@ def cmd_install_claude_plugin(args: argparse.Namespace) -> int:
             }
         )
     else:
-        market_line = "added" if market_status == "added" else "already present"
-        plugin_line = "installed" if plugin_status == "installed" else "already installed"
+        market_line = {
+            "added": "added",
+            "updated": "updated",
+            "already": "already current",
+        }.get(market_status, str(market_status))
+        plugin_line = {
+            "installed": "installed",
+            "updated": "updated",
+            "already": "already current",
+        }.get(plugin_status, str(plugin_status))
         print(f"Marketplace jaunt-plugins: {market_line}.")
         print(f"Plugin jaunt: {plugin_line}.")
+        print("Start a new Claude Code session, then review the bundled hooks with /hooks.")
         print(f"See {claude_plugin.DOCS_URL} for what the plugin adds.")
     return EXIT_OK
 
@@ -8059,10 +8076,25 @@ def cmd_install_codex_plugin(args: argparse.Namespace) -> int:
     )
     if err is not None:
         return _fail(err, 1)
+    if market_status == "already" and not local:
+        market_status, err = _step(codex_plugin.marketplace_upgrade_command(), ok_label="updated")
+        if err is not None:
+            return _fail(err, 1)
 
     plugin_status, err = _step(codex_plugin.plugin_install_command(), ok_label="installed")
     if err is not None:
         return _fail(err, 1)
+    if plugin_status == "already":
+        _removed, err = _step(codex_plugin.plugin_remove_command(), ok_label="removed")
+        if err is not None:
+            return _fail(err, 1)
+        plugin_status, err = _step(codex_plugin.plugin_install_command(), ok_label="refreshed")
+        if err is not None:
+            return _fail(
+                "Codex removed the cached Jaunt plugin for refresh, but reinstall failed: "
+                f"{err}. Retry `codex plugin add {codex_plugin.PLUGIN_REF}`.",
+                1,
+            )
 
     if json_mode:
         _emit_json(
@@ -8075,8 +8107,16 @@ def cmd_install_codex_plugin(args: argparse.Namespace) -> int:
             }
         )
     else:
-        market_line = "added" if market_status == "added" else "already present"
-        plugin_line = "installed" if plugin_status == "installed" else "already installed"
+        market_line = {
+            "added": "added",
+            "updated": "updated",
+            "already": "already current",
+        }.get(market_status, str(market_status))
+        plugin_line = {
+            "installed": "installed",
+            "refreshed": "refreshed",
+            "already": "already current",
+        }.get(plugin_status, str(plugin_status))
         print(f"Marketplace {codex_plugin.MARKETPLACE_NAME}: {market_line}.")
         print(f"Plugin jaunt: {plugin_line}.")
         print("Start a new Codex session, then review the bundled hooks with /hooks.")

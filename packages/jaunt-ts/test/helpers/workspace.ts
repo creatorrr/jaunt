@@ -44,6 +44,11 @@ export function createFixtureWorkspace(
     resolve(root, "node_modules/vitest"),
     "dir",
   );
+  symlinkSync(
+    resolve(dirname(require.resolve("fast-check/package.json"))),
+    resolve(root, "node_modules/fast-check"),
+    "dir",
+  );
   const compilerModulePath = resolve(
     root,
     "node_modules/typescript/lib/typescript.js",
@@ -57,6 +62,7 @@ export function createFixtureWorkspace(
         private: true,
         type: "module",
         devDependencies: {
+          "fast-check": ">=4 <5",
           typescript:
             options.compilerPackage === "@typescript/typescript58"
               ? "5.8.3"

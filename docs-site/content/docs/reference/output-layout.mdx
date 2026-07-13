@@ -121,7 +121,7 @@ overwritten — it is skipped with a warning.
 
 ## What `clean` removes
 
-`jaunt clean` removes `__generated__/` directories under the configured source
+For Python, `jaunt clean` removes `__generated__/` directories under the configured source
 and test roots, plus header-marked `.pyi` stubs. It never touches a
 hand-authored `.pyi`. Preview with `jaunt clean --dry-run`, which lists exactly
 what would go:
@@ -132,5 +132,10 @@ what would go:
   "/path/to/src/demo/specs.pyi"
 ]
 ```
+
+For TypeScript, clean works from the worker's artifact manifest instead of deleting
+an arbitrary directory. It removes Jaunt-owned implementations, API mirrors,
+freshness sidecars, and generated magic-test batteries. It preserves `*.jaunt.ts[x]`
+inputs, handwritten context, public facades, and committed contract batteries.
 
 Next: [Limitations](/docs/reference/limitations).

@@ -403,56 +403,6 @@ def _fixture_fingerprint(root: Path, config: JauntConfig) -> str:
     return _canonical_digest(fixtures)
 
 
-@lru_cache(maxsize=16)
-def _probe_node_runtime_version(
-    node: str,
-    _file_identity: tuple[int, int, int, int] | None,
-) -> str:
-    """Ask the exact runner executable for its version.
-
-    The file identity is an otherwise-unused cache key. Replacing or relinking
-    the executable invalidates the cached probe during long-lived watch/daemon
-    processes.
-    """
-
-    try:
-        completed = subprocess.run(
-            [node, "--version"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-            env=worker_environment(),
-        )
-    except (OSError, subprocess.SubprocessError):
-        return "unknown"
-    if completed.returncode != 0:
-        return "unknown"
-    version = completed.stdout.strip()
-    if not re.fullmatch(r"v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", version):
-        return "unknown"
-    return version
-
-
-def _node_runtime_version(node: object) -> str:
-    if not isinstance(node, str) or not node.strip():
-        return "unknown"
-    try:
-        executable = Path(node).resolve(strict=True)
-        metadata = executable.stat()
-        identity = (
-            metadata.st_dev,
-            metadata.st_ino,
-            metadata.st_size,
-            metadata.st_mtime_ns,
-        )
-        command = str(executable)
-    except OSError:
-        command = node
-        identity = None
-    return _probe_node_runtime_version(command, identity)
-
-
 def _runner_export_target(value: object) -> str | None:
     if isinstance(value, str):
         return value
@@ -604,7 +554,6 @@ def _runner_fingerprint(root: Path, client: object, initialized: object) -> str:
             "testRunnerExport": runner_export,
             "workerVersion": str(getattr(initialized, "worker_version", "unknown")),
             "typescriptVersion": str(getattr(initialized, "typescript_version", "unknown")),
-            "nodeRuntimeVersion": _node_runtime_version(getattr(installation, "node", None)),
             "files": files,
             "settings": {
                 "customReporters": False,

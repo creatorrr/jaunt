@@ -9,6 +9,7 @@ export function baseOptions(): BaseLayoutProps {
     links: [
       { text: 'GitHub', url: 'https://github.com/creatorrr/jaunt', external: true },
       { text: 'PyPI', url: 'https://pypi.org/project/jaunt/', external: true },
+      { text: 'npm', url: 'https://www.npmjs.com/package/@usejaunt/ts', external: true },
     ],
   };
 }

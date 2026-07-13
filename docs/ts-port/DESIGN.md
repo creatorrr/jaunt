@@ -3,10 +3,11 @@
 Status: **implemented internal alpha** — the direction survived two external design
 reviews and now has a real Node analyzer, Python orchestration, deterministic sync,
 overlay validation, and a protected Vitest runner. The runnable
-[`example/`](example/README.md) is a model-built JWT fixture that exercises classes,
-contract batteries, held-out tests, mutation strength, and packed-consumer runtime
-isolation. Smaller slugify and project-reference examples keep the core generation
-and workspace-routing paths easy to inspect.
+[TypeScript JWT example](../../examples/typescript-jwt/README.md) is a model-built
+fixture that exercises classes, contract batteries, held-out tests, mutation
+strength, and packed-consumer runtime isolation. Smaller slugify and
+project-reference examples keep the core generation and workspace-routing paths
+easy to inspect.
 
 Execution is specified in [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md),
 including the second-review corrections for class variance, context layering,

@@ -12,6 +12,42 @@ invalidate built modules. The exception is a correctness repair for artifacts
 whose provenance was previously marked fresh incorrectly; that safety migration
 is called out explicitly below.
 
+## 1.7.0
+
+Jaunt 1.7 adds the first alpha TypeScript target. The Python package is now
+1.7.0; the project-local worker and marker package use their own prerelease
+version under `@usejaunt/ts`.
+
+- **Existing Python projects do not need a migration.** Version-1
+  `jaunt.toml` files and generated Python artifacts keep their current layout.
+  The release does not intentionally stale an otherwise fresh Python module;
+  upgrade and run `jaunt check` as usual.
+- **A TypeScript target uses version-2 configuration.** Install the Python CLI,
+  then add the worker, a supported compiler, and the protected test runtime to
+  the package named by `tool_owner`:
+
+  ```bash
+  npm install -D @usejaunt/ts@next 'typescript@^5.9' vitest fast-check @types/node
+  ```
+
+  The worker supports Node 20 through 24 and TypeScript 5.8 through 6.x. Start
+  with the [TypeScript target guide](/docs/guides/typescript), then run
+  `jaunt sync --language ts` before the first model-backed build.
+- **Adding TypeScript to a version-1 Python project is mechanical.** Preview
+  `jaunt migrate --config-v2`, review the version-2 target layout, and apply it
+  with `jaunt migrate --config-v2 --apply`. The migration moves Python-specific
+  settings under `[target.py]` without changing their loaded values or calling
+  a model.
+- **Alpha artifact formats can still change.** Preview upgrades with
+  `jaunt migrate --language ts`. Compatible mirrors, facades, placeholders,
+  sidecars, and fingerprints are repaired deterministically; an incompatible
+  protocol, IR, route, or contract change is reported as `model-rebuild` rather
+  than guessed.
+- **Mixed workspaces operate on both targets by default.** Use
+  `--language py` or `--language ts` to narrow a command. TypeScript target IDs
+  are qualified as `ts:path/to/spec#symbol`; existing dotted Python IDs keep
+  their meaning.
+
 ## 1.6.3
 
 - Removing a magic or generated-test spec now rebuilds its module instead of

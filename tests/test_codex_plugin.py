@@ -21,7 +21,8 @@ CLAUDE_PLUGIN = REPO / "jaunt-claude-plugin"
 def test_manifest_and_marketplace_shape() -> None:
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text())
     assert manifest["name"] == "jaunt"
-    assert manifest["version"] == "1.0.0"
+    assert manifest["version"] == "1.1.0"
+    assert "TypeScript" in manifest["description"]
     assert manifest["skills"] == "./skills/"
     assert "hooks" not in manifest
     assert "apps" not in manifest
@@ -33,6 +34,7 @@ def test_manifest_and_marketplace_shape() -> None:
 
     marketplace = json.loads((REPO / ".agents" / "plugins" / "marketplace.json").read_text())
     assert marketplace["name"] == "jaunt-codex-plugins"
+    assert "version" not in marketplace
     (entry,) = marketplace["plugins"]
     assert entry == {
         "name": "jaunt",
@@ -175,6 +177,8 @@ def test_doctor_skips_codex_warning_preambles(tmp_path: Path) -> None:
     uv = bin_dir / "uv"
     uv.write_text("#!/usr/bin/env bash\necho 'jaunt 1.6.2'\n")
     uv.chmod(0o755)
+    (tmp_path / "jaunt.toml").write_text("version = 1\n")
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'sample'\nversion = '0'\n")
     env = {
         **os.environ,
         "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin",
@@ -193,15 +197,317 @@ def test_doctor_skips_codex_warning_preambles(tmp_path: Path) -> None:
     assert "WARNING:" not in result.stdout
 
 
+def _write_executable(path: Path, body: str) -> None:
+    path.write_text(f"#!/usr/bin/env bash\n{body}")
+    path.chmod(0o755)
+
+
+def test_workspace_runner_prefers_installed_then_uv_project_then_uvx(tmp_path: Path) -> None:
+    resolver = PLUGIN / "scripts" / "resolve-workspace.sh"
+
+    installed_root = tmp_path / "installed"
+    installed_bin = installed_root / "bin"
+    installed_bin.mkdir(parents=True)
+    (installed_root / "jaunt.toml").write_text("version = 1\n")
+    installed_log = installed_root / "runner.log"
+    _write_executable(
+        installed_bin / "jaunt",
+        'if [ "$1" = "--version" ]; then echo "jaunt 1.7.0"; '
+        f'else printf "jaunt:%s\\n" "$*" > "{installed_log}"; fi\n',
+    )
+    _write_executable(installed_bin / "uv", f'printf "uv:%s\\n" "$*" > "{installed_log}"\n')
+    _write_executable(installed_bin / "uvx", f'printf "uvx:%s\\n" "$*" > "{installed_log}"\n')
+    env = {**os.environ, "PATH": f"{installed_bin}{os.pathsep}/usr/bin:/bin"}
+    subprocess.run(
+        ["bash", str(resolver), "--run", str(installed_root), "status", "--json"],
+        env=env,
+        check=True,
+    )
+    assert installed_log.read_text() == "jaunt:status --json\n"
+
+    uv_root = tmp_path / "uv-project"
+    uv_bin = uv_root / "bin"
+    uv_bin.mkdir(parents=True)
+    (uv_root / "jaunt.toml").write_text("version = 1\n")
+    (uv_root / "pyproject.toml").write_text("[project]\nname='sample'\nversion='0'\n")
+    uv_log = uv_root / "runner.log"
+    _write_executable(uv_bin / "jaunt", 'echo "jaunt 0.4.3"\n')
+    _write_executable(
+        uv_bin / "uv",
+        'if [ "$*" = "run --no-sync jaunt --version" ]; then echo "jaunt 1.7.0"; '
+        f'else printf "uv:%s\\n" "$*" > "{uv_log}"; fi\n',
+    )
+    _write_executable(uv_bin / "uvx", f'printf "uvx:%s\\n" "$*" > "{uv_log}"\n')
+    env = {**os.environ, "PATH": f"{uv_bin}{os.pathsep}/usr/bin:/bin"}
+    subprocess.run(["bash", str(resolver), "--run", str(uv_root), "check"], env=env, check=True)
+    assert uv_log.read_text() == "uv:run --no-sync jaunt check\n"
+
+    js_root = tmp_path / "js-only"
+    js_bin = js_root / "bin"
+    js_bin.mkdir(parents=True)
+    (js_root / "jaunt.toml").write_text("version = 2\n[target.ts]\n")
+    (js_root / "package.json").write_text('{"name":"sample"}\n')
+    js_log = js_root / "runner.log"
+    _write_executable(js_bin / "jaunt", 'echo "jaunt 1.6.3"\n')
+    _write_executable(js_bin / "uv", f'printf "uv:%s\\n" "$*" > "{js_log}"\n')
+    _write_executable(js_bin / "uvx", f'printf "uvx:%s\\n" "$*" > "{js_log}"\n')
+    env = {**os.environ, "PATH": f"{js_bin}{os.pathsep}/usr/bin:/bin"}
+    subprocess.run(
+        ["bash", str(resolver), "--run", str(js_root), "status", "--language", "ts"],
+        env=env,
+        check=True,
+    )
+    assert js_log.read_text() == "uvx:jaunt status --language ts\n"
+
+    inline_root = tmp_path / "v2-inline"
+    inline_bin = inline_root / "bin"
+    inline_bin.mkdir(parents=True)
+    (inline_root / "jaunt.toml").write_text(
+        'version = 2\ntarget = { py = { source_roots = ["src"] } }\n'
+    )
+    (inline_root / "pyproject.toml").write_text("[project]\nname='sample'\nversion='0'\n")
+    inline_log = inline_root / "runner.log"
+    _write_executable(inline_bin / "jaunt", 'echo "jaunt 1.6.3"\n')
+    _write_executable(inline_bin / "uv", 'echo "jaunt 1.6.3"\n')
+    _write_executable(inline_bin / "uvx", f'printf "uvx:%s\\n" "$*" > "{inline_log}"\n')
+    env = {**os.environ, "PATH": f"{inline_bin}{os.pathsep}/usr/bin:/bin"}
+    subprocess.run(
+        ["bash", str(resolver), "--run", str(inline_root), "status"], env=env, check=True
+    )
+    assert inline_log.read_text() == "uvx:jaunt status\n"
+
+
+def test_workspace_runner_exports_plugin_cache_for_uv_and_uvx(tmp_path: Path) -> None:
+    resolver = PLUGIN / "scripts" / "resolve-workspace.sh"
+    plugin_data = tmp_path / "plugin-data"
+    plugin_data.mkdir()
+    unwritable_home = tmp_path / "unwritable-home"
+    unwritable_home.mkdir()
+    unwritable_home.chmod(0o500)
+
+    uv_root = tmp_path / "uv-project"
+    uv_bin = uv_root / "bin"
+    uv_bin.mkdir(parents=True)
+    (uv_root / "jaunt.toml").write_text("version = 2\n[target.py]\n")
+    (uv_root / "pyproject.toml").write_text("[project]\nname='sample'\nversion='0'\n")
+    uv_log = uv_root / "runner.log"
+    _write_executable(
+        uv_bin / "uv",
+        """if [ "$UV_CACHE_DIR" != "$EXPECTED_CACHE" ]; then exit 82; fi
+if [ "$*" = "run --no-sync jaunt --version" ]; then echo "jaunt 1.7.0"; exit 0; fi
+printf "uv:%s\n" "$*" > "$RUNNER_LOG"
+""",
+    )
+    env = {
+        **os.environ,
+        "PATH": f"{uv_bin}{os.pathsep}/usr/bin:/bin",
+        "HOME": str(unwritable_home),
+        "PLUGIN_DATA": str(plugin_data),
+        "EXPECTED_CACHE": str(plugin_data),
+        "RUNNER_LOG": str(uv_log),
+    }
+    env.pop("UV_CACHE_DIR", None)
+    subprocess.run(["bash", str(resolver), "--run", str(uv_root), "status"], env=env, check=True)
+    assert uv_log.read_text() == "uv:run --no-sync jaunt status\n"
+
+    js_root = tmp_path / "js-only"
+    js_bin = js_root / "bin"
+    js_bin.mkdir(parents=True)
+    (js_root / "jaunt.toml").write_text("version = 2\n[target.ts]\n")
+    js_log = js_root / "runner.log"
+    _write_executable(
+        js_bin / "uvx",
+        """if [ "$UV_CACHE_DIR" != "$EXPECTED_CACHE" ]; then exit 82; fi
+printf "uvx:%s\n" "$*" > "$RUNNER_LOG"
+""",
+    )
+    env.update(
+        {
+            "PATH": f"{js_bin}{os.pathsep}/usr/bin:/bin",
+            "RUNNER_LOG": str(js_log),
+        }
+    )
+    subprocess.run(
+        ["bash", str(resolver), "--run", str(js_root), "status", "--language", "ts"],
+        env=env,
+        check=True,
+    )
+    assert js_log.read_text() == "uvx:jaunt status --language ts\n"
+
+
+def test_session_status_reports_typescript_unbuilt_invalid_and_diagnostics(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    (tmp_path / "jaunt.toml").write_text(
+        "version = 2\n[target.ts]\nsource_roots=['src']\nprojects=['tsconfig.json']\n"
+    )
+    _write_executable(
+        bin_dir / "jaunt",
+        """if [ "$1" = "--version" ]; then echo "jaunt 1.7.0"; exit 0; fi
+cat <<'JSON'
+{
+  "command": "status",
+  "ok": true,
+  "fresh": [],
+  "stale": ["ts:src/slug/index"],
+  "stale_changes": {"ts:src/slug/index": "structural"},
+  "unbuilt": ["ts:src/slug/index"],
+  "invalid": {
+    "ts:src/bad/index": [{"code": "JAUNT_TS_INVALID", "message": "invalid artifact"}]
+  },
+  "orphans": [],
+  "diagnostics": [
+    {"code": "JAUNT_TS_WARNING", "message": "compiler warning", "severity": "warning"}
+  ],
+  "targets": {
+    "ts": {
+      "fresh": [],
+      "stale": {"src/slug/index": "structural"},
+      "unbuilt": ["src/slug/index"],
+      "invalid": {
+        "src/bad/index": [{"code": "JAUNT_TS_INVALID", "message": "invalid artifact"}]
+      },
+      "orphans": []
+    }
+  }
+}
+JSON
+""",
+    )
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin"}
+    result = subprocess.run(
+        ["bash", str(PLUGIN / "scripts" / "session-status.sh")],
+        input=json.dumps({"cwd": str(tmp_path)}),
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    assert "TS: 1 unbuilt, 1 invalid, 2 diagnostics" in result.stdout
+    assert "JAUNT_TS_WARNING" in result.stdout
+    assert "JAUNT_TS_INVALID" in result.stdout
+
+
+def test_doctor_checks_node_npm_and_typescript_tooling_without_building(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    (tmp_path / "jaunt.toml").write_text(
+        "version = 2\n[target.ts]\nsource_roots=['src']\nprojects=['tsconfig.json']\n"
+    )
+    _write_executable(
+        bin_dir / "codex",
+        'if [ "$1" = "--version" ]; then echo "codex-cli 9"; else echo "Logged in"; fi\n',
+    )
+    _write_executable(bin_dir / "node", 'echo "v22.14.0"\n')
+    _write_executable(bin_dir / "npm", 'echo "11.5.1"\n')
+    _write_executable(
+        bin_dir / "jaunt",
+        """if [ "$1" = "--version" ]; then echo "jaunt 1.7.0"; exit 0; fi
+cat <<'JSON'
+{
+  "command": "status",
+  "ok": true,
+  "fresh": [],
+  "stale": [],
+  "unbuilt": ["ts:src/slug/index"],
+  "invalid": {},
+  "orphans": [],
+  "diagnostics": [
+    {"code": "JAUNT_TS_NOTE", "message": "review this warning", "severity": "warning"}
+  ],
+  "targets": {
+    "ts": {
+      "fresh": [],
+      "stale": {},
+      "unbuilt": ["src/slug/index"],
+      "invalid": {},
+      "orphans": []
+    }
+  }
+}
+JSON
+""",
+    )
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin",
+        "JAUNT_WORKSPACE_ROOT": str(tmp_path),
+    }
+    result = subprocess.run(
+        ["bash", str(PLUGIN / "scripts" / "doctor.sh")],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    assert "- node: v22.14.0" in result.stdout
+    assert "- npm: 11.5.1" in result.stdout
+    assert "TypeScript: worker/compiler ready; 1 unbuilt, 0 invalid, 1 diagnostics" in result.stdout
+    assert "JAUNT_TS_NOTE: review this warning" in result.stdout
+
+
+def test_status_hooks_do_not_report_error_payload_as_healthy(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    (tmp_path / "jaunt.toml").write_text("version = 2\n[target.ts]\n")
+    _write_executable(
+        bin_dir / "jaunt",
+        """if [ "$1" = "--version" ]; then echo "jaunt 1.7.0"; exit 0; fi
+cat <<'JSON'
+{
+  "command": "status",
+  "ok": false,
+  "error": {
+    "message": "compiler unavailable",
+    "diagnostics": [{"code": "JAUNT_TS_COMPILER", "message": "install TypeScript"}]
+  }
+}
+JSON
+""",
+    )
+    _write_executable(bin_dir / "codex", 'echo "Logged in"\n')
+    _write_executable(bin_dir / "node", 'echo "v22.14.0"\n')
+    _write_executable(bin_dir / "npm", 'echo "11.5.1"\n')
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin",
+        "JAUNT_WORKSPACE_ROOT": str(tmp_path),
+    }
+    session = subprocess.run(
+        ["bash", str(PLUGIN / "scripts" / "session-status.sh")],
+        input=json.dumps({"cwd": str(tmp_path)}),
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    assert "TS status unavailable: compiler unavailable [JAUNT_TS_COMPILER]" in session.stdout
+    assert "0 fresh" not in session.stdout
+    doctor = subprocess.run(
+        ["bash", str(PLUGIN / "scripts" / "doctor.sh")],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    assert "worker/compiler unavailable: compiler unavailable" in doctor.stdout
+    assert "JAUNT_TS_COMPILER: install TypeScript" in doctor.stdout
+    assert "worker/compiler ready" not in doctor.stdout
+
+
 def _fake_guard_bin(tmp_path: Path, *, fail: bool = False) -> Path:
     bin_dir = tmp_path / "fakebin"
     bin_dir.mkdir()
     jaunt = bin_dir / "jaunt"
     if fail:
-        jaunt.write_text("#!/usr/bin/env bash\nexit 2\n")
+        jaunt.write_text(
+            '#!/usr/bin/env bash\nif [ "$1" = "--version" ]; then echo "jaunt 1.7.0"; '
+            "else exit 2; fi\n"
+        )
     else:
         jaunt.write_text(
             """#!/usr/bin/env bash
+if [ "$1" = "--version" ]; then echo "jaunt 1.7.0"; exit 0; fi
 python3 -c '
 import json, os, sys
 payload = json.load(sys.stdin)
@@ -328,3 +634,105 @@ def test_codex_guard_allows_normal_file(tmp_path: Path) -> None:
     result = _run_guard(_payload(tmp_path, patch), env=_env(bin_dir))
     assert result.returncode == 0
     assert result.stdout == ""
+
+
+def test_codex_guard_uses_uvx_in_javascript_only_workspace(tmp_path: Path) -> None:
+    (tmp_path / "jaunt.toml").write_text("version = 2\n")
+    (tmp_path / "package.json").write_text('{"name":"sample"}\n')
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    uvx = bin_dir / "uvx"
+    uvx.write_text(
+        """#!/usr/bin/env bash
+python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+path = payload["tool_input"]["file_path"]
+print(json.dumps({"hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "ask",
+    "permissionDecisionReason": f"{path} is generated; edit the spec",
+}}))
+'
+"""
+    )
+    uvx.chmod(0o755)
+    patch = "*** Begin Patch\n*** Update File: __generated__/mod.ts\n*** End Patch"
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin",
+    }
+    result = _run_guard(_payload(tmp_path, patch), env=env)
+    specific = json.loads(result.stdout)["hookSpecificOutput"]
+    assert specific["permissionDecision"] == "deny"
+
+
+def test_codex_guard_skips_stale_zero_exit_jaunt_for_v2(tmp_path: Path) -> None:
+    (tmp_path / "jaunt.toml").write_text("version = 2\n[target.ts]\ngenerated_dir = 'gen'\n")
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='sample'\nversion='0'\n")
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    _write_executable(bin_dir / "jaunt", 'if [ "$1" = "--version" ]; then echo "jaunt 1.6.3"; fi\n')
+    _write_executable(bin_dir / "uv", 'echo "jaunt 1.6.3"\n')
+    _write_executable(
+        bin_dir / "uvx",
+        """python3 -c '
+import json, sys
+p = json.load(sys.stdin)
+print(json.dumps({"hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "ask",
+    "permissionDecisionReason": p["tool_input"]["file_path"] + " is generated",
+}}))
+'
+""",
+    )
+    patch = "*** Begin Patch\n*** Update File: gen/mod.ts\n*** End Patch"
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin"}
+    result = _run_guard(_payload(tmp_path, patch), env=env)
+    assert json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_codex_guard_uv_probe_uses_owner_and_plugin_cache(tmp_path: Path) -> None:
+    root = tmp_path / "session-root"
+    owner = root / "packages" / "app"
+    (owner / "gen").mkdir(parents=True)
+    (owner / "jaunt.toml").write_text("version = 2\n[target.ts]\ngenerated_dir = 'gen'\n")
+    (owner / "pyproject.toml").write_text("[project]\nname='app'\nversion='0'\n")
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    plugin_data = tmp_path / "plugin-data"
+    plugin_data.mkdir()
+    unwritable_home = tmp_path / "unwritable-home"
+    unwritable_home.mkdir()
+    unwritable_home.chmod(0o500)
+    _write_executable(bin_dir / "jaunt", 'echo "jaunt 1.6.3"\n')
+    _write_executable(
+        bin_dir / "uv",
+        """if [ "$PWD" != "$EXPECTED_OWNER" ]; then exit 81; fi
+if [ "$UV_CACHE_DIR" != "$EXPECTED_CACHE" ]; then exit 82; fi
+if [ "$*" = "run --no-sync jaunt --version" ]; then echo "jaunt 1.7.0"; exit 0; fi
+python3 -c '
+import json, sys
+p = json.load(sys.stdin)
+print(json.dumps({"hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "ask",
+    "permissionDecisionReason": p["tool_input"]["file_path"] + " is generated",
+}}))
+'
+""",
+    )
+    patch = "*** Begin Patch\n*** Update File: packages/app/gen/mod.ts\n*** End Patch"
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin",
+        "HOME": str(unwritable_home),
+        "PLUGIN_DATA": str(plugin_data),
+        "EXPECTED_OWNER": str(owner),
+        "EXPECTED_CACHE": str(plugin_data),
+    }
+    env.pop("UV_CACHE_DIR", None)
+    result = _run_guard(_payload(root, patch), env=env)
+    specific = json.loads(result.stdout)["hookSpecificOutput"]
+    assert specific["permissionDecision"] == "deny"

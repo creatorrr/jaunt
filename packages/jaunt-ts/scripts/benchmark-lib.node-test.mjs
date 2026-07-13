@@ -8,6 +8,24 @@ import {
   linearRegressionSlope,
   percentile,
 } from "./benchmark-lib.mjs";
+import { parseArguments } from "./benchmark-watch.mjs";
+
+test("benchmark assertion modes separate shared-runner leaks from timings", () => {
+  assert.deepEqual(parseArguments(["--assert"]), {
+    assertBudgets: true,
+    assertPerformanceBudgets: true,
+    cycles: 100,
+    graphFiles: 1000,
+    output: undefined,
+  });
+  assert.deepEqual(parseArguments(["--assert-leaks"]), {
+    assertBudgets: true,
+    assertPerformanceBudgets: false,
+    cycles: 100,
+    graphFiles: 1000,
+    output: undefined,
+  });
+});
 
 test("percentile uses the nearest-rank definition", () => {
   assert.equal(percentile([5, 1, 4, 2, 3], 0.5), 3);

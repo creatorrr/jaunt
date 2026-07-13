@@ -1,6 +1,6 @@
 ---
 name: working-with-jaunt
-description: Use when reading or editing a Jaunt spec module, jaunt.toml, generated code, or a generated .pyi stub, or when jaunt build/check/status appears in the task. Explains workspace routing, freshness, and fix-forward rules.
+description: Use when reading or editing Python @jaunt.magic specs, private *.jaunt.ts[x] specs, jaunt.toml, generated implementations, .pyi files, API mirrors, sidecars, or Vitest batteries, or when Jaunt build/check/status appears. Explains routing, freshness, and fix-forward rules for both targets.
 ---
 
 # Working with Jaunt
@@ -54,8 +54,10 @@ API mirror, sidecar, a newly created canonical facade, and Jaunt metadata.
 | `prose` | Calls the semantic gate, then refreezes unchanged code or rebuilds. |
 | `fingerprint` / `re-stamp` | Re-stamps validated output without a model call. |
 | `stub` | Re-emits the `.pyi` deterministically when implementation inputs are unchanged. |
+| `unbuilt` | Keeps the typed TypeScript placeholder red in `check`; `build` calls the implementation model. |
+| `invalid` | Reports compiler, conformance, sidecar, or battery diagnostics; fix the spec or toolchain before building. |
 
-Run `uv run jaunt status --json --progress none` before a build. Describe the
+Run `status --json --progress none` through the workspace runner before a build. Describe the
 likely model work, but do not invent a price. Report the actual cost printed by
 the build afterward.
 
@@ -77,16 +79,20 @@ the build afterward.
 
 ## Useful commands
 
+Use the resolver's `--run` mode for every command. It prefers a compatible installed
+`jaunt`, then a uv project environment, then `uvx jaunt` for a JavaScript-only
+workspace.
+
 ```bash
-uv run jaunt specs --json
-uv run jaunt status --json --progress none
-uv run jaunt sync                 # TypeScript: deterministic, model-free
-uv run jaunt build --json
-uv run jaunt check
-uv run jaunt clean --orphans
-uv run jaunt watch --test
-uv run jaunt jobs --json
-uv run jaunt instructions
+bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" --run "$PWD" specs --json
+bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" --run "$PWD" status --json --progress none
+bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" --run "$PWD" sync --language ts
+bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" --run "$PWD" build --json
+bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" --run "$PWD" check
+bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" --run "$PWD" clean --orphans
+bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" --run "$PWD" watch --test
+bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" --run "$PWD" jobs --json
+bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" --run "$PWD" instructions
 ```
 
 Always surface build advisories. They are generator reports about ambiguous

@@ -1335,10 +1335,18 @@ Record p50/p95 duration, peak RSS, worker restarts, file descriptors, and child 
 count as JSON artifacts.
 
 Set hard budgets from the first alpha baseline. A greater-than-20% regression blocks
-only on a dedicated pinned runner; hosted PR runners collect comparison data and
-release gates evaluate it. Replace qualitative leak claims with numeric RSS slope,
-descriptor/listener deltas, and surviving-process thresholds measured over the
-100-edit watch loop.
+only on a dedicated pinned runner. Hosted PR and release runners archive timing
+comparison data while gating deterministic RSS slope, descriptor/listener deltas,
+worker restarts, and surviving-process thresholds measured over the 100-edit watch
+loop.
+
+The CI workflow contains the strict lane, gated by the repository variable
+`JAUNT_TS_STRICT_BENCHMARK_ENABLED=true`. It runs only on a Linux x64 self-hosted
+runner labeled `jaunt-ts-performance`, with Node 24.14.0 and the lockfile-pinned
+TypeScript 6 compiler. Without that variable, GitHub skips the job before assigning
+a runner. This keeps the strict gate automatic where the calibrated machine exists
+without leaving a required check queued in repositories that lack it. Fork pull
+requests are always excluded from the self-hosted runner.
 
 ## 20. Documentation and developer experience
 
@@ -1390,13 +1398,14 @@ ranges.
 - Clean-room install can init, build, check, test, emit, pack, consume, and eject.
 - Generated application code remains runnable after uninstalling Jaunt tooling.
 
-Before the first coordinated release, replace the current `release.yml` behavior that
-publishes/tags PyPI on any `pyproject.toml` change. Build the wheel/sdist and npm
-tarball once, retain checksums, and test those exact artifacts. Publish npm first under
-a non-`latest` candidate dist-tag with provenance, publish PyPI through trusted
-publishing, install both registry artifacts into clean projects, run the full registry
-smoke, and only then move npm `latest` and create releases. Keep existing Python tags
-as `vX.Y.Z`; use distinct npm tags such as `ts-vX.Y.Z`.
+The coordinated `release.yml` is manually dispatched from the current `main` commit.
+It builds the wheel, sdist, and npm tarball once, records component-specific checksums,
+and tests those exact artifacts. npm and PyPI publish in separate GitHub environments
+through trusted publishing. Alpha and beta npm releases go directly to the selected
+`next` or `beta` dist-tag; the workflow never changes `latest` because OIDC does not
+authorize dist-tag edits. A coordinated release publishes npm first and starts PyPI
+only after npm succeeds. Registry smoke tests must pass before Git tags or GitHub releases
+are created. Python tags remain `vX.Y.Z`; npm tags use `ts-vX.Y.Z`.
 
 Rollback uses npm dist-tags/deprecation and PyPI yank where warranted. A patch release
 must remain protocol-compatible where possible. Uninstalling tooling does not break

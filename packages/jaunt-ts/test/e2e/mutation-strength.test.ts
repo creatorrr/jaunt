@@ -6,6 +6,7 @@ import {
   runMutationProcess,
   type MutationStrengthResult,
 } from "../../src/test/mutation.js";
+import { runTestRunner } from "../../src/test/runner.js";
 import { createFixtureWorkspace, packageRoot } from "../helpers/workspace.js";
 
 const roots: string[] = [];
@@ -53,17 +54,35 @@ export function isPositive(value: number): boolean {
   write(
     workspace.root,
     "tests/contract.derived.test.ts",
-    `import { expect, test } from "vitest";
+    `// ⚙️ jaunt:contract-battery — DO NOT EDIT. Regenerate with \`jaunt reconcile\`.
+// jaunt:property_scheme=jaunt-ts-property/2
+
+import * as fc from "fast-check";
+import { expect, test } from "vitest";
 import { isPositive } from "../src/contract.js";
-test("positive boundary", () => {
-  expect(isPositive(1)).toBe(true);
-  expect(isPositive(0)).toBe(false);
-  expect(isPositive(-1)).toBe(false);
+
+const valueArbitrary: fc.Arbitrary<number> = fc.constant(0);
+test("@prop: strict positivity excludes zero", () => {
+  fc.assert(
+    fc.property(valueArbitrary, (value) => {
+      expect(isPositive(value)).toBe(value > 0);
+    }),
+    { seed: 184493121, numRuns: 10 },
+  );
 });
 `,
   );
   const source = resolve(workspace.root, "src/contract.ts");
   const before = readFileSync(source);
+  const base = await runTestRunner({
+    root: workspace.root,
+    files: ["tests/contract.derived.test.ts"],
+    timeoutMs: 5_000,
+    redactDerived: true,
+    mode: "run",
+  });
+  expect(base.ok, JSON.stringify(base)).toBe(true);
+  expect(base.tests).toEqual([]); // Passing derived cases stay held out.
   const payload = {
     root: workspace.root,
     sourcePath: "src/contract.ts",

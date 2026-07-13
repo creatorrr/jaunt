@@ -3,10 +3,10 @@ title: Claude Code Plugin
 description: "Install Jaunt's Claude Code plugin for workspace-aware build skills, freshness context, and generated-file approval guards."
 ---
 
-Version 1.1.0 updates the Claude Code plugin for Jaunt 1.6.2 workspace routing.
-It packages the same CLI-backed authoring loop as the Codex plugin, while
-keeping Claude's approval-style PreToolUse decision and first-build reviewer
-agent.
+Version 1.2.0 adds version-2 TypeScript target awareness to the Claude Code
+plugin. It packages the same CLI-backed Python and TypeScript authoring loop as
+the Codex plugin, while keeping Claude's approval-style PreToolUse decision and
+first-build reviewer agent.
 
 ## Install
 
@@ -22,6 +22,9 @@ The direct GitHub flow is:
 claude plugin marketplace add creatorrr/jaunt
 claude plugin install jaunt@jaunt-plugins
 ```
+
+On a rerun, the installer refreshes the marketplace and calls
+`claude plugin update jaunt@jaunt-plugins` for an existing installation.
 
 Start a new Claude Code session after installation. For one-session development,
 use `claude --plugin-dir ./jaunt-claude-plugin`.
@@ -48,11 +51,12 @@ fingerprint, or artifact change.
 
 - `/jaunt:working-with-jaunt`: spec rules, workspace routing, and freshness.
 - `/jaunt:build`: preview likely model calls, build, report actual cost, and
-  run check/tests/Ruff/ty.
-- `/jaunt:doctor`: authentication, workspace health, current stale reasons,
-  orphans, and duplicate Claude/Codex guards.
-- `/jaunt:convert`: explicit-only conversion, with characterization tests
-  before the first model call.
+  run the Python or TypeScript native gates.
+- `/jaunt:doctor`: authentication, Node/npm/worker/compiler readiness,
+  workspace health, current stale or unbuilt state, diagnostics, orphans, and
+  duplicate Claude/Codex guards.
+- `/jaunt:convert`: explicit-only Python or TypeScript conversion, with
+  characterization tests before the first model call.
 - `first-build-reviewer`: read-only contract-silence review after a module's
   first successful build.
 
@@ -71,7 +75,8 @@ work before a build and reports the actual cost afterward.
 ## Hooks
 
 The shared SessionStart script reads payload `cwd` and injects a bounded
-freshness/orphan summary for each discovered workspace.
+freshness/orphan summary for each discovered workspace, including TypeScript
+unbuilt, invalid, and diagnostic counts.
 Because `jaunt status` imports discovered spec modules, enable SessionStart only
 for workspaces whose Python code you trust.
 
@@ -85,5 +90,8 @@ tools, or timeouts. `/jaunt:doctor` flags hand-written guards in either Claude
 or Codex config once the matching plugin hook is enabled.
 
 There is no MCP server; Jaunt's JSON CLI is the machine interface.
+
+Plugin commands prefer a compatible installed `jaunt`, use `uv run --no-sync jaunt` in a
+uv project, and fall back to `uvx jaunt` for a JavaScript-only workspace.
 
 Next: [PyPI Skills](/docs/guides/pypi-skills).

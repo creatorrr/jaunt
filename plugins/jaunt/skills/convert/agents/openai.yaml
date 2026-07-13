@@ -1,6 +1,6 @@
 interface:
   display_name: Convert to Jaunt
-  short_description: Convert handwritten Python into reviewed Jaunt specs.
-  default_prompt: Convert this module to Jaunt while preserving its tested behavior.
+  short_description: Convert Python or TypeScript into reviewed Jaunt specs.
+  default_prompt: Convert this Python or TypeScript module to Jaunt while preserving its tested behavior.
 policy:
   allow_implicit_invocation: false

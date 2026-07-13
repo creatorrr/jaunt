@@ -84,9 +84,20 @@ npm run benchmark:watch -- --output /tmp/jaunt-ts-watch.json
 
 The JSON includes p50/p95 timings, peak RSS, post-GC RSS slope, open file
 descriptors, active Node resources, listeners, child processes, worker restarts,
-and surviving processes. The pinned Node 24 / TypeScript 6 lane enforces both the
-numeric resource budgets and a 20% ceiling over the rounded first-alpha timing
-baseline; CI and release fail when any assertion is exceeded.
+and surviving processes. `npm run benchmark:watch` strictly enforces the numeric
+resource budgets and a 20% ceiling over the rounded first-alpha timing baseline
+for a controlled Node 24 / TypeScript 6 runner. Shared GitHub CI and release
+runners use `benchmark:watch:ci`: they fail on deterministic leak and process
+budgets while recording absolute timing measurements for comparison.
+
+CI also defines an opt-in strict timing job. Provision a quiet Linux x64
+self-hosted runner with the `jaunt-ts-performance` label, calibrate the checked-in
+baseline on that machine, and set the repository variable
+`JAUNT_TS_STRICT_BENCHMARK_ENABLED=true`. CI will then run the strict command on
+every push and same-repository pull request with Node 24.14.0. Pull requests from
+forks never reach the self-hosted runner. When the variable is absent, the job is
+skipped before runner assignment, so repositories without that dedicated machine
+do not accumulate queued jobs.
 
 This is an alpha published under the `next` dist-tag. It supports project-reference
 builds, cross-module generated dependencies, concrete class inheritance, strict
@@ -99,3 +110,7 @@ The worker still rejects abstract governed classes, authored `private`/`protecte
 members, parameter properties, computed member names, mixin or `implements`
 heritage, and preserve tags on overload groups. `.mts`, `.cts`, and JavaScript specs
 are not supported.
+
+## License
+
+MIT. See [LICENSE](./LICENSE).

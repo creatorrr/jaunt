@@ -344,13 +344,15 @@ function ownerForRuntimeImport(
   projects: readonly ResolutionProject[],
   importer: string,
 ): ResolutionProject | undefined {
-  const absolute = resolve(importer.split("?")[0]!);
+  const absolute = comparableEntryPath(importer.split("?")[0]!);
   const exact = projects.filter((project) =>
-    project.parsed.fileNames.some((file) => resolve(file) === absolute),
+    project.parsed.fileNames.some(
+      (file) => comparableEntryPath(file) === absolute,
+    ),
   );
   if (exact.length > 0) return exact[0];
   return projects.find((project) =>
-    isContainedBy(dirname(project.configPath), absolute),
+    isContainedBy(comparableEntryPath(dirname(project.configPath)), absolute),
   );
 }
 
@@ -374,15 +376,15 @@ async function projectSourceResolver(input: TestRunnerInput): Promise<
   ]);
   const overlays = new Map(
     Object.entries(input.overlays ?? {}).map(([path, source]) => [
-      resolve(input.root, path),
+      comparableEntryPath(resolve(input.root, path)),
       source,
     ]),
   );
   const host: ts.ModuleResolutionHost = {
     fileExists: (path) =>
-      overlays.has(resolve(path)) || compiler.sys.fileExists(path),
+      overlays.has(comparableEntryPath(path)) || compiler.sys.fileExists(path),
     readFile: (path) =>
-      overlays.get(resolve(path)) ?? compiler.sys.readFile(path),
+      overlays.get(comparableEntryPath(path)) ?? compiler.sys.readFile(path),
     directoryExists: compiler.sys.directoryExists,
     getDirectories: compiler.sys.getDirectories,
     ...(compiler.sys.realpath ? { realpath: compiler.sys.realpath } : {}),
@@ -401,10 +403,11 @@ async function projectSourceResolver(input: TestRunnerInput): Promise<
         host,
       ).resolvedModule;
       if (!resolution) return null;
-      const resolved = resolve(resolution.resolvedFileName);
-      const workspaceRelative = relative(input.root, resolved);
+      const resolved = comparableEntryPath(resolution.resolvedFileName);
+      const physicalRoot = comparableEntryPath(input.root);
+      const workspaceRelative = relative(physicalRoot, resolved);
       if (
-        !isContainedBy(input.root, resolved) ||
+        !isContainedBy(physicalRoot, resolved) ||
         workspaceRelative.split(sep).includes("node_modules") ||
         /\.d\.(?:ts|mts|cts)$/.test(resolved)
       ) {
@@ -1360,10 +1363,15 @@ async function run(input: TestRunnerInput): Promise<TestRunnerOutput> {
     throw new Error("protected Node permission guard was not preloaded");
   }
   const overlays = input.overlays ?? {};
+  // Vite realpaths module IDs on platforms where a temporary directory is
+  // reached through an OS alias (notably /var -> /private/var on macOS).
+  // Materialize virtual files before computing their identities so overlays
+  // and mutation runs use the same physical paths as Vite.
+  const placeholders = materializeOverlayPlaceholders(input);
   const reporter = new JauntReporter(input.root, overlays, input.redactDerived);
   const overlayAbsolute = new Map(
     Object.entries(overlays).map(([path, source]) => [
-      resolve(input.root, path),
+      comparableEntryPath(resolve(input.root, path)),
       source,
     ]),
   );
@@ -1389,7 +1397,6 @@ async function run(input: TestRunnerInput): Promise<TestRunnerOutput> {
   }
   const originalOut = process.stdout.write.bind(process.stdout);
   const originalErr = process.stderr.write.bind(process.stderr);
-  const placeholders = materializeOverlayPlaceholders(input);
   process.stdout.write = ((chunk: string | Uint8Array) => {
     const captured = capture(capturedOut, chunk, capturedOutBytes);
     capturedOutBytes = captured.bytes;
@@ -1430,7 +1437,10 @@ async function run(input: TestRunnerInput): Promise<TestRunnerOutput> {
             name: "jaunt-test-overlays",
             enforce: "pre",
             load(id: string) {
-              return overlayAbsolute.get(resolve(id.split("?")[0]!)) ?? null;
+              return (
+                overlayAbsolute.get(comparableEntryPath(id.split("?")[0]!)) ??
+                null
+              );
             },
           },
         ],

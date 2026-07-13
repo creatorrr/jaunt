@@ -136,7 +136,7 @@ jobs:
         working-directory: packages/jaunt-ts
       - name: Benchmark pinned graph and assert leak budgets
         run: >-
-          npm run benchmark:watch --
+          npm run benchmark:watch:ci --
           --output "${RUNNER_TEMP}/jaunt-ts-watch-benchmark.json"
         working-directory: packages/jaunt-ts
       - name: Upload benchmark measurements
@@ -145,6 +145,36 @@ jobs:
         with:
           name: jaunt-ts-watch-benchmark
           path: ${{ runner.temp }}/jaunt-ts-watch-benchmark.json
+          if-no-files-found: error
+          retention-days: 30
+
+  typescript-watch-performance:
+    name: TypeScript pinned watch timing gate
+    if: ${{ vars.JAUNT_TS_STRICT_BENCHMARK_ENABLED == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, linux, x64, jaunt-ts-performance]
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.14.0
+          cache: npm
+          cache-dependency-path: packages/jaunt-ts/package-lock.json
+      - run: npm ci
+        working-directory: packages/jaunt-ts
+      - name: Assert the pinned 20-percent timing budgets
+        run: >-
+          npm run benchmark:watch --
+          --output "${RUNNER_TEMP}/jaunt-ts-watch-performance.json"
+        working-directory: packages/jaunt-ts
+      - name: Upload strict benchmark measurements
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jaunt-ts-watch-performance
+          path: ${{ runner.temp }}/jaunt-ts-watch-performance.json
           if-no-files-found: error
           retention-days: 30
 
@@ -171,7 +201,7 @@ jobs:
       - run: npm ci
         working-directory: packages/jaunt-ts
       - name: Typecheck, test, and inspect the packed worker
-        run: npm run typecheck && npm test && npm run pack:check
+        run: npm run typecheck && npm run test:platform && npm run pack:check
         working-directory: packages/jaunt-ts
       - name: Exercise platform paths through the Python adapter
         run: uv run pytest -q tests/test_typescript_real_worker.py
@@ -234,7 +264,7 @@ jobs:
           fast-check@${{ matrix.fast-check-version }}
         working-directory: packages/jaunt-ts
       - name: Test peer-boundary versions
-        run: npm run typecheck && npm test
+        run: npm run typecheck && npm run test:peers
         working-directory: packages/jaunt-ts
 
   packaging:

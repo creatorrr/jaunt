@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdtempSync,
   mkdirSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -28,6 +29,14 @@ function write(root: string, path: string, content: string): void {
   const target = resolve(root, path);
   mkdirSync(dirname(target), { recursive: true });
   writeFileSync(target, content);
+}
+
+function aliasedWorkspaceRoot(root: string): string {
+  const parent = mkdtempSync(resolve(tmpdir(), "jaunt-ts-root-alias-"));
+  roots.push(parent);
+  const alias = resolve(parent, "workspace");
+  symlinkSync(root, alias, "dir");
+  return alias;
 }
 
 function managedTestSource(tier: "example" | "derived", body: string): string {
@@ -848,9 +857,10 @@ test("normal emit rejects unsafe package output and Jaunt provenance", async () 
 test("runner executes a new inline test overlay without leaving it on disk", async () => {
   const workspace = createFixtureWorkspace();
   roots.push(workspace.root);
+  const root = aliasedWorkspaceRoot(workspace.root);
   const path = "tests/nested/__generated__/overlay.example.test.ts";
   const result = await runTestRunner({
-    root: workspace.root,
+    root,
     files: [path],
     timeoutMs: 5_000,
     redactDerived: false,
@@ -870,8 +880,8 @@ test("overlay", () => expect(6 * 7).toBe(42));
   expect(result.tests).toContainEqual(
     expect.objectContaining({ status: "passed", tier: "example" }),
   );
-  expect(existsSync(resolve(workspace.root, path))).toBe(false);
-  expect(existsSync(resolve(workspace.root, "tests/nested"))).toBe(false);
+  expect(existsSync(resolve(root, path))).toBe(false);
+  expect(existsSync(resolve(root, "tests/nested"))).toBe(false);
 });
 
 test("permission sandbox forces nested workers to retain filesystem restrictions", async () => {
@@ -883,6 +893,13 @@ test("permission sandbox forces nested workers to retain filesystem restrictions
   writeFileSync(secret, "NESTED-WORKER-HELD-OUT-SENTINEL\n");
   write(workspace.root, "pnpm-workspace.yaml", "packages: []\n");
   const path = "tests/__generated__/worker.example.test.ts";
+  const permissionFlag = process.allowedNodeEnvironmentFlags.has("--permission")
+    ? "--permission"
+    : "--experimental-permission";
+  const disablePermissionFlag =
+    permissionFlag === "--permission"
+      ? "--no-permission"
+      : "--no-experimental-permission";
   write(
     workspace.root,
     path,
@@ -897,11 +914,11 @@ test("worker stays restricted", async () => {
     try { parentPort.postMessage(fs.readFileSync(${JSON.stringify(secret)}, "utf8")); }
     catch (error) { parentPort.postMessage(error.code); }\`;
   const priorNodeOptions = process.env.NODE_OPTIONS;
-  process.env.NODE_OPTIONS = "--no-permission";
+  process.env.NODE_OPTIONS = ${JSON.stringify(disablePermissionFlag)};
   try {
     const options = [
-      { execArgv: [], env: { NODE_OPTIONS: "--no-permission" } },
-      { execArgv: ["--no-permission"], env: { NODE_OPTIONS: "--no-permission" } },
+      { execArgv: [], env: { NODE_OPTIONS: ${JSON.stringify(disablePermissionFlag)} } },
+      { execArgv: [${JSON.stringify(disablePermissionFlag)}], env: { NODE_OPTIONS: ${JSON.stringify(disablePermissionFlag)} } },
       { execArgv: [], env: SHARE_ENV },
     ];
     const values = await Promise.all(options.map((workerOptions) =>
@@ -920,13 +937,12 @@ test("worker stays restricted", async () => {
 `,
     ),
   );
-  const permissionFlag = process.allowedNodeEnvironmentFlags.has("--permission")
-    ? "--permission"
-    : "--experimental-permission";
   const permissionGuard = resolve(
     packageRoot,
     "dist/test/permission_guard.cjs",
   );
+  const physicalWorkspace = realpathSync(workspace.root);
+  const physicalPackageRoot = realpathSync(packageRoot);
   const child = spawn(
     process.execPath,
     [
@@ -934,9 +950,9 @@ test("worker stays restricted", async () => {
       "--allow-addons",
       "--allow-worker",
       `--require=${permissionGuard}`,
-      `--allow-fs-read=${workspace.root}`,
-      `--allow-fs-read=${packageRoot}`,
-      `--allow-fs-write=${workspace.root}`,
+      `--allow-fs-read=${physicalWorkspace}`,
+      `--allow-fs-read=${physicalPackageRoot}`,
+      `--allow-fs-write=${physicalWorkspace}`,
       resolve(packageRoot, "dist/test/runner.js"),
     ],
     {
@@ -1184,6 +1200,7 @@ test("not collected", () => {});
 test("runner resolves package aliases through the owning referenced source project", async () => {
   const workspace = createFixtureWorkspace();
   roots.push(workspace.root);
+  const root = aliasedWorkspaceRoot(workspace.root);
   rmSync(resolve(workspace.root, "src"), { recursive: true, force: true });
   write(
     workspace.root,
@@ -1294,7 +1311,7 @@ test("uses referenced source", () => expect(feature()).toBe("source"));
   );
 
   const result = await runTestRunner({
-    root: workspace.root,
+    root,
     files: ["tests/__generated__/project.example.test.ts"],
     timeoutMs: 15_000,
     redactDerived: false,
@@ -1305,7 +1322,10 @@ test("uses referenced source", () => expect(feature()).toBe("source"));
       "packages/app/tsconfig.json",
       "packages/core/tsconfig.json",
     ],
-    compilerModulePath: workspace.compilerModulePath,
+    compilerModulePath: resolve(
+      root,
+      "node_modules/typescript/lib/typescript.js",
+    ),
   });
 
   expect(result.ok, JSON.stringify(result)).toBe(true);

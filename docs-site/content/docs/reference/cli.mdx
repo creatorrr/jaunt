@@ -172,7 +172,7 @@ jaunt build --language ts --target ts:src/tokens/index
 | `--force` | Regenerate everything, ignoring digests. |
 | `--instruction "..."` | Extra build instruction appended to the prompt (repeatable). |
 | `--include-target-tests` / `--no-include-target-tests` | Include targeted test-spec source in build prompts (default from `[build] include_target_tests`). |
-| `--no-auto-skills` | Skip auto-generated PyPI skills this run. |
+| `--no-auto-skills` | Skip automatic PyPI or npm package skills this run. |
 | `--no-builtin-skills` | Don't seed the bundled builtin skills into the Codex workspace. |
 | `--no-repo-map` | Disable repo-map injection this run. See [Repo Context](/docs/concepts/repo-context). |
 | `--no-semantic-gate` | Rebuild on every real change; skip the Layer B gate (Layer A still applies). See [Change Detection](/docs/concepts/change-detection). |
@@ -214,7 +214,7 @@ jaunt status --magic-only
 
 | Flag | Effect |
 |------|--------|
-| `--magic-only` | Probe only `@jaunt.magic` freshness; skip contract and repo-map checks. |
+| `--magic-only` | Probe only generated-artifact freshness; skip contract and repo-map checks. |
 
 A module the next build resolves through the free re-stamp path reads
 `stale (re-stamp: free)` rather than `stale (structural)`; when that module also
@@ -224,8 +224,10 @@ in their own section, reported under `"orphans"` in `--json`.
 
 ### `jaunt clean`
 
-Remove `__generated__` directories and header-marked `.pyi` stubs under the
-configured roots.
+Remove target-owned generated artifacts under the configured roots. Python removes
+`__generated__` directories and header-marked `.pyi` stubs. TypeScript removes owned
+implementations, API mirrors, sidecars, and generated magic-test batteries while
+preserving private specs, public facades, and contract batteries.
 
 ```bash
 jaunt clean
@@ -264,7 +266,7 @@ jaunt test --language ts --target ts:src/tokens/index
 | Flag | Effect |
 |------|--------|
 | `--no-build` | Skip the `build` step. |
-| `--no-run` | Generate tests without running pytest. |
+| `--no-run` | Generate tests without running the target's pytest or Vitest runner. |
 | `--pytest-args ARG` | Extra arg appended to pytest for Python targets (repeatable). TypeScript runner args are intentionally not accepted. |
 | `--no-semantic-gate` | Rebuild on every real change; skip the Layer B gate. |
 | `--no-redact-derived` | Debug only — feed full derived-tier failure detail into repair. |
@@ -315,10 +317,11 @@ jaunt reconcile --language ts
 ### `jaunt check`
 
 The single deterministic CI gate for both modes — no model, no API key. It
-verifies committed contract batteries and `@jaunt.magic` freshness, exiting `4`
+verifies committed contract batteries and Python/TypeScript magic freshness, exiting `4`
 on any blocking drift: a contract that is unbuilt, stale-prose, signature-drift,
 or behavior-drift; or a magic module that is unbuilt or stale (including a
-missing or stale `.pyi` stub).
+missing or stale Python `.pyi` stub). TypeScript invalid-artifact diagnostics and
+unbuilt private spec modules block the same gate.
 
 ```bash
 jaunt check
@@ -329,7 +332,7 @@ jaunt check --magic-only
 | Flag | Effect |
 |------|--------|
 | `--contracts-only` | Gate only contract batteries. |
-| `--magic-only` | Gate only `@jaunt.magic` freshness. |
+| `--magic-only` | Gate only generated-artifact freshness for configured targets. |
 
 `check` also blocks on orphaned artifacts. A generated module, `.pyi`, or
 contract battery whose spec no longer exists exits `4` with a message naming the
