@@ -252,3 +252,5 @@ def test_workflows_gate_release_integrity_and_typescript_fixture_freshness() -> 
     assert 'mv "$candidate_prefix/node_modules/@usejaunt/ts"' in release
     assert "FIXME(exact-wheel-eject)" in release
     assert '"$jaunt_bin" eject ' not in release
+    assert "FIXME(registry-runner)" in release
+    assert '"$venv/bin/jaunt" eject ' not in release
