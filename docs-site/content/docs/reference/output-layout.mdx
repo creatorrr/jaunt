@@ -24,9 +24,12 @@ src/slug/
 
 The generated implementation and mirror carry `jaunt:module`, structural, prose, and
 API digests. The sidecar records the same contract identity plus exact artifact
-hashes. `jaunt sync` may re-stamp those header lines after deterministic validation,
-but it does not rewrite a built body or public boundary. Do not edit any of the three
-machine-owned files by hand.
+hashes. `jaunt sync` re-renders the deterministic mirror and its sidecar bookkeeping,
+but it does not rewrite a built body, replace an existing facade, or advance the
+built implementation's provenance to a changed contract. Semantic and fingerprint
+re-stamps happen during `jaunt build`; compatible alpha-format repairs happen through
+`jaunt migrate --language ts`. Do not edit any of the three machine-owned files by
+hand.
 
 ### Python target
 

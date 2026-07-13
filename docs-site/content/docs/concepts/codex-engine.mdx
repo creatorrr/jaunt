@@ -3,11 +3,15 @@ title: Codex Engine
 description: "How Jaunt drives the OpenAI Codex CLI (`codex exec`) to generate code."
 ---
 
-Codex is Jaunt's only generation engine. Every command that writes code —
-`jaunt build`, `jaunt test`, `jaunt skill build`, `jaunt skill refresh` — drives
-the OpenAI **Codex CLI** (`codex exec`) underneath. Jaunt keeps everything else
-for itself: discovery, dependency ordering, freshness, validation, repair
-retries, and writing the final files into your tree.
+Codex is Jaunt's only generation engine. Model-backed implementation, test, contract,
+skill, and project-overview work drives the OpenAI **Codex CLI** (`codex exec`). Jaunt
+keeps discovery, dependency ordering, freshness, validation, repair retries, and
+artifact transactions for itself.
+
+Writing a file does not automatically mean calling Codex. TypeScript `sync`, reviewed
+`design --apply`, compatible `migrate --language ts --apply`, `check`, and deterministic
+re-stamps use the worker and local toolchain only. Fresh build and test targets skip
+generation too.
 
 <Callout type="info">
   The older `legacy` (direct provider SDK) and `aider` engines are gone.
@@ -33,16 +37,19 @@ model, reasoning effort, and sandbox policy live in the
 
 ## How a generation call works
 
-For each module Jaunt needs to build:
+For each module that needs model-backed generation:
 
-1. Jaunt renders the prompt — preamble, system template, your spec's source
-   segment, any per-spec extras, and the repo map — and seeds builtin and
-   project skills into the workspace at `.agents/skills/` for Codex to find.
+1. Jaunt renders the target prompt from your contract, per-spec extras, project
+   context, and target templates, then seeds builtin and project skills into the
+   workspace at `.agents/skills/` for Codex to find.
 2. It spawns one `codex exec --json` subprocess and passes the prompt on stdin.
 3. Codex edits inside the configured sandbox; Jaunt reads the JSONL event stream
    for the final result.
-4. Jaunt validates the module with AST and type checks and, on failure, runs
-   bounded repair retries before writing the file into `__generated__/`.
+4. Python validates the proposed module with AST and type checks. TypeScript asks
+   Codex for reserved internal bindings, composes the deterministic exports, and
+   checks the complete candidate in the owning compiler overlay, including affected
+   project references. Either target can run bounded repair retries before an atomic
+   write.
 
 Each call is its own subprocess. There are no shared credentials and no
 process-wide locks, so generation is task-local and parallel-safe by
@@ -50,18 +57,18 @@ construction — Jaunt just runs several `codex exec` processes at once.
 
 ## Freshness
 
-The Codex runtime is part of what Jaunt fingerprints for freshness: switch the
-model, the sandbox, the reasoning effort, or the prompt templates, and the
-affected modules regenerate without `--force`. The full list of what counts as a
-change is in [Change Detection](/docs/concepts/change-detection).
+The Codex runtime is part of what Jaunt fingerprints for freshness: switch the model,
+sandbox, reasoning effort, or target prompt templates, and affected modules become
+stale without `--force`. A fingerprint-only change can be validated and re-stamped
+without asking the implementation model to rewrite the body. The full list is in
+[Change Detection](/docs/concepts/change-detection).
 
 ## Test generation
 
-Generated pytest modules have to satisfy the literal test specs you wrote. By
-default Jaunt tests through the **public module contract**, not the generated
-internals, unless a spec opts out. Spell out every behavior you want covered in
-the spec rather than trusting the engine to guess at a broad, unstated matrix —
-the model writes what you specify, not what you meant.
+Generated pytest and Vitest modules have to satisfy the literal test specs you wrote.
+Jaunt tests through the **public module contract**, not generated internals. Spell out
+every behavior you want covered rather than trusting the engine to guess at a broad,
+unstated matrix: the model writes what you specify, not what you meant.
 
 See also: [Configuration](/docs/reference/config) and
 [Limitations](/docs/reference/limitations).

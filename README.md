@@ -332,28 +332,31 @@ cd docs-site
 npm run dev
 ```
 
-## Publish to PyPI
+## Release
 
-If you keep your token in `.env` as `UV_PUBLISH_TOKEN=...`, load it into your shell first:
+Publishing runs through the repository's **Coordinated release** GitHub Actions
+workflow. It builds the Python and npm candidates once, tests those exact artifacts,
+publishes through PyPI and npm trusted publishing (OIDC), verifies the registry bytes,
+then creates the matching Git tags and GitHub releases. Do not upload a locally built
+wheel or tarball.
 
-```bash
-set -a
-source .env
-set +a
-```
+After the version, lockfiles, changelog, and generated artifacts are committed on
+`main`, run `.github/workflows/release.yml` from the Actions UI. Choose `python`,
+`typescript`, or `both`; leave `publish` off for a candidate-only rehearsal, or enable
+it to publish. TypeScript alpha releases use the `next` npm dist-tag (`beta` is also an
+explicit workflow choice).
 
-Build and validate artifacts:
-
-```bash
-uv build
-uvx twine check dist/*
-```
-
-Upload to PyPI:
+The equivalent GitHub CLI invocation is:
 
 ```bash
-uv publish --check-url https://pypi.org/simple/
+gh workflow run release.yml --ref main \
+  -f component=both \
+  -f publish=true \
+  -f npm_dist_tag=next
 ```
+
+The repository must have trusted-publisher entries for the `pypi` and `npm` GitHub
+environments. No long-lived PyPI or npm token is stored in Actions.
 
 ## Dev
 

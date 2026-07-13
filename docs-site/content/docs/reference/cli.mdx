@@ -134,11 +134,12 @@ jaunt sync --target ts:src/tokens/index
 ```
 
 The owner project must typecheck before the artifacts are committed. Existing custom
-facades are never overwritten, and sync never changes a built implementation's body
-or public boundary. A semantic refreeze or fingerprint re-stamp may update only its
-Jaunt provenance header so the implementation and sidecar remain consistent. A
-synchronized placeholder keeps the editor green but remains `unbuilt` in `status` and
-`check`.
+facades are never overwritten. Sync may refresh the deterministic API mirror and its
+sidecar hash bookkeeping, but it never rewrites a built implementation's body or
+advances its provenance to a changed contract. Semantic and fingerprint re-stamps
+belong to `build`; compatible alpha artifact repairs belong to `migrate --language
+ts`. A synchronized placeholder keeps the editor green but remains `unbuilt` in
+`status` and `check`.
 
 ### `jaunt design`
 

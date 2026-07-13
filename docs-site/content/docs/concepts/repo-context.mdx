@@ -11,9 +11,10 @@ module knows what exists around it. The map is on by default and works offline.
 ## The repo map
 
 `treedocs.yaml` at the project root holds a one-line description of every
-directory and `.py` file. The descriptions start from an AST baseline — module
-docstrings and top-level symbols, computed offline — and can be enriched by the
-model if you opt in.
+directory and supported source file (`.py`, `.ts`, or `.tsx`; generated output and
+declaration files are excluded). Descriptions start from an offline static baseline:
+Python module docstrings and public symbols, or TypeScript documentation and exported
+surface. They can be enriched by the model if you opt in.
 
 ```bash
 jaunt tree             # sync the tree incrementally (AST-only by default)
@@ -29,12 +30,15 @@ with the `[context]` config; see the
 
 ## Semantic retrieval (opt-in)
 
-The repo map tells the model what exists. Semantic retrieval goes one step
-further and shows it the actual neighboring code. Turn it on, put the `colgrep`
-binary (LightOn next-plaid) on your `PATH`, and before each build Jaunt queries
-`colgrep` for code relevant to the spec, then seeds the top hits into the
-workspace as `_context/relevant_*.py`. If `colgrep` is missing, the build still
-runs — retrieval just sits out that round.
+The repo map tells the model what exists. For Python generation, semantic retrieval
+goes one step further and shows it the actual neighboring code. Turn it on, put the
+`colgrep` binary (LightOn next-plaid) on your `PATH`, and Jaunt queries `colgrep` for
+code relevant to each Python spec, then seeds the top hits into the workspace as
+`_context/relevant_*.py`. If `colgrep` is missing, the build still runs — retrieval
+just sits out that round.
+
+The TypeScript alpha receives the shared repo map and optional project overview, but
+does not yet add `colgrep` hits to its generation context.
 
 The trade-off is real neighboring implementations against an extra tool
 dependency and a bit of build time, which is why it stays off until you ask for
@@ -50,15 +54,14 @@ overview prompt. The result is cached to `.jaunt/PROJECT_OVERVIEW.md` and reused
 until one of those inputs changes, so you pay for the prose once, not per build.
 The call counts against your build cost budget and shows up in the cost summary.
 
-## The Jaunt preamble
+## Target prompt preambles
 
-Every build prompt opens with a static preamble
-(`src/jaunt/prompts/codex_preamble.md`). It frames what Jaunt is, states the
-signature/docstring contract, and tells the generator to write straightforward,
-human-maintainable code and useful comments. That matters if you later run
-`jaunt eject` and keep the implementation as ordinary source. The preamble also
-lists the core design laws the generator is held to. It adds no model call. Its
-text is part of the build fingerprint, so editing it — or overriding it in
-config — regenerates already-built modules.
+Python build prompts open with `src/jaunt/prompts/codex_preamble.md`. TypeScript uses
+its own strict system and module templates under `src/jaunt/typescript/prompts/` so
+the model writes only reserved internal bindings while Jaunt owns the public boundary.
+Both targets ask for straightforward, maintainable source that remains useful after
+ejection. These templates add no model call, and their content participates in the
+target's generation fingerprint. Override them through `[prompts.py]` or
+`[prompts.ts]` in a version-2 config.
 
 Next: [Change Detection](/docs/concepts/change-detection).
