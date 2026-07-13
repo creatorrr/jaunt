@@ -24,12 +24,13 @@ export function encode(bytes: Uint8Array): string {
  * Decode an unpadded base64url string.
  *
  * @example decode("aGk") // => Uint8Array [104, 105]
- * @throws TypeError if `text` contains characters outside [A-Za-z0-9_-],
- *   including "=" padding.
+ * @throws TypeError if `text` contains characters outside [A-Za-z0-9_-]
+ *   (including "=" padding), or has an impossible unpadded length
+ *   (length % 4 === 1), which Buffer would otherwise decode silently.
  * @jauntContract
  */
 export function decode(text: string): Uint8Array {
-  if (!/^[A-Za-z0-9_-]*$/.test(text)) {
+  if (!/^[A-Za-z0-9_-]*$/.test(text) || text.length % 4 === 1) {
     throw new TypeError("invalid base64url");
   }
   return new Uint8Array(Buffer.from(text, "base64url"));

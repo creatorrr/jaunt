@@ -25,7 +25,7 @@ test("decode: aGk -> [104, 105]", () => {
 
 // --- cases derived from @throws tags ---
 
-test.each(["a=b", "abc=", "not base64url!", "with space "])(
+test.each(["a=b", "abc=", "not base64url!", "with space ", "A", "AAAAA"])(
   "decode rejects invalid input %j with TypeError",
   (text) => {
     expect(() => decode(text)).toThrowError(TypeError);

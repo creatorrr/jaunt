@@ -26,6 +26,14 @@ test("expired entries are invisible and pruned on read", ({ clock }) => {
   expect(store.size).toBe(0);
 });
 
+test("size reports only live entries, without an explicit sweep", ({ clock }) => {
+  const store = new TokenStore(() => clock.now());
+  store.put("a", "tok-a", clock.now() + 10);
+  store.put("b", "tok-b", clock.now() + 100);
+  clock.advance(50);
+  expect(store.size).toBe(1); // no get()/sweep() ran — expiry is still invisible
+});
+
 test("sweep drops every expired entry and reports the count", ({ clock }) => {
   const store = new TokenStore(() => clock.now());
   store.put("a", "tok-a", clock.now() + 10);

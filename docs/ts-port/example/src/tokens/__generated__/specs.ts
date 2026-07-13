@@ -43,7 +43,7 @@ export function createToken(
     throw new RangeError("userId must be non-empty");
   }
   const iat = nowSeconds();
-  const ttl = opts?.ttlSeconds ?? 3600;
+  const ttl = Math.trunc(opts?.ttlSeconds ?? 3600);
   return mint({ sub: userId, iat, exp: iat + ttl }, secret);
 }
 
@@ -51,10 +51,17 @@ function isClaims(value: unknown): value is Claims {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as Record<string, unknown>;
   return (
+    Object.keys(candidate).length === 3 &&
     typeof candidate.sub === "string" &&
     Number.isInteger(candidate.iat) &&
     Number.isInteger(candidate.exp)
   );
+}
+
+function isHs256Header(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return candidate.alg === "HS256" && candidate.typ === "JWT";
 }
 
 export function verifyToken(token: string, secret: string): Claims {
@@ -68,13 +75,15 @@ export function verifyToken(token: string, secret: string): Claims {
   if (got.length !== expected.length || !timingSafeEqual(got, expected)) {
     throw new JwtError("invalid-signature");
   }
+  let header: unknown;
   let payload: unknown;
   try {
+    header = JSON.parse(Buffer.from(headerB64, "base64url").toString("utf8"));
     payload = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8"));
   } catch {
     throw new JwtError("malformed");
   }
-  if (!isClaims(payload)) {
+  if (!isHs256Header(header) || !isClaims(payload)) {
     throw new JwtError("malformed");
   }
   if (payload.exp <= nowSeconds()) {
@@ -89,10 +98,13 @@ export function rotateToken(
   opts?: { ttlSeconds?: number },
 ): string {
   const claims = verifyToken(token, secret);
-  const ttl = opts?.ttlSeconds ?? 3600;
-  // Contract: strictly increasing iat/exp even within the same clock second.
+  const ttl = Math.trunc(opts?.ttlSeconds ?? 3600);
+  // Contract: strictly increasing iat/exp even within the same clock second,
+  // and even when the fresh ttl is shorter than the input token's remaining
+  // lifetime.
   const iat = Math.max(nowSeconds(), claims.iat + 1);
-  return mint({ sub: claims.sub, iat, exp: iat + ttl }, secret);
+  const exp = Math.max(iat + ttl, claims.exp + 1);
+  return mint({ sub: claims.sub, iat, exp }, secret);
 }
 
 /**
@@ -136,7 +148,9 @@ export class TokenStore {
     return removed;
   }
 
+  /** Live entries only — expired entries are invisible to every read. */
   get size(): number {
+    this.sweep();
     return this.#entries.size;
   }
 }

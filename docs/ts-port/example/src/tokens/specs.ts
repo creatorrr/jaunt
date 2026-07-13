@@ -57,7 +57,8 @@ export function nowSeconds(): number {
  * base64url(signature), where base64url omits "=" padding.
  * - Header is exactly `{"alg":"HS256","typ":"JWT"}`.
  * - Payload is `{"sub":userId,"iat":now,"exp":now+ttl}` with integer unix
- *   seconds; default ttl is 3600 seconds.
+ *   seconds; default ttl is 3600 seconds, and a non-integer `ttlSeconds` is
+ *   truncated to whole seconds so iat/exp stay integers.
  * - Sign with HMAC-SHA256 using `secret` as the key.
  * - Allow any ttl, including negative, so tests can mint expired tokens.
  *
@@ -77,11 +78,15 @@ export function createToken(
  * 1. Split on "." — must be exactly 3 non-empty base64url segments.
  * 2. Recompute HMAC-SHA256 over "header.payload"; compare to the signature
  *    segment in constant time.
- * 3. Parse the payload strictly into {@link Claims} (JSON shape and types).
- * 4. Require `exp` strictly greater than the current time.
+ * 3. Decode the header — it must be a JSON object with alg "HS256" and typ
+ *    "JWT" (anything else, including "none", is malformed).
+ * 4. Parse the payload strictly into {@link Claims}: exactly the declared
+ *    keys with the declared types — extra keys are malformed.
+ * 5. Require `exp` strictly greater than the current time.
  *
  * @throws JwtError code "malformed" for structural problems (wrong segment
- *   count, non-base64url characters, bad JSON, wrong payload shape).
+ *   count, non-base64url characters, bad JSON, wrong header, wrong or
+ *   extra payload fields).
  * @throws JwtError code "invalid-signature" when the HMAC does not match.
  * @throws JwtError code "expired" when `exp` has passed.
  */
@@ -95,7 +100,9 @@ export function verifyToken(token: string, secret: string): Claims {
  * - Propagate verification errors unchanged.
  * - The rotated token MUST have strictly increasing iat/exp compared to the
  *   input token: if the clock has not advanced (both calls in the same
- *   second), bump iat forward so iat2 > iat1.
+ *   second), bump iat forward so iat2 > iat1; if the fresh ttl would land
+ *   exp at or before the input token's exp (a shorter ttl than the
+ *   original), bump exp to the input's exp + 1.
  */
 export function rotateToken(
   token: string,
@@ -110,10 +117,12 @@ export function rotateToken(
  * (docstring-only spec): jaunt designs the members from this contract.
  *
  * Callers need to: record the live token issued to a subject (replacing any
- * previous one), look up a subject's live token (expired entries must be
- * invisible), and sweep expired entries in bulk. Take the clock as an
- * injectable `() => number` (unix seconds) defaulting to real time, so
- * tests can control expiry deterministically.
+ * previous one), look up a subject's live token, report how many live
+ * tokens are held, and sweep expired entries in bulk. Expired entries must
+ * be invisible to *every* read — lookups and counts alike — regardless of
+ * whether a sweep has run. Take the clock as an injectable `() => number`
+ * (unix seconds) defaulting to real time, so tests can control expiry
+ * deterministically.
  *
  * Consumers import this through the package barrel (./index.ts), where its
  * types flow from the generated module — see DESIGN.md on designed APIs.
