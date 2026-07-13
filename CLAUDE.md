@@ -84,6 +84,7 @@ tests/              # pytest test suite (~41 files)
 examples/           # Runnable example projects
 jaunt-claude-plugin/  # Claude Code plugin (marketplace at .claude-plugin/marketplace.json)
 plugins/jaunt/        # Codex plugin (marketplace at .agents/plugins/marketplace.json)
+packages/jaunt-ts/  # Published @usejaunt/ts alpha marker API; Node worker planned
 ```
 
 ## Key Concepts

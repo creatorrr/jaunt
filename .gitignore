@@ -39,3 +39,11 @@ build/
 
 .jaunt/
 .context/
+
+# --- Jaunt-for-TypeScript preview (docs/ts-port/example) ---
+# Its mock __generated__ output is committed by design; node_modules never is.
+node_modules/
+!docs/ts-port/example/src/tokens/__generated__/
+!docs/ts-port/example/src/tokens/__generated__/**
+!docs/ts-port/example/tests/__generated__/
+!docs/ts-port/example/tests/__generated__/**
