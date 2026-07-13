@@ -194,13 +194,27 @@ jobs:
             cp -a examples/typescript-jwt "$project"
             local metadata_before
             metadata_before="$(sha256sum "$project/package.json" "$project/package-lock.json")"
+            local typescript_before
+            typescript_before="$(node -p \
+              "require('${project}/node_modules/typescript/package.json').name + '@' + require('${project}/node_modules/typescript/package.json').version")"
+            test "$typescript_before" = \
+              "typescript@$(node -p "require('${project}/package-lock.json').packages['node_modules/typescript'].version")"
+            test ! -L "$project/node_modules/typescript"
             rm -rf "$project/dist" "$project/.jaunt" \
               "$project/node_modules/@usejaunt/ts" \
               "$project/node_modules/.bin/jaunt-ts-worker"
+            # npm 11 reports the intact compiler in this relocated tree as
+            # `typescript@undefined` while resolving the tarball's peer. The
+            # peer-boundary jobs above validate the declared range, and the
+            # locked compiler is asserted before and after this controlled swap.
             npm install --prefix "$project" --offline --ignore-scripts --no-audit --no-fund \
-              --no-save --package-lock=false "$tarball"
+              --no-save --package-lock=false --legacy-peer-deps "$tarball"
             test "$metadata_before" = \
               "$(sha256sum "$project/package.json" "$project/package-lock.json")"
+            test "$typescript_before" = \
+              "$(node -p \
+                "require('${project}/node_modules/typescript/package.json').name + '@' + require('${project}/node_modules/typescript/package.json').version")"
+            test ! -L "$project/node_modules/typescript"
             test ! -L "$project/node_modules/@usejaunt/ts"
             test "$(node -p "require('${project}/node_modules/@usejaunt/ts/package.json').version")" = \
               "${{ steps.versions.outputs.typescript-version }}"

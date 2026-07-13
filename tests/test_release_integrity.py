@@ -246,3 +246,5 @@ def test_workflows_gate_release_integrity_and_typescript_fixture_freshness() -> 
     assert "npm dist-tag add" not in release
     assert "promote_npm_latest" not in release
     assert '"$project/node_modules/.package-lock.json"' not in release
+    assert "--legacy-peer-deps" in release
+    assert 'test "$typescript_before" =' in release
