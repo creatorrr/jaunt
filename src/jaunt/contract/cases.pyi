@@ -2,8 +2,8 @@
 # jaunt:tool_version=1.6.3
 # jaunt:kind=stub
 # jaunt:source_module=jaunt.contract.cases
-# jaunt:generated_digest=sha256:f7c129275f839e84c27c73c7c967b95a5a3c2cf10e0618c4a4b67d9eee8ec1fa
-# jaunt:inputs_digest=sha256:622836ce6a163a900934029bb11c8d6f0295b6ae72cd9403358ca5540e3e5ccc
+# jaunt:generated_digest=sha256:8b0528ad2cd47aac19880cca7e68c8d9161fc904055f4cf22af74d8b15a3e1d2
+# jaunt:inputs_digest=sha256:ae99f86b3427598d38b7c8e94565b806b41adb2807e217d54d746876422d5210
 
 import ast
 import builtins

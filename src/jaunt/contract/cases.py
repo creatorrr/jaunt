@@ -290,6 +290,14 @@ def parse_case_blocks(
     may raise ``CaseParseError``; do not catch it. Preserve the order in which
     cases are appended (source order within each section).
 
+    The generated module must not import helpers or types from
+    ``jaunt.contract.cases`` at module-import time. That source module is lazily
+    rebound to this generated implementation, so a top-level self-import can
+    re-enter resolution and expose a transient not-built binding to another
+    thread. Import every needed source-module helper lazily inside
+    ``parse_case_blocks`` before using it; postponed annotations make a
+    top-level ``CaseBlocks`` import unnecessary.
+
     Examples section — for each bullet line, in order:
 
     1. Call-equality form: try ``_split_top_level_eq(line)``. When it returns a

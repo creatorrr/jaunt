@@ -48,3 +48,4 @@
 2026-07-13 05:29Z build    jaunt.migrate — rebuilt
 2026-07-13 05:29Z advisory jaunt.contract.cases — “Strip a single trailing period” conflicts with prescribed `rstrip(".")`, which strips all; implementation follows `rstrip(".")`.
 2026-07-13 05:29Z advisory jaunt.heldout — `assign_opaque_ids` was required but absent from dependency stubs, so it was implemented locally.
+2026-07-13 05:36Z build    jaunt.contract.cases — rebuilt

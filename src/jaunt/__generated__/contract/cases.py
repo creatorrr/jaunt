@@ -2,11 +2,11 @@
 # jaunt:tool_version=1.6.3
 # jaunt:kind=build
 # jaunt:source_module=jaunt.contract.cases
-# jaunt:module_digest=sha256:b8d59b165363205ccb72b1eaf6b7183de1661af57378d81f346acda64a751b62
+# jaunt:module_digest=sha256:242da429ca8029321d67540411884b32c1dc6d3925ffbad5fe2d293b80708788
 # jaunt:digest_scheme=2
-# jaunt:spec_digests={"jaunt.contract.cases:parse_case_blocks": {"p": "e71512bca2de7f1343d84af3cf88c9ed1c86862ff51f2a4073e29ac4eab472ce", "s": "8d892f6dee8e593d5adee4fea3a55d80d2e45e0b997ed7701e560510271ef9fe"}}
+# jaunt:spec_digests={"jaunt.contract.cases:parse_case_blocks": {"p": "05c2d680041959dbec4b464e77d43e970ad80735bf2a129b162a6709de53bd18", "s": "8d892f6dee8e593d5adee4fea3a55d80d2e45e0b997ed7701e560510271ef9fe"}}
 # jaunt:generation_fingerprint=sha256:ce5b7955d1d41de6dabe0fc8f7ef796a0c18cad9d8bcc9043d8e4bc2f8ce1306
-# jaunt:module_api_digest=sha256:328d5e98fb7740a2bc0dfda6bc6caa98869febe73b85f6e3b14339d452063066
+# jaunt:module_api_digest=sha256:5d67168dcc6ff08169cb3956c296803b357e7aa8c16220019917d2979d831aa9
 # jaunt:module_context_digest=sha256:e78c093921140aab0ba7dcc449acf49cc47a4028465587f7c6e21d626a865801
 # jaunt:spec_refs=["jaunt.contract.cases:parse_case_blocks"]
 
@@ -14,19 +14,12 @@ from __future__ import annotations
 
 import ast
 import re
+from typing import TYPE_CHECKING
 
-from jaunt.contract.cases import (
-    _CASE_EXCEPTION_NAME_RE,
-    _MakeCaseKw,
-    CaseBlocks,
-    CaseParseError,
-    _call_root_and_method,
-    _case_lines_for_section,
-    _make_case,
-    _parse_fixtures,
-    _split_top_level_eq,
-    _valid_case_expr,
-)
+if TYPE_CHECKING:
+    from jaunt.contract.cases import CallCase, CaseBlocks
+
+__all__ = ["parse_case_blocks"]
 
 
 def parse_case_blocks(
@@ -37,25 +30,29 @@ def parse_case_blocks(
     module_names: frozenset[str],
     method: str | None = None,
 ) -> CaseBlocks:
-    r"""Parse executable examples and expected exceptions from a spec docstring."""
-    fixtures_declared = _parse_fixtures(docstring)
-    shared_case_kwargs: _MakeCaseKw = {
-        "target": target,
-        "async_map": async_map,
-        "fixtures_declared": fixtures_declared,
-        "module_names": module_names,
-        "method_override": method,
-    }
+    r"""Parse executable example and exception cases from a spec docstring."""
+    from jaunt.contract.cases import (
+        _CASE_EXCEPTION_NAME_RE,
+        CaseBlocks,
+        CaseParseError,
+        _call_root_and_method,
+        _case_lines_for_section,
+        _make_case,
+        _parse_fixtures,
+        _split_top_level_eq,
+        _valid_case_expr,
+    )
 
-    examples = []
+    fixtures_declared = _parse_fixtures(docstring)
+    examples: list[CallCase] = []
+    raises: list[CallCase] = []
+
     for line in _case_lines_for_section(docstring, "Examples"):
         equality = _split_top_level_eq(line)
         if equality is not None:
-            call_expr, expected_expr = equality
-            rooted, _ = _call_root_and_method(
-                ast.parse(call_expr, mode="eval").body,
-                target,
-            )
+            call_expr, expected = equality
+            tree = ast.parse(call_expr, mode="eval")
+            rooted, _ = _call_root_and_method(tree.body, target)
             if not rooted:
                 raise CaseParseError(
                     f"example call must be rooted in the target {target!r}",
@@ -65,74 +62,83 @@ def parse_case_blocks(
                 _make_case(
                     source_line=line,
                     call_expr=call_expr,
-                    expected_expr=expected_expr,
+                    expected_expr=expected,
                     exc_name=None,
                     legacy=False,
-                    **shared_case_kwargs,
+                    target=target,
+                    async_map=async_map,
+                    fixtures_declared=fixtures_declared,
+                    module_names=module_names,
+                    method_override=method,
                 )
             )
             continue
 
-        if "->" not in line:
-            continue
-        left, right = (part.strip() for part in line.split("->", 1))
-        if not (_valid_case_expr(left) and _valid_case_expr(right)):
-            continue
-        examples.append(
-            _make_case(
-                source_line=line,
-                call_expr=f"{target}({left})",
-                expected_expr=right,
-                exc_name=None,
-                legacy=True,
-                **shared_case_kwargs,
-            )
-        )
+        if "->" in line:
+            left, right = (part.strip() for part in line.split("->", 1))
+            if _valid_case_expr(left) and _valid_case_expr(right):
+                examples.append(
+                    _make_case(
+                        source_line=line,
+                        call_expr=f"{target}({left})",
+                        expected_expr=right,
+                        exc_name=None,
+                        legacy=True,
+                        target=target,
+                        async_map=async_map,
+                        fixtures_declared=fixtures_declared,
+                        module_names=module_names,
+                        method_override=method,
+                    )
+                )
 
-    raises = []
     for line in _case_lines_for_section(docstring, "Raises"):
         if " raises " in line:
-            input_expr, exception_name = line.split(" raises ", 1)
-            input_expr = input_expr.strip()
-            exception_name = exception_name.strip().rstrip(".")
-            if not (
-                _valid_case_expr(input_expr)
-                and _CASE_EXCEPTION_NAME_RE.match(exception_name)
-            ):
+            inp, exc = line.split(" raises ", 1)
+            inp = inp.strip()
+            exc = exc.strip().rstrip(".")
+            if not _valid_case_expr(inp) or not _CASE_EXCEPTION_NAME_RE.match(exc):
                 continue
 
-            tree = ast.parse(input_expr, mode="eval")
+            tree = ast.parse(inp, mode="eval")
             rooted, _ = _call_root_and_method(tree.body, target)
-            is_call_form = rooted and isinstance(tree.body, ast.Call | ast.Attribute)
+            call_form = rooted and isinstance(tree.body, (ast.Call, ast.Attribute))
             raises.append(
                 _make_case(
                     source_line=line,
-                    call_expr=input_expr if is_call_form else f"{target}({input_expr})",
+                    call_expr=inp if call_form else f"{target}({inp})",
                     expected_expr=None,
-                    exc_name=exception_name,
-                    legacy=not is_call_form,
-                    **shared_case_kwargs,
+                    exc_name=exc,
+                    legacy=not call_form,
+                    target=target,
+                    async_map=async_map,
+                    fixtures_declared=fixtures_declared,
+                    module_names=module_names,
+                    method_override=method,
                 )
             )
             continue
 
-        legacy_match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s+on\s+(.+)$", line)
-        if legacy_match is None:
+        match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s+on\s+(.+)$", line)
+        if match is None:
             continue
-        exception_name, input_expr = legacy_match.groups()
-        input_expr = input_expr.strip()
-        if not _valid_case_expr(input_expr):
-            continue
-        raises.append(
-            _make_case(
-                source_line=line,
-                call_expr=f"{target}({input_expr})",
-                expected_expr=None,
-                exc_name=exception_name,
-                legacy=True,
-                **shared_case_kwargs,
+        exc = match.group(1)
+        inp = match.group(2).strip()
+        if _valid_case_expr(inp):
+            raises.append(
+                _make_case(
+                    source_line=line,
+                    call_expr=f"{target}({inp})",
+                    expected_expr=None,
+                    exc_name=exc,
+                    legacy=True,
+                    target=target,
+                    async_map=async_map,
+                    fixtures_declared=fixtures_declared,
+                    module_names=module_names,
+                    method_override=method,
+                )
             )
-        )
 
     return CaseBlocks(
         examples=tuple(examples),

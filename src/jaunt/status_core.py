@@ -344,12 +344,12 @@ def _label_change_kind(
             any_prose = True
     if any_prose:
         return "prose"
-    if generation_fingerprint and existing:
-        stored_fp = _norm_digest(extract_generation_fingerprint(existing))
-        if stored_fp is not None and stored_fp != _norm_digest(generation_fingerprint):
-            return "fingerprint"
     if module_context_digest and existing:
         stored_context = _norm_digest(extract_module_context_digest(existing))
         if stored_context != _norm_digest(module_context_digest):
             return "structural"
+    if generation_fingerprint and existing:
+        stored_fp = _norm_digest(extract_generation_fingerprint(existing))
+        if stored_fp is not None and stored_fp != _norm_digest(generation_fingerprint):
+            return "fingerprint"
     return "re-stamp"

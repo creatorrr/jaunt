@@ -2,11 +2,25 @@
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from jaunt.contract.cases import CaseBlocks, CaseParseError, parse_case_blocks
+
+
+def test_generated_cases_module_does_not_top_level_import_its_lazy_source() -> None:
+    generated = (
+        Path(__file__).parents[1] / "src" / "jaunt" / "__generated__" / "contract" / "cases.py"
+    )
+    tree = ast.parse(generated.read_text(encoding="utf-8"))
+
+    assert not any(
+        isinstance(node, ast.ImportFrom) and node.module == "jaunt.contract.cases"
+        for node in tree.body
+    )
 
 
 def _parse(doc: str, **kw: Any) -> CaseBlocks:

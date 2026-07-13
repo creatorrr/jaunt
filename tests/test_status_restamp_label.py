@@ -32,6 +32,8 @@ def _build_scheme2_module(
     pkg: str,
     module_digest_override: str | None,
     tool_version: str = "0",
+    generation_fingerprint_override: str | None = None,
+    module_context_digest_override: str | None = None,
 ) -> None:
     """Write a generated module carrying scheme-2 spec_digests over the CURRENT specs.
 
@@ -82,10 +84,9 @@ def _build_scheme2_module(
             "kind": "build",
             "source_module": module_name,
             "module_digest": module_digest_override or real_digest,
-            "generation_fingerprint": generation_fingerprint(
-                load_config(root=tmp_path), kind="build"
-            ),
-            "module_context_digest": ctx_digest,
+            "generation_fingerprint": generation_fingerprint_override
+            or generation_fingerprint(load_config(root=tmp_path), kind="build"),
+            "module_context_digest": module_context_digest_override or ctx_digest,
             "module_api_digest": module_api_digest(entries),
             "spec_refs": [str(e.spec_ref) for e in entries],
         },
@@ -168,6 +169,28 @@ def test_vulnerable_restamp_version_labels_structural(tmp_path: Path, monkeypatc
     out = json.loads(capsys.readouterr().out)
     assert rc == cli.EXIT_OK
     assert f"{pkg}.specs" in out["stale"]
+    assert out["stale_changes"][f"{pkg}.specs"] == "structural"
+
+
+def test_context_change_takes_priority_over_fingerprint_change(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    pkg = "restamp_context_and_fingerprint"
+    _spec_project(tmp_path, pkg=pkg)
+    monkeypatch.chdir(tmp_path)
+    sys.path.insert(0, str(tmp_path / "src"))
+    _build_scheme2_module(
+        tmp_path,
+        pkg=pkg,
+        module_digest_override="sha256:" + "0" * 64,
+        generation_fingerprint_override="sha256:" + "1" * 64,
+        module_context_digest_override="sha256:" + "2" * 64,
+    )
+
+    rc = _run(["status", "--json", "--magic-only", "--root", str(tmp_path)])
+    out = json.loads(capsys.readouterr().out)
+
+    assert rc == cli.EXIT_OK
     assert out["stale_changes"][f"{pkg}.specs"] == "structural"
 
 
