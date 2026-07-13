@@ -387,6 +387,30 @@ jaunt guard --generated-dir __generated__
 |------|--------|
 | `--generated-dir DIR` | Override the guarded dir (default from `jaunt.toml` or `__generated__`). |
 
+### `jaunt install-codex-plugin`
+
+Install Jaunt's first-party Codex plugin from the GitHub marketplace, or from a
+local clone for development.
+
+```bash
+jaunt install-codex-plugin
+jaunt install-codex-plugin --local --root /path/to/jaunt
+jaunt install-codex-plugin --json
+```
+
+### `jaunt install-claude-plugin`
+
+Install Jaunt's first-party Claude Code plugin with the matching GitHub or local
+marketplace flow.
+
+```bash
+jaunt install-claude-plugin
+jaunt install-claude-plugin --local --root /path/to/jaunt
+jaunt install-claude-plugin --json
+```
+
+Both installers are idempotent and use a 120-second timeout per CLI command.
+
 ## Maintenance
 
 ### `jaunt tree`

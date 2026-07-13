@@ -3,14 +3,14 @@
   "owner": { "name": "Jaunt Contributors" },
   "metadata": {
     "description": "Claude Code plugins for the Jaunt spec-driven code generation framework",
-    "version": "1.0.0"
+    "version": "1.1.0"
   },
   "plugins": [
     {
       "name": "jaunt",
       "source": "./jaunt-claude-plugin",
-      "description": "Spec-driven Python codegen (jaunt) support: generated-code guard hook, session freshness map, plan-first cost-aware build workflow, conversion protocol, project doctor, first-build reviewer agent, and spec-authoring knowledge.",
-      "version": "1.0.0",
+      "description": "Workspace-aware Jaunt support: generated-file guards, freshness summaries, build and conversion workflows, doctor, and first-build review.",
+      "version": "1.1.0",
       "author": { "name": "Jaunt Contributors" },
       "category": "development",
       "keywords": ["jaunt", "spec-driven", "code-generation", "python", "llm", "claude-code"]

@@ -1,0 +1,6 @@
+interface:
+  display_name: Build Jaunt Specs
+  short_description: Preview, build, and verify stale Jaunt modules.
+  default_prompt: Build the stale Jaunt modules, surface advisories, and run the gates.
+policy:
+  allow_implicit_invocation: true

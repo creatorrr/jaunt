@@ -50,7 +50,15 @@ COMMANDS: list[tuple[str, str]] = [
 # The drift-guard test requires every real subcommand to be in COMMANDS or here,
 # so adding a new command forces an explicit decision.
 OMITTED_COMMANDS: frozenset[str] = frozenset(
-    {"tree", "eval", "cache", "skill", "skills", "install-claude-plugin"}
+    {
+        "tree",
+        "eval",
+        "cache",
+        "skill",
+        "skills",
+        "install-claude-plugin",
+        "install-codex-plugin",
+    }
 )
 
 EXIT_CODES: list[tuple[int, str]] = [

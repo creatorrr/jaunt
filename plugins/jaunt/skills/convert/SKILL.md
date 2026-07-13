@@ -1,7 +1,5 @@
 ---
 name: convert
-disable-model-invocation: true
-argument-hint: "[module-or-file]"
 description: Use only when the user explicitly asks to convert handwritten Python into Jaunt specs. Characterizes current behavior, distills contracts, converts stubs, previews model work, builds, and reviews the first result.
 ---
 
@@ -14,9 +12,10 @@ that call.
    candidate; import-time side effects and thin I/O orchestration are not.
 2. Add characterization tests for current behavior before changing the module.
    They must pass unchanged before and after conversion.
-3. Resolve the nearest workspace with `resolve-workspace.sh`. A Jaunt 1.6.2+
-   root config may cover several packages through literal or globbed roots.
-   For old nested configs, preview `jaunt migrate --merge-projects`.
+3. Locate this installed `SKILL.md`, walk up two directories to the plugin
+   root, and run `scripts/resolve-workspace.sh` by absolute path. A Jaunt 1.6.2+
+   root config may cover several packages through literal or globbed roots. For
+   old nested configs, preview `jaunt migrate --merge-projects`.
 4. Distill a self-contained contract. Pin errors, ordering, mutation, state
    timing, and boundaries that callers rely on.
 5. Add `jaunt.magic_module(__name__)` or a per-symbol `@jaunt.magic`, then

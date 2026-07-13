@@ -83,6 +83,7 @@ src/jaunt/          # Library source
 tests/              # pytest test suite (~41 files)
 examples/           # Runnable example projects
 jaunt-claude-plugin/  # Claude Code plugin (marketplace at .claude-plugin/marketplace.json)
+plugins/jaunt/        # Codex plugin (marketplace at .agents/plugins/marketplace.json)
 ```
 
 ## Key Concepts
@@ -357,6 +358,7 @@ jaunt log                     # Tail the JAUNT_LOG change journal (-n N, --modul
 jaunt guard                   # PreToolUse hook: warn when agents touch __generated__ (see docs/hooks.md)
 
 jaunt install-claude-plugin   # Install the first-party Jaunt plugin into Claude Code (--local to add from this clone; --json)
+jaunt install-codex-plugin    # Install the first-party Jaunt plugin into Codex (--local to add from this clone; --json)
 
 jaunt watch                   # Auto-rebuild on file changes
 jaunt watch --test            # Build + test on change
@@ -468,7 +470,8 @@ its rendered battery bytes feed the deterministic `check` gate, so regenerating
 it would restale every committed battery.
 
 **Iron rules apply to us too** (see
-`jaunt-claude-plugin/skills/working-with-jaunt/SKILL.md`): never hand-edit
+`plugins/jaunt/skills/working-with-jaunt/SKILL.md` or the matching Claude
+skill): never hand-edit
 anything under `__generated__/**` or any `.pyi`, and never edit an existing test
 to accommodate generated code. To change a magic-mode framework module, edit its
 docstring contract and rebuild (`jaunt build --target jaunt.<module>`); to change

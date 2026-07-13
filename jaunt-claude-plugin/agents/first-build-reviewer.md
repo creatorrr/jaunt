@@ -32,11 +32,13 @@ Classify each finding:
   contract does not pin it.
 - PINNED-OK — the behavior is already covered by the contract.
 
-Fix-forward doctrine: the deliverable is SPEC docstring edits, never body
-patches. Cost taxonomy: none / prose (~$0 refreeze) / structural (paid) /
-fingerprint (free re-stamp). A docstring prose addition that does not change
-meaning refreezes ~$0; one that adds a new pinned behavior is structural and
-re-bills the module on the next build.
+Fix-forward doctrine: the deliverable is spec docstring edits, never body or
+generated `.pyi` patches. Freshness taxonomy: structural changes rebuild the
+implementation; prose changes go through the semantic gate and may refreeze or
+rebuild; fingerprint/re-stamp changes re-stamp deterministically; stub changes
+re-emit the `.pyi` deterministically when implementation inputs are unchanged.
+Preview likely model work and report the actual build cost afterward. Do not
+invent a dollar estimate.
 
 Forbidden:
 - Do not propose edits to `__generated__/**`.

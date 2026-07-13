@@ -8,8 +8,12 @@ description: Use when building or rebuilding Jaunt-governed modules, after a spe
 ## 1. Resolve the workspace
 
 ```bash
-bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" <spec-file-or-dir>
+bash <absolute-plugin-root>/scripts/resolve-workspace.sh <spec-file-or-dir>
 ```
+
+Resolve `<absolute-plugin-root>` by locating this installed `SKILL.md` and
+walking up two directories. Do not assume `PLUGIN_ROOT` is set in an ordinary
+skill-driven shell call.
 
 Change to the printed directory. A root workspace may own several packages;
 Jaunt routes each module to the nearest owning `pyproject.toml`.

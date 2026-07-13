@@ -5,10 +5,13 @@ description: Use when a Jaunt workspace misbehaves, before a large build, or whe
 
 # Jaunt doctor
 
-Run from the repository root:
+Locate this installed `SKILL.md`, resolve `../../scripts/doctor.sh` relative to
+its directory, and run that absolute script path from the repository root.
+`PLUGIN_ROOT` is available to plugin hooks but is not guaranteed in ordinary
+skill-driven shell calls.
 
 ```bash
-JAUNT_WORKSPACE_ROOT="$PWD" bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/doctor.sh"
+JAUNT_WORKSPACE_ROOT="$PWD" bash <absolute-plugin-root>/scripts/doctor.sh
 ```
 
 The report is read-only and makes no model calls. It checks:

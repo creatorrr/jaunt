@@ -1,7 +1,7 @@
 {
   "name": "jaunt",
-  "version": "1.0.0",
-  "description": "Spec-driven Python codegen (jaunt) support: generated-code guard hook, session freshness map, plan-first cost-aware build workflow, conversion protocol, project doctor, first-build reviewer agent, and spec-authoring knowledge.",
+  "version": "1.1.0",
+  "description": "Workspace-aware Jaunt support for Claude Code: generated-file guards, freshness summaries, build and conversion workflows, doctor, and first-build review.",
   "author": { "name": "Jaunt Contributors" },
   "homepage": "https://jaunt.ing/docs/guides/claude-code-plugin",
   "repository": "https://github.com/creatorrr/jaunt",
