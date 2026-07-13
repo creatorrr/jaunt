@@ -75,10 +75,12 @@ src/tokens/
   follow the owning project's runtime convention (normally `.js` under
   Node-style resolution), so ordinary tsc, bundler, test, and publish flows
   need no Jaunt loader.
-- **A missing build is an honest compile failure.** For first-build analysis,
-  Jaunt supplies an in-memory typed throwing placeholder for only the exact
-  missing owned artifact. Nothing is scaffolded onto disk before the complete
-  project overlay validates.
+- **An unbuilt module stays visibly unbuilt.** Without synchronization, its
+  missing implementation is a normal compiler error. `jaunt sync` may write a
+  deterministic API mirror and typed throwing placeholder to restore editor and
+  project typing without a model call; provenance keeps `status`/`check` in the
+  unbuilt state until a validated implementation replaces it. First-build
+  analysis can create the same placeholder in memory when sync was skipped.
 - Resolve hooks may survive only as **optional development convenience**.
   Nothing in build, check, test, emit, publish, or consumer execution may
   depend on one.
@@ -191,7 +193,7 @@ taplo/Even Better TOML. The decisive property: **one root `jaunt.toml`
 governs mixed repos** — shared `[codex]`/`[semantic_gate]`/`[daemon]`
 sections plus `[target.py]` / `[target.ts]` (the TS target adds
 explicit production/test `projects`, a `tool_owner`, source/test roots, and
-per-target generated directories. Workspace routing needs *both* manifests:
+per-target generated directories). Workspace routing needs *both* manifests:
 the containing package for dependency ownership and configured
 `tsconfig.json`/project references for compilation ownership. Every facade,
 spec, artifact, and test has one unambiguous project role. Rejected: a
@@ -236,10 +238,20 @@ executes application modules or user config.
     consumers outside the facade/context/generated cycle.
 12. *(implementation planning)* **Python core + project-local Node worker**,
     selected projects, versioned JSONL protocol, and target adapters.
+13. *(package naming)* **The npm coordinate is `@usejaunt/ts`.** Unscoped
+    `jaunt` and the `@jaunt` scope belong to unrelated publishers, while npm's
+    similarity guard rejected `jaunt-ts`. The owned `usejaunt` scope is explicit,
+    avoids a naming dispute, and leaves space for future packages with distinct
+    jobs. `@usejaunt/jaunt` remains unused unless an actual umbrella package is
+    designed.
+14. *(authoring loop)* **`jaunt sync` is deterministic and model-free.** It
+    renders API mirrors plus explicitly unbuilt throwing placeholders, allowing
+    the editor and context layer to typecheck before the first paid build.
 
 ## Next steps
 
 Execute the phased plan in [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md).
-Phase 0 freezes protocol-v1, contract-IR-v1, package ownership, the corrected
-preview layout, and the complete positive/negative conformance matrix before
-the Python and Node foundations proceed in parallel.
+Phase 0 pins initial protocol/IR drafts, package ownership, the corrected preview
+layout, and the positive/negative conformance matrix before the Python and Node
+foundations proceed in parallel. Protocol and IR compatibility freeze at beta,
+after checker behavior has exercised the drafts.

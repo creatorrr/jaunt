@@ -61,8 +61,9 @@ no Jaunt runtime dependency below the public facade.
   host range when the worker package is created and test it independently from
   target runtimes.
 - Generated TypeScript is committed/reviewed just like Python generated output.
-  A missing implementation is a deterministic `jaunt check` and compiler
-  failure.
+  A missing implementation is always a deterministic `jaunt check` failure.
+  Before `jaunt sync` it is also a compiler failure; after sync, a provenance-marked
+  throwing placeholder restores project/editor typing without counting as built.
 
 ### Deferred
 
@@ -114,6 +115,9 @@ no Jaunt runtime dependency below the public facade.
     exit-2 install diagnostic; the worker never silently switches compilers.
 13. **Optional resolver hooks remain development sugar only.** No build, test,
     check, publish, or consumer path depends on them.
+14. **Deterministic synchronization precedes paid generation.** `jaunt sync`
+    renders API mirrors and, for unbuilt modules, exact typed throwing placeholders.
+    It never calls a model or turns an unbuilt module fresh.
 
 ## 4. Authoring contract
 
@@ -144,16 +148,16 @@ export * from "./index.context.js";
 export * from "./__generated__/index.js";
 ```
 
-Absent optional files are omitted. `jaunt init` and `jaunt migrate` can scaffold
-or repair this file, but build never silently overwrites user-written facade
-code.
+Absent optional files are omitted. `jaunt init`, `jaunt sync`, and `jaunt migrate`
+can create a missing canonical facade, but none silently overwrites a user-written
+facade.
 
 ### 4.2 Spec grammar
 
 A spec imports markers from the TypeScript package and opts in once:
 
 ```ts
-import * as jaunt from "@jaunt/ts/spec";
+import * as jaunt from "@usejaunt/ts/spec";
 
 jaunt.magicModule();
 
@@ -229,13 +233,17 @@ files/configs. Daemon jobs never share analyzers across worktrees or repositorie
 
 ### 6.1 New npm package
 
-Create the self-contained package at `packages/jaunt-ts/` with its own lockfile
-(published under the working package name
-`@jaunt/ts`):
+The public package coordinate is `@usejaunt/ts`. The `usejaunt` npm organization
+is owned by the Jaunt maintainer, and `0.0.0-alpha.0` bootstraps the coordinate with
+the typed marker API and its ESM/CommonJS runtime guard. Expand that tracked package
+at `packages/jaunt-ts/` into the following self-contained layout:
 
 ```text
 packages/jaunt-ts/
   package.json
+  package-lock.json
+  README.md
+  index.{js,cjs,d.ts}              published alpha bootstrap; replaced by build output
   tsconfig.json
   src/
     spec.ts                       marker/runtime types
@@ -262,9 +270,17 @@ packages/jaunt-ts/
       mutation.ts                 disposable mutation worker coordinator
 ```
 
-The npm package exports `@jaunt/ts/spec`, the worker entry point, and the
+The npm package exports `@usejaunt/ts/spec`, the worker entry point, and the
 disposable test-runner entry point. It does not expose analyzer internals as a
 public API in v1.
+
+The name is deliberate. Unscoped `jaunt` is an unrelated object-path package,
+and the `@jaunt` organization belongs to an unrelated npm account. npm also
+rejected unscoped `jaunt-ts` under its package-name similarity guard. The
+`@usejaunt/ts` coordinate keeps the product name recognizable without implying
+control of those existing names, and the scope leaves room for real future
+packages such as `@usejaunt/cli`. Do not publish `@usejaunt/jaunt` or other empty
+placeholders merely to reserve them; add a package only when it has a genuine role.
 
 ### 6.2 New Python modules
 
@@ -345,7 +361,7 @@ source_roots = ["packages/*/src"]
 test_roots = ["packages/*/tests"]
 projects = ["tsconfig.json"]
 test_projects = ["tsconfig.test.json"]
-tool_owner = "." # package that directly owns @jaunt/ts + typescript
+tool_owner = "." # package that directly owns @usejaunt/ts + typescript
 generated_dir = "__generated__"
 test_runner = "vitest"
 vitest_config = ""
@@ -768,7 +784,22 @@ Magic ejection operates on a whole TypeScript spec module in v1:
 The result contains no Jaunt import, `.jaunt` path, generated-directory dependency,
 or provenance header. Ejection refuses layouts it cannot update without guessing.
 
-### 14.4 Init, migrate, clean, and orphans
+### 14.4 Deterministic sync
+
+- `jaunt sync [--target ...]` parses the selected dependency closure and writes API
+  mirrors without calling Codex or the semantic gate.
+- For a new module it creates the canonical facade only when that path is absent and
+  emits a self-contained, exact-export typed throwing placeholder when no real
+  implementation exists. Existing handwritten facades and real generated
+  implementations are never replaced.
+- Placeholder headers carry `state = "unbuilt"`; `status` and `check` remain blocked,
+  while the owner project, context layer, editor hovers, and declaration references can
+  typecheck before a paid build.
+- Mirror, facade, placeholder, sidecar, and journal writes use the same prevalidated,
+  recoverable owner-project transaction as build. JSON reports stable `mirrors`,
+  `placeholders`, `created_facades`, and `failed` records.
+
+### 14.5 Init, migrate, clean, and orphans
 
 - `jaunt init --language ts` scaffolds config, spec/context/facade/test examples, and
   prints the package-manager-specific dev-dependency command. It mutates
@@ -833,7 +864,8 @@ reserved-binding output and validates through `validateOverlay`.
 ### 15.2 CLI behavior
 
 - `build`, `test`, `status`, `specs`, `check`, `clean`, `watch`, daemon/jobs, and
-  instructions operate on every configured target by default.
+  instructions operate on every configured target by default. `sync` does as well,
+  but performs only deterministic TypeScript artifact preparation in v1.
 - `--language py|ts` narrows a command. Unprefixed Python `--target` values remain
   valid; TypeScript uses stable `ts:` IDs.
 - `design` is TypeScript-only in v1 and errors for other targets.
@@ -846,7 +878,8 @@ reserved-binding output and validates through `validateOverlay`.
 
 Version-1 Python-only JSON remains byte-for-byte unchanged and gains no `targets`
 field. Version 2 uses qualified top-level IDs and repeats language-local values under
-`targets` for consumers that prefer partitioned data. Freeze these shapes in Phase 0:
+`targets` for consumers that prefer partitioned data. Pin these draft shapes in
+Phase 0; alpha revisions carry a schema version, while public-beta shapes freeze:
 
 ```json
 {
@@ -938,27 +971,37 @@ paths and never assume one generated-directory basename for the workspace.
 
 ## 16. Delivery phases
 
-Each phase is independently reviewable. Do not start model-backed TypeScript build
-integration until the route, IR, import-graph, and conformance negative fixtures are
-green.
+Each phase is independently reviewable. Do not expose a model-backed TypeScript build
+until the route, IR, import-graph, and conformance negative fixtures are green. The
+hard-coded Phase 1 tracer is the deliberate exception: it probes integration risk but
+is neither generalized nor user-facing.
 
-### Phase 0 — freeze the contracts
+This is the stable 1.0 plan, not a small MVP. The advertised matrix includes project
+references, mixed module systems, workspaces, lifecycle commands, daemon operation,
+mutation strength, ejection, and coordinated publication; resource it as a multi-quarter
+effort. The Phase 1 tracer and internal alpha are deliberately narrow risk-reduction
+slices, not a smaller product commitment.
+
+### Phase 0 — pin the initial contracts
 
 Deliverables:
 
-- Freeze `DESIGN.md` around the name-preserving routes, API mirror, context DAG,
+- Pin `DESIGN.md` around the name-preserving routes, API mirror, context DAG,
   class checks, transitive type closure, v1 syntax/support limits, and project graph.
 - Change the preview to `index.jaunt.ts -> index.ts -> __generated__/index.ts`, use
   `.js` source specifiers, add the deterministic API mirror, and remove private spec
   imports from production source.
 - Add fixtures for every second-review failure before implementation.
-- Reserve an owned npm package name. Unscoped `jaunt` is already occupied; the
-  provisional `@jaunt/ts` import must not become API until its scope/name is owned.
-- Freeze protocol-v1 and contract-IR-v1 JSON schemas plus the conformance matrix.
+- Keep the owned `@usejaunt/ts` coordinate and published alpha bootstrap aligned
+  with `packages/jaunt-ts/`; all preview and protocol fixtures use that import.
+- Pin draft protocol-v1 and contract-IR-v1 schemas, golden fixtures, and the
+  conformance matrix. Every alpha revision bumps its schema/digest identifier and
+  produces an explicit rebuild diagnostic; compatibility freezes at public beta.
 
 Exit gate: the design, schemas, and fixture expectations receive review; preview
-typecheck/test/demo, emitted JS, declaration emit, QuickInfo, and packed consumer all
-pass without a resolver or raw spec artifact.
+typecheck/test, declaration emit, QuickInfo, and packed consumer all pass without a
+resolver or raw spec artifact. The demo compiles with `tsc` and runs from emitted
+JavaScript (`node dist/...`); it does not rely on Node's direct `.ts` execution.
 
 ### Phase 1 — parallel foundations
 
@@ -970,17 +1013,31 @@ pass without a resolver or raw spec artifact.
 
 **Node package foundation**
 
-- Create the npm workspace package, marker API, protocol validation, worker lifecycle,
+- Expand the published npm marker package with protocol validation, worker lifecycle,
   and fake request handlers.
 - Add clean `npm pack` and installed-tarball handshake tests.
 - Implement Python worker client, startup/request timeouts, cancellation, error mapping,
   bounded stderr, and shutdown.
 
-These tasks share only frozen protocol fixtures and may run in parallel.
+**Vertical tracer**
+
+- As soon as the fake handshake works, thread one hard-coded NodeNext project and one
+  free-function spec through minimal discovery, draft IR, API-mirror rendering, a fake
+  candidate, overlay validation, and a recoverable write transaction.
+- Keep classes, references, workspaces, repair, and generalized routing out of this
+  tracer. Its job is to force the Python adapter, JSONL protocol, compiler worker, and
+  artifact boundary to meet before their full abstractions are built.
+- After the deterministic tracer is green, run and record one manual `gpt-5.6-sol`
+  generation smoke. It is not a PR gate and does not make the TS target user-facing.
+
+The Python and Node foundations share only pinned protocol fixtures and may run in
+parallel. The tracer starts when both minimal endpoints exist.
 
 Exit gate: the installed wheel can locate the project-local npm worker and complete a
 fake handshake; missing Node/package, version mismatch, malformed output, crash, and
-timeout have deterministic exit-2 diagnostics; Python behavior is unchanged.
+timeout have deterministic exit-2 diagnostics; Python behavior is unchanged. The
+free-function tracer succeeds end to end, and an invalid fake candidate leaves no
+artifact writes.
 
 ### Phase 2 — project graph, routes, discovery, and IR
 
@@ -990,6 +1047,8 @@ timeout have deterministic exit-2 diagnostics; Python behavior is unchanged.
 - Implement spec/test/contract discovery and the normative authoring grammar.
 - Implement TSDoc parsing, semantic IR, transitive type Merkle graph, dependency/API
   digests, and deterministic API-mirror rendering.
+- Implement `jaunt sync` for the supported grammar: model-free mirrors, missing
+  facades, unbuilt throwing placeholders, and idempotent owner-project transactions.
 - Resolve import/dependency graphs; reject runtime spec edges, route collisions,
   undeclared packages, and context cycles.
 - Expose `specs` plus analyzer/project diagnostics. Full freshness/status waits for
@@ -998,6 +1057,8 @@ timeout have deterministic exit-2 diagnostics; Python behavior is unchanged.
 Exit gate: cosmetic mutations preserve IR; referenced-type mutations stale all public
 consumers; recursive types terminate; two specs per directory route uniquely; solution
 configs, aliases, and cross-project APIs pass; invalid sources have stable locations.
+An unbuilt free-function module becomes editor/typecheck-clean after sync while
+`jaunt check` still reports it as unbuilt.
 
 ### Phase 3 — candidate composition and sound conformance
 
@@ -1007,6 +1068,7 @@ configs, aliases, and cross-project APIs pass; invalid sources have stable locat
   exports, package provenance, and no-write candidate results.
 - Implement free-function, overload, generic, constructor, class-member, accessor,
   field, modifier, and inheritance conformance.
+- Extend sync placeholder rendering across every supported class/member shape.
 - Reject `any`, suppressions, ambient/declaration tricks, boundary casts, unsupported
   nominal members, and model-authored exports.
 
@@ -1014,12 +1076,13 @@ Exit gate: the complete positive/negative matrix passes, especially narrowed cla
 methods/constructors under strict TypeScript; failed candidates leave every artifact
 byte-identical; validated returned bytes match their content hash.
 
-### Phase 4 — first vertical build slice
+### Phase 4 — first supported model-backed build slice
 
 - Add TypeScript prompt templates and language-aware Codex generation request.
 - Implement one-project `jaunt build --language ts`, repair retries,
   cost/cache/progress, and the recoverable implementation/API/header/sidecar write
-  transaction. Freeze those artifact formats here.
+  transaction. Pin the initial artifact formats here; alpha changes bump their format
+  identifiers and force an explicit rebuild, while beta freezes compatibility.
 - Scaffold a real generated JWT example through Jaunt rather than hand-maintaining the
   preview output.
 - Verify normal compile, emit, declaration, and execution with a fake backend in CI;
@@ -1096,6 +1159,8 @@ clear unsupported-phase diagnostic; they never silently ignore the TS target.
 
 - Marker alias resolution, exact stub forms, illegal executable declarations,
   `@jauntDesign`, `@jauntPreserve`, test targets, and contract tags.
+- Deterministic sync rendering for mirrors, new facades, and self-contained throwing
+  placeholders across every supported symbol shape; repeated sync is byte-identical.
 - TSDoc cleaning, multiline/custom tags, malformed tags, Unicode, CRLF, and source
   locations.
 - Cosmetic IR neutrality: whitespace, comments, semicolons, quote style, import alias,
@@ -1136,6 +1201,8 @@ clear unsupported-phase diagnostic; they never silently ignore the TS target.
   reports and exit precedence.
 - Header/sidecar parse, refreeze/restamp, API dependency closure, cache validation,
   orphan safety, and atomic-write recovery.
+- `sync` makes no model call, never overwrites a facade or real implementation, and
+  preserves `unbuilt` status/check semantics after a green owner-project typecheck.
 - Context freshness split: signature changes rebuild, meaningful TSDoc changes take
   the prose gate, and body-only edits revalidate without generation.
 - Daemon TS job IDs, supersession, retry, patch allowlist, proposal landing/discard,
@@ -1160,6 +1227,8 @@ Fixtures are copied to temporary directories before mutation:
   JS; API mirror/declarations and QuickInfo retain authored types and TSDoc.
 - Missing output, stale output, invalid candidate, context cycle, runtime spec import,
   orphan, and undeclared package all fail at the intended phase.
+- A new spec runs `jaunt sync` with Codex unavailable, typechecks through its facade
+  and context, throws if its placeholder is executed, and remains `unbuilt` in check.
 - Design dry-run/apply/stale-source/dirty-tree/invalid patch; contract lifecycle; full
   magic eject.
 
@@ -1174,7 +1243,8 @@ corrupt reports produce a minimal redacted fallback, never raw Vitest output.
 
 ### 18.1 npm package
 
-- Reserve an owned name before Phase 1; treat `@jaunt/ts` as provisional.
+- Publish from the owned `@usejaunt/ts` coordinate. The marker-only alpha bootstrap
+  is already tracked; Phase 1 adds the worker without renaming the package.
 - The worker entry is pure ESM. The inert marker surface has conditional ESM/CJS
   exports with one shared declaration contract so NodeNext CommonJS specs do not hit
   ESM-import errors. The package has no native addon, install script, network access,
@@ -1357,7 +1427,8 @@ The TypeScript target is stable only when all are true:
 ## 23. Execution rules for implementation PRs
 
 - One phase may span several PRs, but each PR has one primary interface and its tests.
-- Freeze protocol/IR fixtures before parallel Python and TypeScript implementations.
+- Pin versioned protocol/IR draft fixtures before parallel Python and TypeScript
+  implementations; freeze compatibility only at the public-beta gate.
 - Do not mix Python behavior refactors with TS semantics unless the adapter boundary
   requires it; land the Python compatibility wrapper first.
 - Never hand-edit existing Python self-hosted `__generated__`, `.pyi`, or contract

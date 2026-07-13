@@ -1,0 +1,43 @@
+{
+  "name": "@usejaunt/ts",
+  "version": "0.0.0-alpha.0",
+  "description": "Static marker API for authoring Jaunt TypeScript specs",
+  "type": "module",
+  "license": "UNLICENSED",
+  "sideEffects": false,
+  "files": [
+    "index.js",
+    "index.cjs",
+    "index.d.ts",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js",
+      "require": "./index.cjs"
+    },
+    "./spec": {
+      "types": "./index.d.ts",
+      "import": "./index.js",
+      "require": "./index.cjs"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/creatorrr/jaunt.git",
+    "directory": "packages/jaunt-ts"
+  },
+  "homepage": "https://github.com/creatorrr/jaunt/tree/main/docs/ts-port",
+  "bugs": "https://github.com/creatorrr/jaunt/issues",
+  "keywords": [
+    "jaunt",
+    "typescript",
+    "code-generation",
+    "spec-driven-development"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "tag": "next"
+  }
+}
