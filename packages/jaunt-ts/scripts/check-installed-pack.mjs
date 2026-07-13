@@ -10,9 +10,9 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { npmCliInvocation } from "./npm-cli.mjs";
 
 const npm = npmCliInvocation();
@@ -30,8 +30,15 @@ assert.match(compilerPackage.version, /^6\./);
 const sandbox = await mkdtemp(join(tmpdir(), "jaunt-ts-pack-"));
 let worker;
 
-function posix(path) {
-  return path.replaceAll("\\", "/");
+function absoluteFileDependency(path) {
+  const specifier = pathToFileURL(resolve(path)).href;
+  assert.equal(new URL(specifier).protocol, "file:");
+  assert.equal(
+    isAbsolute(fileURLToPath(specifier)),
+    true,
+    `dependency must be an absolute file URL: ${specifier}`,
+  );
+  return specifier;
 }
 
 function run(command, args, cwd) {
@@ -101,6 +108,8 @@ try {
   }
   await access(tarball);
   const project = resolve(sandbox, "consumer");
+  const tarballDependency = absoluteFileDependency(tarball);
+  const compilerDependency = absoluteFileDependency(compilerRoot);
   await mkdir(resolve(project, "src"), { recursive: true });
   await mkdir(resolve(project, "tests"), { recursive: true });
   await writeFile(
@@ -110,8 +119,8 @@ try {
         private: true,
         type: "module",
         devDependencies: {
-          "@usejaunt/ts": `file:${posix(relative(project, tarball))}`,
-          typescript: `file:${posix(relative(project, compilerRoot))}`,
+          "@usejaunt/ts": tarballDependency,
+          typescript: compilerDependency,
         },
       },
       null,
