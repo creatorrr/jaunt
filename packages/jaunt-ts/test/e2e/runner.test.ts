@@ -915,7 +915,7 @@ test("permission sandbox forces nested workers to retain filesystem restrictions
 import { SHARE_ENV, Worker } from "node:worker_threads";
 import { expect, test } from "vitest";
 test("worker stays restricted", async () => {
-  const code = \`const { parentPort } = require("node:worker_threads");
+  const code = String.raw\`const { parentPort } = require("node:worker_threads");
     const fs = require("node:fs");
     const inherited = {
       execArgv: process.execArgv,
@@ -992,7 +992,9 @@ test("worker stays restricted", async () => {
       root: workspace.root,
       files: [path],
       timeoutMs: 10_000,
-      redactDerived: true,
+      // This fixture contains no held-out battery. Keep infrastructure errors
+      // visible so platform permission regressions name the denied resource.
+      redactDerived: false,
       mode: "run",
       tier: "example",
       permissionSandbox: true,
