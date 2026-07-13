@@ -9,6 +9,7 @@
     "daemon",
     "ci",
     "coding-agents",
+    "codex-plugin",
     "claude-code-plugin",
     "pypi-skills"
   ]

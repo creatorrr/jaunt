@@ -1,0 +1,96 @@
+---
+title: Codex Plugin
+description: "Install Jaunt's Codex plugin for workspace-aware build skills, freshness context, and generated-file guards."
+---
+
+Jaunt's Codex plugin packages five CLI-backed skills and two hooks. It does not
+run an MCP server or app connector. Version 1.0.0 is distributed from this
+repository's `.agents/plugins/marketplace.json`.
+
+## Install
+
+```bash
+uvx jaunt install-codex-plugin
+# from this clone:
+uv run jaunt install-codex-plugin --local --root .
+```
+
+The default command runs these steps in order:
+
+```bash
+codex plugin marketplace add creatorrr/jaunt
+codex plugin add jaunt@jaunt-codex-plugins
+```
+
+Local mode verifies `.agents/plugins/marketplace.json`, adds the clone root as
+the marketplace, and installs the same plugin reference. Both modes are
+idempotent.
+
+Start a new Codex session after installation. Open `/hooks` to inspect and
+trust the bundled hook definitions; changed hooks require review again.
+
+The bundled command hooks require Bash (macOS, Linux, or a Windows environment
+that provides Bash).
+
+## Skills
+
+- `$jaunt:working-with-jaunt` loads when work touches Jaunt specs, config, or
+  generated artifacts.
+- `$jaunt:build` resolves the workspace, previews likely model calls, builds,
+  reports actual cost, and runs the gates.
+- `$jaunt:doctor` checks workspace health without building.
+- `$jaunt:convert` runs only when explicitly invoked.
+- `$jaunt:first-build-reviewer` runs when explicitly invoked or delegated by
+  the build workflow.
+
+On a first build, the build skill delegates one read-only explorer subagent to
+the reviewer checklist when delegation is available. Otherwise it checks the
+same contract-silence risks in the main thread.
+
+## Workspace model
+
+Jaunt 1.6.2 lets one `jaunt.toml` cover several packages. Source and test roots
+may be literal paths or globs. Each module follows its longest containing root
+and nearest `pyproject.toml`; that owner controls generated files, stubs,
+dependency validation, tests, and contract batteries.
+
+Use `jaunt migrate --merge-projects` to preview consolidation of older child
+configs. The command makes no model call and refuses route, digest,
+fingerprint, or artifact changes.
+
+## Freshness
+
+The plugin reports Jaunt's current reasons without fixed price estimates:
+
+| reason | next action |
+|---|---|
+| `structural` | implementation-model rebuild |
+| `prose` | semantic-gate judgment, then refreeze or rebuild |
+| `fingerprint` or `re-stamp` | deterministic re-stamp |
+| `stub` | deterministic `.pyi` re-emission when implementation inputs are unchanged |
+
+The build skill reports the actual cost after the command completes.
+
+## Hooks
+
+The SessionStart hook reads `cwd` from its JSON payload and scans for at most
+twelve workspaces, injecting a one-line freshness and orphan summary for each.
+`jaunt status` imports discovered spec modules, so trust the SessionStart hook
+only in workspaces whose Python code you trust.
+
+The PreToolUse hook matches `apply_patch`. It extracts Add, Update, Delete, and
+Move paths, resolves them against payload `cwd`, and checks each path through
+`jaunt guard`. Jaunt's approval result becomes a Codex `deny`, because Codex
+does not support `permissionDecision: "ask"` for this event. Existing
+provenance-headed generated `.pyi` files are denied too, with a pointer to the
+corresponding `.py` spec.
+
+Malformed payloads, missing configuration, missing executables, command
+failures, and timeouts fail open. A hook is a useful guardrail, not a complete
+security boundary.
+
+See the official [plugin](https://learn.chatgpt.com/docs/build-plugins),
+[skill](https://learn.chatgpt.com/docs/build-skills), and
+[hook](https://learn.chatgpt.com/docs/hooks) documentation for the host formats.
+
+Next: [Claude Code Plugin](/docs/guides/claude-code-plugin).

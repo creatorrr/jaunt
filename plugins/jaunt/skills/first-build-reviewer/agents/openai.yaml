@@ -1,0 +1,6 @@
+interface:
+  display_name: First-Build Reviewer
+  short_description: Review generated code for contract-silence divergence.
+  default_prompt: Review this first Jaunt build against its spec without editing files.
+policy:
+  allow_implicit_invocation: false

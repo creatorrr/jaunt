@@ -14,6 +14,11 @@ src/jaunt/__generated__/**/__pycache__/
 src/jaunt/__generated__/**/*.py[cod]
 
 .agents/
+!.agents/
+.agents/*
+!.agents/plugins/
+.agents/plugins/*
+!.agents/plugins/marketplace.json
 
 .venv/
 .ruff_cache/
@@ -26,6 +31,8 @@ dist/
 build/
 # the plugin's /jaunt:build skill lives in a dir named build/ — keep it tracked
 !jaunt-claude-plugin/skills/build/
+!plugins/jaunt/skills/build/
+!plugins/jaunt/skills/build/**
 *.egg-info/
 
 .omc/

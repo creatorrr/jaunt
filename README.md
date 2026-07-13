@@ -215,16 +215,27 @@ current project (resolved paths, engine/model, and which modules are stale). It
 ships with the package, so the briefing always matches the installed version. Run
 it before you start working.
 
-### Claude Code plugin
+### Codex and Claude Code plugins
 
-The first-party Claude Code plugin packages the guard hook, session freshness map, and build/convert/doctor skills:
+The first-party plugins package generated-file guards, session freshness, and
+workspace-aware build/convert/doctor workflows:
 
 ```bash
+jaunt install-codex-plugin
+jaunt install-claude-plugin
+```
+
+The underlying marketplace commands are:
+
+```bash
+codex plugin marketplace add creatorrr/jaunt
+codex plugin add jaunt@jaunt-codex-plugins
 claude plugin marketplace add creatorrr/jaunt
 claude plugin install jaunt@jaunt-plugins
 ```
 
-Docs: https://jaunt.ing/docs/guides/claude-code-plugin.
+Docs: https://jaunt.ing/docs/guides/codex-plugin and
+https://jaunt.ing/docs/guides/claude-code-plugin.
 
 ## Background Daemon
 

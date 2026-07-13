@@ -1,70 +1,52 @@
 # Jaunt Claude Code Plugin
 
-Claude Code plugin for [Jaunt](https://github.com/creatorrr/jaunt): generated-code
-guardrails, session freshness, project health checks, conversion workflow, and
-cost-aware build discipline for 1.5-era Jaunt projects.
+This plugin packages Jaunt's workspace-aware authoring loop for Claude Code:
+generated-file guards, session freshness, build and conversion skills, a
+read-only doctor, and a first-build reviewer.
 
-Organizing principle: **make the paid paths deliberate and the free paths
-frictionless** — builds bill real money; status/check/re-stamp are free.
+Version 1.1.0 targets Jaunt 1.6.2 workspace routing. One root `jaunt.toml` may
+cover several packages through literal or globbed roots, while each module uses
+its nearest `pyproject.toml` for ownership.
 
-Docs: https://jaunt.ing/docs/guides/claude-code-plugin
+## Install
 
-## What's included
+```bash
+jaunt install-claude-plugin
+```
 
-| Component | What it does | Scar it heals |
-|---|---|---|
-| `hooks/hooks.json` PreToolUse | Wires `scripts/guard.sh` on Edit/MultiEdit/Write/NotebookEdit — an owning-project wrapper around `jaunt guard` for `__generated__/**` + generated `.pyi` | Every adopter hand-rolls this guard |
-| `hooks/hooks.json` SessionStart | `scripts/session-status.sh`: freshness map per jaunt project (stale + why, orphans) injected at session start | Drift discovered only when someone thinks to look |
-| `skills/working-with-jaunt/` | Auto-invoked knowledge: digest taxonomy + cost table, stub forms, self-contained contracts, multi-project byte-identical-config rule | Each adopter re-derives all of this |
-| `skills/build/` | `/jaunt:build`: resolve owning project → classify staleness before spending → build → advisories/check/tests/first-build line-review | Wrong-cwd misroutes; advisories scrolling away; unreviewed first builds |
-| `skills/doctor/` | `/jaunt:doctor`: env + config-drift + orphans + duplicate-hook health check; free and deterministic (no model calls, no builds) | Drift/orphans/auth problems discovered only at build time |
-| `skills/convert/` | `/jaunt:convert`: conversion protocol — churn triage, characterization tests first, contract distillation, stub, build, gate, first-build review | Ad-hoc conversions billing before a safety net exists |
-| `agents/first-build-reviewer.md` | Adversarial first-build review for contract-silence divergence | Behavior the docstring doesn't pin, caught by no deterministic gate |
-| `scripts/guard.sh` | Resolves the OWNING jaunt project from the payload path, then runs `jaunt guard` from there | Wrong-project guard config (`generated_dir`) in multi-project repos |
-| `scripts/resolve-project.sh` | File → owning jaunt project dir | Multi-project routing (pre-1.6) |
+From a local clone:
 
-Fail-open on purpose: both hooks swallow env errors (`|| true`, `exit 0`)
-so a broken uv env never blocks editing or session start.
+```bash
+jaunt install-claude-plugin --local --root .
+```
 
-Unlike the 0.4.x plugin, there is no MCP server: the CLI's `--json` flags
-already give agents structured access, and a server lifecycle adds surface
-without capability.
-
-## Installation
-
-From the GitHub marketplace:
+The direct GitHub flow is:
 
 ```bash
 claude plugin marketplace add creatorrr/jaunt
 claude plugin install jaunt@jaunt-plugins
 ```
 
-From a clone, at the repo root:
+Start a new Claude Code session after installation so it loads the refreshed
+skills and hooks.
 
-```bash
-claude plugin marketplace add .
-claude plugin install jaunt@jaunt-plugins
-```
+## Included workflows
 
-For one session: `claude --plugin-dir ./jaunt-claude-plugin`
+- `/jaunt:working-with-jaunt`: current spec, workspace, and freshness rules.
+- `/jaunt:build`: previews likely model calls, builds, reports actual cost,
+  and runs the gates.
+- `/jaunt:doctor`: checks workspace health, authentication, orphans, and
+  duplicate Claude/Codex hooks without building.
+- `/jaunt:convert`: explicit-only handwritten-to-Jaunt conversion.
+- `first-build-reviewer`: read-only review for contract-silence divergence.
 
-Repos with a hand-rolled `jaunt guard` hook in `.claude/settings.json` can
-delete it once the plugin loads — it becomes a duplicate.
+The SessionStart hook injects a bounded freshness summary. The PreToolUse hook
+keeps Claude's approval-style guard for generated implementations and existing
+provenance-headed `.pyi` files. Both hooks fail open on malformed input,
+missing configuration, unavailable tools, or timeouts.
 
-## Roadmap
+There is no MCP server. Jaunt's JSON CLI is the machine interface.
 
-Doctor, convert, and the first-build reviewer shipped in 1.0.0; they were the
-old roadmap items 1–3.
-
-1. Monitor on the propose-only daemon — "proposal ready" notifications →
-   event-driven `jobs land` instead of polling.
-2. Cost ledger in `${CLAUDE_PLUGIN_DATA}` feeding real spend estimates into
-   the build skill.
-
-Meta-wish for jaunt itself: a machine-readable build report
-(`.jaunt/last-build.json`: advisories, cost, stale reasons, routing) would
-shrink most of this plugin to thin glue.
-
-History: revived the plugin dropped in the pre-1.0 cleanup (#55), redesigned
-around 1.5-era semantics; grew out of the mem-mcp adoption campaign (FEEDBACK
-findings 27–29).
+The command hooks require Bash. SessionStart runs `jaunt status`, which imports
+discovered spec modules; enable it only for workspaces whose Python code you
+trust.

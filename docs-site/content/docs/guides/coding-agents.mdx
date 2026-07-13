@@ -4,10 +4,10 @@ description: "Point Claude Code, Codex, Cursor, or CI at Jaunt with one command.
 ---
 
 You want an agent — Claude Code, Codex, Cursor, or a CI bot — to drive Jaunt
-without a plugin or a server to install. If you are on Claude Code, there is
-also a first-party plugin that packages all of this — the guard hook, the
-session freshness map, and the build/convert/doctor skills: see
-[the Claude Code plugin](/docs/guides/claude-code-plugin). Everything the agent
+without a plugin or a server to install. Codex and Claude Code also have
+first-party plugins that package the guard hook, freshness summary, and
+build/convert/doctor skills: see the [Codex plugin](/docs/guides/codex-plugin)
+and [Claude Code plugin](/docs/guides/claude-code-plugin). Everything the agent
 needs is on the CLI: a primer to load into context, structured output on every
 command it drives, and exit codes it can branch on.
 
@@ -82,9 +82,10 @@ Generated code is overwritten on every build, so an agent must fix specs, not
 output. `jaunt guard` is a PreToolUse hook: it reads the tool-call payload on
 stdin and, when the target sits under `__generated__/`, returns a decision that
 points the agent back at the owning spec. The
-[`jaunt` Claude Code plugin](/docs/guides/claude-code-plugin) ships this hook
-prewired, with owning-project resolution so `generated_dir` comes from the right
-config in a multi-project repo. Or wire it in yourself via `.claude/settings.json`:
+[Codex plugin](/docs/guides/codex-plugin) and
+[Claude Code plugin](/docs/guides/claude-code-plugin) ship this hook prewired,
+including protection for provenance-headed generated `.pyi` files. Or wire the
+Claude form yourself via `.claude/settings.json`:
 
 ```json
 {
@@ -111,4 +112,4 @@ the model reads as untrusted; …). The full document lives in the repo at
 `docs/principles/2026-06-29-building-with-coding-agents.md`, and the build
 prompt preamble embeds the laws so the generator operates under the same rules.
 
-Next: [Claude Code Plugin](/docs/guides/claude-code-plugin).
+Next: [Codex Plugin](/docs/guides/codex-plugin).

@@ -1,8 +1,8 @@
-The `jaunt` Claude Code plugin (`jaunt-claude-plugin/`, docs at /docs/guides/claude-code-plugin) packages this hook prewired; the snippet below is the hand-rolled equivalent for other harnesses.
+Jaunt's [Codex plugin](/docs/guides/codex-plugin) and [Claude Code plugin](/docs/guides/claude-code-plugin) package generated-file guards and generated-`.pyi` protection. Review bundled hooks in the host before trusting them. The snippet below is the hand-written Claude equivalent.
 
 # Warn-on-access hook
 
-Add to `.claude/settings.json` in a jaunt project:
+Add to `.claude/settings.json` in a Jaunt workspace:
 
 ```json
 {
@@ -17,6 +17,12 @@ Add to `.claude/settings.json` in a jaunt project:
 }
 ```
 
-Agents get a confirmation prompt with a pointer to the owning spec when they touch
-`__generated__/**`. For harnesses without hook support (Codex), the barrier is advisory:
-`jaunt instructions` states the rule.
+`jaunt guard` returns an approval request with the owning spec when a file
+lives under the configured generated directory. The Codex plugin needs an
+adapter because Codex supplies a whole `apply_patch` command and does not
+support `permissionDecision: "ask"`; its adapter checks every patch path and
+returns `deny`.
+
+Plugin hooks fail open when their payload, configuration, executable, or
+timeout prevents a reliable decision. They are guardrails, not a complete
+security boundary.

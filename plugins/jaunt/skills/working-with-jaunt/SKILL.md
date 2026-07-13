@@ -15,7 +15,9 @@ the contract; `jaunt build` writes the implementation under `__generated__/`.
 2. Never change an existing test merely to accommodate generated code. Tighten
    the contract when generated behavior misses an established expectation.
 3. Resolve the workspace before running Jaunt:
-   `bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" <path>`.
+   locate this installed `SKILL.md`, walk up two directories to the plugin
+   root, and run its `scripts/resolve-workspace.sh` by absolute path. Do not
+   assume `PLUGIN_ROOT` is set in ordinary skill-driven shell calls.
 4. Treat a fresh spec as canonical. Read generated code for build review or
    debugging, not as the authoring surface.
 
