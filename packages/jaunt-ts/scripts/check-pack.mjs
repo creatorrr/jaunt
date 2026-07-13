@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { isAbsolute, win32 } from "node:path";
+import { npmCliInvocation } from "./npm-cli.mjs";
 
 const packageJson = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8"),
@@ -12,12 +13,17 @@ assert.equal(
   packageJson.version,
   "built worker version must match package.json",
 );
+const npm = npmCliInvocation();
 const packed = JSON.parse(
-  execFileSync("npm", ["pack", "--json", "--dry-run", "--ignore-scripts"], {
-    cwd: new URL("..", import.meta.url),
-    encoding: "utf8",
-    env: { ...process.env, npm_config_loglevel: "silent" },
-  }),
+  execFileSync(
+    npm.command,
+    [...npm.args, "pack", "--json", "--dry-run", "--ignore-scripts"],
+    {
+      cwd: new URL("..", import.meta.url),
+      encoding: "utf8",
+      env: { ...process.env, npm_config_loglevel: "silent" },
+    },
+  ),
 )[0];
 
 assert(

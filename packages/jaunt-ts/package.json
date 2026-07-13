@@ -64,7 +64,8 @@
     "benchmark:test": "node --test scripts/benchmark-lib.node-test.mjs",
     "benchmark:watch": "npm run build && npm run benchmark:test && node ./scripts/benchmark-watch.mjs --assert",
     "benchmark:watch:ci": "npm run build && npm run benchmark:test && node ./scripts/benchmark-watch.mjs --assert-leaks",
-    "pack:check": "npm run build && node ./scripts/check-pack.mjs && node ./scripts/check-installed-pack.mjs"
+    "pack:test": "node --test scripts/npm-cli.node-test.mjs",
+    "pack:check": "npm run build && npm run pack:test && node ./scripts/check-pack.mjs && node ./scripts/check-installed-pack.mjs"
   },
   "repository": {
     "type": "git",

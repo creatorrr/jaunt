@@ -13,8 +13,9 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
+import { npmCliInvocation } from "./npm-cli.mjs";
 
-const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+const npm = npmCliInvocation();
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const compilerRoot = resolve(
   packageRoot,
@@ -77,8 +78,15 @@ try {
   } else {
     const packed = JSON.parse(
       run(
-        npm,
-        ["pack", "--json", "--ignore-scripts", "--pack-destination", sandbox],
+        npm.command,
+        [
+          ...npm.args,
+          "pack",
+          "--json",
+          "--ignore-scripts",
+          "--pack-destination",
+          sandbox,
+        ],
         packageRoot,
       ),
     )[0];
@@ -168,7 +176,11 @@ jaunt.magicModule();
 export function slugify(value: string): string { return jaunt.magic(); }
 `,
   );
-  run(npm, ["install", "--ignore-scripts", "--legacy-peer-deps"], project);
+  run(
+    npm.command,
+    [...npm.args, "install", "--ignore-scripts", "--legacy-peer-deps"],
+    project,
+  );
 
   const installedPackage = JSON.parse(
     await readFile(
