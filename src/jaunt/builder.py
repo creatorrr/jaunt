@@ -1939,13 +1939,14 @@ async def run_build(
     def _emit_stubs(
         generated_modules: set[str],
         skipped_modules: set[str],
-    ) -> tuple[dict[str, str], list[str]]:
+    ) -> tuple[dict[str, str], list[str], dict[str, list[str]]]:
         if not emit_stubs:
-            return {}, []
+            return {}, [], {}
         from jaunt import stub_emitter
 
         emitted_stubs: dict[str, str] = {}
         stub_warnings: list[str] = []
+        stub_failures: dict[str, list[str]] = {}
         stub_targets = (generated_modules | skipped_modules) & set(module_specs.keys())
         # For a targeted build (`jaunt build --target X`), `skipped` spans the whole
         # project; restrict stub emission to the requested closure so we never rewrite
@@ -1974,10 +1975,9 @@ async def run_build(
                         f"{module_name}: existing hand-authored {stub_path.name} not overwritten"
                     )
                     continue
-                # Freshness is keyed on the inputs digest, never rendered bytes:
-                # a digest-fresh stub is left untouched even if this environment
-                # would render it differently (e.g. ruff present vs absent), so
-                # builds never churn committed stubs across environments.
+                # Stub freshness covers both semantic inputs and the exact rendered
+                # bytes recorded in the provenance header. Owner-format or manual
+                # byte drift therefore takes the deterministic re-emission path.
                 if (
                     stub_emitter.stub_staleness(
                         source_file=source_file, generated_source=gen_source
@@ -2002,8 +2002,8 @@ async def run_build(
                         module_name, generated_dir=generated_dir
                     ),
                 )
-                new_stub = stub_emitter.format_stub_best_effort(new_stub)
-                if not (stub_path.exists() and stub_path.read_text(encoding="utf-8") == new_stub):
+                new_stub = stub_emitter.format_stub_best_effort(new_stub, filename=stub_path)
+                if not (stub_path.exists() and stub_path.read_bytes() == new_stub.encode("utf-8")):
                     stub_path.parent.mkdir(parents=True, exist_ok=True)
                     fd, tmp = tempfile.mkstemp(
                         dir=str(stub_path.parent),
@@ -2012,7 +2012,7 @@ async def run_build(
                         text=True,
                     )
                     try:
-                        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+                        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
                             f.write(new_stub)
                             f.flush()
                             os.fsync(f.fileno())
@@ -2024,11 +2024,14 @@ async def run_build(
                             pass
                 emitted_stubs[module_name] = str(stub_path)
             except Exception as e:
-                stub_warnings.append(f"{module_name}: failed to emit stub: {e!r}")
-        return emitted_stubs, stub_warnings
+                stub_failures[module_name] = [f"failed to emit stub: {e}"]
+        return emitted_stubs, stub_warnings, stub_failures
 
     if not stale:
-        emitted_stubs, stub_warnings = _emit_stubs(set(), skipped)
+        emitted_stubs, stub_warnings, stub_failures = _emit_stubs(set(), skipped)
+        for module_name, errors in stub_failures.items():
+            skipped_failures.setdefault(module_name, []).extend(errors)
+        skipped -= set(stub_failures)
         return BuildReport(
             generated=set(),
             skipped=skipped,
@@ -2749,7 +2752,11 @@ async def run_build(
         except Exception:
             pass
 
-    emitted_stubs, stub_warnings = _emit_stubs(generated, skipped)
+    emitted_stubs, stub_warnings, stub_failures = _emit_stubs(generated, skipped)
+    for module_name, errors in stub_failures.items():
+        failed.setdefault(module_name, []).extend(errors)
+    generated -= set(stub_failures)
+    skipped -= set(stub_failures)
     return BuildReport(
         generated=generated,
         skipped=skipped,

@@ -135,6 +135,7 @@ def test_matching_stub_keeps_module_fresh(tmp_path: Path, monkeypatch) -> None:
     from jaunt.header import format_stub_header
     from jaunt.stub_emitter import (
         build_stub_source,
+        format_stub_best_effort,
         generated_content_digest,
         stub_inputs_digest,
         stub_path_for_source,
@@ -152,7 +153,8 @@ def test_matching_stub_keeps_module_fresh(tmp_path: Path, monkeypatch) -> None:
             inputs_digest=stub_inputs_digest(spec_file.read_text(encoding="utf-8"), gen_source),
         )
         stub = build_stub_source(spec_file.read_text(encoding="utf-8"), gen_source, set(), header)
-        stub_path_for_source(spec_file).write_text(stub, encoding="utf-8")
+        stub_path = stub_path_for_source(spec_file)
+        stub_path.write_text(format_stub_best_effort(stub, filename=stub_path), encoding="utf-8")
 
         st = _status(tmp_path)
         assert "stubpkg_fresh.specs" in st.fresh
@@ -168,6 +170,7 @@ def test_stale_stub_marks_module_stale(tmp_path: Path, monkeypatch) -> None:
     from jaunt.header import format_stub_header
     from jaunt.stub_emitter import (
         build_stub_source,
+        format_stub_best_effort,
         generated_content_digest,
         stub_inputs_digest,
         stub_path_for_source,
@@ -189,7 +192,8 @@ def test_stale_stub_marks_module_stale(tmp_path: Path, monkeypatch) -> None:
             inputs_digest=stub_inputs_digest(spec_file.read_text(encoding="utf-8"), drifted),
         )
         stub = build_stub_source(spec_file.read_text(encoding="utf-8"), gen_source, set(), header)
-        stub_path_for_source(spec_file).write_text(stub, encoding="utf-8")
+        stub_path = stub_path_for_source(spec_file)
+        stub_path.write_text(format_stub_best_effort(stub, filename=stub_path), encoding="utf-8")
 
         st = _status(tmp_path)
         assert "stubpkg_stale.specs" in st.stale
@@ -205,6 +209,7 @@ def _emit_matching_stub(spec_file: Path, gen_file: Path, source_module: str) -> 
     from jaunt.header import format_stub_header
     from jaunt.stub_emitter import (
         build_stub_source,
+        format_stub_best_effort,
         generated_content_digest,
         stub_inputs_digest,
         stub_path_for_source,
@@ -218,8 +223,12 @@ def _emit_matching_stub(spec_file: Path, gen_file: Path, source_module: str) -> 
         generated_digest=generated_content_digest(gen_source),
         inputs_digest=stub_inputs_digest(spec_source, gen_source),
     )
-    stub_path_for_source(spec_file).write_text(
-        build_stub_source(spec_source, gen_source, set(), header), encoding="utf-8"
+    stub_path = stub_path_for_source(spec_file)
+    stub_path.write_text(
+        format_stub_best_effort(
+            build_stub_source(spec_source, gen_source, set(), header), filename=stub_path
+        ),
+        encoding="utf-8",
     )
 
 

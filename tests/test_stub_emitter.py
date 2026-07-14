@@ -5,12 +5,17 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 
+import pytest
+
 from jaunt.header import format_stub_header, parse_stub_header
 from jaunt.stub_emitter import (
     build_stub_source,
+    format_stub_best_effort,
     generated_content_digest,
     is_jaunt_stub,
     normalize_python_source,
+    rendered_stub_digest,
+    stamp_stub_rendered_digest,
     stub_inputs_digest,
     stub_path_for_source,
     stub_staleness,
@@ -186,12 +191,77 @@ def test_stub_staleness_missing_and_stale_and_fresh(tmp_path: Path) -> None:
         inputs_digest=stub_inputs_digest("import jaunt\n", generated),
     )
     stub_path = stub_path_for_source(source_file)
-    stub_path.write_text(build_stub_source("import jaunt\n", generated, set(), header), "utf-8")
+    stub_path.write_text(
+        format_stub_best_effort(
+            build_stub_source("import jaunt\n", generated, set(), header), filename=stub_path
+        ),
+        "utf-8",
+    )
     assert stub_staleness(source_file=source_file, generated_source=generated) is None
 
     # Generated content changes -> recorded inputs digest no longer matches -> stale.
     changed = "def greet() -> str:\n    return 'hello'\n"
     assert stub_staleness(source_file=source_file, generated_source=changed) == "stale"
+
+
+def test_stub_staleness_rejects_rendered_byte_drift(tmp_path: Path) -> None:
+    source_file = tmp_path / "timing.py"
+    source_file.write_text("import jaunt\n", encoding="utf-8")
+    generated = "def greet() -> str:\n    return 'hi'\n"
+    header = format_stub_header(
+        tool_version="0",
+        source_module="timing",
+        generated_digest=generated_content_digest(generated),
+        inputs_digest=stub_inputs_digest("import jaunt\n", generated),
+    )
+    stub_path = stub_path_for_source(source_file)
+    stub = format_stub_best_effort(
+        build_stub_source("import jaunt\n", generated, set(), header), filename=stub_path
+    )
+    stub_path.write_text(stub, encoding="utf-8")
+    assert stub_staleness(source_file=source_file, generated_source=generated) is None
+
+    stub_path.write_text(stub + "\n", encoding="utf-8")
+    assert stub_staleness(source_file=source_file, generated_source=generated) == "stale"
+
+
+def test_stub_staleness_rejects_crlf_and_body_digest_comment_drift(tmp_path: Path) -> None:
+    source_file = tmp_path / "timing.py"
+    source_file.write_text("import jaunt\n", encoding="utf-8")
+    generated = "def greet() -> str:\n    return 'hi'\n"
+    header = format_stub_header(
+        tool_version="0",
+        source_module="timing",
+        generated_digest=generated_content_digest(generated),
+        inputs_digest=stub_inputs_digest("import jaunt\n", generated),
+    )
+    stub_path = stub_path_for_source(source_file)
+    stub = format_stub_best_effort(
+        build_stub_source("import jaunt\n", generated, set(), header), filename=stub_path
+    )
+
+    stub_path.write_bytes(stub.replace("\n", "\r\n").encode("utf-8"))
+    assert stub_staleness(source_file=source_file, generated_source=generated) == "stale"
+
+    stub_path.write_text(stub + "# jaunt:rendered_digest=body-comment\n", encoding="utf-8")
+    assert stub_staleness(source_file=source_file, generated_source=generated) == "stale"
+
+
+def test_stub_without_rendered_digest_is_stale(tmp_path: Path) -> None:
+    source_file = tmp_path / "timing.py"
+    source_file.write_text("import jaunt\n", encoding="utf-8")
+    generated = "def greet() -> str:\n    return 'hi'\n"
+    header = format_stub_header(
+        tool_version="0",
+        source_module="timing",
+        generated_digest=generated_content_digest(generated),
+        inputs_digest=stub_inputs_digest("import jaunt\n", generated),
+    )
+    stub_path_for_source(source_file).write_text(
+        build_stub_source("import jaunt\n", generated, set(), header), encoding="utf-8"
+    )
+
+    assert stub_staleness(source_file=source_file, generated_source=generated) == "stale"
 
 
 def test_emit_stubs_config_defaults_true(tmp_path: Path) -> None:
@@ -424,8 +494,12 @@ def test_stub_staleness_reacts_to_spec_source_change(tmp_path: Path) -> None:
         generated_digest=generated_content_digest(generated),
         inputs_digest=stub_inputs_digest(spec_v1, generated),
     )
-    stub_path_for_source(source_file).write_text(
-        build_stub_source(spec_v1, generated, {"greet"}, header), encoding="utf-8"
+    stub_path = stub_path_for_source(source_file)
+    stub_path.write_text(
+        format_stub_best_effort(
+            build_stub_source(spec_v1, generated, {"greet"}, header), filename=stub_path
+        ),
+        encoding="utf-8",
     )
     # Fresh: both spec and generated match what the stub recorded.
     assert stub_staleness(source_file=source_file, generated_source=generated) is None
@@ -631,18 +705,129 @@ def test_string_annotation_names_resolve_or_any_bind() -> None:
 
 
 def test_format_stub_best_effort_formats_when_ruff_available() -> None:
-    from jaunt.stub_emitter import format_stub_best_effort
-
-    ugly = "__all__ = ['a',   'b']\n\n\n\n\ndef a() -> int: ...\n"
+    ugly = "__all__ = ['a']\n\n\n\n\ndef a() -> int: ...\n"
     formatted = format_stub_best_effort(ugly)
-    # jaunt's own dev env has ruff; formatted output uses double quotes and
-    # stub-file blank-line rules. In a ruff-less env this degrades to identity.
-    import shutil
+    assert '"a"' in formatted
 
-    if shutil.which("ruff"):
-        assert '"a"' in formatted
-    else:
-        assert formatted == ugly
+
+def test_format_stub_best_effort_uses_owner_ruff_config_and_stamps_bytes(
+    tmp_path: Path,
+) -> None:
+    import shutil
+    import subprocess
+
+    ruff = shutil.which("ruff")
+    if ruff is None:
+        return
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.ruff]\nline-length = 88\ntarget-version = "py313"\n', encoding="utf-8"
+    )
+    stub_path = tmp_path / "src" / "pkg" / "values.pyi"
+    stub_path.parent.mkdir(parents=True)
+    raw = (
+        _header()
+        + "\n"
+        + "def _normalize_value(value: str | None, *, "
+        + 'prefix: str = "", suffix: str = "") -> str: ...\n'
+    )
+
+    formatted = format_stub_best_effort(raw, filename=stub_path)
+    stub_path.write_text(formatted, encoding="utf-8")
+
+    expected_signature = (
+        "def _normalize_value(\n"
+        '    value: str | None, *, prefix: str = "", suffix: str = ""\n'
+        ") -> str: ..."
+    )
+    assert expected_signature in formatted
+    parsed = parse_stub_header(formatted)
+    assert parsed is not None
+    assert parsed["rendered_digest"] == rendered_stub_digest(formatted)
+    assert stamp_stub_rendered_digest(formatted) == formatted
+    check = subprocess.run(
+        [ruff, "format", "--check", str(stub_path)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert check.returncode == 0, check.stdout + check.stderr
+
+
+def test_owner_configured_crlf_is_preserved_and_fresh(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.ruff]\nline-length = 100\n\n[tool.ruff.format]\nline-ending = "cr-lf"\n',
+        encoding="utf-8",
+    )
+    source_file = tmp_path / "src" / "pkg" / "values.py"
+    source_file.parent.mkdir(parents=True)
+    spec_source = "import jaunt\n"
+    source_file.write_text(spec_source, encoding="utf-8")
+    generated = "def value() -> int:\n    return 1\n"
+    header = format_stub_header(
+        tool_version="0",
+        source_module="pkg.values",
+        generated_digest=generated_content_digest(generated),
+        inputs_digest=stub_inputs_digest(spec_source, generated),
+    )
+    stub_path = stub_path_for_source(source_file)
+    formatted = format_stub_best_effort(
+        build_stub_source(spec_source, generated, set(), header), filename=stub_path
+    )
+
+    assert "\r\n" in formatted
+    assert "\n" not in formatted.replace("\r\n", "")
+    stub_path.write_bytes(formatted.encode("utf-8"))
+    assert stub_staleness(source_file=source_file, generated_source=generated) is None
+
+    stub_path.write_bytes(formatted.replace("\r\n", "\n").encode("utf-8"))
+    assert stub_staleness(source_file=source_file, generated_source=generated) == "stale"
+
+
+def test_stub_staleness_reacts_to_owner_ruff_config_change(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.ruff]\nline-length = 100\ntarget-version = "py312"\n', encoding="utf-8"
+    )
+    source_file = tmp_path / "src" / "pkg" / "values.py"
+    source_file.parent.mkdir(parents=True)
+    spec_source = (
+        "import jaunt\n\n"
+        "@jaunt.magic()\n"
+        "def normalize_value(value: str | None, *, "
+        'prefix: str = "", suffix: str = "") -> str: ...\n'
+    )
+    source_file.write_text(spec_source, encoding="utf-8")
+    generated = (
+        "def normalize_value(value: str | None, *, "
+        'prefix: str = "", suffix: str = "") -> str:\n'
+        "    return value or prefix or suffix\n"
+    )
+    header = format_stub_header(
+        tool_version="0",
+        source_module="pkg.values",
+        generated_digest=generated_content_digest(generated),
+        inputs_digest=stub_inputs_digest(spec_source, generated),
+    )
+    stub_path = stub_path_for_source(source_file)
+    stub_path.write_text(
+        format_stub_best_effort(
+            build_stub_source(spec_source, generated, {"normalize_value"}, header),
+            filename=stub_path,
+        ),
+        encoding="utf-8",
+    )
+    assert stub_staleness(source_file=source_file, generated_source=generated) is None
+
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.ruff]\nline-length = 70\ntarget-version = "py312"\n', encoding="utf-8"
+    )
+    assert stub_staleness(source_file=source_file, generated_source=generated) == "stale"
+
+
+def test_format_stub_best_effort_does_not_stamp_when_ruff_is_missing(monkeypatch) -> None:
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+
+    with pytest.raises(RuntimeError, match="ruff executable was not found"):
+        format_stub_best_effort(_header() + "\ndef value() -> int: ...\n")
 
 
 def test_normalize_python_source_formats_and_applies_unsafe_ruff_fixes() -> None:

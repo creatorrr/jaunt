@@ -3,6 +3,16 @@
 All notable changes to jaunt. Generated from conventional commits by
 [git-cliff](https://git-cliff.org); one section per published PyPI release.
 
+## [1.7.2] - 2026-07-14
+
+### Fixes
+
+- Format emitted provenance stubs with the owning project's Ruff configuration,
+  then record their rendered bytes so `jaunt status` and `jaunt check` detect
+  formatter or manual drift without a model call.
+- Expand the human-readable generation plan with each module's split-component
+  fan-out, maximum attempts, monolithic fallback, and fallback conditions.
+
 ## [1.7.1] - 2026-07-14
 
 ### Fixes

@@ -15,7 +15,9 @@ from jaunt.header import parse_stub_header
 _JAUNT_DECORATORS = {"magic", "sig", "test", "contract", "preserve"}
 
 # Bump when the stub rendering logic changes so already-emitted stubs re-emit.
-_STUB_FORMAT_VERSION = "4"
+_STUB_FORMAT_VERSION = "5"
+
+_RENDERED_DIGEST_PREFIX = "# jaunt:rendered_digest="
 
 _BUILTIN_NAMES = frozenset(dir(builtins))
 
@@ -169,16 +171,97 @@ def normalize_python_source(
     return current, []
 
 
-def format_stub_best_effort(stub_source: str) -> str:
-    """Normalize an emitted stub with Ruff when Ruff is available.
+def rendered_stub_digest(stub_source: str) -> str:
+    """Hash the exact stub bytes, excluding the self-referential digest line."""
 
-    Projects that gate on ``ruff format --check`` have ruff by definition, so
-    normalization removes the need for per-file lint exemptions on emitted
-    stubs. Environments without Ruff retain the unformatted text; freshness is
-    keyed on the inputs digest, never the rendered bytes.
+    lines = stub_source.splitlines(keepends=True)
+    digest_index = _rendered_digest_header_index(lines)
+    payload = "".join(line for index, line in enumerate(lines) if index != digest_index)
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _rendered_digest_header_index(lines: list[str]) -> int | None:
+    """Locate the self-referential digest field in the leading Jaunt header."""
+
+    for index, line in enumerate(lines[1:], start=1):
+        if not line.startswith("# jaunt:"):
+            break
+        if line.startswith(_RENDERED_DIGEST_PREFIX):
+            return index
+    return None
+
+
+def stamp_stub_rendered_digest(stub_source: str) -> str:
+    """Insert or replace the rendered-byte digest in a Jaunt stub header."""
+
+    if parse_stub_header(stub_source) is None:
+        return stub_source
+    lines = stub_source.splitlines(keepends=True)
+    digest_index = _rendered_digest_header_index(lines)
+    if digest_index is not None:
+        del lines[digest_index]
+    newline = "\r\n" if lines and lines[0].endswith("\r\n") else "\n"
+    digest_line = f"{_RENDERED_DIGEST_PREFIX}{rendered_stub_digest(stub_source)}{newline}"
+    insert_at = 1
+    for index, line in enumerate(lines[1:], start=1):
+        if not line.startswith("# jaunt:"):
+            break
+        insert_at = index + 1
+    lines.insert(insert_at, digest_line)
+    return "".join(lines)
+
+
+def _format_stub_with_owner_config(stub_source: str, *, filename: Path) -> tuple[str, str | None]:
+    """Apply the Ruff formatter configuration that owns ``filename``."""
+
+    import shutil
+    import subprocess
+
+    ruff = shutil.which("ruff")
+    if ruff is None:
+        return stub_source, "the bundled ruff executable was not found"
+    resolved = filename.resolve()
+    try:
+        formatted = subprocess.run(
+            [ruff, "format", "--stdin-filename", str(resolved), "-"],
+            input=stub_source.encode("utf-8"),
+            capture_output=True,
+            timeout=30,
+            cwd=resolved.parent,
+        )
+    except OSError as exc:
+        return stub_source, f"Ruff owner-format failed to run: {exc}"
+    except subprocess.TimeoutExpired:
+        return stub_source, "Ruff owner-format timed out"
+    if formatted.returncode != 0:
+        detail = (formatted.stderr or formatted.stdout).decode("utf-8", errors="replace").strip()
+        return stub_source, f"Ruff owner-format failed{': ' + detail if detail else ''}"
+    try:
+        return formatted.stdout.decode("utf-8"), None
+    except UnicodeDecodeError as exc:
+        return stub_source, f"Ruff owner-format returned invalid UTF-8: {exc}"
+
+
+def format_stub_best_effort(stub_source: str, *, filename: str | Path | None = None) -> str:
+    """Normalize and integrity-stamp an emitted stub.
+
+    Jaunt's isolated Ruff pass keeps generated imports and syntax lint-clean. A
+    final format pass uses the real stub path so the owning project's Ruff line
+    length, target Python, and formatting options produce bytes that its normal
+    ``ruff format`` gate will leave unchanged. Ruff is a bundled dependency, so
+    normalization or owner-format failures raise instead of stamping fallback bytes
+    as canonical. Provenance stubs always record their exact rendered bytes.
     """
-    normalized, _errors = normalize_python_source(stub_source, filename="stub.pyi")
-    return normalized
+
+    display_filename = str(filename) if filename is not None else "stub.pyi"
+    normalized, errors = normalize_python_source(stub_source, filename=display_filename)
+    if errors:
+        raise RuntimeError("; ".join(errors))
+    if filename is not None:
+        normalized, error = _format_stub_with_owner_config(normalized, filename=Path(filename))
+        if error is not None:
+            raise RuntimeError(error)
+    return stamp_stub_rendered_digest(normalized)
 
 
 @jaunt.contract
@@ -304,8 +387,10 @@ def stub_staleness(*, source_file: str | Path, generated_source: str) -> str | N
     if not stub_path.exists():
         return "missing"
     try:
-        text = stub_path.read_text(encoding="utf-8")
-    except OSError:
+        # Decode raw bytes so CRLF-only edits remain visible to the rendered-byte
+        # integrity check instead of being hidden by universal-newline reads.
+        text = stub_path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
         return "missing"
     parsed = parse_stub_header(text)
     if parsed is None:
@@ -323,6 +408,15 @@ def stub_staleness(*, source_file: str | Path, generated_source: str) -> str | N
         return "stale"
     current_inputs = _normalize_digest(stub_inputs_digest(spec_source, generated_source))
     if recorded_inputs != current_inputs:
+        return "stale"
+    recorded_rendered = _normalize_digest(parsed.get("rendered_digest"))
+    if recorded_rendered is None:
+        return "stale"
+    current_rendered = _normalize_digest(rendered_stub_digest(text))
+    if recorded_rendered != current_rendered:
+        return "stale"
+    owner_formatted, owner_error = _format_stub_with_owner_config(text, filename=stub_path)
+    if owner_error is not None or owner_formatted != text:
         return "stale"
     return None
 
