@@ -28,8 +28,148 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate_python:
+    name: Verify Python release gates
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --frozen --all-extras
+      - run: |
+          uv run pytest
+          uv run ruff check .
+          uv run ruff format --check .
+          uv run ty check
+          uv run jaunt check
+
+  validate_typescript:
+    name: Verify TypeScript release gates
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Pin trusted-publishing npm CLI
+        run: |
+          npm install --global npm@11.18.0
+          test "$(npm --version)" = "11.18.0"
+      - run: npm ci
+        working-directory: packages/jaunt-ts
+      - run: npm run lint && npm run format:check && npm run typecheck && npm test && npm run pack:check
+        working-directory: packages/jaunt-ts
+
+  validate_typescript_benchmark:
+    name: Verify TypeScript shared-runner leak gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Pin trusted-publishing npm CLI
+        run: |
+          npm install --global npm@11.18.0
+          test "$(npm --version)" = "11.18.0"
+      - run: npm ci
+        working-directory: packages/jaunt-ts
+      - run: |
+          mkdir -p "${GITHUB_WORKSPACE}/release/benchmarks"
+          npm run benchmark:watch:ci -- \
+            --output "${GITHUB_WORKSPACE}/release/benchmarks/jaunt-ts-watch.json"
+        working-directory: packages/jaunt-ts
+      - uses: actions/upload-artifact@v7
+        with:
+          name: jaunt-release-benchmark
+          path: release/benchmarks
+          if-no-files-found: error
+          retention-days: 30
+
+  validate_typescript_examples:
+    name: Verify TypeScript architecture and generated examples
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Pin trusted-publishing npm CLI
+        run: |
+          npm install --global npm@11.18.0
+          test "$(npm --version)" = "11.18.0"
+      - run: uv sync --frozen --all-extras
+      - run: npm ci
+        working-directory: packages/jaunt-ts
+      - run: npm run build
+        working-directory: packages/jaunt-ts
+      - run: |
+          npm ci --prefix examples/typescript-jwt
+          JAUNT_TS_WORKER=packages/jaunt-ts/dist/worker/main.js \
+            uv run jaunt check --language ts --root examples/typescript-jwt
+          npm --prefix examples/typescript-jwt run typecheck
+          npm --prefix examples/typescript-jwt test
+          npm --prefix examples/typescript-jwt run emit
+          npm --prefix examples/typescript-jwt run demo
+          npm --prefix examples/typescript-jwt run smoke:consumer
+          npm ci --prefix examples/typescript_slugify
+          JAUNT_TS_WORKER=packages/jaunt-ts/dist/worker/main.js \
+            uv run jaunt check --language ts --root examples/typescript_slugify
+          npm --prefix examples/typescript_slugify run typecheck
+          npm --prefix examples/typescript_slugify test
+          npm --prefix examples/typescript_slugify run demo
+          npm ci --prefix examples/typescript_project_references
+          JAUNT_TS_WORKER=packages/jaunt-ts/dist/worker/main.js \
+            uv run jaunt check --language ts --root examples/typescript_project_references
+          npm --prefix examples/typescript_project_references run typecheck
+          npm --prefix examples/typescript_project_references test
+          npm --prefix examples/typescript_project_references run demo
+          npm install --global pnpm@11.5.0
+          pnpm --dir examples/typescript_project_references install --frozen-lockfile
+          uv run jaunt check --language ts --root examples/typescript_project_references
+          pnpm --dir examples/typescript_project_references run typecheck
+          pnpm --dir examples/typescript_project_references test
+          pnpm --dir examples/typescript_project_references run demo
+
+  validate_docs:
+    name: Verify documentation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Pin trusted-publishing npm CLI
+        run: |
+          npm install --global npm@11.18.0
+          test "$(npm --version)" = "11.18.0"
+      - run: npm ci
+        working-directory: docs-site
+      - run: npm run types:check && npm run build
+        working-directory: docs-site
+
   candidates:
     name: Build and verify exact release candidates
+    needs:
+      - validate_python
+      - validate_typescript
+      - validate_typescript_benchmark
+      - validate_typescript_examples
+      - validate_docs
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -67,55 +207,13 @@ jobs:
       - run: uv sync --frozen --all-extras
       - run: npm ci
         working-directory: packages/jaunt-ts
-      - name: Verify Python release gates
-        run: |
-          uv run pytest
-          uv run ruff check .
-          uv run ruff format --check .
-          uv run ty check
-          uv run jaunt check
-      - name: Verify TypeScript release gates
-        run: npm run lint && npm run format:check && npm run typecheck && npm test && npm run pack:check
+      - run: npm run build
         working-directory: packages/jaunt-ts
-      - name: Verify TypeScript shared-runner leak gate
-        run: |
-          mkdir -p "${GITHUB_WORKSPACE}/release/benchmarks"
-          npm run benchmark:watch:ci -- \
-            --output "${GITHUB_WORKSPACE}/release/benchmarks/jaunt-ts-watch.json"
-        working-directory: packages/jaunt-ts
-      - name: Verify TypeScript architecture and generated examples
-        run: |
-          npm ci --prefix examples/typescript-jwt
-          JAUNT_TS_WORKER=packages/jaunt-ts/dist/worker/main.js \
-            uv run jaunt check --language ts --root examples/typescript-jwt
-          npm --prefix examples/typescript-jwt run typecheck
-          npm --prefix examples/typescript-jwt test
-          npm --prefix examples/typescript-jwt run emit
-          npm --prefix examples/typescript-jwt run demo
-          npm --prefix examples/typescript-jwt run smoke:consumer
-          npm ci --prefix examples/typescript_slugify
-          JAUNT_TS_WORKER=packages/jaunt-ts/dist/worker/main.js \
-            uv run jaunt check --language ts --root examples/typescript_slugify
-          npm --prefix examples/typescript_slugify run typecheck
-          npm --prefix examples/typescript_slugify test
-          npm --prefix examples/typescript_slugify run demo
-          npm ci --prefix examples/typescript_project_references
-          JAUNT_TS_WORKER=packages/jaunt-ts/dist/worker/main.js \
-            uv run jaunt check --language ts --root examples/typescript_project_references
-          npm --prefix examples/typescript_project_references run typecheck
-          npm --prefix examples/typescript_project_references test
-          npm --prefix examples/typescript_project_references run demo
-          npm install --global pnpm@11.5.0
-          pnpm --dir examples/typescript_project_references install --frozen-lockfile
-          uv run jaunt check --language ts --root examples/typescript_project_references
-          pnpm --dir examples/typescript_project_references run typecheck
-          pnpm --dir examples/typescript_project_references test
-          pnpm --dir examples/typescript_project_references run demo
-      - name: Verify documentation
-        run: |
-          npm ci --prefix docs-site
-          npm --prefix docs-site run types:check
-          npm --prefix docs-site run build
+      - run: npm ci --prefix examples/typescript-jwt
+      - uses: actions/download-artifact@v8
+        with:
+          name: jaunt-release-benchmark
+          path: release/benchmarks
 
       - name: Read candidate versions
         id: versions

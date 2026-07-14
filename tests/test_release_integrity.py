@@ -224,8 +224,18 @@ def test_workflows_gate_release_integrity_and_typescript_fixture_freshness() -> 
     assert "always()" not in release
     assert release.count("!cancelled()") == 2
     assert release.count("id-token: write") == 2
-    assert release.count("node-version: 24") == 3
-    assert release.count("npm install --global npm@11.18.0") == 3
+    assert release.count("node-version: 24") == 7
+    assert release.count("npm install --global npm@11.18.0") == 7
+    for validation_job in (
+        "validate_python",
+        "validate_typescript",
+        "validate_typescript_benchmark",
+        "validate_typescript_examples",
+        "validate_docs",
+    ):
+        assert f"  {validation_job}:" in release
+        assert f"      - {validation_job}" in release
+    assert "name: jaunt-release-benchmark" in release
     assert 'npm publish "$tarball" --access public --tag "$candidate_tag"' in release
     assert 'npm view "@usejaunt/ts@${candidate_tag}" version' in release
     assert 'test "$(npm view "@usejaunt/ts@${candidate_tag}" version)" = "$version"' in release
