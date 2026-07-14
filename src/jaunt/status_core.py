@@ -324,11 +324,12 @@ def _label_change_kind(
         extract_spec_digests,
     )
 
+    entries = module_specs.get(module_name, [])
     existing = builder._read_generated(package_dir, generated_dir, module_name)
-    if existing and builder._requires_removal_restamp_rebuild(existing):
+    expected_names, _ = builder._build_expected_names(entries)
+    if existing and builder._requires_removal_restamp_rebuild(existing, expected_names):
         return "structural"
     on_disk = extract_spec_digests(existing) if existing else None
-    entries = module_specs.get(module_name, [])
     if not on_disk:
         return "structural"
     if set(on_disk) != {str(entry.spec_ref) for entry in entries}:

@@ -71,6 +71,7 @@ class _RecordingBackend(GeneratorBackend):
         extra_validator=None,
         initial_error_context=None,
         progress=None,
+        usage_callback=None,
     ):
         from jaunt.generate.base import GenerationResult
         from jaunt.validation import validate_generated_source

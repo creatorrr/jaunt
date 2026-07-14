@@ -34,7 +34,7 @@ def _frontmatter(text: str) -> dict[str, str]:
 def test_plugin_manifest_shape():
     manifest = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())
     assert manifest["name"] == "jaunt"
-    assert manifest["version"] == "1.2.0"
+    assert manifest["version"] == "1.2.1"
     assert "TypeScript" in manifest["description"]
 
 
@@ -124,7 +124,7 @@ def _fake_jaunt_bin(tmp_path):
     # assert the guard both found jaunt AND piped the payload through.
     jaunt.write_text(
         "#!/usr/bin/env bash\n"
-        'if [ "$1" = "--version" ]; then echo "jaunt 1.7.0"; exit 0; fi\n'
+        'if [ "$1" = "--version" ]; then echo "jaunt 1.7.1"; exit 0; fi\n'
         "cat >/dev/null\necho GUARD_RAN\n"
     )
     jaunt.chmod(0o755)
@@ -186,7 +186,7 @@ def test_guard_rewrites_payload_cwd_to_owning_project(tmp_path):
     bin_dir.mkdir()
     echo_jaunt = bin_dir / "jaunt"
     echo_jaunt.write_text(
-        '#!/usr/bin/env bash\nif [ "$1" = "--version" ]; then echo "jaunt 1.7.0"; exit 0; fi\ncat\n'
+        '#!/usr/bin/env bash\nif [ "$1" = "--version" ]; then echo "jaunt 1.7.1"; exit 0; fi\ncat\n'
     )  # echo payload back
     echo_jaunt.chmod(0o755)
     env = {
@@ -222,7 +222,7 @@ def test_guard_falls_back_to_uv_when_path_jaunt_is_stale(tmp_path):
     uv.write_text(
         "#!/usr/bin/env bash\n"
         'if [ "$*" = "run --no-sync jaunt --version" ]; then '
-        'echo "jaunt 1.7.0"; exit 0; fi\n'
+        'echo "jaunt 1.7.1"; exit 0; fi\n'
         "cat >/dev/null\necho UV_FALLBACK_RAN\n"
     )
     uv.chmod(0o755)
@@ -310,7 +310,7 @@ def test_guard_uv_probe_uses_owner_and_plugin_cache(tmp_path):
         """#!/usr/bin/env bash
 if [ "$PWD" != "$EXPECTED_OWNER" ]; then exit 81; fi
 if [ "$UV_CACHE_DIR" != "$EXPECTED_CACHE" ]; then exit 82; fi
-if [ "$*" = "run --no-sync jaunt --version" ]; then echo "jaunt 1.7.0"; exit 0; fi
+if [ "$*" = "run --no-sync jaunt --version" ]; then echo "jaunt 1.7.1"; exit 0; fi
 python3 -c '
 import json, sys
 p = json.load(sys.stdin)

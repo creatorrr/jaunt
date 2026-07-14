@@ -42,7 +42,7 @@ try:
         version = tomllib.load(handle).get("version")
 except Exception:
     version = 2
-print("1.7.0" if version == 2 else "1.6.2")
+print("1.7.1" if version == 2 else "1.6.2")
 ' "$1/jaunt.toml" 2>/dev/null
 }
 version_is_compatible() {

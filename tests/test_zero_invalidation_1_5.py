@@ -84,8 +84,9 @@ def test_advisories_instruction_absent_from_fingerprinted_templates() -> None:
         assert "ADVISORIES" not in template.read_text(encoding="utf-8"), template
 
 
-def test_stub_format_version_not_bumped_by_1_5() -> None:
-    # Spec "Upgrade & compatibility" #2: no emitter format changes in 1.5.
+def test_stub_format_version_tracks_async_contextmanager_emission() -> None:
+    # Cycle-2 adoption feedback changed emitted imports, so existing stubs must
+    # re-emit once through the deterministic stub-only freshness path.
     from jaunt import stub_emitter
 
-    assert stub_emitter._STUB_FORMAT_VERSION == "2"
+    assert stub_emitter._STUB_FORMAT_VERSION == "4"

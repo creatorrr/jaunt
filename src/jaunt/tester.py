@@ -100,6 +100,11 @@ def run_pytest(
     pythonpath: Sequence[Path] | None = None,
     cwd: Path | None = None,
 ) -> int:
+    # Retain the public helper's historical no-op contract. The orchestration
+    # path uses _run_pytest_capture directly so an empty targeted selection is
+    # surfaced as pytest's no-tests-collected exit code instead.
+    if not files:
+        return 0
     result = _run_pytest_capture(
         files,
         pytest_args=pytest_args,
@@ -111,6 +116,7 @@ def run_pytest(
 
 @dataclass(frozen=True, slots=True)
 class PytestExecution:
+    command: tuple[str, ...]
     exit_code: int
     stdout: str
     stderr: str
@@ -123,10 +129,15 @@ def _run_pytest_capture(
     pythonpath: Sequence[Path] | None = None,
     cwd: Path | None = None,
 ) -> PytestExecution:
-    if not files:
-        return PytestExecution(exit_code=0, stdout="", stderr="")
-
     args = [sys.executable, "-m", "pytest", *(pytest_args or []), *[str(p) for p in files]]
+    if not files:
+        return PytestExecution(
+            command=tuple(args),
+            exit_code=5,
+            stdout="",
+            stderr="No generated test files were selected; zero tests collected.\n",
+        )
+
     env = os.environ.copy()
     if pythonpath is not None:
         new_parts: list[str] = []
@@ -163,6 +174,7 @@ def _run_pytest_capture(
     if proc.stderr:
         sys.stderr.write(proc.stderr)
     return PytestExecution(
+        command=tuple(args),
         exit_code=int(proc.returncode),
         stdout=proc.stdout or "",
         stderr=proc.stderr or "",
@@ -678,7 +690,8 @@ async def plan_test_refreeze_or_rebuild(
             propagating_rebuilds.add(module_name)
             continue
 
-        if _requires_removal_restamp_rebuild(existing):
+        expected_names, _ = _build_expected_names(entries)
+        if _requires_removal_restamp_rebuild(existing, expected_names):
             rebuild.add(module_name)
             continue
 
@@ -851,7 +864,8 @@ def detect_stale_test_modules(
             stale.add(module_name)
             continue
 
-        if _requires_removal_restamp_rebuild(existing):
+        expected_names, _ = _build_expected_names(entries)
+        if _requires_removal_restamp_rebuild(existing, expected_names):
             stale.add(module_name)
             continue
 
@@ -1003,6 +1017,11 @@ class PytestResult:
     generated: set[str] = field(default_factory=set)
     skipped: set[str] = field(default_factory=set)
     advisories: dict[str, list[str]] = field(default_factory=dict)
+    pytest_ran: bool = False
+    pytest_command: tuple[str, ...] = ()
+    pytest_exit_code: int | None = None
+    pytest_stdout: str = ""
+    pytest_stderr: str = ""
 
 
 def _compact_failure_context(stdout: str, stderr: str, *, max_lines: int = 28) -> list[str]:
@@ -1253,12 +1272,15 @@ async def run_test_generation(
                 extra_validator=_retry_validator,
                 initial_error_context=(initial_error_context_by_module or {}).get(module_name),
                 progress=lambda stage, detail: _phase(module_name, stage, detail),
+                usage_callback=(
+                    (lambda usage: cost_tracker.record(module_name, usage))
+                    if cost_tracker is not None
+                    else None
+                ),
             )
             # Failed/no-source generations are still billable. Charge usage
             # before validation branches so the shared mixed-target ledger is
             # complete on both success and failure paths.
-            if cost_tracker is not None and result.usage is not None:
-                cost_tracker.record(module_name, result.usage)
             if result.source is None:
                 return False, result.errors or ["No source returned."], None
 
@@ -1486,11 +1508,22 @@ async def run_tests(
             builtin_skill_names=builtin_skill_names,
             skills_digest=skills_digest,
         )
-        generated_files = report.generated_files
         generated = report.generated
         skipped = report.skipped
         gen_failed = report.failed
         test_advisories = report.advisories
+        test_paths = _collect_generated_test_paths_by_module(
+            project_dir=project_dir,
+            tests_package=tests_package,
+            generated_dir=generated_dir,
+            module_specs=module_specs,
+            test_roots=test_roots,
+        )
+        generated_files = [
+            path
+            for module_name, path in sorted(test_paths.items())
+            if module_name not in gen_failed and path.is_file()
+        ]
     elif module_specs is not None:
         generated_files = _collect_existing_generated_test_files(
             project_dir=project_dir,
@@ -1511,6 +1544,7 @@ async def run_tests(
             generated=generated,
             skipped=skipped,
             advisories=test_advisories,
+            pytest_ran=False,
         )
 
     with tempfile.NamedTemporaryFile(prefix="jaunt-heldout-", suffix=".json", delete=False) as f:
@@ -1676,6 +1710,11 @@ async def run_tests(
             generated=generated,
             skipped=skipped,
             advisories=test_advisories,
+            pytest_ran=bool(generated_files),
+            pytest_command=pytest_result.command,
+            pytest_exit_code=pytest_exit_code,
+            pytest_stdout=pytest_result.stdout,
+            pytest_stderr=pytest_result.stderr,
         )
     finally:
         if previous_heldout_report is None:

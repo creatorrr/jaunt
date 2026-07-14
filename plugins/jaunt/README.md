@@ -5,7 +5,7 @@ expects: edit specs, preview stale or unbuilt work, build through the CLI, and
 review generated output without hand-editing machine-owned files.
 
 It is CLI-backed. There is no MCP server, app connector, or public-directory
-submission in version 1.1.0.
+submission in version 1.1.1.
 
 ## Install
 
@@ -43,7 +43,7 @@ trust the bundled SessionStart and PreToolUse hooks.
 - `$jaunt:build`: preview likely model work, build, report actual cost, and
   run the deterministic gates.
 - `$jaunt:doctor`: read-only environment, authentication, freshness, orphan,
-  and duplicate-hook checks.
+  and Codex-hook checks. Nested Claude and Codex managed worktrees are skipped.
 - `$jaunt:convert`: explicit-only conversion of handwritten Python or
   TypeScript to Jaunt.
 - `$jaunt:first-build-reviewer`: explicit or delegated read-only review for

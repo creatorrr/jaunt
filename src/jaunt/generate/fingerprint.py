@@ -137,14 +137,14 @@ def generation_fingerprint_from_config(
             list(build_instructions) if build_instructions is not None else cfg.build.instructions
         )
         effective_instructions = [item.strip() for item in instruction_source if item.strip()]
-        effective_include_target_tests = (
-            bool(cfg.build.include_target_tests)
-            if include_target_tests is None
-            else bool(include_target_tests)
-        )
+        # Attached test intent is part of each module's context digest. Keep the
+        # historical default-off value here so enabling the feature invalidates
+        # only modules whose attached-test block actually changes, while artifacts
+        # built with the old default fingerprint remain byte-for-byte fresh.
+        del include_target_tests
         build_runtime_parts.extend(
             [
-                f"include_target_tests={effective_include_target_tests}",
+                "include_target_tests=False",
                 "build_instructions=" + json.dumps(effective_instructions, ensure_ascii=True),
             ]
         )

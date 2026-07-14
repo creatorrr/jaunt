@@ -11,7 +11,9 @@ import ast
 import fnmatch
 import importlib
 import importlib.metadata
+import importlib.machinery
 import sys
+import types
 import warnings
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -230,6 +232,41 @@ def prepare_import_environment(*, module_names: list[str], roots: list[Path]) ->
 
     clear_registries(preserve_modules=self_preserved_modules(module_names))
     evict_modules_for_import(module_names=module_names, roots=roots)
+
+
+def seed_namespace_package(*, module_prefix: str, package_root: Path) -> None:
+    """Bind a package-less test root to its intended dotted import prefix.
+
+    A plain ``tests/`` directory is otherwise only a namespace-package candidate;
+    an unrelated installed regular package named ``tests`` wins import resolution.
+    Seed only missing ``__init__.py`` levels and retain multiple namespace paths.
+    """
+
+    parts = tuple(part for part in module_prefix.split(".") if part)
+    package_root = package_root.resolve()
+    for index in range(1, len(parts) + 1):
+        name = ".".join(parts[:index])
+        package_path = (
+            package_root if index == len(parts) else package_root.parents[len(parts) - index - 1]
+        )
+        if (package_path / "__init__.py").is_file():
+            continue
+        existing = sys.modules.get(name)
+        existing_path = getattr(existing, "__path__", None)
+        if existing is not None and existing_path is not None:
+            paths = list(existing_path)
+            value = str(package_path)
+            if value not in paths:
+                existing_path.append(value)
+            continue
+        module = types.ModuleType(name)
+        module.__package__ = name
+        module.__path__ = [str(package_path)]
+        module.__spec__ = importlib.machinery.ModuleSpec(name, loader=None, is_package=True)
+        sys.modules[name] = module
+        parent_name, _, child_name = name.rpartition(".")
+        if parent_name and parent_name in sys.modules:
+            setattr(sys.modules[parent_name], child_name, module)
 
 
 def _module_name_for_file(

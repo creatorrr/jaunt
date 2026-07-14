@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from jaunt.config import load_config
+from jaunt.repo_context import api as api_mod
 from jaunt.repo_context import tree as tree_mod
 from jaunt.repo_context.digests import TreeCache
 
@@ -69,3 +71,35 @@ def test_sync_drops_ghosts_and_write_skips_when_unchanged(tmp_path: Path) -> Non
     )
     assert "src/pkg/a.py" in result.removed
     assert "src/pkg/a.py" not in doc3.paths()
+
+
+def test_build_map_is_read_only_and_explicit_sync_preserves_committed_name(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "tool-created-worktree-name"
+    _project(root)
+    (root / "jaunt.toml").write_text(
+        'version = 1\n[paths]\nsource_roots = ["src"]\n[context]\nrepo_map = true\n',
+        encoding="utf-8",
+    )
+    committed = tree_mod.TreeDoc(
+        project_name="canonical-project",
+        project_version="1",
+        last_updated="2026-07-01",
+        tree={"src": {"_doc": "source", "pkg": {"_doc": "package"}}},
+    )
+    path = root / "treedocs.yaml"
+    committed.write(path)
+    before = path.read_bytes()
+    (root / "src" / "pkg" / "new.py").write_text('"""New."""\n', encoding="utf-8")
+    cfg = load_config(root=root)
+
+    block = api_mod.repo_map_block_for_build(root=root, cfg=cfg, today="2026-07-13")
+
+    assert "new.py" not in block
+    assert path.read_bytes() == before
+
+    api_mod.sync_tree(root=root, cfg=cfg, today="2026-07-13")
+    refreshed = tree_mod.TreeDoc.load(path)
+    assert refreshed.project_name == "canonical-project"
+    assert "src/pkg/new.py" in refreshed.paths()

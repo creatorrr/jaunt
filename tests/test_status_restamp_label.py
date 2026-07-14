@@ -34,6 +34,7 @@ def _build_scheme2_module(
     tool_version: str = "0",
     generation_fingerprint_override: str | None = None,
     module_context_digest_override: str | None = None,
+    generated_source: str | None = None,
 ) -> None:
     """Write a generated module carrying scheme-2 spec_digests over the CURRENT specs.
 
@@ -78,7 +79,7 @@ def _build_scheme2_module(
         package_dir=tmp_path / "src",
         generated_dir="__generated__",
         module_name=module_name,
-        source="def greet(name: str) -> str:\n    return f'Hello, {name}!'\n",
+        source=generated_source or "def greet(name: str) -> str:\n    return f'Hello, {name}!'\n",
         header_fields={
             "tool_version": tool_version,
             "kind": "build",
@@ -163,6 +164,10 @@ def test_vulnerable_restamp_version_labels_structural(tmp_path: Path, monkeypatc
         pkg=pkg,
         module_digest_override=None,
         tool_version="1.6.2",
+        generated_source=(
+            "def Removed():\n    return 1\n\n"
+            "def greet(name: str) -> str:\n    return f'Hello, {name}!'\n"
+        ),
     )
 
     rc = _run(["status", "--json", "--magic-only", "--root", str(tmp_path)])

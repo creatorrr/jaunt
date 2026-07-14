@@ -27,6 +27,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("build", "Generate implementations for `@jaunt.magic` specs."),
     ("test", "Generate tests for `@jaunt.test` specs and run pytest."),
     ("status", "Show which modules are stale vs fresh (and why)."),
+    ("doctor", "Run read-only environment and workspace health checks."),
     ("sync", "Render TypeScript API mirrors and unbuilt placeholders without a model call."),
     ("design", "Propose or apply a reviewed TypeScript public declaration."),
     ("specs", "List `@jaunt.magic` specs and their dependency graph."),

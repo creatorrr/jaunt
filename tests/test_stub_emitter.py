@@ -10,6 +10,7 @@ from jaunt.stub_emitter import (
     build_stub_source,
     generated_content_digest,
     is_jaunt_stub,
+    normalize_python_source,
     stub_inputs_digest,
     stub_path_for_source,
     stub_staleness,
@@ -543,7 +544,38 @@ def test_jaunt_imports_never_emitted_in_stub() -> None:
     stub = build_stub_source(spec_source, generated_source, {"load"}, _header())
     assert "import jaunt" not in stub
     assert "from jaunt" not in stub
-    assert "import os" in stub
+    assert "import os" not in stub
+
+
+def test_source_only_imports_are_not_emitted_in_stub() -> None:
+    """Imports used only by source bodies must not leak into declaration-only stubs."""
+    spec_source = textwrap.dedent(
+        '''
+        import json
+        import logging
+        from typing import Optional, Sequence
+
+        def load(value: Sequence[str]) -> Optional[str]:
+            """Load one value."""
+            logging.info("loading")
+            json.dumps(value)
+            return value[0] if value else None
+        '''
+    )
+    generated_source = textwrap.dedent(
+        """
+        from typing import Optional, Sequence
+
+        def load(value: Sequence[str]) -> Optional[str]:
+            return value[0] if value else None
+        """
+    )
+
+    stub = build_stub_source(spec_source, generated_source, set(), _header())
+
+    assert "import json" not in stub
+    assert "import logging" not in stub
+    assert "from typing import Optional, Sequence" in stub
 
 
 def test_string_annotation_names_resolve_or_any_bind() -> None:
@@ -611,6 +643,25 @@ def test_format_stub_best_effort_formats_when_ruff_available() -> None:
         assert '"a"' in formatted
     else:
         assert formatted == ugly
+
+
+def test_normalize_python_source_formats_and_applies_unsafe_ruff_fixes() -> None:
+    source = textwrap.dedent(
+        """
+        from typing import Any
+        from typing import Any, Optional
+
+        def identity( value: Optional[Any] )->Optional[Any]:
+          return value
+        """
+    )
+
+    normalized, errors = normalize_python_source(source, filename="generated.py")
+
+    assert errors == []
+    assert normalized.count("Any") == 3
+    assert normalized.count("from typing import") == 1
+    assert "def identity(value: Any | None) -> Any | None:" in normalized
 
 
 def test_jaunt_public_names_in_annotations_still_resolve() -> None:
@@ -691,3 +742,84 @@ def test_any_fallback_assignments_emitted_after_imports() -> None:
     import ast as _ast
 
     _ast.parse(stub)
+
+
+def test_async_contextmanager_stub_passes_available_type_checkers(tmp_path: Path) -> None:
+    import shutil
+    import subprocess
+
+    import pytest
+
+    spec_source = textwrap.dedent(
+        '''
+        import contextlib
+        from collections.abc import AsyncGenerator, AsyncIterator
+
+        import jaunt
+
+
+        @contextlib.asynccontextmanager
+        @jaunt.magic()
+        async def get_connection() -> AsyncGenerator[str, None]:
+            """Yield one connection."""
+            ...
+
+
+        @contextlib.asynccontextmanager
+        @jaunt.magic()
+        async def trace_span() -> AsyncIterator[int]:
+            """Yield one span identifier."""
+            ...
+        '''
+    )
+    generated_source = textwrap.dedent(
+        """
+        import contextlib
+        from collections.abc import AsyncGenerator, AsyncIterator
+
+
+        @contextlib.asynccontextmanager
+        async def get_connection() -> AsyncGenerator[str, None]:
+            yield "connection"
+
+
+        @contextlib.asynccontextmanager
+        async def trace_span() -> AsyncIterator[int]:
+            yield 1
+        """
+    )
+    stub = build_stub_source(
+        spec_source,
+        generated_source,
+        {"get_connection", "trace_span"},
+        _header(),
+    )
+    stub, errors = normalize_python_source(stub, filename="contexts.pyi")
+    assert errors == []
+    assert "async def get_connection" not in stub
+    assert "async def trace_span" not in stub
+    assert stub.count("@contextlib.asynccontextmanager\ndef ") == 2
+
+    stub_path = tmp_path / "contexts.pyi"
+    stub_path.write_text(stub, encoding="utf-8")
+    commands = (
+        ("ty", ["ty", "check", str(stub_path)]),
+        ("mypy", ["mypy", str(stub_path)]),
+        ("pyright", ["pyright", str(stub_path)]),
+    )
+    checked = 0
+    for executable, argv in commands:
+        resolved = shutil.which(executable)
+        if resolved is None:
+            continue
+        checked += 1
+        proc = subprocess.run(
+            [resolved, *argv[1:]],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode == 0, f"{executable}:\n{proc.stdout}\n{proc.stderr}"
+    if checked == 0:
+        pytest.skip("ty, mypy, and pyright are unavailable")

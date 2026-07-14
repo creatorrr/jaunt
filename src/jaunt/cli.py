@@ -19,7 +19,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
 from jaunt import __version__
 from jaunt.diagnostics import (
@@ -72,6 +72,15 @@ EXIT_PYTEST_FAILURE = 4
 EXIT_TIMEOUT = 5
 
 _JOBS_WAIT_POLL_SECONDS = 1.0
+
+
+class _ModuleCost(TypedDict):
+    api_calls: int
+    prompt_tokens: int
+    cached_prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    estimated_cost_usd: float
 
 
 def _add_common_flags(p: argparse.ArgumentParser) -> None:
@@ -353,6 +362,12 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="magic_only",
         help="Probe only @jaunt.magic freshness; skip contract checks and repo-map drift.",
     )
+
+    doctor_p = subparsers.add_parser(
+        "doctor",
+        help="Run a read-only environment and workspace health check.",
+    )
+    _add_common_flags(doctor_p)
 
     sync_p = subparsers.add_parser(
         "sync",
@@ -1251,13 +1266,9 @@ def _capture_python_json(
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
         exit_code = command(child)
-    for line in reversed(output.getvalue().splitlines()):
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            return exit_code, cast("dict[str, object]", value)
+    value = _last_json_object(output.getvalue())
+    if value is not None:
+        return exit_code, value
     return exit_code, {"ok": exit_code == 0}
 
 
@@ -1378,19 +1389,9 @@ def _prepare_mixed_repo_map(
         )
     try:
         from jaunt.repo_context import api as rc_api
-        from jaunt.repo_context import block as rc_block
 
-        repo_map_doc, _ = rc_api.sync_tree(
-            root=root,
-            cfg=cfg,
-            today=_today(),
-            # The legacy enrich backend is not command-runtime aware.  One
-            # shared AST map keeps both targets deterministic and model-free.
-            enrich=False,
-        )
-        args._mixed_repo_map_block = rc_block.render_repo_map(
-            repo_map_doc,
-            max_chars=cfg.context.max_chars,
+        args._mixed_repo_map_block = rc_api.repo_map_block_for_build(
+            root=root, cfg=cfg, today=_today()
         )
     except Exception:  # noqa: BLE001 - repo map remains best-effort
         args._mixed_repo_map_block = ""
@@ -1760,9 +1761,15 @@ def _mixed_build_payload(
         "failed": py_failed,
     }
     py_cost = python_payload.get("cost")
+    py_cost_by_module = python_payload.get("cost_by_module")
+    py_work_items = python_payload.get("work_items")
     ts_cost = typescript_payload.get("cost")
     if isinstance(py_cost, dict):
         py_target["cost"] = py_cost
+    if isinstance(py_cost_by_module, dict):
+        py_target["cost_by_module"] = py_cost_by_module
+    if isinstance(py_work_items, dict):
+        py_target["work_items"] = py_work_items
     if command == "test" and "pytest" in python_payload:
         py_target["pytest"] = python_payload["pytest"]
     if command == "test" and "generation_failed" in python_payload:
@@ -1785,6 +1792,14 @@ def _mixed_build_payload(
         "failed": failed,
         "targets": {"py": py_target, "ts": ts_target},
     }
+    if isinstance(py_cost_by_module, dict):
+        payload["cost_by_module"] = {
+            f"py:{module}": value for module, value in sorted(py_cost_by_module.items())
+        }
+    if isinstance(py_work_items, dict):
+        payload["work_items"] = {
+            f"py:{module}": value for module, value in sorted(py_work_items.items())
+        }
     if command == "test":
         if "pytest" in python_payload:
             payload["pytest"] = python_payload["pytest"]
@@ -2687,7 +2702,42 @@ def _command_cost_tracker(
         return runtime.cost_tracker(language)
     from jaunt.cost import CostTracker
 
-    return CostTracker(max_cost=cfg.llm.max_cost_per_build)
+    tracker = CostTracker(max_cost=cfg.llm.max_cost_per_build)
+    trackers = getattr(args, f"_cost_trackers_{language}", None)
+    if isinstance(trackers, list):
+        trackers.append(tracker)
+    return tracker
+
+
+def _recorded_cost_summary(args: argparse.Namespace, language: Literal["py", "ts"]):
+    trackers = getattr(args, f"_cost_trackers_{language}", [])
+    if not isinstance(trackers, list):
+        return {}
+    return _aggregate_cost_payloads(
+        *[tracker.summary_dict() for tracker in trackers if hasattr(tracker, "summary_dict")]
+    )
+
+
+def _emit_interrupted_cost(args: argparse.Namespace, *, command: str) -> None:
+    cost = _recorded_cost_summary(args, "py")
+    if _is_json_mode(args):
+        _emit_json(
+            {
+                "command": command,
+                "ok": False,
+                "interrupted": True,
+                "exit_code": 130,
+                "cost": cost,
+                "cost_note": "usage from completed provider attempts before interruption",
+            }
+        )
+    elif cost:
+        _eprint(
+            "Interrupted; recorded "
+            f"{cost.get('api_calls', 0)} completed provider call(s), "
+            f"{cost.get('total_tokens', 0)} tokens, "
+            f"${float(cost.get('estimated_cost_usd', 0.0)):.4f}."
+        )
 
 
 def _command_cost_summary(
@@ -2699,6 +2749,43 @@ def _command_cost_summary(
     if runtime is not None:
         return cast("dict[str, object]", runtime.summary(language))
     return tracker.summary_dict()
+
+
+def _cost_by_module(tracker: CostTracker) -> dict[str, _ModuleCost]:
+    """Break the command ledger down by its recorded module/work-item owner."""
+    from jaunt.cost import _estimate_cost
+    from jaunt.generate.base import TokenUsage
+
+    records = cast(
+        "list[tuple[str, TokenUsage]]",
+        getattr(tracker, "_records", []),
+    )
+    out: dict[str, _ModuleCost] = {}
+    for module, usage in records:
+        row = out.setdefault(
+            module,
+            {
+                "api_calls": 0,
+                "prompt_tokens": 0,
+                "cached_prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "estimated_cost_usd": 0.0,
+            },
+        )
+        row["api_calls"] += 1
+        row["prompt_tokens"] += usage.prompt_tokens
+        row["cached_prompt_tokens"] += usage.cached_prompt_tokens
+        row["completion_tokens"] += usage.completion_tokens
+        row["total_tokens"] += usage.prompt_tokens + usage.completion_tokens
+        row["estimated_cost_usd"] += _estimate_cost(
+            usage.model,
+            usage.prompt_tokens,
+            usage.completion_tokens,
+        )
+    for row in out.values():
+        row["estimated_cost_usd"] = round(row["estimated_cost_usd"], 6)
+    return {module: out[module] for module in sorted(out)}
 
 
 def _check_shared_command_budget(
@@ -2791,6 +2878,23 @@ def _print_error(e: BaseException) -> None:
 def _emit_json(data: dict[str, object]) -> None:
     """Write structured JSON to stdout."""
     print(json.dumps(data, indent=2, default=str))
+
+
+def _last_json_object(text: str) -> dict[str, object] | None:
+    """Parse the final complete JSON object after any preceding command output."""
+
+    decoder = json.JSONDecoder()
+    for index in range(len(text) - 1, -1, -1):
+        if text[index] != "{":
+            continue
+        try:
+            value, end = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if text[index + end :].strip() or not isinstance(value, dict):
+            continue
+        return cast("dict[str, object]", value)
+    return None
 
 
 def _job_state_label(job: JobRecord) -> str:
@@ -4136,6 +4240,11 @@ def _discover_governed_test_modules(
         if not test_modules:
             continue
         discovery.prepare_import_environment(module_names=sorted(test_modules), roots=test_dirs)
+        for route in owner_routes:
+            discovery.seed_namespace_package(
+                module_prefix=route.module_prefix,
+                package_root=route.root,
+            )
         for module in sorted(test_modules):
             try:
                 importlib.import_module(module)
@@ -5856,6 +5965,12 @@ def cmd_status(args: argparse.Namespace) -> int:
         stale = mstatus.stale
         fresh = mstatus.fresh
         stale_changes = mstatus.stale_changes
+        generation_plan = _python_generation_plan(
+            root=root,
+            cfg=cfg,
+            stale_changes=stale_changes,
+            infer_default=infer_default,
+        )
 
         if json_mode:
             payload = {
@@ -5866,6 +5981,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                 "fresh": sorted(fresh),
                 "digests": mstatus.digests,
                 "orphans": orphan_rels,
+                "generation_plan": generation_plan,
             }
             if not magic_only:
                 payload.update(
@@ -5914,6 +6030,26 @@ def cmd_status(args: argparse.Namespace) -> int:
             print(f"Fresh ({len(fresh_sorted)}):")
             for mod in fresh_sorted:
                 print(f"- {mod}")
+            candidates = generation_plan["candidate_modules"]
+            if isinstance(candidates, list) and candidates:
+                print(
+                    "Generation plan: up to "
+                    f"{generation_plan['max_generation_attempts']} implementation attempt(s) "
+                    f"across {len(candidates)} candidate module(s) "
+                    f"({generation_plan['max_attempts_per_unit']} per unit; "
+                    "split fallback included)."
+                )
+                seeded = generation_plan["skills_workspace_seeded"]
+                if isinstance(seeded, dict):
+                    seeded_map = cast("dict[str, object]", seeded)
+                    skill_count = seeded_map.get("count")
+                    skill_chars = seeded_map.get("chars")
+                    if isinstance(skill_count, int) and isinstance(skill_chars, int):
+                        print(
+                            "Skills seeded on disk: "
+                            f"{skill_count} skill(s), {_fmt_count(skill_chars)} chars "
+                            "(lazy-loaded, not prompt tokens)."
+                        )
             if orphan_rels:
                 print(f"Orphaned artifacts ({len(orphan_rels)}):")
                 for orphan in sorted(orphan_objs, key=lambda o: str(o.path)):
@@ -5940,6 +6076,108 @@ def cmd_status(args: argparse.Namespace) -> int:
         return EXIT_CONFIG_OR_DISCOVERY
 
 
+def _doctor_command_probe(argv: list[str]) -> dict[str, object]:
+    executable = shutil.which(argv[0])
+    if executable is None:
+        return {"available": False, "detail": "not found"}
+    try:
+        proc = subprocess.run(
+            [executable, *argv[1:]],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"available": False, "detail": str(exc)}
+    lines = [
+        line.strip()
+        for line in (proc.stdout or proc.stderr or "").splitlines()
+        if line.strip() and not line.startswith("WARNING:")
+    ]
+    return {
+        "available": proc.returncode == 0,
+        "detail": lines[0] if lines else f"exit {proc.returncode}",
+    }
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Run native, read-only health checks without building or calling a model."""
+    import contextlib
+    import io
+
+    child = argparse.Namespace(**vars(args))
+    child.command = "status"
+    child.json_output = True
+    child.magic_only = False
+    child.progress = "none"
+    status_stdout = io.StringIO()
+    status_stderr = io.StringIO()
+    previous_dont_write_bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        with contextlib.redirect_stdout(status_stdout), contextlib.redirect_stderr(status_stderr):
+            status_rc = cmd_status(child)
+    finally:
+        sys.dont_write_bytecode = previous_dont_write_bytecode
+    try:
+        status_payload = json.loads(status_stdout.getvalue())
+    except json.JSONDecodeError:
+        status_payload = {
+            "command": "status",
+            "ok": False,
+            "error": status_stderr.getvalue().strip() or "status produced invalid output",
+        }
+
+    codex = _doctor_command_probe(["codex", "--version"])
+    codex_auth = _doctor_command_probe(["codex", "login", "status"])
+    environment: dict[str, object] = {
+        "jaunt": {"available": True, "detail": f"jaunt {__version__}"},
+        "python": {"available": True, "detail": sys.version.split()[0]},
+        "ruff": _doctor_command_probe(["ruff", "--version"]),
+        "codex": codex,
+        "codex_auth": codex_auth,
+        "node": _doctor_command_probe(["node", "--version"]),
+        "npm": _doctor_command_probe(["npm", "--version"]),
+    }
+    findings: list[str] = []
+    if not bool(codex.get("available")):
+        findings.append("Codex CLI unavailable; builds require codex")
+    elif not bool(codex_auth.get("available")):
+        findings.append("Codex is not authenticated; run codex login")
+    stale = status_payload.get("stale", []) if isinstance(status_payload, dict) else []
+    if isinstance(stale, list) and stale:
+        findings.append(f"{len(stale)} stale Jaunt module(s)")
+    orphans = status_payload.get("orphans", []) if isinstance(status_payload, dict) else []
+    if isinstance(orphans, list) and orphans:
+        findings.append(f"{len(orphans)} orphaned Jaunt artifact(s)")
+
+    payload: dict[str, object] = {
+        "command": "doctor",
+        "ok": status_rc == EXIT_OK and bool(status_payload.get("ok")),
+        "read_only": True,
+        "model_calls": 0,
+        "environment": environment,
+        "status": status_payload,
+        "findings": findings,
+    }
+    if _is_json_mode(args):
+        _emit_json(payload)
+    else:
+        print("Jaunt doctor (read-only; no model calls)")
+        for name, probe in environment.items():
+            probe_row = cast("dict[str, object]", probe)
+            state = "ok" if probe_row.get("available") else "unavailable"
+            print(f"- {name}: {state} ({probe_row.get('detail', '')})")
+        if findings:
+            print("Findings:")
+            for finding in findings:
+                print(f"- {finding}")
+        else:
+            print("No health findings.")
+    return status_rc
+
+
 def _fmt_count(n: int) -> str:
     if n >= 1_000_000:
         return f"{n / 1_000_000:.1f}M"
@@ -5952,17 +6190,17 @@ def _context_stats_summary_line(module: str, blocks: dict[str, dict[str, int]]) 
     # The seeded-skills block is emitted under both `skills_workspace_seeded` and the
     # legacy `skills_workspace` alias (same value). Render only the seeded key — as
     # `skills(seeded)` — and never total or print the number twice.
-    if "skills_workspace_seeded" in blocks:
-        blocks = {
-            ("skills(seeded)" if k == "skills_workspace_seeded" else k): v
-            for k, v in blocks.items()
-            if k != "skills_workspace"
-        }
-    total_chars = sum(b["chars"] for b in blocks.values())
-    total_tokens = sum(b["est_tokens"] for b in blocks.values())
+    seeded = blocks.get("skills_workspace_seeded") or blocks.get("skills_workspace")
+    prompt_blocks = {
+        key: value
+        for key, value in blocks.items()
+        if key not in {"skills_workspace_seeded", "skills_workspace"}
+    }
+    total_chars = sum(b["chars"] for b in prompt_blocks.values())
+    total_tokens = sum(b["est_tokens"] for b in prompt_blocks.values())
     parts: list[str] = []
     if total_chars > 0:
-        ranked = sorted(blocks.items(), key=lambda kv: kv[1]["chars"], reverse=True)
+        ranked = sorted(prompt_blocks.items(), key=lambda kv: kv[1]["chars"], reverse=True)
         for name, b in ranked:
             if b["chars"] <= 0:
                 continue
@@ -5973,10 +6211,70 @@ def _context_stats_summary_line(module: str, blocks: dict[str, dict[str, int]]) 
             if len(parts) >= 4:
                 break
     breakdown = ", ".join(parts) if parts else "empty"
-    return (
+    line = (
         f"{module} context: {_fmt_count(total_chars)} chars "
         f"(~{_fmt_count(total_tokens)} tok) — {breakdown}"
     )
+    if seeded and seeded["chars"]:
+        line += (
+            f"; skills seeded on disk: {_fmt_count(seeded['chars'])} chars "
+            "(lazy-loaded, not prompt tokens)"
+        )
+    return line
+
+
+def _python_generation_plan(
+    *, root: Path, cfg: JauntConfig, stale_changes: dict[str, str], infer_default: bool
+) -> dict[str, object]:
+    """Describe the bounded implementation-call fan-out before a build runs."""
+    from jaunt import builder, registry
+    from jaunt.deps import build_spec_graph
+    from jaunt.skill_seed import skills_workspace_stats
+
+    candidates = sorted(
+        module for module, reason in stale_changes.items() if reason in {"structural", "prose"}
+    )
+    specs = dict(registry.get_magic_registry())
+    graph = build_spec_graph(specs, infer_default=infer_default)
+    modules = registry.get_specs_by_module("magic")
+    jobs = max(1, int(cfg.build.jobs))
+    per_unit = 2 + int(cfg.build.ty_retry_attempts) if builder._resolve_ty_cmd() else 2
+    module_plan: dict[str, dict[str, int]] = {}
+    max_attempts = 0
+    for module in candidates:
+        entries = modules.get(module, [])
+        component_count = len(
+            builder._component_entries(module_name=module, entries=entries, spec_graph=graph)
+        )
+        initial_units = component_count if jobs > 1 and component_count > 1 else 1
+        fallback_units = 1 if initial_units > 1 else 0
+        module_max = (initial_units + fallback_units) * per_unit
+        module_plan[module] = {
+            "initial_generation_units": initial_units,
+            "split_fallback_units": fallback_units,
+            "max_generation_attempts": module_max,
+        }
+        max_attempts += module_max
+
+    builtin_names = tuple(cfg.skills.builtin_skills) if cfg.skills.builtin else ()
+    skill_count, skill_chars = skills_workspace_stats(
+        project_root=root, builtin_names=builtin_names
+    )
+    return {
+        "candidate_modules": candidates,
+        "max_attempts_per_unit": per_unit,
+        "max_generation_attempts": max_attempts,
+        "modules": module_plan,
+        "skills_workspace_seeded": {
+            "count": skill_count,
+            "chars": skill_chars,
+            "note": "lazy-loadable files on disk, not prompt tokens sent",
+        },
+        "note": (
+            "upper bound for implementation generation; split-component failures may add "
+            "one monolithic fallback unit per module"
+        ),
+    }
 
 
 async def _cmd_build_async(args: argparse.Namespace) -> int:
@@ -6041,17 +6339,8 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                     "mixed-target command; run `jaunt tree --enrich` separately"
                 )
                 try:
-                    from jaunt.repo_context import block as rc_block
-
-                    repo_map_doc, _ = rc_api.sync_tree(
-                        root=root,
-                        cfg=cfg,
-                        today=_today(),
-                        enrich=False,
-                    )
-                    repo_map_block = rc_block.render_repo_map(
-                        repo_map_doc,
-                        max_chars=cfg.context.max_chars,
+                    repo_map_block = rc_api.repo_map_block_for_build(
+                        root=root, cfg=cfg, today=_today()
                     )
                 except Exception:  # noqa: BLE001 - repo map remains best-effort
                     repo_map_block = ""
@@ -6406,6 +6695,12 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
 
         if not json_mode and (cost_tracker.api_calls > 0 or cost_tracker.cache_hits > 0):
             _eprint(cost_tracker.format_summary())
+            for module, row in _cost_by_module(cost_tracker).items():
+                _eprint(
+                    f"  {module}: {row['api_calls']} call(s), "
+                    f"{row['total_tokens']:,} tokens, "
+                    f"${row['estimated_cost_usd']:.4f}"
+                )
 
         if not json_mode:
             for mod in sorted(report.generated):
@@ -6426,8 +6721,14 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                 "refrozen": sorted(refrozen_modules),
                 "failed": {k: v for k, v in sorted(report.failed.items())},
                 "cost": _command_cost_summary(args, "py", cost_tracker),
+                "cost_by_module": _cost_by_module(cost_tracker),
                 "cache": {"hits": response_cache.hits, "misses": response_cache.misses},
+                "work_items": report.work_items,
                 "context_stats": {k: v for k, v in sorted(report.context_stats.items())},
+                "context_stats_note": (
+                    "skills_workspace_seeded measures lazy-loadable files copied to disk; "
+                    "its est_tokens value is a size comparison, not prompt tokens sent"
+                ),
             }
             if report.needs_deps:
                 build_payload["needs_deps"] = {k: v for k, v in sorted(report.needs_deps.items())}
@@ -6470,7 +6771,12 @@ def cmd_build(args: argparse.Namespace) -> int:
             return _cmd_typescript_build_loaded(args, root, cfg)
         if mode == "mixed":
             return _cmd_mixed_build(args, root, cfg)
-    return asyncio.run(_cmd_build_async(args))
+    args._cost_trackers_py = []
+    try:
+        return asyncio.run(_cmd_build_async(args))
+    except KeyboardInterrupt:
+        _emit_interrupted_cost(args, command="build")
+        return 130
 
 
 async def _cmd_test_async(args: argparse.Namespace) -> int:
@@ -6532,6 +6838,7 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             build_module_contract,
             group_test_entries_by_target_module,
             synthesize_auto_class_test_entries,
+            target_modules_by_name,
             target_refs_by_test_name,
         )
 
@@ -6632,6 +6939,11 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             modules_set.update(mods)
         modules = sorted(modules_set)
         discovery.prepare_import_environment(module_names=modules, roots=existing_test_dirs)
+        for route in test_routes:
+            discovery.seed_namespace_package(
+                module_prefix=route.module_prefix,
+                package_root=route.root,
+            )
         discovery.import_and_collect(modules, kind="test")
 
         specs = dict(registry.get_test_registry())
@@ -6655,7 +6967,15 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
                 specs[entry.spec_ref] = entry
         if not specs:
             if json_mode:
-                _emit_json({"command": "test", "ok": True, "exit_code": 0, "refrozen": []})
+                _emit_json(
+                    {
+                        "command": "test",
+                        "ok": True,
+                        "exit_code": 0,
+                        "selected": not bool(args.target),
+                        "refrozen": [],
+                    }
+                )
             return EXIT_OK
         targeted_test_entries = group_test_entries_by_target_module(list(specs.values()))
         if include_target_tests:
@@ -6674,6 +6994,45 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             module_specs.setdefault(module_name, []).extend(entries)
             module_specs[module_name].sort(key=lambda e: (e.qualname, str(e.spec_ref)))
 
+        target_mods = _iter_target_modules(args.target)
+        selected_modules = set(module_specs)
+        if target_mods:
+            directly_selected = set(module_specs) & target_mods
+            production_selected = {
+                module_name
+                for module_name, entries in module_specs.items()
+                if any(
+                    target_module in target_mods
+                    for modules_by_name in target_modules_by_name(entries).values()
+                    for target_module in modules_by_name
+                )
+            }
+            selected_modules = _deps_closure(
+                directly_selected | production_selected,
+                module_dag=module_dag,
+            ) & set(module_specs)
+        selected_module_specs = {
+            module_name: module_specs[module_name] for module_name in sorted(selected_modules)
+        }
+        if target_mods and not selected_module_specs and owner_scope is not None:
+            if json_mode:
+                _emit_json(
+                    {
+                        "command": "test",
+                        "ok": True,
+                        "exit_code": 0,
+                        "selected": False,
+                        "pytest": {
+                            "ran": False,
+                            "command": [],
+                            "exit_code": None,
+                            "stdout": "",
+                            "stderr": "",
+                        },
+                    }
+                )
+            return EXIT_OK
+
         # Lazy imports (these are layered; keep CLI import-time minimal).
         from jaunt import builder, tester
         from jaunt.generation_fingerprint import generation_fingerprint
@@ -6683,7 +7042,7 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
         test_generation_fingerprint = generation_fingerprint(cfg, kind="test")
         test_module_context_digests: dict[str, str] = {}
         test_target_api_digests: dict[str, str] = {}
-        for module_name, entries in module_specs.items():
+        for module_name, entries in selected_module_specs.items():
             expected, _errs = builder._build_expected_names(entries)
             test_module_context_digests[module_name] = build_module_contract(
                 entries=entries,
@@ -6704,7 +7063,7 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             generated_dir=cfg.paths.generated_dir,
             tests_package=tests_package,
             test_roots=existing_test_dirs,
-            module_specs=module_specs,
+            module_specs=selected_module_specs,
             specs=specs,
             spec_graph=spec_graph,
             generation_fingerprint=test_generation_fingerprint,
@@ -6714,16 +7073,11 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
         )
         stale = builder.expand_stale_modules(module_dag, stale)
 
-        target_mods = _iter_target_modules(args.target)
-        if target_mods:
-            allowed = _deps_closure(target_mods, module_dag=module_dag)
-            stale = {m for m in stale if m in allowed}
-
         test_refrozen_modules: set[str] = set()
         if (not bool(args.force)) and stale:
             test_header_fields_by_module: dict[str, dict[str, object]] = {}
             for module_name in stale:
-                entries = module_specs.get(module_name)
+                entries = selected_module_specs.get(module_name)
                 if entries is None:
                     continue
                 test_module_context_digest = test_module_context_digests.get(module_name, "")
@@ -6758,11 +7112,11 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             test_plan = await tester.plan_test_refreeze_or_rebuild(
                 project_dir=test_project_dir,
                 generated_dir=cfg.paths.generated_dir,
-                module_specs=module_specs,
+                module_specs=selected_module_specs,
                 specs=specs,
                 spec_graph=spec_graph,
                 module_dag=module_dag,
-                stale_modules=stale & set(module_specs.keys()),
+                stale_modules=stale & set(selected_module_specs),
                 header_fields_by_module=test_header_fields_by_module,
                 cfg=cfg.semantic_gate,
                 tests_package=tests_package,
@@ -6775,7 +7129,7 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             test_refrozen_modules = set(test_plan.refrozen)
             stale = set(test_plan.rebuild)
 
-        total = len(stale & set(module_specs.keys()))
+        total = len(stale & set(selected_module_specs))
         progress = _make_progress(args, label="test", total=total, json_mode=json_mode)
 
         from jaunt.cache import ResponseCache
@@ -6830,7 +7184,7 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             generated_dir=cfg.paths.generated_dir,
             test_roots=existing_test_dirs,
             dependency_apis=magic_dependency_apis,
-            module_specs=module_specs,
+            module_specs=selected_module_specs,
             specs=specs,
             spec_graph=spec_graph,
             module_dag=module_dag,
@@ -6893,8 +7247,20 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
                 "refrozen": sorted(test_refrozen_modules),
                 "generation_failed": {k: v for k, v in sorted(gen_failed.items())},
             }
+            if owner_scope is not None and args.target:
+                test_payload["selected"] = True
+            if not bool(args.no_run):
+                test_payload["pytest"] = {
+                    "ran": result.pytest_ran,
+                    "command": list(result.pytest_command),
+                    "exit_code": result.pytest_exit_code,
+                    "stdout": result.pytest_stdout,
+                    "stderr": result.pytest_stderr,
+                }
+            test_cost = _command_cost_summary(args, "py", cost_tracker)
+            if bool(test_cost.get("api_calls")) or bool(test_cost.get("cache_hits")):
+                test_payload["cost"] = test_cost
             if getattr(args, "_mixed_runtime", None) is not None:
-                test_payload["cost"] = _command_cost_summary(args, "py", cost_tracker)
                 test_payload["generated"] = sorted(result.generated)
                 test_payload["skipped"] = sorted(result.skipped)
             if getattr(result, "advisories", None):
@@ -6961,15 +7327,7 @@ async def _cmd_test_workspace_async(args: argparse.Namespace) -> int:
         exit_codes.append(rc)
         output = captured.getvalue()
         if _is_json_mode(args):
-            payload: dict[str, object] = {}
-            for line in reversed(output.splitlines()):
-                try:
-                    parsed = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(parsed, dict):
-                    payload = parsed
-                    break
+            payload = _last_json_object(output) or {}
             owner_results.append(
                 {
                     "owner": str(owner.relative_to(root)),
@@ -6982,6 +7340,14 @@ async def _cmd_test_workspace_async(args: argparse.Namespace) -> int:
             if output:
                 print(output, end="")
 
+    any_selected = any(
+        isinstance(owner_result.get("result"), dict)
+        and bool(cast("dict[str, object]", owner_result["result"]).get("selected", True))
+        for owner_result in owner_results
+    )
+    if args.target and not any_selected:
+        exit_codes.append(EXIT_PYTEST_FAILURE)
+
     rc = (
         EXIT_CONFIG_OR_DISCOVERY
         if EXIT_CONFIG_OR_DISCOVERY in exit_codes
@@ -6992,12 +7358,50 @@ async def _cmd_test_workspace_async(args: argparse.Namespace) -> int:
         else EXIT_OK
     )
     if _is_json_mode(args):
+        pytest_results: list[dict[str, object]] = []
+        for owner_result in owner_results:
+            raw_result = owner_result.get("result")
+            if not isinstance(raw_result, dict):
+                continue
+            result_payload = cast("dict[str, object]", raw_result)
+            if not bool(result_payload.get("selected", True)):
+                continue
+            raw_pytest = result_payload.get("pytest")
+            if not isinstance(raw_pytest, dict):
+                continue
+            pytest_results.append(
+                {
+                    "owner": owner_result["owner"],
+                    **cast("dict[str, object]", raw_pytest),
+                }
+            )
+        owner_cost = _aggregate_cost_payloads(
+            *[
+                cast("dict[str, object]", owner_result.get("result", {})).get("cost")
+                for owner_result in owner_results
+                if isinstance(owner_result.get("result"), dict)
+            ]
+        )
         payload: dict[str, object] = {
             "command": "test",
             "ok": rc == EXIT_OK,
             "exit_code": rc,
             "owners": owner_results,
+            "pytest": pytest_results,
         }
+        if owner_cost:
+            payload["cost"] = owner_cost
+        if args.target and not any_selected:
+            payload["pytest"] = [
+                {
+                    "owner": None,
+                    "ran": False,
+                    "command": [],
+                    "exit_code": 5,
+                    "stdout": "",
+                    "stderr": "No generated test modules matched the requested target(s).",
+                }
+            ]
         runtime = getattr(args, "_mixed_runtime", None)
         if runtime is not None:
             payload["cost"] = runtime.summary("py")
@@ -7031,7 +7435,12 @@ def cmd_test(args: argparse.Namespace) -> int:
             return _cmd_typescript_test_loaded(args, root, cfg)
         if mode == "mixed":
             return _cmd_mixed_test(args, root, cfg)
-    return asyncio.run(_cmd_test_workspace_async(args))
+    args._cost_trackers_py = []
+    try:
+        return asyncio.run(_cmd_test_workspace_async(args))
+    except KeyboardInterrupt:
+        _emit_interrupted_cost(args, command="test")
+        return 130
 
 
 def cmd_eval(args: argparse.Namespace) -> int:
@@ -8144,6 +8553,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_migrate(args)
     if args.command == "status":
         return cmd_status(args)
+    if args.command == "doctor":
+        return cmd_doctor(args)
     if args.command == "sync":
         return cmd_sync(args)
     if args.command == "design":

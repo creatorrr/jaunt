@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 
-from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
+import pytest
+
+from jaunt.generate.base import GeneratorBackend, ModuleSpecContext, TokenUsage
 
 
 class DummyBackend(GeneratorBackend):
@@ -93,3 +95,41 @@ def test_generate_with_retry_uses_extra_validator_feedback() -> None:
     assert backend.calls == 2
     assert backend.extra_contexts[1] is not None
     assert any("implicit None return path" in s for s in backend.extra_contexts[1] or [])
+
+
+def test_retry_reports_completed_attempt_usage_before_interrupt() -> None:
+    class InterruptBackend(GeneratorBackend):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate_module(
+            self, ctx: ModuleSpecContext, *, extra_error_context: list[str] | None = None
+        ) -> tuple[str, TokenUsage]:
+            del ctx, extra_error_context
+            self.calls += 1
+            if self.calls == 2:
+                raise KeyboardInterrupt
+            return (
+                "def not_it():\n    return 1\n",
+                TokenUsage(10, 4, "gpt-5.6-sol", "openai", cached_prompt_tokens=3),
+            )
+
+    backend = InterruptBackend()
+    ctx = ModuleSpecContext(
+        kind="build",
+        spec_module="pkg.specs",
+        generated_module="__generated__.pkg.specs",
+        expected_names=["foo"],
+        spec_sources={},
+        decorator_prompts={},
+        dependency_apis={},
+        dependency_generated_modules={},
+    )
+    usages: list[TokenUsage] = []
+
+    with pytest.raises(KeyboardInterrupt):
+        asyncio.run(backend.generate_with_retry(ctx, usage_callback=usages.append))
+
+    assert len(usages) == 1
+    assert usages[0].prompt_tokens == 10
+    assert usages[0].completion_tokens == 4

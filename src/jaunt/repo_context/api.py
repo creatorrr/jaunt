@@ -89,27 +89,40 @@ def sync_tree(*, root: Path, cfg, today: str, enrich: bool | None = None):
     cache = TreeCache(root / ".jaunt" / "tree-cache.json")
     effective_enrich = cfg.context.enrich if enrich is None else enrich
     backend = _build_enrich_backend(cfg) if effective_enrich else None
+    map_path = root / cfg.context.repo_map_file
+    project_name = root.name
+    if map_path.exists():
+        try:
+            committed = tree_mod.TreeDoc.load(map_path)
+            if committed.project_name:
+                project_name = committed.project_name
+        except Exception:  # noqa: BLE001 - malformed maps are replaced by explicit tree runs
+            pass
     doc, result = tree_mod.sync(
         repo_root=root,
         source_roots=_source_roots(root, cfg),
         generated_dir=_generated_dirs(cfg),
         cache=cache,
-        project_name=root.name,
+        project_name=project_name,
         project_version=str(cfg.version),
         today=today,
         enrich=effective_enrich,
         backend=backend,
     )
     cache.save()
-    doc.write(root / cfg.context.repo_map_file)
+    doc.write(map_path)
     return doc, result
 
 
 def repo_map_block_for_build(*, root: Path, cfg, today: str) -> str:
+    del today
     if not cfg.context.repo_map:
         return ""
     try:
-        doc, _ = sync_tree(root=root, cfg=cfg, today=today)
+        path = root / cfg.context.repo_map_file
+        if not path.exists():
+            return ""
+        doc = tree_mod.TreeDoc.load(path)
         return block_mod.render_repo_map(doc, max_chars=cfg.context.max_chars)
     except Exception:  # noqa: BLE001 - never block the build on map maintenance
         return ""

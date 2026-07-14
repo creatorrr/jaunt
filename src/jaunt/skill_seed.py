@@ -26,6 +26,32 @@ def _project_skill_dirs(project_root: Path | None) -> list[tuple[str, Path]]:
     return pairs
 
 
+def _resolved_skill_dirs(
+    *, project_root: Path | None, builtin_names: Sequence[str]
+) -> dict[str, Path]:
+    ordered: dict[str, Path] = {}
+    for name, src in iter_enabled_builtin_skill_dirs(builtin_names):
+        ordered[name] = src
+    for name, src in _project_skill_dirs(project_root):
+        ordered[name] = src
+    return ordered
+
+
+def skills_workspace_stats(
+    *, project_root: Path | None, builtin_names: Sequence[str]
+) -> tuple[int, int]:
+    """Return ``(skill_count, SKILL.md chars)`` for the workspace Jaunt will seed."""
+    skill_dirs = _resolved_skill_dirs(project_root=project_root, builtin_names=builtin_names)
+    chars = 0
+    for skill_dir in skill_dirs.values():
+        path = skill_dir / "SKILL.md"
+        try:
+            chars += len(path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+    return len(skill_dirs), chars
+
+
 def seed_skills_into_workspace(
     workspace_root: Path,
     *,
@@ -40,11 +66,7 @@ def seed_skills_into_workspace(
     warnings: list[str] = []
     dest_root = workspace_root / ".agents" / "skills"
 
-    ordered: dict[str, Path] = {}
-    for name, src in iter_enabled_builtin_skill_dirs(builtin_names):
-        ordered[name] = src
-    for name, src in _project_skill_dirs(project_root):
-        ordered[name] = src
+    ordered = _resolved_skill_dirs(project_root=project_root, builtin_names=builtin_names)
 
     for name, src in ordered.items():
         dest = dest_root / name
@@ -64,11 +86,7 @@ def skills_fingerprint(
 ) -> str:
     """Stable digest over the seeded skill set (names + file contents)."""
     h = hashlib.sha256()
-    ordered: dict[str, Path] = {}
-    for name, src in iter_enabled_builtin_skill_dirs(builtin_names):
-        ordered[name] = src
-    for name, src in _project_skill_dirs(project_root):
-        ordered[name] = src
+    ordered = _resolved_skill_dirs(project_root=project_root, builtin_names=builtin_names)
 
     for name in sorted(ordered):
         skill_dir = ordered[name]

@@ -185,6 +185,7 @@ def test_cli_build_json_includes_context_stats(tmp_path: Path, monkeypatch, caps
     payload = json.loads(capsys.readouterr().out)
     assert rc == jaunt.cli.EXIT_OK
     assert "context_stats" in payload
+    assert "lazy-loadable" in payload["context_stats_note"]
     stats = payload["context_stats"]
     assert "app.specs" in stats
     blocks = stats["app.specs"]
@@ -265,3 +266,59 @@ def test_cli_build_non_json_prints_context_line(tmp_path: Path, monkeypatch, cap
     assert rc == jaunt.cli.EXIT_OK
     assert "context:" in out
     assert "app.specs" in out
+
+
+def test_context_summary_does_not_count_seeded_skills_as_prompt_tokens() -> None:
+    line = jaunt.cli._context_stats_summary_line(
+        "app.specs",
+        {
+            "module_contract": {"chars": 400, "est_tokens": 100},
+            "skills_workspace_seeded": {"chars": 200_000, "est_tokens": 50_000},
+            "skills_workspace": {"chars": 200_000, "est_tokens": 50_000},
+        },
+    )
+
+    assert "context: 400 chars (~100 tok)" in line
+    assert "skills seeded on disk: 200k chars" in line
+    assert "not prompt tokens" in line
+
+
+def test_cost_by_module_counts_retry_calls_without_double_counting_tokens() -> None:
+    from jaunt.cost import CostTracker
+    from jaunt.generate.base import TokenUsage
+
+    tracker = CostTracker()
+    tracker.record("pkg.a", TokenUsage(20, 10, "gpt-5.6-sol", "openai"))
+    tracker.record("pkg.a", TokenUsage(0, 0, "gpt-5.6-sol", "openai"))
+    tracker.record("pkg.b", TokenUsage(7, 3, "gpt-5.6-sol", "openai"))
+
+    costs = jaunt.cli._cost_by_module(tracker)
+
+    assert costs["pkg.a"]["api_calls"] == 2
+    assert costs["pkg.a"]["total_tokens"] == 30
+    assert costs["pkg.b"]["api_calls"] == 1
+    assert costs["pkg.b"]["total_tokens"] == 10
+
+
+def test_interrupted_build_json_reports_completed_provider_usage(monkeypatch, capsys) -> None:
+    from jaunt.cost import CostTracker
+    from jaunt.generate.base import TokenUsage
+
+    async def interrupted(args):
+        tracker = CostTracker()
+        tracker.record("pkg.mod", TokenUsage(20, 5, "gpt-5.6-sol", "openai"))
+        args._cost_trackers_py.append(tracker)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(jaunt.cli, "_typescript_command_context", lambda _args: None)
+    monkeypatch.setattr(jaunt.cli, "_cmd_build_async", interrupted)
+    args = jaunt.cli.parse_args(["build", "--json"])
+
+    rc = jaunt.cli.cmd_build(args)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 130
+    assert payload["interrupted"] is True
+    assert payload["cost"]["api_calls"] == 1
+    assert payload["cost"]["total_tokens"] == 25
+    assert "completed provider attempts" in payload["cost_note"]

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import copy
 import hashlib
 import heapq
 import importlib.metadata
@@ -111,20 +112,14 @@ def _block_size(text: str) -> dict[str, int]:
     return {"chars": chars, "est_tokens": chars // 4}
 
 
-def _skills_workspace_chars(project_root: Path | None) -> int:
-    """Total chars of SKILL.md files seeded under <project_root>/.agents/skills/."""
-    if project_root is None:
-        return 0
-    skills_root = project_root / ".agents" / "skills"
-    if not skills_root.is_dir():
-        return 0
-    total = 0
-    for path in skills_root.rglob("SKILL.md"):
-        try:
-            total += len(path.read_text(encoding="utf-8"))
-        except OSError:
-            continue
-    return total
+def _skills_workspace_chars(project_root: Path | None, builtin_skill_names: Sequence[str]) -> int:
+    """Total SKILL.md chars available for lazy loading in the seeded workspace."""
+    from jaunt.skill_seed import skills_workspace_stats
+
+    _count, chars = skills_workspace_stats(
+        project_root=project_root, builtin_names=builtin_skill_names
+    )
+    return chars
 
 
 def _tool_version() -> str:
@@ -142,12 +137,40 @@ def _normalize_digest(digest: str | None) -> str | None:
     return digest
 
 
-def _requires_removal_restamp_rebuild(existing: str) -> bool:
+def _requires_removal_restamp_rebuild(
+    existing: str, expected_names: Sequence[str] | None = None
+) -> bool:
+    """Return whether an old re-stamped artifact has evidence of a removed spec.
+
+    Releases through 1.6.2 could leave a removed public spec body behind during
+    a free re-stamp. A version-only check forced every adopter module through a
+    paid rebuild on the next Jaunt upgrade. Narrow that migration to artifacts
+    that actually contain unexpected public top-level definitions; private
+    generated helpers are not evidence of a removed spec.
+    """
     parsed = header.parse_header(existing)
-    return bool(
+    vulnerable = bool(
         parsed
         and _tool_version() not in _UNSAFE_REMOVAL_RESTAMP_TOOL_VERSIONS
         and parsed.get("tool_version") in _UNSAFE_REMOVAL_RESTAMP_TOOL_VERSIONS
+    )
+    if not vulnerable:
+        return False
+    if expected_names is None:
+        return True
+    body = _strip_header(existing)
+    if body is None:
+        return True
+    try:
+        tree = ast.parse(body)
+    except SyntaxError:
+        return True
+    expected = set(expected_names)
+    return any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and not node.name.startswith("_")
+        and node.name not in expected
+        for node in tree.body
     )
 
 
@@ -306,7 +329,8 @@ def detect_stale_modules(
             stale.add(module_name)
             continue
 
-        if _requires_removal_restamp_rebuild(existing):
+        expected_names, _ = _build_expected_names(entries)
+        if _requires_removal_restamp_rebuild(existing, expected_names):
             stale.add(module_name)
             continue
 
@@ -607,7 +631,8 @@ async def plan_refreeze_or_rebuild(
             propagating_rebuilds.add(module_name)
             continue
 
-        if _requires_removal_restamp_rebuild(existing):
+        expected_names, _ = _build_expected_names(entries)
+        if _requires_removal_restamp_rebuild(existing, expected_names):
             rebuild.add(module_name)
             continue
 
@@ -756,6 +781,7 @@ class BuildReport:
     context_stats: dict[str, dict[str, dict[str, int]]] = field(default_factory=dict)
     emitted_stubs: dict[str, str] = field(default_factory=dict)
     stub_warnings: list[str] = field(default_factory=list)
+    work_items: dict[str, list[dict[str, object]]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1310,10 +1336,18 @@ def _build_attached_test_specs_block(entries: list[SpecEntry]) -> str:
     if not entries:
         return ""
 
-    rendered: list[tuple[str, str]] = []
-    for entry in sorted(entries, key=lambda item: (item.module, item.qualname, str(item.spec_ref))):
-        rendered.append((str(entry.spec_ref), extract_source_segment(entry)))
-    return fmt_kv_block(rendered)
+    rendered: set[tuple[str, str]] = set()
+    for entry in entries:
+        targets = entry.decorator_kwargs.get("targets")
+        if isinstance(targets, (list, tuple, set, frozenset)):
+            target_label = ", ".join(sorted(str(target) for target in targets))
+        else:
+            target_label = str(targets or "")
+        identity = entry.qualname
+        if target_label:
+            identity += f" (targets: {target_label})"
+        rendered.add((identity, extract_source_segment(entry)))
+    return fmt_kv_block(sorted(rendered))
 
 
 def _build_package_context_block(
@@ -1700,9 +1734,14 @@ def _sorted_spec_refs(refs: set[SpecRef], *, reverse: bool = False) -> list[Spec
     return cast(list[SpecRef], sorted(refs, key=str, reverse=reverse))
 
 
+def _normalize_generated_source(source: str, module_name: str) -> tuple[str, list[str]]:
+    from jaunt.stub_emitter import normalize_python_source
+
+    return normalize_python_source(source, filename=f"{module_name.rsplit('.', 1)[-1]}.py")
+
+
 def _merge_generated_components(components: list[_GeneratedComponent]) -> tuple[str, list[str]]:
-    import_texts: list[str] = []
-    seen_imports: set[str] = set()
+    import_nodes: list[ast.Import | ast.ImportFrom] = []
     body_texts: list[str] = []
     seen_names: set[str] = set()
 
@@ -1715,10 +1754,7 @@ def _merge_generated_components(components: list[_GeneratedComponent]) -> tuple[
 
         for node in mod.body:
             if isinstance(node, (ast.Import, ast.ImportFrom)):
-                rendered = ast.unparse(node).strip()
-                if rendered and rendered not in seen_imports:
-                    seen_imports.add(rendered)
-                    import_texts.append(rendered)
+                import_nodes.append(node)
                 continue
 
             names = _defined_top_level_names(node)
@@ -1731,6 +1767,44 @@ def _merge_generated_components(components: list[_GeneratedComponent]) -> tuple[
             if rendered:
                 body_texts.append(rendered)
 
+    grouped: dict[tuple[str, int, str | None], ast.Import | ast.ImportFrom] = {}
+    group_order: list[tuple[str, int, str | None]] = []
+    bound_origins: dict[str, tuple[str, str | None, str | None]] = {}
+    for node in import_nodes:
+        key = (
+            ("import", 0, None)
+            if isinstance(node, ast.Import)
+            else ("from", node.level, node.module)
+        )
+        if key not in grouped:
+            grouped[key] = (
+                ast.Import(names=[])
+                if isinstance(node, ast.Import)
+                else ast.ImportFrom(module=node.module, names=[], level=node.level)
+            )
+            group_order.append(key)
+        target = grouped[key]
+        seen_aliases = {(alias.name, alias.asname) for alias in target.names}
+        for alias in node.names:
+            alias_key = (alias.name, alias.asname)
+            if alias_key in seen_aliases:
+                continue
+            if alias.name != "*":
+                bound = alias.asname or alias.name.split(".", 1)[0]
+                origin = (key[0], key[2], alias.name)
+                previous = bound_origins.get(bound)
+                if previous is not None and previous != origin:
+                    return "", [
+                        "Component merge conflict: import binding "
+                        f"{bound!r} comes from both {previous[1] or previous[2]!r} "
+                        f"and {key[2] or alias.name!r}"
+                    ]
+                bound_origins[bound] = origin
+            target.names.append(copy.deepcopy(alias))
+            seen_aliases.add(alias_key)
+
+    group_order.sort(key=lambda key: 0 if key == ("from", 0, "__future__") else 1)
+    import_texts = [ast.unparse(grouped[key]).strip() for key in group_order]
     chunks = [*import_texts, *body_texts]
     if not chunks:
         return "", []
@@ -1981,10 +2055,11 @@ async def run_build(
     module_needs_deps: dict[str, list[str]] = {}
     module_advisories: dict[str, list[str]] = {}
     module_context_stats: dict[str, dict[str, dict[str, int]]] = {}
+    module_work_items: dict[str, list[dict[str, object]]] = {}
     from jaunt.generate.shared import load_prompt as _load_prompt
 
     _preamble_chars = len(_load_prompt("codex_preamble.md", build_preamble_override or None))
-    _skills_ws_chars = _skills_workspace_chars(project_root)
+    _skills_ws_chars = _skills_workspace_chars(project_root, builtin_skill_names)
     failed: dict[str, list[str]] = dict(skipped_failures)
     completed: set[str] = set()
     ty_cmd = _resolve_ty_cmd() if ty_attempts is not None else None
@@ -2037,7 +2112,24 @@ async def run_build(
         *,
         validate_candidate: Callable[[str], list[str]],
         retry_validator: Callable[[str], list[str]],
+        work_item_id: str,
+        work_item_label: str = "",
     ) -> tuple[bool, str | None, list[str]]:
+        def _work_phase(stage: str, detail: str = "") -> None:
+            parts = [part for part in (work_item_label, detail) if part]
+            _phase(module_name, stage, "; ".join(parts))
+
+        def _record_work(*, attempts: int, cache_hit: bool) -> None:
+            module_work_items.setdefault(module_name, []).append(
+                {
+                    "id": work_item_id,
+                    "label": work_item_label or "module",
+                    "symbols": list(ctx.expected_names),
+                    "attempts": attempts,
+                    "cache_hit": cache_hit,
+                }
+            )
+
         result_source: str | None = None
         ck: str | None = None
         if response_cache is not None:
@@ -2049,37 +2141,44 @@ async def run_build(
             )
             cached = response_cache.get(ck)
             if cached is not None:
-                cache_errors = validate_candidate(cached.source)
+                raw_errors = validate_candidate(cached.source)
+                normalized, ruff_errors = _normalize_generated_source(cached.source, module_name)
+                cache_errors = [*raw_errors, *ruff_errors, *validate_candidate(normalized)]
                 if not cache_errors:
-                    result_source = cached.source
-                    _phase(module_name, "cache hit")
+                    result_source = normalized
+                    _work_phase("cache hit")
+                    _record_work(attempts=0, cache_hit=True)
                     if cost_tracker is not None:
                         cost_tracker.record_cache_hit()
 
         if result_source is None:
             max_attempts = (2 + (ty_attempts or 0)) if ty_cmd is not None else 2
             async with llm_slots:
-                _phase(module_name, "generating")
+                _work_phase("generating")
                 result = await backend.generate_with_retry(
                     ctx,
                     max_attempts=max_attempts,
                     extra_validator=retry_validator,
                     initial_error_context=(initial_error_context_by_module or {}).get(module_name),
-                    progress=lambda stage, detail: _phase(module_name, stage, detail),
+                    progress=_work_phase,
+                    usage_callback=(
+                        (lambda usage: cost_tracker.record(module_name, usage))
+                        if cost_tracker is not None
+                        else None
+                    ),
                 )
             # Token spend is real even when the candidate is absent or fails
             # validation. Record it before every failure return so command
             # budgets and summaries cannot undercount rejected generations.
-            if cost_tracker is not None and result.usage is not None:
-                cost_tracker.record(module_name, result.usage)
+            _record_work(attempts=result.attempts, cache_hit=False)
             if result.source is None:
                 return False, None, result.errors or ["No source returned."]
             if result.errors:
                 return False, None, result.errors
 
-            result_source = result.source
-            _phase(module_name, "validating")
-            validation_errors = validate_candidate(result_source)
+            result_source, ruff_errors = _normalize_generated_source(result.source, module_name)
+            _work_phase("validating")
+            validation_errors = [*ruff_errors, *validate_candidate(result_source)]
             if validation_errors:
                 return False, None, validation_errors
 
@@ -2327,6 +2426,9 @@ async def run_build(
                     class_errs = validate_build_class_source(source, **kw)  # type: ignore[arg-type]
                     if class_errs:
                         return class_errs
+                source, ruff_errors = _normalize_generated_source(source, module_name)
+                if ruff_errors:
+                    return ruff_errors
                 if ty_validator is None:
                     return []
                 return ty_validator(source)
@@ -2396,6 +2498,7 @@ async def run_build(
         if len(components) > 1 and jobs > 1:
 
             async def _build_component(
+                component_index: int,
                 component_entries: list[SpecEntry],
             ) -> tuple[bool, _GeneratedComponent | None, list[str]]:
                 try:
@@ -2414,6 +2517,11 @@ async def run_build(
                     ctx,
                     validate_candidate=validate_candidate,
                     retry_validator=retry_validator,
+                    work_item_id=f"{module_name}:component:{component_index}",
+                    work_item_label=(
+                        f"component {component_index}/{len(components)} "
+                        f"[{', '.join(component_expected)}]"
+                    ),
                 )
                 if not ok or source is None:
                     return False, None, errs
@@ -2424,7 +2532,10 @@ async def run_build(
                 )
 
             component_results = await asyncio.gather(
-                *[asyncio.create_task(_build_component(component)) for component in components]
+                *[
+                    asyncio.create_task(_build_component(index, component))
+                    for index, component in enumerate(components, start=1)
+                ]
             )
             generated_components: list[_GeneratedComponent] = []
             for ok, generated_component, errs in component_results:
@@ -2438,7 +2549,10 @@ async def run_build(
                 if merge_errors:
                     split_errors.extend(merge_errors)
                 else:
-                    validation_errors = _validate_module_candidate(merged_source)
+                    merged_source, ruff_errors = _normalize_generated_source(
+                        merged_source, module_name
+                    )
+                    validation_errors = [*ruff_errors, *_validate_module_candidate(merged_source)]
                     if validation_errors:
                         split_errors.extend(validation_errors)
                     else:
@@ -2456,6 +2570,10 @@ async def run_build(
                 ctx,
                 validate_candidate=validate_candidate,
                 retry_validator=retry_validator,
+                work_item_id=(
+                    f"{module_name}:fallback" if len(components) > 1 and jobs > 1 else module_name
+                ),
+                work_item_label=("monolithic fallback" if len(components) > 1 and jobs > 1 else ""),
             )
             if not ok or source is None:
                 if split_errors:
@@ -2606,4 +2724,8 @@ async def run_build(
         context_stats=module_context_stats,
         emitted_stubs=emitted_stubs,
         stub_warnings=stub_warnings,
+        work_items={
+            module: sorted(items, key=lambda item: str(item["id"]))
+            for module, items in sorted(module_work_items.items())
+        },
     )

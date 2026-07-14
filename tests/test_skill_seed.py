@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from jaunt.skill_seed import seed_skills_into_workspace, skills_fingerprint
+from jaunt.skill_seed import seed_skills_into_workspace, skills_fingerprint, skills_workspace_stats
 
 
 def _write(p: Path, text: str) -> None:
@@ -54,3 +54,13 @@ def test_fingerprint_changes_with_set(tmp_path):
     b = skills_fingerprint(project_root=None, builtin_names=["ruff", "pytest"])
     assert a != b
     assert a == skills_fingerprint(project_root=None, builtin_names=["ruff"])
+
+
+def test_workspace_stats_match_resolved_builtin_and_project_skills(tmp_path: Path) -> None:
+    _write(tmp_path / ".agents" / "skills" / "ruff" / "SKILL.md", "PROJECT RUFF\n")
+    _write(tmp_path / ".agents" / "skills" / "custom" / "SKILL.md", "CUSTOM\n")
+
+    count, chars = skills_workspace_stats(project_root=tmp_path, builtin_names=["ruff", "pytest"])
+
+    assert count == 3
+    assert chars >= len("PROJECT RUFF\n") + len("CUSTOM\n")

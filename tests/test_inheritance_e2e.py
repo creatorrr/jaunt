@@ -55,7 +55,10 @@ BASE_SOURCE = (
     "        return None\n"
 )
 
-CHILD_SOURCE = 'class B(A):\n    """Child B."""\n    def go(self) -> None:\n        return None\n'
+CHILD_SOURCE = (
+    "from pkg.base import A\n\n"
+    'class B(A):\n    """Child B."""\n    def go(self) -> None:\n        return None\n'
+)
 
 
 class _RecordingByModule(GeneratorBackend):

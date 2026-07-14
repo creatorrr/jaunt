@@ -3,6 +3,26 @@
 All notable changes to jaunt. Generated from conventional commits by
 [git-cliff](https://git-cliff.org); one section per published PyPI release.
 
+## [1.7.1] - 2026-07-14
+
+### Fixes
+
+- Normalize Jaunt-authored Python with Ruff after generation, while preserving
+  narrow lint accommodations for generated implementation fragments and stubs.
+- Keep targeted builds, tests, status, and progress reporting scoped to the
+  requested module and its owning project.
+- Improve generated stub fidelity for imports, async context managers, and
+  workspace-routed modules.
+- Attribute model work and cost consistently across retries, failures,
+  interrupts, and generated test namespaces.
+
+### Tooling
+
+- Ship Ruff as a runtime dependency and use `ruff format` followed by
+  `ruff check --fix --unsafe-fixes` for Jaunt-authored Python.
+- Add a native `jaunt doctor` command and route the Codex and Claude plugin
+  doctor workflows through it.
+
 ## [1.7.0] - 2026-07-13
 
 ### Features

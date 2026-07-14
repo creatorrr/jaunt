@@ -47,9 +47,9 @@ try:
         version = tomllib.load(handle).get("version")
 except Exception:
     version = 2
-print("1.7.0" if version == 2 else "1.6.2")
+print("1.7.1" if version == 2 else "1.6.2")
 ' jaunt.toml 2>/dev/null || true)
-[ -n "$minimum_version" ] || minimum_version="1.7.0"
+[ -n "$minimum_version" ] || minimum_version="1.7.1"
 version_is_compatible() {
   python3 - "$1" "$minimum_version" <<'PY' >/dev/null 2>&1
 import re, sys

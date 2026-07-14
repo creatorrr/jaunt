@@ -230,6 +230,40 @@ def test_vulnerable_restamp_version_forces_one_time_rebuild(
     assert "def Removed():" in out_path.read_text(encoding="utf-8")
 
 
+def test_vulnerable_version_without_removed_public_body_stays_fresh(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr("jaunt.builder._tool_version", lambda: "1.7.1")
+    spec_path = tmp_path / "m.py"
+    _write(spec_path, "def Bar():\n    return 2\n")
+    bar = _entry(module="m", qualname="Bar", source_file=str(spec_path))
+    specs = {bar.spec_ref: bar}
+    graph = build_spec_graph(specs, infer_default=False)
+    digest = module_digest("m", [bar], specs, graph)
+    write_generated_module(
+        package_dir=tmp_path,
+        generated_dir="__generated__",
+        module_name="m",
+        source="def _helper():\n    return 1\n\ndef Bar():\n    return 2\n",
+        header_fields={
+            **_header("m", digest, [str(bar.spec_ref)]),
+            "tool_version": "1.6.2",
+        },
+        spec_digests=_spec_digests(bar),
+        snapshots=_snapshots(bar),
+    )
+
+    stale = detect_stale_modules(
+        package_dir=tmp_path,
+        generated_dir="__generated__",
+        module_specs={"m": [bar]},
+        specs=specs,
+        spec_graph=graph,
+    )
+
+    assert stale == set()
+
+
 def test_removed_spec_rebuild_expands_before_dependents_can_restamp(tmp_path: Path) -> None:
     old_a_path = tmp_path / "a_old.py"
     current_a_path = tmp_path / "a.py"

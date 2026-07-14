@@ -1,6 +1,6 @@
 [project]
 name = "jaunt"
-version = "1.7.0"
+version = "1.7.1"
 description = "Spec-driven code generation for Python and TypeScript: write contracts, generate validated implementations and tests with Codex."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -23,6 +23,7 @@ dependencies = [
   "anyio>=4.1",
   "pyyaml>=6.0",
   "hypothesis>=6",
+  "ruff>=0.9",
 ]
 
 [project.urls]
@@ -48,8 +49,9 @@ include = ["src/jaunt/", "schemas/jaunt-ts/"]
 
 [dependency-groups]
 dev = [
+  "mypy>=1.15",
+  "pyright>=1.1.400",
   "syrupy>=4.8.0",
-  "ruff>=0.9",
   "ty",
   # Examples (jwt_auth, 04_pydantic_validation) import pydantic; it used to
   # arrive transitively via the removed fastmcp dependency.

@@ -4,9 +4,28 @@
 set -u
 
 root="${JAUNT_WORKSPACE_ROOT:-${CLAUDE_PROJECT_DIR:-$PWD}}"
-[ -d "$root" ] || root="$PWD"
+if [ -d "$root" ]; then
+  root=$(cd "$root" 2>/dev/null && pwd)
+else
+  root="$PWD"
+fi
 uv_cache="${UV_CACHE_DIR:-${PLUGIN_DATA:-${CLAUDE_PLUGIN_DATA:-${TMPDIR:-/tmp}/jaunt-plugin-uv-cache-${UID:-user}}}}"
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+plugin_root=$(cd "$script_dir/.." && pwd)
+
+if [ -f "$plugin_root/.claude-plugin/plugin.json" ]; then
+  plugin_host="Claude"
+  hook_settings=(
+    "$root/.claude/settings.json"
+    "$root/.claude/settings.local.json"
+  )
+else
+  plugin_host="Codex"
+  hook_settings=(
+    "$root/.codex/hooks.json"
+    "$root/.codex/config.toml"
+  )
+fi
 
 if command -v timeout >/dev/null 2>&1; then
   _timeout_bin=timeout
@@ -202,7 +221,9 @@ echo
 echo "== workspace health"
 configs=$(find "$root" -maxdepth 5 -name jaunt.toml \
   -not -path '*/.venv/*' -not -path '*/node_modules/*' \
-  -not -path '*/.jaunt/*' -not -path '*/.git/*' 2>/dev/null | sort)
+  -not -path '*/.jaunt/*' -not -path '*/.git/*' \
+  -not -path "$root/.claude/worktrees/*" \
+  -not -path "$root/.codex/worktrees/*" 2>/dev/null | sort)
 if [ -z "$configs" ]; then
   echo "- no jaunt.toml found under $root"
 else
@@ -242,19 +263,14 @@ else
 fi
 
 echo
-echo "== duplicate Claude/Codex hooks"
+echo "== duplicate $plugin_host hooks"
 found=0
-for settings in \
-  "$root/.claude/settings.json" \
-  "$root/.claude/settings.local.json" \
-  "$root/.codex/hooks.json" \
-  "$root/.codex/config.toml"
-do
+for settings in "${hook_settings[@]}"; do
   if [ -f "$settings" ] && grep -Eq 'jaunt guard|scripts/(claude-|codex-)?guard\.sh' "$settings" 2>/dev/null; then
-    echo "- $settings contains a hand-rolled Jaunt guard; remove it when the matching plugin hook is enabled"
+    echo "- $settings contains a hand-rolled Jaunt guard; remove it when the $plugin_host plugin hook is enabled"
     found=1
   fi
 done
-[ "$found" -eq 1 ] || echo "- no duplicate hand-rolled Jaunt guard hooks detected"
+[ "$found" -eq 1 ] || echo "- no duplicate hand-rolled $plugin_host Jaunt guard hooks detected"
 
 exit 0
