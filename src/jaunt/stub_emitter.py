@@ -74,7 +74,12 @@ def _normalize_source_for_digest(source: str) -> str:
         return source or ""
 
 
-def normalize_python_source(source: str, *, filename: str) -> tuple[str, list[str]]:
+def normalize_python_source(
+    source: str,
+    *,
+    filename: str,
+    preserve_annotation_syntax: bool = False,
+) -> tuple[str, list[str]]:
     """Apply Jaunt's bundled Ruff convention to generated Python source.
 
     Ruff is a base Jaunt dependency. Candidates are formatted, auto-fixed with
@@ -101,6 +106,14 @@ def normalize_python_source(source: str, *, filename: str) -> tuple[str, list[st
         filename,
         "-",
     ]
+    ignored_rules = ["E501"]
+    if preserve_annotation_syntax:
+        # Sealed @jaunt.sig methods require the emitted annotation syntax to
+        # match the authored signature exactly. These are the pyupgrade rules
+        # that rewrite typing.List/Optional/Union rather than merely formatting
+        # them. All other UP rules, plus E/F/I/B, remain active.
+        ignored_rules.extend(["UP006", "UP007", "UP035", "UP045"])
+
     check_args = [
         ruff,
         "check",
@@ -110,7 +123,7 @@ def normalize_python_source(source: str, *, filename: str) -> tuple[str, list[st
         # Ruff's formatter intentionally leaves some unsplittable lines long;
         # retrying the model for formatter-owned E501 output wastes tokens.
         "--ignore",
-        "E501",
+        ",".join(ignored_rules),
         "--target-version",
         "py312",
         "--stdin-filename",

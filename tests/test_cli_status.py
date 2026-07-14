@@ -90,6 +90,39 @@ def test_doctor_json_is_read_only_and_wraps_status(tmp_path: Path, monkeypatch, 
                 del sys.modules[name]
 
 
+def test_doctor_treats_successful_not_authenticated_probe_as_failure(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from jaunt.registry import clear_registries
+
+    _make_spec_project(tmp_path, pkg="doctor_auth_pkg")
+
+    def probe(argv: list[str]) -> dict[str, object]:
+        if argv == ["codex", "login", "status"]:
+            return {"available": True, "detail": "Not authenticated"}
+        return {"available": True, "detail": f"{argv[0]} test"}
+
+    monkeypatch.setattr(jaunt.cli, "_doctor_command_probe", probe)
+    before_modules = set(sys.modules)
+    orig_path = list(sys.path)
+    try:
+        rc = jaunt.cli.main(["doctor", "--json", "--root", str(tmp_path)])
+        payload = json.loads(capsys.readouterr().out)
+
+        assert rc == 0
+        assert payload["environment"]["codex_auth"] == {
+            "available": False,
+            "detail": "Not authenticated",
+        }
+        assert "Codex is not authenticated; run codex login" in payload["findings"]
+    finally:
+        clear_registries()
+        sys.path[:] = orig_path
+        for name in list(sys.modules):
+            if name not in before_modules:
+                del sys.modules[name]
+
+
 def _write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")

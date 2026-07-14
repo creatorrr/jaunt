@@ -1734,10 +1734,19 @@ def _sorted_spec_refs(refs: set[SpecRef], *, reverse: bool = False) -> list[Spec
     return cast(list[SpecRef], sorted(refs, key=str, reverse=reverse))
 
 
-def _normalize_generated_source(source: str, module_name: str) -> tuple[str, list[str]]:
+def _normalize_generated_source(
+    source: str,
+    module_name: str,
+    *,
+    preserve_annotation_syntax: bool = False,
+) -> tuple[str, list[str]]:
     from jaunt.stub_emitter import normalize_python_source
 
-    return normalize_python_source(source, filename=f"{module_name.rsplit('.', 1)[-1]}.py")
+    return normalize_python_source(
+        source,
+        filename=f"{module_name.rsplit('.', 1)[-1]}.py",
+        preserve_annotation_syntax=preserve_annotation_syntax,
+    )
 
 
 def _merge_generated_components(components: list[_GeneratedComponent]) -> tuple[str, list[str]]:
@@ -2114,6 +2123,7 @@ async def run_build(
         retry_validator: Callable[[str], list[str]],
         work_item_id: str,
         work_item_label: str = "",
+        preserve_annotation_syntax: bool = False,
     ) -> tuple[bool, str | None, list[str]]:
         def _work_phase(stage: str, detail: str = "") -> None:
             parts = [part for part in (work_item_label, detail) if part]
@@ -2142,7 +2152,11 @@ async def run_build(
             cached = response_cache.get(ck)
             if cached is not None:
                 raw_errors = validate_candidate(cached.source)
-                normalized, ruff_errors = _normalize_generated_source(cached.source, module_name)
+                normalized, ruff_errors = _normalize_generated_source(
+                    cached.source,
+                    module_name,
+                    preserve_annotation_syntax=preserve_annotation_syntax,
+                )
                 cache_errors = [*raw_errors, *ruff_errors, *validate_candidate(normalized)]
                 if not cache_errors:
                     result_source = normalized
@@ -2176,7 +2190,11 @@ async def run_build(
             if result.errors:
                 return False, None, result.errors
 
-            result_source, ruff_errors = _normalize_generated_source(result.source, module_name)
+            result_source, ruff_errors = _normalize_generated_source(
+                result.source,
+                module_name,
+                preserve_annotation_syntax=preserve_annotation_syntax,
+            )
             _work_phase("validating")
             validation_errors = [*ruff_errors, *validate_candidate(result_source)]
             if validation_errors:
@@ -2204,6 +2222,14 @@ async def run_build(
         entries = module_specs.get(module_name, [])
         module_dir = _module_dir(module_name)
         owner_dir = _owner_dir(module_name)
+
+        def _preserve_annotation_syntax(candidate_entries: list[SpecEntry]) -> bool:
+            return any(
+                bool(_class_validation_inputs(entry)["sealed_signatures"])
+                for entry in _whole_class_specs(candidate_entries).values()
+            )
+
+        preserve_module_annotations = _preserve_annotation_syntax(entries)
 
         expected, conflict_errs = _build_expected_names(entries)
         if conflict_errs:
@@ -2359,6 +2385,7 @@ async def run_build(
             component_expected: list[str],
             handwritten_names: tuple[str, ...],
         ) -> tuple[Callable[[str], list[str]], Callable[[str], list[str]]]:
+            preserve_component_annotations = _preserve_annotation_syntax(component_entries)
             generated_module = paths.spec_module_to_generated_module(
                 module_name, generated_dir=generated_dir
             )
@@ -2426,7 +2453,11 @@ async def run_build(
                     class_errs = validate_build_class_source(source, **kw)  # type: ignore[arg-type]
                     if class_errs:
                         return class_errs
-                source, ruff_errors = _normalize_generated_source(source, module_name)
+                source, ruff_errors = _normalize_generated_source(
+                    source,
+                    module_name,
+                    preserve_annotation_syntax=preserve_component_annotations,
+                )
                 if ruff_errors:
                     return ruff_errors
                 if ty_validator is None:
@@ -2522,6 +2553,7 @@ async def run_build(
                         f"component {component_index}/{len(components)} "
                         f"[{', '.join(component_expected)}]"
                     ),
+                    preserve_annotation_syntax=_preserve_annotation_syntax(component_entries),
                 )
                 if not ok or source is None:
                     return False, None, errs
@@ -2550,7 +2582,9 @@ async def run_build(
                     split_errors.extend(merge_errors)
                 else:
                     merged_source, ruff_errors = _normalize_generated_source(
-                        merged_source, module_name
+                        merged_source,
+                        module_name,
+                        preserve_annotation_syntax=preserve_module_annotations,
                     )
                     validation_errors = [*ruff_errors, *_validate_module_candidate(merged_source)]
                     if validation_errors:
@@ -2574,6 +2608,7 @@ async def run_build(
                     f"{module_name}:fallback" if len(components) > 1 and jobs > 1 else module_name
                 ),
                 work_item_label=("monolithic fallback" if len(components) > 1 and jobs > 1 else ""),
+                preserve_annotation_syntax=preserve_module_annotations,
             )
             if not ok or source is None:
                 if split_errors:

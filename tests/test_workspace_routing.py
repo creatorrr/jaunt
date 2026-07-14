@@ -184,6 +184,19 @@ def test_cli_test_generates_identical_test_modules_per_owner(
         )
         targeted_payload = json.loads(capsys.readouterr().out)
 
+        human_targeted_rc = jaunt.cli.main(
+            [
+                "test",
+                "--root",
+                str(tmp_path),
+                "--target",
+                "tests.test_spec",
+                "--no-build",
+                "--pytest-args=-q",
+            ]
+        )
+        human_targeted_output = capsys.readouterr().out
+
         missing_rc = jaunt.cli.main(
             [
                 "test",
@@ -197,6 +210,19 @@ def test_cli_test_generates_identical_test_modules_per_owner(
             ]
         )
         missing_payload = json.loads(capsys.readouterr().out)
+
+        human_missing_rc = jaunt.cli.main(
+            [
+                "test",
+                "--root",
+                str(tmp_path),
+                "--target",
+                "tests.does_not_exist",
+                "--no-build",
+                "--pytest-args=-q",
+            ]
+        )
+        capsys.readouterr()
     finally:
         sys.path[:] = original_path
         for name in list(sys.modules):
@@ -217,9 +243,13 @@ def test_cli_test_generates_identical_test_modules_per_owner(
         "-m" in result["command"] and "pytest" in result["command"]
         for result in targeted_payload["pytest"]
     )
+    assert human_targeted_rc == 0
+    assert "== packages/a ==" in human_targeted_output
+    assert "== packages/b ==" in human_targeted_output
     assert missing_rc == jaunt.cli.EXIT_PYTEST_FAILURE
     assert missing_payload["pytest"][0]["exit_code"] == 5
     assert "matched" in missing_payload["pytest"][0]["stderr"]
+    assert human_missing_rc == jaunt.cli.EXIT_PYTEST_FAILURE
     assert (tmp_path / "packages/a/tests/__generated__/test_spec.py").is_file()
     assert (tmp_path / "packages/b/tests/__generated__/test_spec.py").is_file()
 

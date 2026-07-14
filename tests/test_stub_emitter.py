@@ -664,6 +664,28 @@ def test_normalize_python_source_formats_and_applies_unsafe_ruff_fixes() -> None
     assert "def identity(value: Any | None) -> Any | None:" in normalized
 
 
+def test_normalize_python_source_preserves_sealed_annotation_syntax() -> None:
+    source = textwrap.dedent(
+        """
+        from typing import List, Optional
+
+        class Legacy:
+            def convert(self, values: Optional[List[str]]) -> Optional[int]:
+                return None
+        """
+    )
+
+    normalized, errors = normalize_python_source(
+        source,
+        filename="generated.py",
+        preserve_annotation_syntax=True,
+    )
+
+    assert errors == []
+    assert "values: Optional[List[str]]" in normalized
+    assert "-> Optional[int]" in normalized
+
+
 def test_jaunt_public_names_in_annotations_still_resolve() -> None:
     """Stripping jaunt imports must not orphan a legitimate annotation that
     references a jaunt public name — it resolves from the generated module's

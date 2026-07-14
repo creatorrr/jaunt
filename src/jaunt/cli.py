@@ -6131,6 +6131,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     codex = _doctor_command_probe(["codex", "--version"])
     codex_auth = _doctor_command_probe(["codex", "login", "status"])
+    auth_detail = str(codex_auth.get("detail", "")).casefold()
+    if bool(codex_auth.get("available")) and (
+        "not authenticated" in auth_detail or "not logged in" in auth_detail
+    ):
+        codex_auth = {**codex_auth, "available": False}
     environment: dict[str, object] = {
         "jaunt": {"available": True, "detail": f"jaunt {__version__}"},
         "python": {"available": True, "detail": sys.version.split()[0]},
@@ -6781,6 +6786,10 @@ def cmd_build(args: argparse.Namespace) -> int:
 
 async def _cmd_test_async(args: argparse.Namespace) -> int:
     json_mode = _is_json_mode(args)
+    # The workspace wrapper reads this independently of presentation mode.
+    # Targeted owners start unselected and flip only after discovery finds a
+    # matching generated-test module.
+    args._target_selected = not bool(args.target)
     try:
         root, cfg = _load_config(args)
         _maybe_load_dotenv(root)
@@ -7014,6 +7023,8 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
         selected_module_specs = {
             module_name: module_specs[module_name] for module_name in sorted(selected_modules)
         }
+        if target_mods and selected_module_specs:
+            args._target_selected = True
         if target_mods and not selected_module_specs and owner_scope is not None:
             if json_mode:
                 _emit_json(
@@ -7316,6 +7327,7 @@ async def _cmd_test_workspace_async(args: argparse.Namespace) -> int:
     import io
 
     owner_results: list[dict[str, object]] = []
+    owner_selections: list[bool] = []
     exit_codes: list[int] = []
     for owner in owners:
         child = argparse.Namespace(**vars(args))
@@ -7325,6 +7337,7 @@ async def _cmd_test_workspace_async(args: argparse.Namespace) -> int:
         with contextlib.redirect_stdout(captured):
             rc = await _cmd_test_async(child)
         exit_codes.append(rc)
+        owner_selections.append(bool(getattr(child, "_target_selected", not bool(args.target))))
         output = captured.getvalue()
         if _is_json_mode(args):
             payload = _last_json_object(output) or {}
@@ -7340,11 +7353,7 @@ async def _cmd_test_workspace_async(args: argparse.Namespace) -> int:
             if output:
                 print(output, end="")
 
-    any_selected = any(
-        isinstance(owner_result.get("result"), dict)
-        and bool(cast("dict[str, object]", owner_result["result"]).get("selected", True))
-        for owner_result in owner_results
-    )
+    any_selected = any(owner_selections)
     if args.target and not any_selected:
         exit_codes.append(EXIT_PYTEST_FAILURE)
 
