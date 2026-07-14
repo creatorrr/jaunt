@@ -189,6 +189,44 @@ def _test_prefix(test_root: Path, owner_dir: Path) -> str:
     return ".".join(part for part in rel.parts if part not in {"", "."}) or "tests"
 
 
+def _test_module_name(route: TestRoute, source_file: Path) -> str | None:
+    rel = source_file.relative_to(route.root)
+    suffix = rel.parent.parts if rel.name == "__init__.py" else rel.with_suffix("").parts
+    tail = ".".join(suffix)
+    return route.module_prefix if not tail else f"{route.module_prefix}.{tail}"
+
+
+def _validate_test_module_names(routes: Sequence[TestRoute], *, generated_dir: str) -> None:
+    """Reject ambiguous test imports within one owner before any module import."""
+
+    seen: dict[tuple[Path, str], Path] = {}
+    collisions: dict[tuple[Path, str], set[Path]] = defaultdict(set)
+    for route in routes:
+        if not route.root.is_dir():
+            continue
+        for source_file in sorted(route.root.rglob("*.py")):
+            rel = source_file.relative_to(route.root)
+            if generated_dir in rel.parts or "__pycache__" in rel.parts:
+                continue
+            module = _test_module_name(route, source_file)
+            if module is None:
+                continue
+            key = (route.owner_dir, module)
+            previous = seen.get(key)
+            if previous is not None and previous != source_file:
+                collisions[key].update({previous, source_file})
+            seen.setdefault(key, source_file)
+    if not collisions:
+        return
+    details = "; ".join(
+        f"{module} ({owner}): " + ", ".join(path.as_posix() for path in sorted(paths))
+        for (owner, module), paths in sorted(
+            collisions.items(), key=lambda item: (item[0][0].as_posix(), item[0][1])
+        )
+    )
+    raise JauntConfigError(f"Duplicate test module names within one owner: {details}")
+
+
 def resolve_workspace(
     root: Path,
     cfg: JauntConfig,
@@ -225,6 +263,8 @@ def resolve_workspace(
                 module_prefix=_test_prefix(test_root, owner_dir),
             )
         )
+
+    _validate_test_module_names(test_routes, generated_dir=cfg.paths.generated_dir)
 
     files: dict[Path, bool] = {}
     for source_root in source_roots:

@@ -200,6 +200,7 @@ class GeneratorBackend(ABC):
         max_attempts: int = 2,
         initial_error_context: list[str] | None = None,
         progress: Callable[[str, str], None] | None = None,
+        usage_callback: Callable[[TokenUsage], None] | None = None,
     ) -> GenerationResult:
         """Generate and validate a generic request, feeding diagnostics to retries."""
 
@@ -225,6 +226,8 @@ class GeneratorBackend(ABC):
             usage = generated[1]
             advisories = _generation_advisories(generated)
             if usage is not None:
+                if usage_callback is not None:
+                    usage_callback(usage)
                 total_prompt += usage.prompt_tokens
                 total_completion += usage.completion_tokens
                 total_cached_prompt += usage.cached_prompt_tokens
@@ -279,6 +282,7 @@ class GeneratorBackend(ABC):
         extra_validator: Callable[[str], list[str]] | None = None,
         initial_error_context: list[str] | None = None,
         progress: Callable[[str, str], None] | None = None,
+        usage_callback: Callable[[TokenUsage], None] | None = None,
     ) -> GenerationResult:
         """Generate code, validate, and retry with error context (deterministic)."""
 
@@ -299,6 +303,8 @@ class GeneratorBackend(ABC):
             usage = gen[1]
             attempt_advisories = _generation_advisories(gen)
             if usage is not None:
+                if usage_callback is not None:
+                    usage_callback(usage)
                 total_prompt += usage.prompt_tokens
                 total_completion += usage.completion_tokens
                 total_cached_prompt += usage.cached_prompt_tokens

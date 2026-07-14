@@ -15,7 +15,7 @@ from jaunt.header import parse_stub_header
 _JAUNT_DECORATORS = {"magic", "sig", "test", "contract", "preserve"}
 
 # Bump when the stub rendering logic changes so already-emitted stubs re-emit.
-_STUB_FORMAT_VERSION = "2"
+_STUB_FORMAT_VERSION = "4"
 
 _BUILTIN_NAMES = frozenset(dir(builtins))
 
@@ -74,34 +74,111 @@ def _normalize_source_for_digest(source: str) -> str:
         return source or ""
 
 
-def format_stub_best_effort(stub_source: str) -> str:
-    """Run the emitted stub through ``ruff format`` when ruff is on PATH.
+def normalize_python_source(
+    source: str,
+    *,
+    filename: str,
+    preserve_annotation_syntax: bool = False,
+) -> tuple[str, list[str]]:
+    """Apply Jaunt's bundled Ruff convention to generated Python source.
 
-    Projects that gate on ``ruff format --check`` have ruff by definition, so
-    formatting with the user's own tool removes the need for per-file lint
-    exemptions on emitted stubs. Environments without ruff get the unformatted
-    text — freshness is keyed on the inputs digest, never the rendered bytes,
-    so the two environments agree on staleness.
+    Ruff is a base Jaunt dependency. Candidates are formatted, auto-fixed with
+    the E/F/I/UP/B rule set (including explicitly requested unsafe fixes), then
+    formatted and checked once more. The isolated configuration keeps emitted
+    bytes stable across adopter repositories with different Ruff settings.
     """
     import shutil
     import subprocess
 
     ruff = shutil.which("ruff")
     if ruff is None:
-        return stub_source
-    try:
-        proc = subprocess.run(
-            [ruff, "format", "--stdin-filename", "stub.pyi", "-"],
-            input=stub_source,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return stub_source
-    if proc.returncode != 0 or not proc.stdout:
-        return stub_source
-    return proc.stdout
+        return source, ["Ruff normalization unavailable: the bundled ruff executable was not found"]
+
+    format_args = [
+        ruff,
+        "format",
+        "--isolated",
+        "--line-length",
+        "100",
+        "--target-version",
+        "py312",
+        "--stdin-filename",
+        filename,
+        "-",
+    ]
+    ignored_rules = ["E501"]
+    if preserve_annotation_syntax:
+        # Sealed @jaunt.sig methods require the emitted annotation syntax to
+        # match the authored signature exactly. These are the pyupgrade rules
+        # that rewrite typing.List/Optional/Union rather than merely formatting
+        # them. All other UP rules, plus E/F/I/B, remain active.
+        ignored_rules.extend(["UP006", "UP007", "UP035", "UP045"])
+
+    check_args = [
+        ruff,
+        "check",
+        "--isolated",
+        "--select",
+        "E,F,I,UP,B",
+        # Ruff's formatter intentionally leaves some unsplittable lines long;
+        # retrying the model for formatter-owned E501 output wastes tokens.
+        "--ignore",
+        ",".join(ignored_rules),
+        "--target-version",
+        "py312",
+        "--stdin-filename",
+        filename,
+    ]
+
+    def run(args: list[str], text: str) -> subprocess.CompletedProcess[str] | None:
+        try:
+            return subprocess.run(
+                args,
+                input=text,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+
+    formatted = run(format_args, source)
+    if formatted is None or formatted.returncode != 0:
+        detail = "" if formatted is None else (formatted.stderr or formatted.stdout).strip()
+        return source, [f"Ruff format failed{': ' + detail if detail else ''}"]
+    current = formatted.stdout
+
+    fixed = run([*check_args, "--fix", "--unsafe-fixes", "-"], current)
+    if fixed is None:
+        return current, ["Ruff check --fix --unsafe-fixes failed to run"]
+    if fixed.stdout:
+        current = fixed.stdout
+
+    reformatted = run(format_args, current)
+    if reformatted is None or reformatted.returncode != 0:
+        detail = "" if reformatted is None else (reformatted.stderr or reformatted.stdout).strip()
+        return current, [f"Ruff format failed{': ' + detail if detail else ''}"]
+    current = reformatted.stdout
+
+    checked = run([*check_args, "--output-format", "concise", "-"], current)
+    if checked is None:
+        return current, ["Ruff final check failed to run"]
+    if checked.returncode != 0:
+        diagnostics = [line for line in checked.stdout.splitlines() if line.strip()]
+        return current, diagnostics or ["Ruff final check failed"]
+    return current, []
+
+
+def format_stub_best_effort(stub_source: str) -> str:
+    """Normalize an emitted stub with Ruff when Ruff is available.
+
+    Projects that gate on ``ruff format --check`` have ruff by definition, so
+    normalization removes the need for per-file lint exemptions on emitted
+    stubs. Environments without Ruff retain the unformatted text; freshness is
+    keyed on the inputs digest, never the rendered bytes.
+    """
+    normalized, _errors = normalize_python_source(stub_source, filename="stub.pyi")
+    return normalized
 
 
 @jaunt.contract
@@ -138,7 +215,7 @@ def build_stub_source(
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
     }
 
-    import_chunks: list[str] = []
+    source_imports: list[ast.Import | ast.ImportFrom] = []
     body_chunks: list[str] = []
     rendered_nodes: list[ast.AST] = []
     for node in spec_tree.body:
@@ -161,11 +238,13 @@ def build_stub_source(
                 if not kept:
                     continue
                 node = ast.Import(names=kept)
-            import_chunks.append(ast.unparse(copy.deepcopy(node)).strip())
+            source_imports.append(copy.deepcopy(node))
             continue
 
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
-            body_chunks.append(ast.unparse(copy.deepcopy(node)).strip())
+            clone = copy.deepcopy(node)
+            rendered_nodes.append(clone)
+            body_chunks.append(ast.unparse(clone).strip())
             continue
 
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -191,9 +270,22 @@ def build_stub_source(
     # such referenced-but-unprovided names from the generated module. Names bound
     # only by jaunt imports are NOT provided — those imports were skipped above,
     # so a legitimate reference (`-> JauntError`) must resolve like any other.
+    referenced: set[str] = set()
+    for node in rendered_nodes:
+        referenced |= _referenced_load_names(node)
+    referenced |= _explicit_stub_exports(spec_tree)
+    kept_imports = [
+        kept
+        for node in source_imports
+        if (kept := _filter_stub_import(node, referenced)) is not None
+    ]
+    import_chunks = [ast.unparse(node).strip() for node in kept_imports]
+    all_import_names = _import_bound_names(spec_tree)
+    kept_import_names = {name for node in kept_imports for name in _bound_import_names(node)}
+
     resolved = _resolve_stub_references(
         rendered_nodes=rendered_nodes,
-        provided=_module_bound_names(spec_tree) - _jaunt_import_bound_names(spec_tree),
+        provided=(_module_bound_names(spec_tree) - all_import_names) | kept_import_names,
         generated_tree=generated_tree,
         generated_module=generated_module,
     )
@@ -353,6 +445,62 @@ def _module_bound_names(tree: ast.Module) -> set[str]:
     return names
 
 
+def _bound_import_names(node: ast.Import | ast.ImportFrom) -> set[str]:
+    names: set[str] = set()
+    for alias in node.names:
+        if alias.name == "*":
+            continue
+        names.add(alias.asname or alias.name.split(".", 1)[0])
+    return names
+
+
+def _import_bound_names(tree: ast.Module) -> set[str]:
+    return {
+        name
+        for node in tree.body
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        for name in _bound_import_names(node)
+    }
+
+
+def _explicit_stub_exports(tree: ast.Module) -> set[str]:
+    exports: set[str] = set()
+    for node in tree.body:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        target = node.target if isinstance(node, ast.AnnAssign) else node.targets[0]
+        if not (isinstance(target, ast.Name) and target.id == "__all__"):
+            continue
+        value = node.value
+        if not isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+            continue
+        exports.update(
+            item.value
+            for item in value.elts
+            if isinstance(item, ast.Constant) and isinstance(item.value, str)
+        )
+    return exports
+
+
+def _filter_stub_import(
+    node: ast.Import | ast.ImportFrom, required_names: set[str]
+) -> ast.Import | ast.ImportFrom | None:
+    kept: list[ast.alias] = []
+    for alias in node.names:
+        if alias.name == "*":
+            kept.append(copy.deepcopy(alias))
+            continue
+        bound = alias.asname or alias.name.split(".", 1)[0]
+        explicit_reexport = alias.asname == alias.name
+        if bound in required_names or explicit_reexport:
+            kept.append(copy.deepcopy(alias))
+    if not kept:
+        return None
+    if isinstance(node, ast.Import):
+        return ast.Import(names=kept)
+    return ast.ImportFrom(module=node.module, names=kept, level=node.level)
+
+
 def _import_bindings(tree: ast.Module, *, generated_module: str | None) -> dict[str, str]:
     """Map each name a top-level import binds to a single-import statement string.
 
@@ -488,8 +636,33 @@ def _function_stub_clone(node: ast.FunctionDef | ast.AsyncFunctionDef) -> ast.st
     clone = copy.deepcopy(node)
     clone.decorator_list = [dec for dec in clone.decorator_list if not _is_jaunt_decorator(dec)]
     clone.body = [ast.Expr(value=ast.Constant(value=Ellipsis))]
+    if isinstance(clone, ast.AsyncFunctionDef) and any(
+        _is_async_contextmanager_decorator(dec) for dec in clone.decorator_list
+    ):
+        # A body-less async def in a .pyi is a coroutine function, not an async
+        # generator, so asynccontextmanager rejects its Callable return type. Stub
+        # syntax uses a plain def here to describe the decorator's generator input;
+        # the decorated public callable type remains the async context manager.
+        sync_clone = ast.FunctionDef(
+            name=clone.name,
+            args=clone.args,
+            body=clone.body,
+            decorator_list=clone.decorator_list,
+            returns=clone.returns,
+            type_comment=clone.type_comment,
+            type_params=clone.type_params,
+        )
+        ast.copy_location(sync_clone, clone)
+        clone = sync_clone
     ast.fix_missing_locations(clone)
     return clone
+
+
+def _is_async_contextmanager_decorator(dec: ast.expr) -> bool:
+    target = dec.func if isinstance(dec, ast.Call) else dec
+    if isinstance(target, ast.Name):
+        return target.id == "asynccontextmanager"
+    return isinstance(target, ast.Attribute) and target.attr == "asynccontextmanager"
 
 
 def _is_jaunt_decorator(dec: ast.expr) -> bool:

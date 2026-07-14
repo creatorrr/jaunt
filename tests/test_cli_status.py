@@ -30,6 +30,99 @@ def test_main_dispatches_status(monkeypatch) -> None:
     assert jaunt.cli.main(["status"]) == 0
 
 
+def test_status_json_previews_generation_fanout_and_seeded_skills(tmp_path: Path, capsys) -> None:
+    from jaunt.registry import clear_registries
+
+    pkg = "status_plan_pkg"
+    _make_spec_project(tmp_path, pkg=pkg)
+    before_modules = set(sys.modules)
+    orig_path = list(sys.path)
+    try:
+        rc = jaunt.cli.main(["status", "--json", "--root", str(tmp_path)])
+        payload = json.loads(capsys.readouterr().out)
+
+        assert rc == 0
+        plan = payload["generation_plan"]
+        assert plan["candidate_modules"] == [f"{pkg}.specs"]
+        assert plan["max_attempts_per_unit"] >= 2
+        assert plan["max_generation_attempts"] >= 2
+        assert plan["modules"][f"{pkg}.specs"]["initial_generation_units"] == 1
+        assert "not prompt tokens" in plan["skills_workspace_seeded"]["note"]
+    finally:
+        clear_registries()
+        sys.path[:] = orig_path
+        for name in list(sys.modules):
+            if name not in before_modules:
+                del sys.modules[name]
+
+
+def test_doctor_json_is_read_only_and_wraps_status(tmp_path: Path, monkeypatch, capsys) -> None:
+    from jaunt.registry import clear_registries
+
+    pkg = "doctor_pkg"
+    _make_spec_project(tmp_path, pkg=pkg)
+    monkeypatch.setattr(
+        jaunt.cli,
+        "_doctor_command_probe",
+        lambda argv: {"available": True, "detail": f"{argv[0]} test"},
+    )
+    before_files = sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*"))
+    before_modules = set(sys.modules)
+    orig_path = list(sys.path)
+    try:
+        rc = jaunt.cli.main(["doctor", "--json", "--root", str(tmp_path)])
+        payload = json.loads(capsys.readouterr().out)
+
+        assert rc == 0
+        assert payload["command"] == "doctor"
+        assert payload["ok"] is True
+        assert payload["read_only"] is True
+        assert payload["model_calls"] == 0
+        assert payload["status"]["stale"] == [f"{pkg}.specs"]
+        assert payload["status"]["generation_plan"]["candidate_modules"] == [f"{pkg}.specs"]
+        assert payload["findings"] == ["1 stale Jaunt module(s)"]
+        assert sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*")) == before_files
+    finally:
+        clear_registries()
+        sys.path[:] = orig_path
+        for name in list(sys.modules):
+            if name not in before_modules:
+                del sys.modules[name]
+
+
+def test_doctor_treats_successful_not_authenticated_probe_as_failure(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from jaunt.registry import clear_registries
+
+    _make_spec_project(tmp_path, pkg="doctor_auth_pkg")
+
+    def probe(argv: list[str]) -> dict[str, object]:
+        if argv == ["codex", "login", "status"]:
+            return {"available": True, "detail": "Not authenticated"}
+        return {"available": True, "detail": f"{argv[0]} test"}
+
+    monkeypatch.setattr(jaunt.cli, "_doctor_command_probe", probe)
+    before_modules = set(sys.modules)
+    orig_path = list(sys.path)
+    try:
+        rc = jaunt.cli.main(["doctor", "--json", "--root", str(tmp_path)])
+        payload = json.loads(capsys.readouterr().out)
+
+        assert rc == 0
+        assert payload["environment"]["codex_auth"] == {
+            "available": False,
+            "detail": "Not authenticated",
+        }
+        assert "Codex is not authenticated; run codex login" in payload["findings"]
+    finally:
+        clear_registries()
+        sys.path[:] = orig_path
+        for name in list(sys.modules):
+            if name not in before_modules:
+                del sys.modules[name]
+
+
 def _write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")

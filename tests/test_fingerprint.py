@@ -226,6 +226,24 @@ def test_codex_fingerprint_is_stable_for_identical_inputs() -> None:
     assert first == second
 
 
+def test_include_target_tests_does_not_change_global_build_fingerprint() -> None:
+    cfg = _config(engine="codex")
+    disabled = fingerprint.generation_fingerprint_from_config(
+        cfg,
+        kind="build",
+        include_target_tests=False,
+        codex_version_resolver=lambda: "codex-cli 1.0.0",
+    )
+    enabled = fingerprint.generation_fingerprint_from_config(
+        replace(cfg, build=replace(cfg.build, include_target_tests=True)),
+        kind="build",
+        include_target_tests=True,
+        codex_version_resolver=lambda: "codex-cli 1.0.0",
+    )
+
+    assert enabled == disabled
+
+
 def test_codex_fingerprint_cli_version_switch_can_disable_churn() -> None:
     cfg = _config(
         engine="codex",

@@ -28,6 +28,13 @@ Test quality:
 - Cover the happy path (normal usage) and edge cases (boundary values, error conditions, empty inputs).
 - Write specific assertions that check concrete values — avoid bare `assert result`.
 - Use `pytest.raises` for expected exceptions.
+- Governed callables resolve sibling globals in their generated implementation module. Patch
+  the callable's `__globals__` binding or the actual defining module; patching a facade sibling
+  does not affect a callable that never reads that facade.
+- Import support types and exceptions from their defining modules, not from a facade unless
+  Dependency APIs explicitly show the facade exports them.
+- Keep intentional invalid-input cases type-checkable with `cast(Any, callable)` or a precise
+  `# type: ignore[arg-type]` on the one call. Do not emit broad ignores.
 - When a target is a class, test it holistically: construct it, drive realistic
   sequences of method calls (stateful scenarios), and assert invariants across
   calls — not just isolated per-method results.

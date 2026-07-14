@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import subprocess
 from pathlib import Path
 
@@ -8,9 +9,11 @@ import pytest
 
 from jaunt import paths
 from jaunt.builder import expand_stale_modules, run_build
+from jaunt.cost import CostTracker
 from jaunt.deps import build_spec_graph
 from jaunt.errors import JauntDependencyCycleError
-from jaunt.generate.base import GeneratorBackend, ModuleSpecContext
+from jaunt.generate.base import GeneratorBackend, ModuleSpecContext, TokenUsage
+from jaunt.progress import ProgressBar
 from jaunt.registry import SpecEntry
 from jaunt.spec_ref import normalize_spec_ref
 
@@ -247,7 +250,9 @@ def test_run_build_rejects_undeclared_generated_import(tmp_path: Path) -> None:
             spec_graph=spec_graph,
             module_dag=module_dag,
             stale_modules={"pkg.specs"},
-            backend=SourceBackend("import hallucinated_pkg\n\ndef Play():\n    return 1\n"),
+            backend=SourceBackend(
+                "import hallucinated_pkg\n\ndef Play():\n    return hallucinated_pkg.VALUE\n"
+            ),
             jobs=1,
         )
     )
@@ -531,7 +536,9 @@ def test_run_build_revalidates_fresh_generated_import_policy(tmp_path: Path) -> 
     module_specs = {"pkg.specs": [entry]}
     module_dag = {"pkg.specs": set()}
 
-    first_backend = SourceBackend("import hallucinated_pkg\n\ndef Play():\n    return 1\n")
+    first_backend = SourceBackend(
+        "import hallucinated_pkg\n\ndef Play():\n    return hallucinated_pkg.VALUE\n"
+    )
     first = asyncio.run(
         run_build(
             package_dir=src,
@@ -749,6 +756,7 @@ def test_scheduler_splits_disconnected_specs_within_module(tmp_path: Path) -> No
     module_dag = {"pkg.mod": set()}
 
     backend = FakeBackend()
+    progress_output = io.StringIO()
     report = asyncio.run(
         run_build(
             package_dir=tmp_path,
@@ -760,12 +768,39 @@ def test_scheduler_splits_disconnected_specs_within_module(tmp_path: Path) -> No
             stale_modules={"pkg.mod"},
             backend=backend,
             jobs=2,
+            progress=ProgressBar(
+                label="build",
+                total=1,
+                mode="plain",
+                stream=progress_output,
+            ),
         )
     )
 
     assert report.failed == {}
     assert backend.calls == ["pkg.mod", "pkg.mod"]
     assert sorted(ctx.expected_names for ctx in backend.contexts) == [["A"], ["B"]]
+    assert report.work_items == {
+        "pkg.mod": [
+            {
+                "id": "pkg.mod:component:1",
+                "label": "component 1/2 [A]",
+                "symbols": ["A"],
+                "attempts": 1,
+                "cache_hit": False,
+            },
+            {
+                "id": "pkg.mod:component:2",
+                "label": "component 2/2 [B]",
+                "symbols": ["B"],
+                "attempts": 1,
+                "cache_hit": False,
+            },
+        ]
+    }
+    progress_text = progress_output.getvalue()
+    assert "component 1/2 [A]" in progress_text
+    assert "component 2/2 [B]" in progress_text
 
     relpath = paths.generated_module_to_relpath(
         paths.spec_module_to_generated_module("pkg.mod", generated_dir="__generated__"),
@@ -774,6 +809,187 @@ def test_scheduler_splits_disconnected_specs_within_module(tmp_path: Path) -> No
     generated = (tmp_path / relpath).read_text(encoding="utf-8")
     assert "def A():" in generated
     assert "def B():" in generated
+
+
+def test_scheduler_attributes_retries_and_cost_to_one_module(tmp_path: Path) -> None:
+    class RetryBackend(GeneratorBackend):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        @property
+        def model_name(self) -> str:
+            return "gpt-5.6-sol"
+
+        @property
+        def provider_name(self) -> str:
+            return "openai"
+
+        async def generate_module(
+            self,
+            ctx: ModuleSpecContext,
+            *,
+            extra_error_context: list[str] | None = None,
+        ) -> tuple[str, TokenUsage]:
+            del extra_error_context
+            self.calls += 1
+            name = "Wrong" if self.calls == 1 else ctx.expected_names[0]
+            return (
+                f"def {name}():\n    return 1\n",
+                TokenUsage(10, 5, self.model_name, self.provider_name),
+            )
+
+    spec_path = tmp_path / "mod.py"
+    _write(spec_path, "def A():\n    return None\n")
+    entry = _entry(module="pkg.mod", qualname="A", source_file=str(spec_path))
+    specs = {entry.spec_ref: entry}
+    backend = RetryBackend()
+    tracker = CostTracker()
+    progress_output = io.StringIO()
+
+    report = asyncio.run(
+        run_build(
+            package_dir=tmp_path,
+            generated_dir="__generated__",
+            module_specs={"pkg.mod": [entry]},
+            specs=specs,
+            spec_graph=build_spec_graph(specs, infer_default=False),
+            module_dag={"pkg.mod": set()},
+            stale_modules={"pkg.mod"},
+            backend=backend,
+            jobs=1,
+            cost_tracker=tracker,
+            progress=ProgressBar(
+                label="build",
+                total=1,
+                mode="plain",
+                stream=progress_output,
+            ),
+        )
+    )
+
+    assert report.failed == {}
+    assert report.work_items["pkg.mod"][0]["attempts"] == 2
+    assert tracker.api_calls == 2
+    assert tracker.total_prompt_tokens == 20
+    assert tracker.total_completion_tokens == 10
+    progress_text = progress_output.getvalue()
+    assert "pkg.mod: attempt (1/2)" in progress_text
+    assert "pkg.mod: retry (attempt 1)" in progress_text
+
+
+def test_component_merge_coalesces_overlapping_from_imports() -> None:
+    from jaunt.builder import _GeneratedComponent, _merge_generated_components
+
+    merged, errors = _merge_generated_components(
+        [
+            _GeneratedComponent(
+                expected_names=("A",),
+                source=(
+                    "from typing import Any, Dict\n\n"
+                    "def A(value: Any) -> Dict[str, Any]:\n"
+                    "    return {'value': value}\n"
+                ),
+            ),
+            _GeneratedComponent(
+                expected_names=("B",),
+                source=(
+                    "from typing import Any, Optional\n\n"
+                    "def B(value: Any) -> Optional[Any]:\n"
+                    "    return value\n"
+                ),
+            ),
+        ]
+    )
+
+    assert errors == []
+    assert merged.count("from typing import") == 1
+    assert merged.count("Any") == 5
+    assert "from typing import Any, Dict, Optional" in merged
+
+
+def test_attached_test_context_is_neutral_to_equivalent_path_move(tmp_path: Path) -> None:
+    from jaunt.builder import _build_attached_test_specs_block
+
+    source = (
+        "import jaunt\n\n"
+        "@jaunt.test(targets=('pkg.mod:A',))\n"
+        "def test_a():\n"
+        '    """A returns one."""\n'
+        "    ...\n"
+    )
+    old_path = tmp_path / "owner/tests/spec.py"
+    new_path = tmp_path / "owner_unique_tests/spec.py"
+    _write(old_path, source)
+    _write(new_path, source)
+    entries = []
+    for module, path in (("tests.spec", old_path), ("owner_unique_tests.spec", new_path)):
+        entries.append(
+            SpecEntry(
+                kind="test",
+                spec_ref=normalize_spec_ref(f"{module}:test_a"),
+                module=module,
+                qualname="test_a",
+                source_file=str(path),
+                obj=object(),
+                decorator_kwargs={"targets": ("pkg.mod:A",)},
+            )
+        )
+
+    assert _build_attached_test_specs_block([entries[0]]) == _build_attached_test_specs_block(
+        [entries[1]]
+    )
+
+
+def test_run_build_normalizes_generated_python_with_ruff(tmp_path: Path) -> None:
+    spec_path = tmp_path / "mod.py"
+    _write(spec_path, "def A():\n    return None\n")
+    entry = _entry(module="pkg.mod", qualname="A", source_file=str(spec_path))
+    specs = {entry.spec_ref: entry}
+    report = asyncio.run(
+        run_build(
+            package_dir=tmp_path,
+            generated_dir="__generated__",
+            module_specs={"pkg.mod": [entry]},
+            specs=specs,
+            spec_graph=build_spec_graph(specs, infer_default=False),
+            module_dag={"pkg.mod": set()},
+            stale_modules={"pkg.mod"},
+            backend=SourceBackend(
+                "from typing import Any\n"
+                "from typing import Any, Optional\n\n"
+                "def A( value: Optional[Any]=None )->Optional[Any]:\n"
+                " return value\n"
+            ),
+            jobs=1,
+        )
+    )
+
+    assert report.failed == {}
+    generated = next(tmp_path.rglob("__generated__/mod.py"))
+    source = generated.read_text(encoding="utf-8")
+    assert source.count("from typing import") == 1
+    assert "def A(value: Any | None = None) -> Any | None:" in source
+    subprocess.run(
+        ["ruff", "format", "--isolated", "--check", str(generated)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        [
+            "ruff",
+            "check",
+            "--isolated",
+            "--select",
+            "E,F,I,UP,B",
+            "--ignore",
+            "E501",
+            str(generated),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def test_scheduler_keeps_connected_specs_in_same_module_together(tmp_path: Path) -> None:

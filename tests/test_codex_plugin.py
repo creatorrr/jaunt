@@ -21,7 +21,7 @@ CLAUDE_PLUGIN = REPO / "jaunt-claude-plugin"
 def test_manifest_and_marketplace_shape() -> None:
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text())
     assert manifest["name"] == "jaunt"
-    assert manifest["version"] == "1.1.0"
+    assert manifest["version"] == "1.1.1"
     assert "TypeScript" in manifest["description"]
     assert manifest["skills"] == "./skills/"
     assert "hooks" not in manifest
@@ -197,6 +197,65 @@ def test_doctor_skips_codex_warning_preambles(tmp_path: Path) -> None:
     assert "WARNING:" not in result.stdout
 
 
+def test_doctor_skips_nested_tool_worktrees_and_scopes_hooks_to_its_host(
+    tmp_path: Path,
+) -> None:
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    (tmp_path / "jaunt.toml").write_text("version = 1\n")
+    for host in (".claude", ".codex"):
+        nested = tmp_path / host / "worktrees" / "unrelated"
+        nested.mkdir(parents=True)
+        (nested / "jaunt.toml").write_text("version = 1\n")
+    (tmp_path / ".claude" / "settings.json").write_text(
+        '{"hooks":{"PreToolUse":[{"command":"jaunt guard"}]}}\n'
+    )
+    (tmp_path / ".codex" / "config.toml").write_text('command = "scripts/codex-guard.sh"\n')
+    _write_executable(
+        bin_dir / "codex",
+        'if [ "$1" = "--version" ]; then echo "codex-cli 9"; else echo "Logged in"; fi\n',
+    )
+    _write_executable(
+        bin_dir / "jaunt",
+        """if [ "$1" = "--version" ]; then echo "jaunt 1.7.1"; exit 0; fi
+echo '{"command":"status","ok":true,"fresh":[],"stale":[],"orphans":[]}'
+""",
+    )
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin",
+        "JAUNT_WORKSPACE_ROOT": str(tmp_path),
+    }
+
+    codex = subprocess.run(
+        ["bash", str(PLUGIN / "scripts" / "doctor.sh")],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    assert "- .: 0 fresh" in codex.stdout
+    assert ".claude/worktrees" not in codex.stdout
+    assert ".codex/worktrees" not in codex.stdout
+    assert "== duplicate Codex hooks" in codex.stdout
+    assert str(tmp_path / ".codex" / "config.toml") in codex.stdout
+    assert str(tmp_path / ".claude" / "settings.json") not in codex.stdout
+
+    claude = subprocess.run(
+        ["bash", str(CLAUDE_PLUGIN / "scripts" / "doctor.sh")],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    assert "- .: 0 fresh" in claude.stdout
+    assert ".claude/worktrees" not in claude.stdout
+    assert ".codex/worktrees" not in claude.stdout
+    assert "== duplicate Claude hooks" in claude.stdout
+    assert str(tmp_path / ".claude" / "settings.json") in claude.stdout
+    assert str(tmp_path / ".codex" / "config.toml") not in claude.stdout
+
+
 def _write_executable(path: Path, body: str) -> None:
     path.write_text(f"#!/usr/bin/env bash\n{body}")
     path.chmod(0o755)
@@ -212,7 +271,7 @@ def test_workspace_runner_prefers_installed_then_uv_project_then_uvx(tmp_path: P
     installed_log = installed_root / "runner.log"
     _write_executable(
         installed_bin / "jaunt",
-        'if [ "$1" = "--version" ]; then echo "jaunt 1.7.0"; '
+        'if [ "$1" = "--version" ]; then echo "jaunt 1.7.1"; '
         f'else printf "jaunt:%s\\n" "$*" > "{installed_log}"; fi\n',
     )
     _write_executable(installed_bin / "uv", f'printf "uv:%s\\n" "$*" > "{installed_log}"\n')
@@ -234,7 +293,7 @@ def test_workspace_runner_prefers_installed_then_uv_project_then_uvx(tmp_path: P
     _write_executable(uv_bin / "jaunt", 'echo "jaunt 0.4.3"\n')
     _write_executable(
         uv_bin / "uv",
-        'if [ "$*" = "run --no-sync jaunt --version" ]; then echo "jaunt 1.7.0"; '
+        'if [ "$*" = "run --no-sync jaunt --version" ]; then echo "jaunt 1.7.1"; '
         f'else printf "uv:%s\\n" "$*" > "{uv_log}"; fi\n',
     )
     _write_executable(uv_bin / "uvx", f'printf "uvx:%s\\n" "$*" > "{uv_log}"\n')
@@ -294,7 +353,7 @@ def test_workspace_runner_exports_plugin_cache_for_uv_and_uvx(tmp_path: Path) ->
     _write_executable(
         uv_bin / "uv",
         """if [ "$UV_CACHE_DIR" != "$EXPECTED_CACHE" ]; then exit 82; fi
-if [ "$*" = "run --no-sync jaunt --version" ]; then echo "jaunt 1.7.0"; exit 0; fi
+if [ "$*" = "run --no-sync jaunt --version" ]; then echo "jaunt 1.7.1"; exit 0; fi
 printf "uv:%s\n" "$*" > "$RUNNER_LOG"
 """,
     )
@@ -343,7 +402,7 @@ def test_session_status_reports_typescript_unbuilt_invalid_and_diagnostics(tmp_p
     )
     _write_executable(
         bin_dir / "jaunt",
-        """if [ "$1" = "--version" ]; then echo "jaunt 1.7.0"; exit 0; fi
+        """if [ "$1" = "--version" ]; then echo "jaunt 1.7.1"; exit 0; fi
 cat <<'JSON'
 {
   "command": "status",
@@ -402,7 +461,7 @@ def test_doctor_checks_node_npm_and_typescript_tooling_without_building(tmp_path
     _write_executable(bin_dir / "npm", 'echo "11.5.1"\n')
     _write_executable(
         bin_dir / "jaunt",
-        """if [ "$1" = "--version" ]; then echo "jaunt 1.7.0"; exit 0; fi
+        """if [ "$1" = "--version" ]; then echo "jaunt 1.7.1"; exit 0; fi
 cat <<'JSON'
 {
   "command": "status",
@@ -452,7 +511,7 @@ def test_status_hooks_do_not_report_error_payload_as_healthy(tmp_path: Path) -> 
     (tmp_path / "jaunt.toml").write_text("version = 2\n[target.ts]\n")
     _write_executable(
         bin_dir / "jaunt",
-        """if [ "$1" = "--version" ]; then echo "jaunt 1.7.0"; exit 0; fi
+        """if [ "$1" = "--version" ]; then echo "jaunt 1.7.1"; exit 0; fi
 cat <<'JSON'
 {
   "command": "status",
@@ -501,13 +560,13 @@ def _fake_guard_bin(tmp_path: Path, *, fail: bool = False) -> Path:
     jaunt = bin_dir / "jaunt"
     if fail:
         jaunt.write_text(
-            '#!/usr/bin/env bash\nif [ "$1" = "--version" ]; then echo "jaunt 1.7.0"; '
+            '#!/usr/bin/env bash\nif [ "$1" = "--version" ]; then echo "jaunt 1.7.1"; '
             "else exit 2; fi\n"
         )
     else:
         jaunt.write_text(
             """#!/usr/bin/env bash
-if [ "$1" = "--version" ]; then echo "jaunt 1.7.0"; exit 0; fi
+if [ "$1" = "--version" ]; then echo "jaunt 1.7.1"; exit 0; fi
 python3 -c '
 import json, os, sys
 payload = json.load(sys.stdin)
@@ -711,7 +770,7 @@ def test_codex_guard_uv_probe_uses_owner_and_plugin_cache(tmp_path: Path) -> Non
         bin_dir / "uv",
         """if [ "$PWD" != "$EXPECTED_OWNER" ]; then exit 81; fi
 if [ "$UV_CACHE_DIR" != "$EXPECTED_CACHE" ]; then exit 82; fi
-if [ "$*" = "run --no-sync jaunt --version" ]; then echo "jaunt 1.7.0"; exit 0; fi
+if [ "$*" = "run --no-sync jaunt --version" ]; then echo "jaunt 1.7.1"; exit 0; fi
 python3 -c '
 import json, sys
 p = json.load(sys.stdin)

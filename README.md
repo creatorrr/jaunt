@@ -173,7 +173,7 @@ plain handwritten Python — the builder needs them to build anything.
 pip install jaunt
 
 # The base install is batteries-included (rich, watchfiles, pytest,
-# pytest-asyncio, anyio) — no optional extras.
+# pytest-asyncio, anyio, ruff) — no optional extras.
 
 # Jaunt drives the external OpenAI Codex CLI, which you install and
 # authenticate separately:
@@ -186,6 +186,16 @@ pip install jaunt
 Codex is the sole code-generation engine: Jaunt drives `codex exec` for
 all build/test/skill workflows. It requires the external `codex` binary on your
 PATH, authenticated via `codex login`. Multi-provider routing is deferred.
+
+Run `jaunt doctor --json` for a read-only environment and workspace-health
+report. It wraps status diagnostics, checks the local toolchain and Codex
+authentication, and never builds or calls a model.
+
+Python candidates are normalized before validation and write: Jaunt runs its
+bundled Ruff formatter, applies `ruff check --fix --unsafe-fixes` under Jaunt's
+E/F/I/UP/B convention (excluding formatter-owned E501), then formats and checks
+once more. Generated modules and provenance stubs should not need consumer-side
+Ruff exclusions.
 
 ## Quickstart (This Repo)
 

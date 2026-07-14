@@ -71,6 +71,7 @@ class _RecordingBackend(GeneratorBackend):
         extra_validator=None,
         initial_error_context=None,
         progress=None,
+        usage_callback=None,
     ):
         from jaunt.generate.base import GenerationResult
         from jaunt.validation import validate_generated_source
@@ -182,6 +183,58 @@ def test_in_loop_validator_rejects_unfilled_stub(tmp_path: Path) -> None:
     report = _run_build(tmp_path, _RecordingBackend(stub_out))
     assert "pkg.mod" in report.failed
     assert any("stub" in e for e in report.failed["pkg.mod"])
+
+
+def test_build_preserves_legacy_typing_in_sealed_signature(tmp_path: Path) -> None:
+    class Legacy:
+        pass
+
+    spec_path = tmp_path / "src/pkg/legacy.py"
+    spec_path.parent.mkdir(parents=True, exist_ok=True)
+    spec_path.write_text(
+        "from typing import List, Optional\n"
+        "import jaunt\n\n"
+        "@jaunt.magic()\n"
+        "class Legacy:\n"
+        "    @jaunt.sig\n"
+        "    def convert(self, values: Optional[List[str]]) -> Optional[int]: ...\n",
+        encoding="utf-8",
+    )
+    entry = SpecEntry(
+        kind="magic",
+        spec_ref=normalize_spec_ref("pkg.legacy:Legacy"),
+        module="pkg.legacy",
+        qualname="Legacy",
+        source_file=str(spec_path),
+        obj=Legacy,
+        decorator_kwargs={},
+        class_name=None,
+    )
+    specs = {entry.spec_ref: entry}
+    report = asyncio.run(
+        run_build(
+            package_dir=tmp_path / "src",
+            generated_dir="__generated__",
+            module_specs={"pkg.legacy": [entry]},
+            specs=specs,
+            spec_graph=build_spec_graph(specs, infer_default=False),
+            module_dag={"pkg.legacy": set()},
+            stale_modules={"pkg.legacy"},
+            backend=_StubBackend(
+                "from typing import List, Optional\n\n"
+                "class Legacy:\n"
+                "    def convert(self, values: Optional[List[str]]) -> Optional[int]:\n"
+                "        return len(values) if values is not None else None\n"
+            ),
+            jobs=1,
+        )
+    )
+
+    assert report.failed == {}
+    generated = next((tmp_path / "src").rglob("__generated__/legacy.py"))
+    source = generated.read_text(encoding="utf-8")
+    assert "values: Optional[List[str]]" in source
+    assert "-> Optional[int]" in source
 
 
 # ---------------------------------------------------------------------------
