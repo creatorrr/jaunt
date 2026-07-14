@@ -2,6 +2,286 @@
 
 Running notes from real adopters. Newest section first.
 
+## 2026-07-13 — 1.7.0 Codex plugin: resolver works; doctor crosses workspace and host boundaries
+
+First package-adoption pass with the installed Codex plugin. The resolver
+selects the expected workspace Jaunt:
+
+```bash
+bash ~/.codex/plugins/cache/jaunt-codex-plugins/jaunt/1.1.0/scripts/resolve-workspace.sh \
+  --run "$PWD" --version
+# jaunt 1.7.0
+```
+
+Two `doctor` findings need narrower boundaries:
+
+- **Workspace discovery includes an unrelated Claude worktree.** From the
+  `mem-mcp-c` root, `JAUNT_WORKSPACE_ROOT="$PWD" .../scripts/doctor.sh`
+  reported `.claude/worktrees/agent-af98044930db9d458` as unavailable because
+  its environment could not import `numpy`, followed by the actual root
+  workspace's status. That nested worktree is not part of the root adoption
+  run. Doctor should skip tool-managed worktrees such as
+  `.claude/worktrees/**`, or report them in a separate section that does not
+  read as root-workspace health.
+- **Duplicate-hook detection conflates Claude and Codex hosts.** The same run
+  told us to remove the guard in `.claude/settings.json` when the plugin hook
+  is enabled. That file configures Claude Code's Edit/Write guard; the installed
+  Codex plugin guards `apply_patch` through `hooks/hooks.json`. Enabling the
+  Codex plugin does not replace the Claude hook. The duplicate check should be
+  host-aware: compare `.claude/settings*.json` only with an enabled Claude
+  plugin hook, and `.codex/*` only with an enabled Codex plugin hook.
+
+### The plugin advertises doctor, but the 1.7 CLI has no doctor command
+
+The Codex plugin exposes `jaunt:doctor`, and its workflow calls for a doctor
+health check before a large build. In the Jaunt 1.7 `mem-mcp-c` worktree, the
+corresponding resolver invocation failed:
+
+```bash
+bash .../scripts/resolve-workspace.sh --run "$PWD" doctor --json
+# Jaunt 1.7 rejects "doctor" as an invalid command.
+```
+
+The resolver selected the installed Jaunt 1.7 CLI, but that CLI does not define
+`doctor`. Either implement or restore the CLI command, or update the plugin
+skill to use only the supported health-check commands.
+
+### Dependency-only 1.7.0 upgrade rebuilt 12 modules for $38.06
+
+After changing the Jaunt dependency from 1.6.2 to 1.7.0, with no spec edits,
+`status --json` classified all 12 previously generated modules as
+`structural`. `build --json --progress plain` rebuilt all 12 successfully, but
+the build used:
+
+- 41 API calls;
+- 18,166,780 prompt tokens, 15,574,477 of them provider-cached;
+- 215,440 completion tokens;
+- an estimated $38.05708;
+- `cache_hits: 0` in Jaunt's build summary.
+
+Progress showed repeated attempts under the same module names.
+`mcp_memory_server.temporal`, `memory_store_utils.entity_text`,
+`memory_store_utils.lexical_match`, and `memory_store_utils.timing` each reached
+attempt 3 for at least one generated component.
+
+The context report also listed `skills_workspace_seeded` as 236,994 characters
+(59,248 estimated tokens) for every module. That included small contracts such
+as `coercion` (106 contract characters) and `db_errors` (140). The build
+advisories were useful and concrete: `temporal` lacked dependency APIs,
+`coercion` had a conflict between its never-raises promise and its narrower
+exception handling, and `timing` did not supply the `MockTimer` contract.
+
+For this adopter, a dependency-only minor-version upgrade was therefore a
+41-call, $38 regeneration event. `status` correctly warned that implementation
+rebuilds were coming; it did not expose the retry fan-out or the fixed
+59,248-token skill context per module before the build.
+
+### Advisory conflated missing model context with a missing workspace file
+
+A successful default-mode build of `memory_store_reranker.client` emitted:
+
+> The referenced `_context/dep_*.pyi` and
+> `memory_store_reranker/errors.py` are absent from the provided workspace.
+
+The package-local file
+`packages/python/memory-store-reranker/src/memory_store_reranker/errors.py`
+exists and is imported by both the governed source and generated
+implementation. Package-local sibling modules used by the governed source
+should be included in build context. If they intentionally are not, the
+advisory should say "not provided to the model" rather than "absent from the
+workspace."
+
+### Multi-target build appeared to duplicate scheduled work
+
+Help documents `--target` as repeatable. We selected five distinct stale
+modules in one five-job build:
+
+```bash
+jaunt build --target memory_store_embeddings.client \
+  --target memory_store_reranker.client \
+  --target memory_store_postgres.pool \
+  --target memory_store_telemetry.tracing \
+  --target memory_store_telemetry.dbos_instrumentation \
+  --jobs 5 --include-target-tests --json --progress plain
+```
+
+Progress then showed five concurrent, independent generation attempts all
+attributed to `memory_store_embeddings.client`, followed by repeated
+`memory_store_postgres.pool` attempts, including retries. This may be duplicate
+scheduling or incorrect progress attribution. The independent attempt/retry
+lines strongly suggested multiplied model calls, so we interrupted the command
+(exit 130) before taking that spend. No new generated artifacts were written;
+all five modules remained structurally stale.
+
+This was the clear low-hanging parallel build path: five independent modules
+and five jobs. Once the multi-target invocation appeared to duplicate work, the
+only safe fallback was one target per process, run sequentially. Launching
+separate Jaunt processes concurrently could race on shared `.jaunt` state and
+generated artifacts, so it was not an equivalent way to recover parallelism.
+
+The resolved build plan should contain one work item per distinct selected
+module when repeatable `--target` flags are used. Structured progress and final
+cost output should likewise expose one attributable work item and cost per
+module, so an adopter can distinguish retries from duplicate scheduling and
+recover safe module-level parallelism through one multi-target command.
+
+### Owner routing did not isolate `@jaunt.test` imports
+
+The merged workspace initially used the documented owner-local routing shape:
+
+```toml
+test_roots = ["packages/python/memory-store-*/tests", "apps/memory-api/tests/unit"]
+```
+
+Four new test-spec files lived directly under four separate package `tests/`
+directories, each with its own nearest `pyproject.toml`. This command failed:
+
+```bash
+jaunt test --target memory_store_embeddings.client --no-build --no-run --json
+```
+
+Jaunt tried to import every owner through the shared top-level `tests` name and
+raised `ModuleNotFoundError` for `tests.embeddings_jaunt_specs`,
+`tests.postgres_jaunt_specs`, `tests.reranker_jaunt_specs`, and
+`tests.telemetry_jaunt_specs`. One owner's `tests` package/module shadowed the
+others despite owner routing.
+
+We worked around it by moving the specs into owner-unique top-level roots
+(`embeddings_jaunt_tests`, `postgres_jaunt_tests`, `reranker_jaunt_tests`, and
+`telemetry_jaunt_tests`) and listing those roots explicitly. The same test
+command then reported the owners as OK.
+
+That path-only move restaled all five implementation modules built with
+`--include-target-tests`, even though test intent content was unchanged and the
+generated module digests still matched their sources. Owner-isolated or
+path-based test imports would remove the collision. `status`/`specs` should
+also validate duplicate import names before generation, and target-test
+context should remain fresh when only an equivalent test-intent path changes.
+
+### Targeted `jaunt test` returned OK without a pytest result
+
+We ran this for each of the four owner-unique Jaunt test modules:
+
+```bash
+jaunt test --target <owner_unique_test_module> --no-build --json --pytest-args=-q
+```
+
+All four commands reported `ok=true` for every owner, but included no pytest
+result or output. Running pytest directly against the four generated batteries
+collected tests and produced 5 passes plus 3 telemetry failures:
+
+1. A generated test monkeypatched facade `_collapse_for_io`, but governed
+   `_serialize_io_value` resolves sibling globals in the generated module, so
+   the patch had no effect.
+2. A generated test expected a truncated small-list representation to retain
+   the full `value`, contrary to the contract.
+3. A generated tracing implementation regressed the specified legacy behavior
+   by using `response["usage"]` instead of `.get`; this was a real regression
+   that the generated battery caught.
+
+Root `ty` also treated the owner-unique generated test roots as source input.
+The embeddings battery passed `str` and `float` values to
+`_validate_dimensions(int | None)` without precise ignores or casts, and
+referenced `EmbeddingError` through `memory_store_embeddings.client`. Runtime
+imports that name, but generated `client.pyi` does not export it. The reranker
+battery likewise imported `RerankError` from `client` despite its `.pyi`
+omission. The repo workaround excludes `**/*_jaunt_tests/` from ty, matching its
+existing `**/tests/` policy, while runtime pytest remains required.
+
+Targeted `jaunt test` should select and run generated test-module targets, or
+report that zero tests were collected. Test generation should understand the
+facade/generated-global boundary and avoid facade monkeypatches that cannot
+affect governed functions. JSON output should include the direct pytest command
+and result. Generated tests should import exception classes from their defining
+`errors` modules and use precise ignores or casts for intentional off-signature
+cases. We are refining test intent and the implementation contract rather than
+editing generated tests.
+
+### Global `include_target_tests` invalidated modules with no target-test change
+
+Adding this reproducibility setting for the five newly adopted modules had a
+workspace-wide fingerprint effect:
+
+```toml
+[build]
+include_target_tests = true
+```
+
+All 12 pre-existing modules (`mcp_memory_server.temporal` plus 11
+`memory_store_utils` modules) immediately became stale with reason
+`fingerprint`, although their specs and test intent had not changed. Removing
+the global key restored those 12 to fresh, but made the five newly built
+modules stale again. We therefore had to keep passing
+`--include-target-tests` per build.
+
+Config invalidation should be scoped to modules that actually consume targeted
+test intent, or each artifact should record its effective include mode without
+globally invalidating unrelated modules.
+
+### Generated async-context-manager stubs failed type checking
+
+`uv run ty check` reported three `invalid-argument-type` diagnostics in new
+Jaunt 1.7 `.pyi` output:
+
+- postgres `pool.pyi` preserved `@contextlib.asynccontextmanager` on
+  `async def get_db_connection` and `get_db_connection_no_tx`, both annotated
+  to return `AsyncGenerator`;
+- telemetry `tracing.pyi` did the same for `trace_async_span`, annotated to
+  return `AsyncIterator`.
+
+In a stub, an ellipsis-body `async def` is treated as a coroutine function, so
+it cannot satisfy `asynccontextmanager`'s `Callable[..., AsyncIterator]` input.
+We did not edit the generated stubs. The narrow repo workaround excludes only
+these two generated `.pyi` paths from ty input; targeted source typing then
+passes.
+
+The `.pyi` emitter should special-case decorated async generators and context
+managers: emit the post-decoration callable signature, or use a non-async
+generator-function stub shape accepted by the decorator. Regression coverage
+should run the emitted stub through ty, mypy, and pyright.
+
+### Successful generated artifacts failed the consumer's Ruff gates
+
+The rebuilt behavior passed its existing tests (`memory-store-utils`: 527;
+`temporal`: 38), and `ty` passed. Ruff still rejected Jaunt-owned outputs:
+
+- generated `compression_utils.py` and `lexical_match.py` contained duplicate
+  typing imports (`F811`);
+- generated `cb32.pyi`, `chunking.pyi`, and `compression_utils.pyi` contained
+  unused source-only imports (`F401`);
+- `ruff format --check` said five generated implementations would be
+  reformatted.
+
+We did not hand-edit the generated files. To keep the repo gates green, the
+consumer needed narrow exceptions: ignore `F811` only for
+`__generated__/*.py`, ignore `F401` only for `*.pyi`, and exclude
+`__generated__` from Ruff formatting. A build can therefore succeed, pass its
+behavior and type checks, and still emit artifacts that fail the consumer's
+lint and format gates.
+
+The same `status`/`build` pass rewrote `treedocs.yaml`'s `project.name` from
+the canonical `mem-mcp-b` to the worktree basename
+`mem-mcp-c-jaunt-packages`, along with unrelated tree-entry refreshes. We
+discarded that churn. A worktree path should not change the committed project
+identity or refresh unrelated repo-map entries during a status/build run.
+
+### Campaign cost lower bound was $56.27
+
+Across completed model-backed builds for the five newly governed modules, the
+build summaries reported 20 completed API calls and $18.214878 in estimated
+cost. That excludes the interrupted duplicate multi-target run and all four
+`@jaunt.test` generation costs: the merged-workspace `jaunt test --json`
+wrapper returned only per-owner `{}` values, with no usage or cost data.
+
+Combined with the $38.05708 dependency-only refresh above, this session exposed
+at least $56.27 in reported generation spend. Much of the new-module repetition
+came from first-build contract review plus tool-induced test-root and
+fingerprint churn. This is a lower bound for the adoption campaign, not a
+steady-state per-module estimate.
+
+Workspace JSON should aggregate build and test-generation costs across owners,
+including provider usage already incurred by interrupted work.
+
 ## 2026-07-03 — mem-mcp-b PR 1 (first adoption campaign)
 
 Context: jaunt 1.2.0 from PyPI, Codex CLI 0.142.4 (API-key auth), engine
@@ -730,6 +1010,31 @@ spec's own `source_file`:
    on any stale module in any package. Today we run it once per project
    directory and the workflow file grows a step per adopted package.
 
+### 1.6.1 build-economics data points (same day, same repo)
+
+- **Removal-only spec edits classify as free re-stamps.** Deleting three
+  governed stubs from `timing` and two handwritten classes (+`__all__`
+  entries) from `compression_utils` left both modules stale as
+  `re-stamp: free` — no regeneration billed. Excellent behavior, one
+  wrinkle: the re-stamped generated file keeps the removed symbols' dead
+  bodies as latent text (unbound at runtime, correct `.pyi`), which then
+  shows up as uncovered lines under a coverage floor that counts generated
+  code. `jaunt build --force --target <module>` prunes them for one
+  module's build price. A removal-only re-stamp could prune deleted
+  symbols' bodies textually for $0 — they're identifiable from the spec
+  diff.
+- **gpt-5.6-sol@medium is ~3× cheaper than gpt-5.5@high here.** Forced
+  `timing` rebuild: $1.33 (2 calls, 619k prompt / 82% cached). Four fresh
+  small-module conversions (`coercion`, `db_errors`, `entity_text`,
+  `lexical_match`): $5.56 total, all four converged, moved-in acceptance
+  suites passed unchanged on first run. The finding-4 cost complaint
+  ($4.53 for one trivial module) is effectively resolved by the new
+  default engine.
+- Advisories again earned their keep: the `coercion` build flagged that
+  our contract's "never raises" overpromises against "catches only
+  JSONDecodeError" — a real spec ambiguity we inherited from the code we
+  were porting.
+
 Scale note for prioritization: we're at 2 projects/8 modules and the
 overhead is already comment-guarded duplication + N CI steps + "run
 jaunt from the right directory" tribal knowledge (our AGENTS.md spends
@@ -739,3 +1044,33 @@ one currently costs a new jaunt.toml with hand-synced `[codex]` and
 `[build]` blocks. Per-module resolution is the difference between
 "adopt a package = add one glob entry" and "adopt a package = add a
 config file that can silently re-bill the others if it drifts."
+
+## 2026-07-10 (evening) — 1.6.2 verified: finding 30 closed, consolidation was a non-event
+
+Same repo, same day, 1.6.2 from PyPI. The `migrate --merge-projects`
+path worked exactly as the reply promised:
+
+- **Preview** reported `neutral: true`, both configs discovered, all 10
+  module routes (by then we'd grown to 10 — 4 fresh conversions landed
+  between 1.6.1 and the merge) individually neutral, zero conflicts.
+- **Apply** refused twice before succeeding, both refusals correct: a
+  dirty tracked tree first, then untracked files. Strict, but the right
+  kind of strict for a config rewrite — no complaints. (A
+  `--allow-untracked` might be worth it; untracked files can't affect
+  neutrality.)
+- **Post-merge**: child config deleted, root `[paths]` rewritten with
+  the exact explicit roots from the reply, `jaunt status` shows 10/10
+  fresh from the root, one `jaunt check` gates everything, `$0` spent.
+  First root `jaunt tree` absorbed the child's 690 treedocs entries; we
+  deleted the now-orphaned child `treedocs.yaml` by hand (migrate could
+  plausibly do that itself).
+- CI collapsed from two check steps to one; the byte-identical-blocks
+  comment guards are deleted from our configs and AGENTS.md. The
+  "adopt a package = add one glob entry" end state is real now.
+- Also confirmed: the 1.6.2 semantic-gate default change
+  (`gpt-5.6-luna@medium`) restaled nothing, as promised — gate settings
+  staying outside the fingerprint is the right call.
+
+Finding 30 is closed from our side. Two-day turnaround from
+implementation-level ask to shipped-and-verified is the best adopter
+experience we've had with any tool this year.
