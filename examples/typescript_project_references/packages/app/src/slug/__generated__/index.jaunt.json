@@ -160,7 +160,7 @@
     "generationFingerprint": "sha256:fd0ee9143bfe7d7d1b86323ff0aafaf27e374967ef096a604cfb76573881765a",
     "ir": "contract-ir/1-draft.2",
     "protocol": "jaunt-ts/1-draft.2",
-    "toolVersion": "1.7.1",
+    "toolVersion": "1.7.2",
     "typescriptVersion": "5.9.3",
     "workerVersion": "0.1.0-alpha.0"
   },
