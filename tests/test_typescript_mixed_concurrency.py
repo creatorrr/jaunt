@@ -20,6 +20,7 @@ from jaunt.cli import (
     _command_semantic_exec,
     _capture_python_json,
     _mixed_runtime_args,
+    _mixed_python_preflight,
     _mixed_typescript_preflight,
     _validated_typescript_contract_targets,
     parse_args,
@@ -85,7 +86,12 @@ def test_mixed_build_runs_languages_concurrently_and_preserves_exit_precedence(
     async def run_typescript(*_args, **kwargs):
         observed.update(kwargs)
         barrier.wait(timeout=2)
-        return TargetBuildReport(language="ts", exit_code=3)
+        return TargetBuildReport(
+            language="ts",
+            refrozen=frozenset({"ts:src/math"}),
+            metadata={"recomposed": ("ts:src/math",)},
+            exit_code=3,
+        )
 
     monkeypatch.setattr("jaunt.cli._mixed_typescript_preflight", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("jaunt.cli._mixed_python_preflight", lambda *_: None)
@@ -98,6 +104,8 @@ def test_mixed_build_runs_languages_concurrently_and_preserves_exit_precedence(
     assert payload["schema_version"] == 2
     assert payload["targets"]["py"]["failed"]
     assert payload["targets"]["ts"]["generated"] == []
+    assert payload["recomposed"] == ["ts:src/math"]
+    assert payload["targets"]["ts"]["recomposed"] == ["src/math"]
     assert observed["jobs"] == 2
     assert observed["generator"] is not None
     assert observed["cost_tracker"] is not None
@@ -105,6 +113,13 @@ def test_mixed_build_runs_languages_concurrently_and_preserves_exit_precedence(
     assert observed["python_runtime"].jobs == 2
     assert observed["repo_map_enabled"] is True
     assert isinstance(observed["repo_map_block_override"], str)
+
+
+def test_mixed_clean_preflight_supplies_status_only_defaults(tmp_path: Path) -> None:
+    _mixed_config(tmp_path)
+    args = parse_args(["clean", "--root", str(tmp_path), "--orphans", "--dry-run", "--json"])
+
+    _mixed_python_preflight("clean", args)
 
 
 def test_mixed_test_runs_languages_concurrently(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -476,7 +491,12 @@ def test_mixed_test_preflight_plans_contract_authored_and_implicit_batteries(
     async def fake_worker_session(*_args: object, **_kwargs: object):
         yield object(), object()
 
-    async def fake_analyze(*_args: object, **_kwargs: object) -> object:
+    analyze_targets: list[tuple[str, ...]] = []
+
+    async def fake_analyze(*_args: object, **kwargs: object) -> object:
+        raw_targets = kwargs.get("target_ids", ())
+        assert isinstance(raw_targets, (list, tuple))
+        analyze_targets.append(tuple(str(item) for item in raw_targets))
         return analysis
 
     captured: dict[str, object] = {}
@@ -522,6 +542,21 @@ def test_mixed_test_preflight_plans_contract_authored_and_implicit_batteries(
     assert any("contractValue.contract.test.ts" in path for path in files)
     assert any("contractValue.contract.test.ts" in str(path) for path in owners)
     assert captured["require_fast_check"] is True
+
+    assert (
+        _mixed_typescript_preflight(
+            tmp_path,
+            config,
+            ("ts:src/math",),
+            for_test=True,
+        )
+        is analysis
+    )
+    assert analyze_targets == [(), ("ts:src/math",)]
+    raw_targeted_files = captured["files"]
+    assert isinstance(raw_targeted_files, tuple)
+    targeted_files = {str(item) for item in raw_targeted_files}
+    assert not any("contractValue.contract.test.ts" in path for path in targeted_files)
 
 
 @pytest.mark.asyncio

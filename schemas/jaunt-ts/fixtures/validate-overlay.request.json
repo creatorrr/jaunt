@@ -12,6 +12,8 @@
     "moduleIds": ["ts:src/slug/index"],
     "syncModuleIds": [],
     "restampModuleIds": [],
-    "recomposeModuleIds": []
+    "recomposeModuleIds": [],
+    "scopeToModuleIds": false,
+    "baselineUnselected": false
   }
 }

@@ -101,7 +101,9 @@
         "moduleIds": { "$ref": "#/definitions/stringArray" },
         "syncModuleIds": { "$ref": "#/definitions/stringArray" },
         "restampModuleIds": { "$ref": "#/definitions/stringArray" },
-        "recomposeModuleIds": { "$ref": "#/definitions/stringArray" }
+        "recomposeModuleIds": { "$ref": "#/definitions/stringArray" },
+        "scopeToModuleIds": { "type": "boolean" },
+        "baselineUnselected": { "type": "boolean" }
       }
     },
     "invalidateParams": {
@@ -395,7 +397,7 @@
         "capabilities": {
           "type": "array",
           "minItems": 6,
-          "maxItems": 8,
+          "maxItems": 11,
           "uniqueItems": true,
           "items": {
             "enum": [
@@ -406,7 +408,10 @@
               "invalidate",
               "contract-projection",
               "scoped-diagnostics",
-              "recompose"
+              "scoped-analysis",
+              "scoped-validation",
+              "recompose",
+              "baseline-unselected"
             ]
           }
         }

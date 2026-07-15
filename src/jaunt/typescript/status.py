@@ -513,6 +513,7 @@ async def run_status(
                 {},
                 module_ids,
                 sync_module_ids=module_ids,
+                scoped_validation=bool(target_ids),
             )
             validation_diagnostics = tuple(
                 _diagnostic(diagnostic) for diagnostic in validated.diagnostics
@@ -599,7 +600,7 @@ async def run_check(
             client,
             initialized,
         ):
-            analysis = await analyze(client, initialized)
+            analysis = await analyze(client, initialized, target_ids=target_ids)
             modules = {_module_id(module): module for module in analysis.modules}
             test_specs = _selected_test_specs(
                 root,

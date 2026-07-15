@@ -139,7 +139,10 @@ sidecar hash bookkeeping, but it never rewrites a built implementation's body or
 advances its provenance to a changed contract. Semantic and fingerprint re-stamps
 belong to `build`; compatible alpha artifact repairs belong to `migrate --language
 ts`. A synchronized placeholder keeps the editor green but remains `unbuilt` in
-`status` and `check`.
+`status` and `check`. Full-workspace sync validates dependency-ordered bounded batches
+and commits them together. With `--target`, contract analysis and overlay validation
+include only the selected module, its explicit and public-import closure through
+ordinary barrels/context files, and configured global-declaration roots.
 
 ### `jaunt design`
 
@@ -285,6 +288,10 @@ escape hatch only.
 Fresh TypeScript batteries skip generation but still typecheck and run. Changes only
 to the protected runner or Vitest fingerprint deterministically reheader the unchanged
 battery and appear under `refrozen`; content-affecting drift and `--force` regenerate it.
+When a separate `jaunt build` has already validated a compatible API recomposition,
+the following test command reheaders matching batteries from the persisted local proof.
+Build JSON uses `refrozen` for the full model-free set and `recomposed` for the
+compatible-toolchain subset.
 
 ## Contract mode
 

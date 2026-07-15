@@ -54,3 +54,25 @@
 - [x] Include the active worker phase in unexpected overlay failures.
 - [x] Preserve and reuse a request-validated candidate after a later overlay transaction failure.
 - [x] Add regressions and run the full repository validation suite.
+
+## Cycle 9 — 2026-07-15
+
+- [x] Preserve battery reuse proof across separate TypeScript build and test commands.
+- [x] Report `recomposed` modules in pure and mixed TypeScript build JSON.
+- [x] Add regressions and run the full repository validation suite.
+
+## Cycle 10 — 2026-07-15
+
+- [x] Scope targeted TypeScript contract responses and validation to the explicit and public-import closure.
+- [x] Keep targeted test generation and magic battery checks on the same scoped contract path.
+- [x] Preserve the worker's public-import closure through the Python bridge and retain ambient declarations.
+- [x] Traverse ordinary barrels/context files and retain regular `.ts` global declarations.
+- [x] Bound full-workspace contract responses and batch sync validation in dependency order.
+- [x] Commit independent successful TypeScript candidates when one sibling fails.
+- [x] Revalidate each independent landing unit against the committed sibling baseline.
+- [x] Make unbuilt placeholders safe under strict unused checks.
+- [x] Exclude ordinary co-located native tests from production import provenance.
+- [x] Fix mixed `clean --orphans` preflight argument defaults.
+- [x] Make plugin status timeouts informative, preserve TS diagnostics, and avoid duplicate mixed probes.
+- [x] Refresh both plugin versions so adopters receive the fail-open hook launchers.
+- [x] Add regressions and run the full repository validation suite.

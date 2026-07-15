@@ -847,6 +847,7 @@ async def run_design(
                 {},
                 (module_id,),
                 sync_module_ids=(module_id,),
+                scoped_validation=True,
             )
             if not validated.valid:
                 rendered = "; ".join(

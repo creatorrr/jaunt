@@ -303,6 +303,7 @@ export function analyzeImportGraph(
     const ownerProject = projectForFile(root, file, routes, projects);
     const isTest =
       (isSpec && file.includes(".jaunt-test.")) ||
+      /\.(?:test|spec)\.(?:ts|tsx)$/.test(file) ||
       ownerProject?.role === "test" ||
       belongsToConfiguredRoot(root, file, testRoots);
     const contextRoute = routeByContext.get(resolve(file));

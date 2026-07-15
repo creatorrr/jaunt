@@ -1517,9 +1517,7 @@ def _mixed_typescript_preflight(
                     "`jaunt design --target <module#symbol>` first: "
                     + ", ".join(sorted(pending_designs))
                 )
-            analysis = (
-                await analyze(client, initialized) if for_test and target_ids else target_analysis
-            )
+            analysis = target_analysis
             if for_test:
                 from jaunt.typescript.tester import (
                     _group_test_files,
@@ -1608,7 +1606,15 @@ def _mixed_python_preflight(command: str, args: argparse.Namespace) -> None:
         from jaunt import tester
 
         tester.ensure_pytest_available()
-    code, payload = _capture_python_json(cmd_status, args)
+    status_args = argparse.Namespace(**vars(args))
+    # A mixed mutation reuses the Python status command as its read-only
+    # preflight. Clean/reconcile parsers do not own every status-only flag, so
+    # populate their neutral defaults instead of leaking argparse shape into
+    # the status implementation.
+    for name, value in (("force", False), ("no_infer_deps", False), ("target", [])):
+        if not hasattr(status_args, name):
+            setattr(status_args, name, value)
+    code, payload = _capture_python_json(cmd_status, status_args)
     if code == EXIT_OK:
         return
     raw_error = payload.get("error", "Python target discovery failed")
@@ -1747,6 +1753,7 @@ def _mixed_build_payload(
     ts_generated = list(cast("list[str]", typescript_payload.get("generated", [])))
     ts_skipped = list(cast("list[str]", typescript_payload.get("skipped", [])))
     ts_refrozen = list(cast("list[str]", typescript_payload.get("refrozen", [])))
+    ts_recomposed = list(cast("list[str]", typescript_payload.get("recomposed", [])))
     failed: dict[str, object] = {}
     py_failed = python_payload.get("failed", {})
     if command == "test" and isinstance(python_payload.get("generation_failed"), dict):
@@ -1791,6 +1798,7 @@ def _mixed_build_payload(
         "generated": sorted([*py_generated, *ts_generated]),
         "skipped": sorted([*py_skipped, *ts_skipped]),
         "refrozen": sorted([*py_refrozen, *ts_refrozen]),
+        "recomposed": sorted(ts_recomposed),
         "failed": failed,
         "targets": {"py": py_target, "ts": ts_target},
     }
@@ -2366,7 +2374,11 @@ def _cmd_mixed_status(args: argparse.Namespace, root: Path, cfg: JauntConfig) ->
     }
     digests.update({str(key): value for key, value in ts_digests.items()})
     targets = ts_payload.get("targets", {})
-    ts_target = targets.get("ts", {}) if isinstance(targets, dict) else {}
+    raw_ts_target = targets.get("ts", {}) if isinstance(targets, dict) else {}
+    ts_target = dict(raw_ts_target) if isinstance(raw_ts_target, dict) else {}
+    raw_ts_diagnostics = ts_payload.get("diagnostics", [])
+    ts_diagnostics = raw_ts_diagnostics if isinstance(raw_ts_diagnostics, list) else []
+    ts_target["diagnostics"] = ts_diagnostics
     py_target = {
         key: py_payload.get(key, default)
         for key, default in (
@@ -2398,6 +2410,7 @@ def _cmd_mixed_status(args: argparse.Namespace, root: Path, cfg: JauntConfig) ->
         "digests": digests,
         "unbuilt": list(cast("list[str]", ts_payload.get("unbuilt", []))),
         "invalid": ts_payload.get("invalid", {}),
+        "diagnostics": ts_diagnostics,
         "orphans": sorted(
             [
                 *cast("list[str]", py_payload.get("orphans", [])),

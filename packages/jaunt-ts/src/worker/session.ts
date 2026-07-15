@@ -167,6 +167,71 @@ function moduleSelection(
   return ids ? new Set(ids.map((id) => id.split("#", 1)[0]!)) : undefined;
 }
 
+function moduleClosure(
+  compiler: typeof import("@typescript/typescript6"),
+  root: string,
+  modules: DiscoveryResult["modules"],
+  importAdjacency: DiscoveryResult["importAdjacency"],
+  selected: ReadonlySet<string> | undefined,
+): ReadonlySet<DiscoveryResult["modules"][number]> | undefined {
+  if (!selected) return undefined;
+  const moduleByPath = new Map<string, DiscoveryResult["modules"][number]>();
+  for (const module of modules) {
+    for (const path of [
+      module.route.specPath,
+      module.route.facadePath,
+      module.route.apiMirrorPath,
+      module.route.implementationPath,
+    ]) {
+      moduleByPath.set(resolve(root, path), module);
+    }
+  }
+  const virtualPaths = new Set(moduleByPath.keys());
+  const closure = new Set<DiscoveryResult["modules"][number]>();
+  const pending = modules.filter((module) =>
+    selected.has(module.route.moduleId),
+  );
+  while (pending.length > 0) {
+    const module = pending.pop()!;
+    if (closure.has(module)) continue;
+    closure.add(module);
+    pending.push(...module.dependencyModules);
+    const pathPending = [resolve(module.sourceFile.fileName)];
+    const seenPaths = new Set<string>();
+    while (pathPending.length > 0) {
+      const path = pathPending.pop()!;
+      if (seenPaths.has(path)) continue;
+      seenPaths.add(path);
+      for (const dependency of importAdjacency.get(path) ?? []) {
+        const imported = moduleByPath.get(resolve(dependency));
+        if (imported) {
+          if (imported !== module) pending.push(imported);
+        } else {
+          pathPending.push(resolve(dependency));
+        }
+      }
+    }
+    for (const specifier of candidateModuleSpecifiers(
+      compiler,
+      module.sourceFile.fileName,
+      module.source,
+    )) {
+      const resolved = resolveWorkspaceModuleSpecifier(
+        compiler,
+        module.sourceFile.fileName,
+        specifier,
+        module.compilerOptions,
+        virtualPaths,
+      );
+      const imported = resolved
+        ? moduleByPath.get(resolve(resolved))
+        : undefined;
+      if (imported && imported !== module) pending.push(imported);
+    }
+  }
+  return closure;
+}
+
 function record(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new WorkerError("INVALID_REQUEST", `${label} must be an object`);
@@ -562,7 +627,10 @@ export class AnalyzerSession {
         "invalidate",
         "contract-projection",
         "scoped-diagnostics",
+        "scoped-analysis",
+        "scoped-validation",
         "recompose",
+        "baseline-unselected",
       ],
     };
   }
@@ -571,18 +639,15 @@ export class AnalyzerSession {
     params: AnalyzeWorkspaceParams = {},
   ): AnalyzeWorkspaceResult {
     const selected = moduleSelection(params.moduleIds);
+    const selectedModules = moduleClosure(
+      this.compiler,
+      this.root,
+      this.discovery.modules,
+      this.discovery.importAdjacency,
+      selected,
+    );
     let discoveryDiagnostics = this.discovery.diagnostics;
-    if (selected) {
-      const selectedModules = new Set<DiscoveryResult["modules"][number]>();
-      const pending = this.discovery.modules.filter((module) =>
-        selected.has(module.route.moduleId),
-      );
-      while (pending.length > 0) {
-        const module = pending.pop()!;
-        if (selectedModules.has(module)) continue;
-        selectedModules.add(module);
-        pending.push(...module.dependencyModules);
-      }
+    if (selected && selectedModules) {
       const relevantPaths = new Set<string>();
       for (const module of selectedModules) {
         for (const path of [
@@ -625,13 +690,32 @@ export class AnalyzerSession {
         ),
       );
     }
+    const moduleIds = new Set(
+      [...(selectedModules ?? this.discovery.modules)].map(
+        (module) => module.route.moduleId,
+      ),
+    );
     return {
       ...this.metadata(),
       projects: this.graph.records,
-      routes: this.discovery.routes,
-      specs: this.discovery.specs,
-      testSpecs: this.discovery.testSpecs,
-      contracts: this.discovery.contracts,
+      routes: this.discovery.routes.filter((route) =>
+        moduleIds.has(route.moduleId),
+      ),
+      specs: this.discovery.specs.filter((spec) =>
+        moduleIds.has(spec.moduleId),
+      ),
+      testSpecs: selected
+        ? this.discovery.testSpecs.filter((testSpec) =>
+            testSpec.targets.some((target) =>
+              moduleIds.has(target.split("#", 1)[0]!),
+            ),
+          )
+        : this.discovery.testSpecs,
+      contracts: selected
+        ? this.discovery.contracts.filter((contract) =>
+            selected.has(`ts:${contract.path.replace(/\.(?:ts|tsx)$/u, "")}`),
+          )
+        : this.discovery.contracts,
       diagnostics: [...this.graph.diagnostics, ...discoveryDiagnostics],
     };
   }
@@ -640,8 +724,15 @@ export class AnalyzerSession {
     params: AnalyzeContractsParams = {},
   ): AnalyzeContractsResult {
     const selected = moduleSelection(params.moduleIds);
+    const selectedModules = moduleClosure(
+      this.compiler,
+      this.root,
+      this.discovery.modules,
+      this.discovery.importAdjacency,
+      selected,
+    );
     const modules: ContractAnalysisRecord[] = this.discovery.modules
-      .filter((module) => !selected || selected.has(module.route.moduleId))
+      .filter((module) => !selectedModules || selectedModules.has(module))
       .map((module) => {
         const ir = this.contractIr(module);
         const contextSource = ir.contextPath
@@ -706,6 +797,18 @@ export class AnalyzerSession {
       );
     }
     const selected = moduleSelection(params.moduleIds);
+    if (params.scopeToModuleIds && !selected) {
+      throw new WorkerError(
+        "INVALID_REQUEST",
+        "scopeToModuleIds requires a non-empty moduleIds selection",
+      );
+    }
+    if (params.baselineUnselected && !selected) {
+      throw new WorkerError(
+        "INVALID_REQUEST",
+        "baselineUnselected requires a non-empty moduleIds selection",
+      );
+    }
     const syncModules =
       moduleSelection(params.syncModuleIds) ?? new Set<string>();
     const restampModules =
@@ -770,8 +873,19 @@ export class AnalyzerSession {
     const artifacts: ArtifactRecord[] = [];
     const diagnostics: DiagnosticRecord[] = [];
     const changedProjects = new Set<string>();
+    const validationModules = params.scopeToModuleIds
+      ? [
+          ...(moduleClosure(
+            this.compiler,
+            this.root,
+            this.discovery.modules,
+            this.discovery.importAdjacency,
+            selected,
+          ) ?? []),
+        ]
+      : this.discovery.modules;
     const allIrs = timed("contract-ir", () =>
-      this.discovery.modules.map((module) => this.contractIr(module)),
+      validationModules.map((module) => this.contractIr(module)),
     );
     const irByModule = new Map(allIrs.map((ir) => [ir.moduleId, ir] as const));
     const candidates: Record<string, string> = { ...params.candidates };
@@ -803,7 +917,7 @@ export class AnalyzerSession {
       candidates[moduleId] = decomposed.candidateSource;
     }
     timed("module-overlays", () => {
-      for (const module of this.discovery.modules) {
+      for (const module of validationModules) {
         if (selected && !selected.has(module.route.moduleId)) continue;
         if (failedRecompositions.has(module.route.moduleId)) continue;
         const candidate = candidates[module.route.moduleId];
@@ -925,8 +1039,13 @@ export class AnalyzerSession {
             continue;
           }
         }
-        const preflightModules = this.discovery.modules
-          .filter((other) => other.route.moduleId !== ir.moduleId)
+        const preflightModules = validationModules
+          .filter(
+            (other) =>
+              other.route.moduleId !== ir.moduleId &&
+              (!params.baselineUnselected ||
+                selected?.has(other.route.moduleId)),
+          )
           .map((other) => irByModule.get(other.route.moduleId)!);
         const result =
           candidate === undefined
@@ -939,6 +1058,7 @@ export class AnalyzerSession {
                 restampModules.has(module.route.moduleId),
                 candidates,
                 this.#overlayPrograms,
+                params.scopeToModuleIds ?? false,
               )
             : validateModuleOverlay(
                 this.compiler,
@@ -949,6 +1069,7 @@ export class AnalyzerSession {
                 preflightModules,
                 candidates,
                 this.#overlayPrograms,
+                params.scopeToModuleIds ?? false,
               );
         artifacts.push(...result.artifacts);
         diagnostics.push(...result.diagnostics);
@@ -966,11 +1087,14 @@ export class AnalyzerSession {
             this.compiler,
             this.root,
             this.graph.projects,
-            allIrs,
+            params.baselineUnselected && selected
+              ? allIrs.filter((ir) => selected.has(ir.moduleId))
+              : allIrs,
             candidates,
             artifacts,
             affectedProjects,
             this.#overlayPrograms,
+            params.scopeToModuleIds ?? false,
           ),
         ),
       );
@@ -1160,6 +1284,8 @@ export function parseValidateOverlayParams(
       "syncModuleIds",
       "restampModuleIds",
       "recomposeModuleIds",
+      "scopeToModuleIds",
+      "baselineUnselected",
     ]),
     "validateOverlay",
   );
@@ -1176,6 +1302,24 @@ export function parseValidateOverlayParams(
     throw new WorkerError(
       "INVALID_REQUEST",
       "candidate values must be strings",
+    );
+  }
+  if (
+    input.scopeToModuleIds !== undefined &&
+    typeof input.scopeToModuleIds !== "boolean"
+  ) {
+    throw new WorkerError(
+      "INVALID_REQUEST",
+      "scopeToModuleIds must be a boolean",
+    );
+  }
+  if (
+    input.baselineUnselected !== undefined &&
+    typeof input.baselineUnselected !== "boolean"
+  ) {
+    throw new WorkerError(
+      "INVALID_REQUEST",
+      "baselineUnselected must be a boolean",
     );
   }
   return {
@@ -1195,6 +1339,12 @@ export function parseValidateOverlayParams(
     ...(input.recomposeModuleIds === undefined
       ? {}
       : { recomposeModuleIds: stringArray(input, "recomposeModuleIds") }),
+    ...(input.scopeToModuleIds === undefined
+      ? {}
+      : { scopeToModuleIds: input.scopeToModuleIds as boolean }),
+    ...(input.baselineUnselected === undefined
+      ? {}
+      : { baselineUnselected: input.baselineUnselected as boolean }),
   };
 }
 

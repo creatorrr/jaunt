@@ -71,11 +71,18 @@ def build_payload(report: TargetBuildReport, *, command: str = "build") -> dict[
     generated = sorted(report.generated)
     skipped = sorted(report.skipped)
     refrozen = sorted(report.refrozen)
+    raw_recomposed = report.metadata.get("recomposed", ())
+    recomposed = (
+        sorted(item for item in raw_recomposed if isinstance(item, str))
+        if isinstance(raw_recomposed, (list, tuple, set, frozenset))
+        else []
+    )
     failed = failures_payload(report.failed)
     target = {
         "generated": [local_id(item) for item in generated],
         "skipped": [local_id(item) for item in skipped],
         "refrozen": [local_id(item) for item in refrozen],
+        "recomposed": [local_id(item) for item in recomposed],
         "failed": failures_payload(report.failed, local=True),
     }
     payload: dict[str, Any] = {
@@ -85,6 +92,7 @@ def build_payload(report: TargetBuildReport, *, command: str = "build") -> dict[
         "generated": generated,
         "skipped": skipped,
         "refrozen": refrozen,
+        "recomposed": recomposed,
         "failed": failed,
         "targets": {"ts": target},
     }
@@ -94,6 +102,7 @@ def build_payload(report: TargetBuildReport, *, command: str = "build") -> dict[
         }
     if report.metadata:
         payload.update(dict(report.metadata))
+        payload["recomposed"] = recomposed
     return payload
 
 

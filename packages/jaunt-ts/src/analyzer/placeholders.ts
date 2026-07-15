@@ -1,4 +1,9 @@
-import type { ClassMemberIR, ContractModuleIR, SymbolIR } from "./ir.js";
+import type {
+  ClassMemberIR,
+  ContractModuleIR,
+  ParameterIR,
+  SymbolIR,
+} from "./ir.js";
 import {
   renderClassTypeAlias,
   relativeModuleSpecifier,
@@ -8,8 +13,11 @@ import {
   renderTypeParametersForAdapter,
 } from "./mirror.js";
 
-function throwBody(): string {
-  return '{ throw new Error("Jaunt implementation is unbuilt; run `jaunt build`"); }';
+function throwBody(parameters: readonly ParameterIR[] = []): string {
+  const consume = parameters
+    .map((parameter) => `void ${parameter.name};`)
+    .join(" ");
+  return `{ ${consume}${consume ? " " : ""}throw new Error("Jaunt implementation is unbuilt; run \`jaunt build\`"); }`;
 }
 
 function renderPlaceholderClassMember(member: ClassMemberIR): string {
@@ -20,7 +28,7 @@ function renderPlaceholderClassMember(member: ClassMemberIR): string {
   };
   const prefix = member.static ? "static " : "";
   if (member.kind === "constructor") {
-    return `  constructor(${signature.parameters.map(renderParameterForAdapter).join(", ")}) ${throwBody()}`;
+    return `  constructor(${signature.parameters.map(renderParameterForAdapter).join(", ")}) ${throwBody(signature.parameters)}`;
   }
   if (member.kind === "property") {
     const readonly = member.readonly ? "readonly " : "";
@@ -39,7 +47,7 @@ function renderPlaceholderClassMember(member: ClassMemberIR): string {
     return `  ${prefix}get ${member.name}(): ${renderType(signature.returnType)} ${throwBody()}`;
   }
   if (member.kind === "setter") {
-    return `  ${prefix}set ${member.name}(${signature.parameters.map(renderParameterForAdapter).join(", ")}) ${throwBody()}`;
+    return `  ${prefix}set ${member.name}(${signature.parameters.map(renderParameterForAdapter).join(", ")}) ${throwBody(signature.parameters)}`;
   }
   return `  ${prefix}${member.name}${member.optional ? "?" : ""}${renderTypeParametersForAdapter(signature.typeParameters)}(${signature.parameters.map(renderParameterForAdapter).join(", ")}): ${renderType(signature.returnType)} ${throwBody()}`;
 }
@@ -112,6 +120,18 @@ function renderFunction(symbol: SymbolIR): string {
   return `export const ${symbol.name}: typeof __JauntApi.${symbol.name} = __jaunt_unbuilt;`;
 }
 
+function runtimeImportBindings(ir: ContractModuleIR): readonly string[] {
+  return ir.typeImports
+    .filter((item) => item.runtime)
+    .flatMap((item) => [
+      ...(item.defaultImport ? [item.defaultImport] : []),
+      ...(item.namespaceImport ? [item.namespaceImport] : []),
+      ...item.namedImports
+        .filter((binding) => !binding.typeOnly)
+        .map((binding) => binding.local),
+    ]);
+}
+
 export function renderPlaceholder(ir: ContractModuleIR): string {
   const api = relativeModuleSpecifier(ir.implementationPath, ir.apiMirrorPath);
   const symbols = [...ir.symbols];
@@ -128,6 +148,8 @@ export function renderPlaceholder(ir: ContractModuleIR): string {
       return -1;
     return left.name.localeCompare(right.name);
   });
+  const runtimeBindings = runtimeImportBindings(ir);
+  const hasFunctions = symbols.some((symbol) => symbol.kind === "function");
   return [
     "// ⛓️ jaunt:generated — generated; do not edit.",
     "// jaunt:state=unbuilt",
@@ -135,9 +157,11 @@ export function renderPlaceholder(ir: ContractModuleIR): string {
     `// jaunt:structural=${ir.structuralDigest}`,
     `import type * as __JauntApi from ${JSON.stringify(api)};`,
     ...renderRuntimeImports(ir),
+    ...runtimeBindings.map((binding) => `void ${binding};`),
     "",
-    `function __jaunt_unbuilt(): never ${throwBody()}`,
-    "",
+    ...(hasFunctions
+      ? [`function __jaunt_unbuilt(): never ${throwBody()}`, ""]
+      : []),
     ...symbols.map((symbol) =>
       symbol.kind === "class" ? renderClass(symbol) : renderFunction(symbol),
     ),

@@ -3,6 +3,51 @@
 All notable changes to jaunt. Generated from conventional commits by
 [git-cliff](https://git-cliff.org); one section per published PyPI release.
 
+## [1.7.5] - 2026-07-15
+
+### Fixes
+
+- Preserve compiler-validated TypeScript API reuse proof across separate
+  `jaunt build` and `jaunt test` commands. Matching generated Vitest batteries
+  are reheadered and rerun without another model call, including after a later
+  metadata-only restamp.
+- Keep `recomposed` TypeScript modules in pure and mixed-workspace build JSON.
+- Keep targeted TypeScript test generation and magic battery checks on the selected
+  contract closure.
+  `refrozen` remains the umbrella for every model-free reuse path, while
+  `recomposed` identifies the compatible-toolchain subset.
+- Make targeted TypeScript contract responses and overlay validation follow
+  only the selected modules and their explicit or public-import closure,
+  including ordinary barrels/context files and configured global declarations.
+  Unrelated project errors and unbuilt sibling placeholders no longer force
+  adopters to rotate roots or `tsconfig` includes between builds.
+- Split full-workspace contract analysis into bounded responses and deterministic
+  sync validation into dependency-ordered batches. Artifact writes remain one
+  atomic transaction, while large workspaces no longer need one oversized worker
+  response.
+- Isolate independent TypeScript build transactions even when modules share a
+  package owner or project-reference graph. A failed candidate no longer aborts
+  successful siblings; each successful unit is revalidated against the
+  committed baseline before it lands, and only explicit dependency-connected
+  modules stay atomic.
+- Emit strict-unused-safe TypeScript placeholders and exclude ordinary
+  co-located `*.test.ts[x]` and `*.spec.ts[x]` files from production dependency
+  provenance.
+- Fix mixed-workspace `clean --orphans` preflight when its parser does not carry
+  status-only flags.
+- Make plugin health probes use one status request per mixed workspace without
+  dropping TypeScript diagnostics, give analysis a longer bounded window, and
+  report timeouts as status failures instead of claiming that the worker or
+  compiler is unavailable.
+
+### Packages
+
+- Publish `@usejaunt/ts` `0.1.0-alpha.4` with scoped analysis, bounded sync,
+  isolated build transactions, strict-safe placeholders, and native-test
+  provenance fixes.
+- Publish Codex plugin `1.1.3` and Claude Code plugin `1.2.3`, including the
+  fail-open lifecycle launchers from PR #89 and the updated health probes.
+
 ## [1.7.4] - 2026-07-15
 
 ### Fixes

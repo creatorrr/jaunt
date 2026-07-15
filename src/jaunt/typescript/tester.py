@@ -67,6 +67,10 @@ from jaunt.typescript.provenance import (
     parse_managed_document,
     render_managed_document,
 )
+from jaunt.typescript.reuse import (
+    proven_previous_target_api_digests,
+    target_api_digest,
+)
 from jaunt.typescript.worker import TypeScriptWorkerError, worker_environment
 
 _DEFAULT_RUNNER_TIMEOUT = 300.0
@@ -584,14 +588,6 @@ def _test_provenance(
         else _safe_path(root, path).read_text(encoding="utf-8")
     )
     selected = _selected_test_modules(test_spec, modules)
-    target_api = [
-        {
-            "moduleId": _module_id(module),
-            "apiDigest": str(module.get("apiDigest", "")),
-            "apiSourceDigest": _sha256(str(module.get("apiSource", "")).encode("utf-8")),
-        }
-        for module in selected
-    ]
     target = _target(config)
     roots = _tool_search_roots(root, client)
     config_digest: object = (
@@ -607,7 +603,7 @@ def _test_provenance(
     )
     values = {
         "test_spec_digest": _semantic_test_spec_digest(source),
-        "target_api_digest": _canonical_digest(target_api),
+        "target_api_digest": target_api_digest(selected),
         "vitest_fingerprint": _canonical_digest(
             {
                 "runner": target.test_runner,
@@ -693,7 +689,7 @@ def _existing_test_battery_action(
     provenance: Mapping[str, str],
     force: bool,
     generated_dirs: Sequence[str] = (),
-    allow_recomposed_targets: bool = False,
+    proven_previous_api_digests: frozenset[str] = frozenset(),
 ) -> tuple[str, str | None]:
     """Classify an existing managed battery without trusting its header alone.
 
@@ -730,7 +726,8 @@ def _existing_test_battery_action(
         return "skip", source
 
     allowed_tooling = set(_TEST_REHEADER_FINGERPRINTS)
-    if allow_recomposed_targets:
+    api_proof_matches = metadata.get("target_api_digest") in proven_previous_api_digests
+    if api_proof_matches:
         allowed_tooling.add("target_api_digest")
     allowed = allowed_tooling | {"battery_fingerprint"}
     if (
@@ -1408,11 +1405,23 @@ def _selected_test_specs(
     if not target_ids:
         return tuple(test_specs)
     requested = {target.split("#", 1)[0] for target in target_ids}
-    return tuple(
-        item
-        for item in test_specs
-        if any(_module_id(module) in requested for module in _selected_test_modules(item, modules))
-    )
+    selected: list[Mapping[str, Any]] = []
+    for item in test_specs:
+        raw_targets = item.get("targets", [])
+        declared_modules = (
+            {
+                target.split("#", 1)[0]
+                for target in raw_targets
+                if isinstance(target, str) and target.startswith("ts:")
+            }
+            if isinstance(raw_targets, list)
+            else set()
+        )
+        if declared_modules and requested.isdisjoint(declared_modules):
+            continue
+        if any(_module_id(module) in requested for module in _selected_test_modules(item, modules)):
+            selected.append(item)
+    return tuple(selected)
 
 
 def _selected_generated_test_files(
@@ -3201,13 +3210,6 @@ async def _run_test_batches(
     )
 
 
-def _all_test_targets_recomposed(
-    selected_module_ids: Sequence[str], recomposed_modules: set[str]
-) -> bool:
-    selected = set(selected_module_ids)
-    return bool(selected) and selected.issubset(recomposed_modules)
-
-
 async def run_test(
     root: Path,
     config: JauntConfig,
@@ -3246,6 +3248,7 @@ async def run_test(
     build_cost: Mapping[str, Any] = {}
     repair_cost: Mapping[str, Any] = {}
     repair_metadata: Mapping[str, Any] | None = None
+    in_memory_api_reuse_proof: dict[str, dict[str, str]] = {}
     effective_builtin_skills = (
         tuple(builtin_skill_names)
         if builtin_skill_names is not None
@@ -3295,6 +3298,7 @@ async def run_test(
                 repo_map_block_override=repo_map_block_override,
                 auto_skills_enabled=False,
                 builtin_skill_names=effective_builtin_skills,
+                reuse_proof_sink=in_memory_api_reuse_proof,
             )
         else:
             build = await run_build_in_session(
@@ -3314,6 +3318,7 @@ async def run_test(
                 repo_map_block=repo_map_block_override,
                 project_overview_enabled=bool(config.context.overview),
                 builtin_skill_names=effective_builtin_skills,
+                reuse_proof_sink=in_memory_api_reuse_proof,
             )
         build_metadata = _build_phase_metadata(build)
         raw_build_cost = build.metadata.get("cost")
@@ -3328,11 +3333,6 @@ async def run_test(
                 exit_code=build.exit_code,
             )
 
-    recomposed_modules = {
-        str(module_id)
-        for module_id in build_metadata.get("recomposed", ())
-        if isinstance(module_id, str)
-    }
     backend = generator or _default_backend(config)
     cost = phase_cost_tracker()
     overlays: dict[str, str] = {}
@@ -3359,7 +3359,7 @@ async def run_test(
             yield session
 
     async with operation_worker() as (client, initialized):
-        analysis = await analyze(client, initialized)
+        analysis = await analyze(client, initialized, target_ids=target_ids)
         modules = {_module_id(module): module for module in analysis.modules}
         test_specs = _selected_test_specs(
             root,
@@ -3428,7 +3428,7 @@ async def run_test(
                 ),
             )
 
-        for _test_spec, spec_path, selected_module_ids, request in prepared_requests:
+        for _test_spec, spec_path, _selected_module_ids, request in prepared_requests:
             tier = str(request.cache_payload.get("tier", "example"))
             provenance = _test_provenance(
                 root,
@@ -3440,6 +3440,7 @@ async def run_test(
                 tier=tier,
                 builtin_skill_names=effective_builtin_skills,
             )
+            selected_modules = _selected_test_modules(_test_spec, modules)
             action, existing_source = _existing_test_battery_action(
                 root,
                 request,
@@ -3448,8 +3449,10 @@ async def run_test(
                 provenance=provenance,
                 force=force,
                 generated_dirs=(_target(config).generated_dir,),
-                allow_recomposed_targets=_all_test_targets_recomposed(
-                    selected_module_ids, recomposed_modules
+                proven_previous_api_digests=proven_previous_target_api_digests(
+                    root,
+                    selected_modules,
+                    additional_previous=in_memory_api_reuse_proof,
                 ),
             )
             if action == "skip":

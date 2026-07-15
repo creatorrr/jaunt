@@ -82,15 +82,27 @@ print("mixed" if has_py and has_ts else "ts" if has_ts else "py")
 PY
 }
 
+status_timeout="${JAUNT_PLUGIN_STATUS_TIMEOUT_SECONDS:-20}"
+
 status_json() {
   local dir="$1"
-  local secs="$2"
-  shift 2
-  (
-    cd "$dir" &&
-      UV_CACHE_DIR="$uv_cache" run_timeout "$secs" \
-        bash "$script_dir/resolve-workspace.sh" --run . status "$@" --json --progress none
-  ) 2>/dev/null
+  shift
+  local output status
+  output=$(
+    (
+      cd "$dir" &&
+        UV_CACHE_DIR="$uv_cache" run_timeout "$status_timeout" \
+          bash "$script_dir/resolve-workspace.sh" --run . status "$@" --json --progress none
+    ) 2>/dev/null
+  )
+  status=$?
+  if [ -n "$output" ]; then
+    printf '%s' "$output"
+  elif [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
+    printf '{"command":"status","ok":false,"error":{"kind":"timeout","message":"status timed out after %s seconds"}}\n' "$status_timeout"
+  elif [ "$status" -ne 0 ]; then
+    printf '{"command":"status","ok":false,"error":{"kind":"process","message":"status command exited %s"}}\n' "$status"
+  fi
 }
 
 summarize_status() {
@@ -139,7 +151,10 @@ try:
     status = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
-if status.get("ok") is not True:
+targets = status.get("targets")
+target = targets.get("ts", {}) if isinstance(targets, dict) else {}
+target_failed = isinstance(target, dict) and target.get("ok") is False
+if status.get("ok") is not True and (not target or target_failed):
     error = status.get("error")
     message = error.get("message") if isinstance(error, dict) else error
     diagnostics = error.get("diagnostics", []) if isinstance(error, dict) else []
@@ -147,8 +162,6 @@ if status.get("ok") is not True:
     suffix = " [" + ", ".join(dict.fromkeys(codes[:3])) + "]" if codes else ""
     print("TS status unavailable" + (f": {message}" if message else "") + suffix)
     sys.exit(0)
-targets = status.get("targets")
-target = targets.get("ts", {}) if isinstance(targets, dict) else {}
 unbuilt = target.get("unbuilt", status.get("unbuilt", []))
 invalid = target.get("invalid", status.get("invalid", {}))
 unbuilt_count = len(unbuilt) if isinstance(unbuilt, (list, dict)) else 0
@@ -217,12 +230,12 @@ while IFS= read -r cfg; do
   mode=$(workspace_mode "$cfg")
   ts_out=""
   if [ "$mode" = "ts" ]; then
-    out=$(status_json "$dir" 6 --language ts || true)
+    out=$(status_json "$dir" --language ts || true)
     ts_out="$out"
   else
-    out=$(status_json "$dir" 6 || true)
+    out=$(status_json "$dir" || true)
     if [ "$mode" = "mixed" ]; then
-      ts_out=$(status_json "$dir" 6 --language ts || true)
+      ts_out="$out"
     fi
   fi
   line=$(printf '%s' "$out" | summarize_status || true)

@@ -141,6 +141,81 @@ function facadeDiagnostics(
   return diagnostics;
 }
 
+function globalDeclarationRoots(
+  compiler: typeof import("@typescript/typescript6"),
+  project: LoadedProject,
+): readonly string[] {
+  return project.parsed.fileNames.filter((path) => {
+    if (/\.d\.[cm]?ts$/.test(path)) return true;
+    const source = compiler.sys.readFile(path);
+    if (source === undefined) return false;
+    const moduleDetectionCompiler = compiler as typeof compiler & {
+      getSetExternalModuleIndicator(
+        options: ts.CompilerOptions,
+      ): (file: ts.SourceFile) => void;
+    };
+    const sourceFile = compiler.createSourceFile(
+      path,
+      source,
+      {
+        languageVersion: compiler.ScriptTarget.Latest,
+        impliedNodeFormat: compiler.getImpliedNodeFormatForFile(
+          path,
+          undefined,
+          compiler.sys,
+          project.parsed.options,
+        ),
+        setExternalModuleIndicator:
+          moduleDetectionCompiler.getSetExternalModuleIndicator(
+            project.parsed.options,
+          ),
+      },
+      true,
+    );
+    const externalModule = (
+      sourceFile as ts.SourceFile & { externalModuleIndicator?: ts.Node }
+    ).externalModuleIndicator;
+    if (externalModule === undefined) {
+      return sourceFile.statements.some((statement) => {
+        if (
+          compiler.isClassDeclaration(statement) ||
+          compiler.isFunctionDeclaration(statement) ||
+          compiler.isInterfaceDeclaration(statement) ||
+          compiler.isVariableStatement(statement) ||
+          compiler.isTypeAliasDeclaration(statement) ||
+          compiler.isModuleDeclaration(statement) ||
+          compiler.isEnumDeclaration(statement)
+        ) {
+          return true;
+        }
+        return (
+          compiler.canHaveModifiers(statement) &&
+          (compiler
+            .getModifiers(statement)
+            ?.some(
+              (modifier) =>
+                modifier.kind === compiler.SyntaxKind.DeclareKeyword,
+            ) ??
+            false)
+        );
+      });
+    }
+    let declaresGlobal = false;
+    const visit = (node: ts.Node): void => {
+      if (
+        compiler.isModuleDeclaration(node) &&
+        (node.flags & compiler.NodeFlags.GlobalAugmentation) !== 0
+      ) {
+        declaresGlobal = true;
+        return;
+      }
+      if (!declaresGlobal) compiler.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+    return declaresGlobal;
+  });
+}
+
 function validateSources(
   compiler: typeof import("@typescript/typescript6"),
   root: string,
@@ -151,6 +226,7 @@ function validateSources(
   overlayRoots: readonly string[] = [...sources.keys()],
   referencedOverlayPaths: ReadonlySet<string> = new Set(),
   programCache?: OverlayProgramCache,
+  scopedRoots = false,
 ): DiagnosticRecord[] {
   function programFor(
     profile: "native" | "strict",
@@ -159,7 +235,7 @@ function validateSources(
   ): ts.Program {
     if (programCache) {
       return programCache.create(
-        `${project.id}:${profile}`,
+        `${project.id}:${profile}:${scopedRoots ? "scoped" : "full"}`,
         compiler,
         roots,
         options,
@@ -184,8 +260,9 @@ function validateSources(
     // .tsbuildinfo file; candidate SourceFiles are still recreated on changes.
     incremental: false,
   };
+  const ambientRoots = globalDeclarationRoots(compiler, project);
   const nativeProgram = programFor("native", nativeOptions, [
-    ...project.parsed.fileNames,
+    ...(scopedRoots ? ambientRoots : project.parsed.fileNames),
     ...overlayRoots,
     ...extraRoots,
   ]);
@@ -244,7 +321,7 @@ function validateSources(
       .map((path) => resolve(path)),
   );
   const strictProgram = programFor("strict", strictOptions, [
-    ...project.parsed.fileNames.filter((path) => /\.d\.[cm]?ts$/.test(path)),
+    ...ambientRoots,
     ...overlayRoots,
     ...extraRoots,
   ]);
@@ -781,6 +858,7 @@ export function validateModuleOverlay(
   preflightModules: readonly ContractModuleIR[] = [],
   preflightCandidates: Readonly<Record<string, string>> = {},
   programCache?: OverlayProgramCache,
+  scopedRoots = false,
 ): OverlayValidation {
   const composed = composeCandidate(
     compiler,
@@ -851,6 +929,7 @@ export function validateModuleOverlay(
       moduleValidationRoots(root, project, ir, overlay, preflightModules),
       referencedModulePaths(root, project, preflightModules),
       programCache,
+      scopedRoots,
     ),
   ];
   const sorted = sortDiagnostics(diagnostics);
@@ -910,6 +989,7 @@ export function validateSyncOverlay(
   restampBuilt = false,
   preflightCandidates: Readonly<Record<string, string>> = {},
   programCache?: OverlayProgramCache,
+  scopedRoots = false,
 ): OverlayValidation {
   const apiSource = renderApiMirror(ir);
   const apiPath = absolute(root, ir.apiMirrorPath);
@@ -1012,6 +1092,7 @@ export function validateSyncOverlay(
       moduleValidationRoots(root, project, ir, overlay, preflightModules),
       referencedModulePaths(root, project, preflightModules),
       programCache,
+      scopedRoots,
     ),
     ...facadeDiagnostics(ir, facadeContent),
     ...mirrorShapeDiagnostics(compiler, ir, apiSource),
@@ -1120,6 +1201,7 @@ export function validateProjectOverlayClosure(
   proposedArtifacts: readonly ArtifactRecord[],
   affectedIds: readonly string[],
   programCache?: OverlayProgramCache,
+  scopedRoots = false,
 ): readonly DiagnosticRecord[] {
   const overlay = new Map<string, string>();
   for (const module of modules) {
@@ -1182,12 +1264,17 @@ export function validateProjectOverlayClosure(
         absolute(root, module.implementationPath),
         absolute(root, module.facadePath),
       ]);
+    const ambientRoots = globalDeclarationRoots(compiler, project);
     const roots = [
-      ...new Set([...project.parsed.fileNames, ...ownedOverlayRoots]),
+      ...new Set(
+        scopedRoots
+          ? [...ambientRoots, ...ownedOverlayRoots]
+          : [...project.parsed.fileNames, ...ownedOverlayRoots],
+      ),
     ];
     const program = programCache
       ? programCache.create(
-          `${project.id}:closure`,
+          `${project.id}:closure:${scopedRoots ? "scoped" : "full"}`,
           compiler,
           roots,
           options,
