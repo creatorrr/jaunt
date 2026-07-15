@@ -480,6 +480,7 @@ class _SchedulingWorker:
         self.modules = modules
         self.projects = projects
         self.reject_combined = reject_combined
+        self.epoch = 1
         self.requests: list[tuple[str, dict[str, Any]]] = []
         self.input_hashes: dict[str, str] = {}
         for module in modules:
@@ -506,13 +507,13 @@ class _SchedulingWorker:
             protocol=PROTOCOL_VERSION,
             typescript_version="6.0.2",
             capabilities=REQUIRED_WORKER_CAPABILITIES,
-            stamp=WorkspaceStamp("schedule", 1, "snapshot", self.input_hashes),
+            stamp=WorkspaceStamp("schedule", self.epoch, "snapshot", self.input_hashes),
         )
 
     def _stamp(self) -> dict[str, Any]:
         return {
             "sessionId": "schedule",
-            "epoch": 1,
+            "epoch": self.epoch,
             "snapshot": "snapshot",
             "inputHashes": self.input_hashes,
         }
@@ -531,6 +532,12 @@ class _SchedulingWorker:
             }
         if method == "analyzeContracts":
             return {**self._stamp(), "modules": self.modules}
+        if method == "invalidate":
+            self.epoch += 1
+            return {
+                **self._stamp(),
+                "invalidated": list(params.get("paths", [])),
+            }
         if method != "validateOverlay":
             raise AssertionError(method)
         candidates = dict(params.get("candidates", {}))
@@ -720,6 +727,7 @@ async def test_targeted_analysis_ignores_unrelated_file_diagnostics(tmp_path: Pa
         ),
     )
     original_request = worker.request
+    public_import = _scheduled_module("public_type", owner=".")
 
     async def request(method: str, params: dict[str, Any]) -> dict[str, Any]:
         result = await original_request(method, params)
@@ -736,12 +744,18 @@ async def test_targeted_analysis_ignores_unrelated_file_diagnostics(tmp_path: Pa
                     }
                 ]
             )
+        if method == "analyzeContracts" and params.get("moduleIds"):
+            result["modules"] = [*result["modules"], public_import]
         return result
 
     worker.request = request  # type: ignore[method-assign]
 
     targeted = await analyze(cast(Any, worker), initialized, target_ids=("ts:src/math",))
     assert targeted.workspace["diagnostics"] == []
+    assert {str(module["moduleId"]) for module in targeted.modules} == {
+        "ts:src/math",
+        "ts:src/public_type",
+    }
     assert worker.requests[-1] == (
         "analyzeContracts",
         {"moduleIds": ["ts:src/math"]},
@@ -1284,6 +1298,10 @@ async def test_build_commits_independent_same_owner_modules(
     assert (tmp_path / str(first["implementationPath"])).is_file()
     assert (tmp_path / str(second["implementationPath"])).is_file()
     assert (tmp_path / str(unrelated["implementationPath"])).is_file()
+    validations = [params for method, params in worker.requests if method == "validateOverlay"]
+    landing_validations = [params for params in validations if params.get("baselineUnselected")]
+    assert len(landing_validations) == len(modules)
+    assert any(method == "invalidate" for method, _params in worker.requests)
 
 
 @pytest.mark.asyncio

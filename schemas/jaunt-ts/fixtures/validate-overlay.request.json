@@ -13,6 +13,7 @@
     "syncModuleIds": [],
     "restampModuleIds": [],
     "recomposeModuleIds": [],
-    "scopeToModuleIds": false
+    "scopeToModuleIds": false,
+    "baselineUnselected": false
   }
 }

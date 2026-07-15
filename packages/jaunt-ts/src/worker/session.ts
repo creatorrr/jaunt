@@ -614,6 +614,7 @@ export class AnalyzerSession {
         "scoped-analysis",
         "scoped-validation",
         "recompose",
+        "baseline-unselected",
       ],
     };
   }
@@ -782,6 +783,12 @@ export class AnalyzerSession {
       throw new WorkerError(
         "INVALID_REQUEST",
         "scopeToModuleIds requires a non-empty moduleIds selection",
+      );
+    }
+    if (params.baselineUnselected && !selected) {
+      throw new WorkerError(
+        "INVALID_REQUEST",
+        "baselineUnselected requires a non-empty moduleIds selection",
       );
     }
     const syncModules =
@@ -1014,7 +1021,12 @@ export class AnalyzerSession {
           }
         }
         const preflightModules = validationModules
-          .filter((other) => other.route.moduleId !== ir.moduleId)
+          .filter(
+            (other) =>
+              other.route.moduleId !== ir.moduleId &&
+              (!params.baselineUnselected ||
+                selected?.has(other.route.moduleId)),
+          )
           .map((other) => irByModule.get(other.route.moduleId)!);
         const result =
           candidate === undefined
@@ -1056,7 +1068,9 @@ export class AnalyzerSession {
             this.compiler,
             this.root,
             this.graph.projects,
-            allIrs,
+            params.baselineUnselected && selected
+              ? allIrs.filter((ir) => selected.has(ir.moduleId))
+              : allIrs,
             candidates,
             artifacts,
             affectedProjects,
@@ -1252,6 +1266,7 @@ export function parseValidateOverlayParams(
       "restampModuleIds",
       "recomposeModuleIds",
       "scopeToModuleIds",
+      "baselineUnselected",
     ]),
     "validateOverlay",
   );
@@ -1279,6 +1294,15 @@ export function parseValidateOverlayParams(
       "scopeToModuleIds must be a boolean",
     );
   }
+  if (
+    input.baselineUnselected !== undefined &&
+    typeof input.baselineUnselected !== "boolean"
+  ) {
+    throw new WorkerError(
+      "INVALID_REQUEST",
+      "baselineUnselected must be a boolean",
+    );
+  }
   return {
     sessionId: stringField(input, "sessionId"),
     expectedEpoch: input.expectedEpoch as number,
@@ -1299,6 +1323,9 @@ export function parseValidateOverlayParams(
     ...(input.scopeToModuleIds === undefined
       ? {}
       : { scopeToModuleIds: input.scopeToModuleIds as boolean }),
+    ...(input.baselineUnselected === undefined
+      ? {}
+      : { baselineUnselected: input.baselineUnselected as boolean }),
   };
 }
 

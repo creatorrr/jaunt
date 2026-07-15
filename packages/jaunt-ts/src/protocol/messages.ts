@@ -75,6 +75,7 @@ export interface ValidateOverlayParams {
   readonly restampModuleIds?: readonly string[];
   readonly recomposeModuleIds?: readonly string[];
   readonly scopeToModuleIds?: boolean;
+  readonly baselineUnselected?: boolean;
 }
 
 export interface FindOrphansParams {

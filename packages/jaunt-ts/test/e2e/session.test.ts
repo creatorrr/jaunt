@@ -264,6 +264,127 @@ export function slugify(model: Model): string { return jaunt.magic(); }
     expect(scoped.valid, JSON.stringify(scoped.diagnostics)).toBe(true);
   });
 
+  test("scoped bootstrap retains configured ambient declaration roots", async () => {
+    const workspace = createFixtureWorkspace();
+    roots.push(workspace.root);
+    writeFileSync(
+      resolve(workspace.root, "src/globals.d.ts"),
+      "declare type AmbientText = string;\n",
+    );
+    writeFileSync(
+      resolve(workspace.root, "src/slug/index.jaunt.ts"),
+      `import * as jaunt from "@usejaunt/ts/spec";
+jaunt.magicModule();
+/** Return ambient text unchanged. */
+export function slugify(value: AmbientText): AmbientText { return jaunt.magic(); }
+`,
+    );
+    const session = await AnalyzerSession.create({
+      root: workspace.root,
+      projects: ["tsconfig.json"],
+      testProjects: [],
+      sourceRoots: ["src"],
+      testRoots: ["tests"],
+      generatedDir: "__generated__",
+      toolOwner: ".",
+      compilerModulePath: workspace.compilerModulePath,
+      clientVersion: "test",
+      toolVersion: "test",
+    });
+    const contracts = session.analyzeContracts({
+      moduleIds: ["ts:src/slug/index"],
+    }).modules;
+    const metadata = session.metadata();
+    const scoped = session.validateOverlay({
+      sessionId: metadata.sessionId,
+      expectedEpoch: metadata.epoch,
+      expectedSnapshot: metadata.snapshot,
+      candidates: {},
+      moduleIds: contracts.map((contract) => contract.moduleId),
+      syncModuleIds: contracts.map((contract) => contract.moduleId),
+      scopeToModuleIds: true,
+    });
+    expect(scoped.valid, JSON.stringify(scoped.diagnostics)).toBe(true);
+  });
+
+  test("landing validation keeps unselected modules on their committed baseline", async () => {
+    const workspace = createFixtureWorkspace();
+    roots.push(workspace.root);
+    mkdirSync(resolve(workspace.root, "src/value"), { recursive: true });
+    writeFileSync(
+      resolve(workspace.root, "src/value/index.jaunt.ts"),
+      `import * as jaunt from "@usejaunt/ts/spec";
+jaunt.magicModule();
+/** Return a string value. */
+export function value(input: string): string { return jaunt.magic(); }
+`,
+    );
+    writeFileSync(
+      resolve(workspace.root, "src/consumer.ts"),
+      `import { value } from "./value/index.js";
+export const consumed: string = value("committed");
+`,
+    );
+    const params = {
+      root: workspace.root,
+      projects: ["tsconfig.json"],
+      testProjects: [],
+      sourceRoots: ["src"],
+      testRoots: ["tests"],
+      generatedDir: "__generated__",
+      toolOwner: ".",
+      compilerModulePath: workspace.compilerModulePath,
+      clientVersion: "test",
+      toolVersion: "test",
+    } as const;
+    const original = await AnalyzerSession.create(params);
+    const originalContracts = original.analyzeContracts().modules;
+    const originalMetadata = original.metadata();
+    const bootstrap = original.validateOverlay({
+      sessionId: originalMetadata.sessionId,
+      expectedEpoch: originalMetadata.epoch,
+      expectedSnapshot: originalMetadata.snapshot,
+      candidates: {},
+      moduleIds: originalContracts.map((contract) => contract.moduleId),
+      syncModuleIds: originalContracts.map((contract) => contract.moduleId),
+    });
+    expect(bootstrap.valid, JSON.stringify(bootstrap.diagnostics)).toBe(true);
+    commit(workspace.root, bootstrap.artifacts);
+
+    writeFileSync(
+      resolve(workspace.root, "src/value/index.jaunt.ts"),
+      `import * as jaunt from "@usejaunt/ts/spec";
+jaunt.magicModule();
+/** Return a numeric value. */
+export function value(input: number): number { return jaunt.magic(); }
+`,
+    );
+    const refreshed = await AnalyzerSession.create(params);
+    const slug = refreshed
+      .analyzeContracts()
+      .modules.find((contract) => contract.moduleId === "ts:src/slug/index")!;
+    const metadata = refreshed.metadata();
+    const request = {
+      sessionId: metadata.sessionId,
+      expectedEpoch: metadata.epoch,
+      expectedSnapshot: metadata.snapshot,
+      candidates: {},
+      moduleIds: [slug.moduleId],
+      syncModuleIds: [slug.moduleId],
+    } as const;
+    const prospective = refreshed.validateOverlay(request);
+    const baseline = refreshed.validateOverlay({
+      ...request,
+      baselineUnselected: true,
+    });
+
+    expect(prospective.valid).toBe(false);
+    expect(prospective.diagnostics).toContainEqual(
+      expect.objectContaining({ code: "TS2345", path: "src/consumer.ts" }),
+    );
+    expect(baseline.valid, JSON.stringify(baseline.diagnostics)).toBe(true);
+  });
+
   test("discovers, renders IR, and validates an unbuilt sync transaction", async () => {
     const { session } = await sessionFor();
     const workspace = session.analyzeWorkspace();

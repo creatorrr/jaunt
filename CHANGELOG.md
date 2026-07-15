@@ -24,7 +24,9 @@ All notable changes to jaunt. Generated from conventional commits by
   response.
 - Isolate independent TypeScript build transactions even when modules share a
   package owner or project-reference graph. A failed candidate no longer aborts
-  successful siblings; only explicit dependency-connected modules stay atomic.
+  successful siblings; each successful unit is revalidated against the
+  committed baseline before it lands, and only explicit dependency-connected
+  modules stay atomic.
 - Emit strict-unused-safe TypeScript placeholders and exclude ordinary
   co-located `*.test.ts[x]` and `*.spec.ts[x]` files from production dependency
   provenance.

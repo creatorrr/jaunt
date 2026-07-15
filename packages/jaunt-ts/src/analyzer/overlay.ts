@@ -185,8 +185,11 @@ function validateSources(
     // .tsbuildinfo file; candidate SourceFiles are still recreated on changes.
     incremental: false,
   };
+  const ambientRoots = project.parsed.fileNames.filter((path) =>
+    /\.d\.[cm]?ts$/.test(path),
+  );
   const nativeProgram = programFor("native", nativeOptions, [
-    ...(scopedRoots ? [] : project.parsed.fileNames),
+    ...(scopedRoots ? ambientRoots : project.parsed.fileNames),
     ...overlayRoots,
     ...extraRoots,
   ]);
@@ -245,7 +248,7 @@ function validateSources(
       .map((path) => resolve(path)),
   );
   const strictProgram = programFor("strict", strictOptions, [
-    ...project.parsed.fileNames.filter((path) => /\.d\.[cm]?ts$/.test(path)),
+    ...ambientRoots,
     ...overlayRoots,
     ...extraRoots,
   ]);
@@ -1188,10 +1191,13 @@ export function validateProjectOverlayClosure(
         absolute(root, module.implementationPath),
         absolute(root, module.facadePath),
       ]);
+    const ambientRoots = project.parsed.fileNames.filter((path) =>
+      /\.d\.[cm]?ts$/.test(path),
+    );
     const roots = [
       ...new Set(
         scopedRoots
-          ? ownedOverlayRoots
+          ? [...ambientRoots, ...ownedOverlayRoots]
           : [...project.parsed.fileNames, ...ownedOverlayRoots],
       ),
     ];

@@ -38,6 +38,7 @@ REQUIRED_WORKER_CAPABILITIES = (
     "invalidate",
     "contract-projection",
     "recompose",
+    "baseline-unselected",
 )
 _CRASH_REPLAY_METHODS = frozenset(
     {

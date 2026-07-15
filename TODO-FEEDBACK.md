@@ -64,8 +64,10 @@
 ## Cycle 10 — 2026-07-15
 
 - [x] Scope targeted TypeScript contract responses and validation to the explicit and public-import closure.
+- [x] Preserve the worker's public-import closure through the Python bridge and retain ambient declarations.
 - [x] Bound full-workspace contract responses and batch sync validation in dependency order.
 - [x] Commit independent successful TypeScript candidates when one sibling fails.
+- [x] Revalidate each independent landing unit against the committed sibling baseline.
 - [x] Make unbuilt placeholders safe under strict unused checks.
 - [x] Exclude ordinary co-located native tests from production import provenance.
 - [x] Fix mixed `clean --orphans` preflight argument defaults.

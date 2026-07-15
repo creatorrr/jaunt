@@ -401,24 +401,25 @@ async def analyze(
                 missing.add(target)
         if missing:
             raise JauntConfigError("Unknown TypeScript target(s): " + ", ".join(sorted(missing)))
-        selected: set[str] = set()
-        pending = list(requested)
-        while pending:
-            module_id = pending.pop()
-            if module_id in selected:
-                continue
-            selected.add(module_id)
-            dependencies = by_id[module_id].get("dependencies", [])
-            if isinstance(dependencies, list):
-                pending.extend(
-                    dependency.split("#", 1)[0]
-                    for dependency in dependencies
-                    if isinstance(dependency, str) and dependency.split("#", 1)[0] in by_id
-                )
-        contracts = {
-            **contracts,
-            "modules": [module for module in modules if _module_id(module) in selected],
-        }
+        if not supports_scoped_analysis:
+            selected: set[str] = set()
+            pending = list(requested)
+            while pending:
+                module_id = pending.pop()
+                if module_id in selected:
+                    continue
+                selected.add(module_id)
+                dependencies = by_id[module_id].get("dependencies", [])
+                if isinstance(dependencies, list):
+                    pending.extend(
+                        dependency.split("#", 1)[0]
+                        for dependency in dependencies
+                        if isinstance(dependency, str) and dependency.split("#", 1)[0] in by_id
+                    )
+            contracts = {
+                **contracts,
+                "modules": [module for module in modules if _module_id(module) in selected],
+            }
     diagnostics = workspace.get("diagnostics", [])
     errors = (
         [
@@ -462,6 +463,7 @@ async def validate_overlay(
     restamp_module_ids: Sequence[str] = (),
     recompose_module_ids: Sequence[str] = (),
     scoped_validation: bool = False,
+    baseline_unselected: bool = False,
 ) -> ValidateOverlayResult:
     wire = _stamp_params(analysis, candidates, module_ids).to_wire()
     if sync_module_ids:
@@ -472,6 +474,8 @@ async def validate_overlay(
         wire["recomposeModuleIds"] = list(recompose_module_ids)
     if scoped_validation and "scoped-validation" in analysis.initialized.capabilities:
         wire["scopeToModuleIds"] = True
+    if baseline_unselected:
+        wire["baselineUnselected"] = True
     raw = await client.request(
         "validateOverlay",
         wire,
@@ -1577,8 +1581,19 @@ async def run_build_in_session(
                 failed[module_id] = (_component_failure(module_id, failed_in_unit),)
             candidates.pop(module_id, None)
 
-    validated_units: list[tuple[_BuildUnit, ValidateOverlayResult]] = []
-    for unit in units:
+    changing_artifacts = {
+        _module_path(by_id[module_id], key)
+        for module_id in actionable_ids
+        for key in ("facadePath", "apiMirrorPath", "implementationPath", "sidecarPath")
+    }
+    immutable_inputs = {
+        path: digest
+        for path, digest in _input_hashes(analysis.contracts).items()
+        if path not in changing_artifacts
+    }
+    writes: list[_Write] = []
+    committed_refrozen: set[str] = set()
+    for index, unit in enumerate(units):
         unit_ids = set(unit.module_ids).intersection(actionable_ids)
         if unit_ids.intersection(failed):
             continue
@@ -1597,28 +1612,13 @@ async def run_build_in_session(
             restamp_module_ids=unit_restamped,
             recompose_module_ids=unit_recomposed,
             scoped_validation=bool(target_ids),
+            baseline_unselected=True,
         )
         if not validated.valid:
             diagnostics = _diagnostics(validated.diagnostics)
             for module_id in unit_ids:
                 failed[module_id] = diagnostics
             continue
-        validated_units.append((unit, validated))
-
-    changing_artifacts = {
-        _module_path(by_id[module_id], key)
-        for module_id in actionable_ids
-        for key in ("facadePath", "apiMirrorPath", "implementationPath", "sidecarPath")
-    }
-    immutable_inputs = {
-        path: digest
-        for path, digest in _input_hashes(analysis.contracts).items()
-        if path not in changing_artifacts
-    }
-    writes: list[_Write] = []
-    committed_refrozen: set[str] = set()
-    for unit, validated in validated_units:
-        unit_ids = set(unit.module_ids).intersection(actionable_ids)
         unit_artifact_paths = {
             _module_path(by_id[module_id], key)
             for module_id in unit_ids
@@ -1635,6 +1635,17 @@ async def run_build_in_session(
         writes.extend(unit_writes)
         generated.update(unit_ids.intersection(candidates))
         committed_refrozen.update(unit_ids.intersection(refrozen))
+        later_units = units[index + 1 :]
+        if any(
+            set(later.module_ids).intersection(actionable_ids)
+            and not set(later.module_ids).intersection(failed)
+            for later in later_units
+        ):
+            await client.request(
+                "invalidate",
+                {"paths": sorted(write.path for write in unit_writes)},
+            )
+            analysis = await analyze(client, initialized, target_ids=target_ids)
     update_target_api_reuse_proof(
         root,
         before=previous_target_api_records,

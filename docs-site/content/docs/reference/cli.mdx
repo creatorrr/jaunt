@@ -141,7 +141,8 @@ belong to `build`; compatible alpha artifact repairs belong to `migrate --langua
 ts`. A synchronized placeholder keeps the editor green but remains `unbuilt` in
 `status` and `check`. Full-workspace sync validates dependency-ordered bounded batches
 and commits them together. With `--target`, contract analysis and overlay validation
-include only the selected module and its Jaunt dependency closure.
+include only the selected module, its explicit and public-import closure, and the
+configured ambient declaration roots.
 
 ### `jaunt design`
 

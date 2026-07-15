@@ -157,10 +157,11 @@ consumes its temporary parameters and runtime imports, so `noUnusedLocals` and
 Full-workspace analysis and sync use bounded internal batches. Sync orders those
 batches by Jaunt dependencies, validates every batch first, then commits one artifact
 transaction. `--target` is narrower: contract responses, bootstrap placeholders,
-and overlay compiler validation include the selected module and its dependency
-closure, not unrelated configured sources. A broad stable root or glob can therefore
-remain in `jaunt.toml`; you should not need to rotate roots or `tsconfig` includes as
-each module is built.
+and overlay compiler validation include the selected module and its explicit and
+public-import closure, not unrelated configured sources. Configured ambient `.d.ts`
+roots remain available. A broad stable root or glob can therefore remain in
+`jaunt.toml`; you should not need to rotate roots or `tsconfig` includes as each
+module is built.
 
 ## Build, test, and check
 
@@ -175,7 +176,9 @@ exports, `any`, TypeScript suppressions, and unsafe boundary casts, then compose
 public exports itself. Candidate files are typechecked in an in-memory overlay. Jaunt
 writes the implementation, API mirror, sidecar, and any new facade only after the
 complete validation succeeds. Modules that merely share a package owner or project
-reference are separate write transactions. If one candidate fails, validated
+reference are separate write transactions. Each successful unit is revalidated
+against the artifacts currently committed for unselected siblings, then lands as
+one atomic write before the next unit is checked. If one candidate fails, validated
 independent siblings can still land; explicit Jaunt dependency-connected modules
 remain atomic.
 
