@@ -15,7 +15,7 @@ from jaunt.header import parse_stub_header
 _JAUNT_DECORATORS = {"magic", "sig", "test", "contract", "preserve"}
 
 # Bump when the stub rendering logic changes so already-emitted stubs re-emit.
-_STUB_FORMAT_VERSION = "5"
+_STUB_FORMAT_VERSION = "6"
 
 _RENDERED_DIGEST_PREFIX = "# jaunt:rendered_digest="
 
@@ -211,6 +211,30 @@ def stamp_stub_rendered_digest(stub_source: str) -> str:
     return "".join(lines)
 
 
+def _owner_ruff_config(filename: Path) -> Path | None:
+    """Return the nearest real Ruff config without consulting user-level state."""
+
+    import tomllib
+
+    resolved = filename.resolve()
+    for directory in (resolved.parent, *resolved.parent.parents):
+        for name in (".ruff.toml", "ruff.toml"):
+            candidate = directory / name
+            if candidate.is_file():
+                return candidate
+        pyproject = directory / "pyproject.toml"
+        if not pyproject.is_file():
+            continue
+        try:
+            configured = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+            continue
+        tool = configured.get("tool")
+        if isinstance(tool, dict) and isinstance(tool.get("ruff"), dict):
+            return pyproject
+    return None
+
+
 def _format_stub_with_owner_config(stub_source: str, *, filename: Path) -> tuple[str, str | None]:
     """Apply the Ruff formatter configuration that owns ``filename``."""
 
@@ -221,9 +245,16 @@ def _format_stub_with_owner_config(stub_source: str, *, filename: Path) -> tuple
     if ruff is None:
         return stub_source, "the bundled ruff executable was not found"
     resolved = filename.resolve()
+    config = _owner_ruff_config(resolved)
+    command = [ruff, "format"]
+    if config is None:
+        command.append("--isolated")
+    else:
+        command.extend(("--config", str(config)))
+    command.extend(("--stdin-filename", str(resolved), "-"))
     try:
         formatted = subprocess.run(
-            [ruff, "format", "--stdin-filename", str(resolved), "-"],
+            command,
             input=stub_source.encode("utf-8"),
             capture_output=True,
             timeout=30,

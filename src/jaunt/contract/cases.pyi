@@ -3,8 +3,8 @@
 # jaunt:kind=stub
 # jaunt:source_module=jaunt.contract.cases
 # jaunt:generated_digest=sha256:8b0528ad2cd47aac19880cca7e68c8d9161fc904055f4cf22af74d8b15a3e1d2
-# jaunt:inputs_digest=sha256:d56d9e359a594254ea4dca296c98c3997b7ef9b7a70ef8683f3387f4f977f25a
-# jaunt:rendered_digest=sha256:f26783db1aaddec44671e536b57e18034d48406f003b87855ea2fa35661416c1
+# jaunt:inputs_digest=sha256:212c356fab2694209ea96da1b6e7aa2755ff17332dbd0fc6c09e3b4d2097167a
+# jaunt:rendered_digest=sha256:391709f3b7812efda37549a8d67ee0d2c5a4883f6be16d2db35c3e7c9439ccd1
 
 import ast
 import builtins

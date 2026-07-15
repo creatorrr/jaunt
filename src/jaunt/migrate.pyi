@@ -3,8 +3,8 @@
 # jaunt:kind=stub
 # jaunt:source_module=jaunt.migrate
 # jaunt:generated_digest=sha256:0a1c11f5324101d81a92d3cc588246701570f12514566b1ffc9a74cdb0fee1d4
-# jaunt:inputs_digest=sha256:e1eeaebe40a30014104ba36b44955d9d955ff57946f3d48d949da5cc4dd0f97d
-# jaunt:rendered_digest=sha256:7f752a373c8720fd0335191d6fe3b5bc71fa715ced183190554d8708d6f3c690
+# jaunt:inputs_digest=sha256:c4d521467b401f2c139f6fc634f83e6140e5139859f3b93cd53f0df7f2058dd7
+# jaunt:rendered_digest=sha256:4676f89ada25636362769a8512677adce9dc25a0733d307f93981d550509680f
 
 import ast
 from dataclasses import dataclass

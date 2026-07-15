@@ -3,8 +3,8 @@
 # jaunt:kind=stub
 # jaunt:source_module=jaunt.heldout
 # jaunt:generated_digest=sha256:e90a4ece731560f181ab39c6d34c8f21836549629d7c837554c2ac003e67c1a9
-# jaunt:inputs_digest=sha256:f27139f8d9b22a2b54d68789b5a455022b14bcf3d01b7ca5c3eb0de89d3b811f
-# jaunt:rendered_digest=sha256:db2fd8f957fd05cb64ace17159a6d3c584b4b07d6c0d1b606b79e2d8d9b27dbf
+# jaunt:inputs_digest=sha256:a9a932ee58afcc78d1c67fcc906247606ff10792a9a0e09e3f36b22a57799c93
+# jaunt:rendered_digest=sha256:deeb1de30ed483161f279015c5893d49f0c51c6d0d2c16ddeca7f7f41d068611
 
 from collections.abc import Callable
 from pathlib import Path

@@ -89,4 +89,4 @@ def test_stub_format_version_tracks_owner_formatting_and_rendered_integrity() ->
     # integrity a deterministic stub-only migration.
     from jaunt import stub_emitter
 
-    assert stub_emitter._STUB_FORMAT_VERSION == "5"
+    assert stub_emitter._STUB_FORMAT_VERSION == "6"

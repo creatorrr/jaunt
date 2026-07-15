@@ -14,5 +14,9 @@ jaunt.magicModule();
  * @example slugify("  Project\tReferences!  ") // => "project-references"
  */
 export function slugify(value: string): string {
-  return jaunt.magic({ deps: [normalizeSpacing] });
+  return jaunt.magic({
+    deps: [normalizeSpacing],
+    prompt:
+      "Keep callback parameters explicitly typed so this remains strict before referenced-project declarations are emitted.",
+  });
 }

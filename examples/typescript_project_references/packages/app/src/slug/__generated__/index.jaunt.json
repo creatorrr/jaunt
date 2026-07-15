@@ -1,9 +1,9 @@
 {
-  "apiDigest": "sha256:8507f77eb52d8ac646d37498ebea0eaa769842c89b2a7a85c870c8b9f6455a5e",
+  "apiDigest": "sha256:02e22aaff07391d5f95d1ad63c0d30d065836e8a76bd03e6e47b704833b01993",
   "apiMirrorPath": "packages/app/src/slug/__generated__/index.api.ts",
   "artifactHashes": {
-    "packages/app/src/slug/__generated__/index.api.ts": "sha256:2c8b96eacbd6e77fa145f2f0d2c6bf966356fd1b6fceb72f80c83176c0255b46",
-    "packages/app/src/slug/__generated__/index.ts": "sha256:df2b55e72c7116938cea156abc52fd745248da90a150fc45b88c02072618d4d7",
+    "packages/app/src/slug/__generated__/index.api.ts": "sha256:fc8a519f6195fe7b98feecf2904d8f54a4bde1f167ba1889009c169652729a16",
+    "packages/app/src/slug/__generated__/index.ts": "sha256:cf611f3b0069de7f81f6fea829a38a7bc31525774376ee21c830c863793849d3",
     "packages/app/src/slug/index.ts": "sha256:1db00b0df482881a7fe6f67c5d84bf3d48659187a8e4ed17909cf395260f6874"
   },
   "contextDocs": [
@@ -157,7 +157,7 @@
   "facadePath": "packages/app/src/slug/index.ts",
   "fingerprint": {
     "compilerOptionsHash": "sha256:22dff1df026f3de9770281305f24eaeca1459083c36584842d4be246c15e0423",
-    "generationFingerprint": "sha256:be394cee1d92f01f12346309b497362505c37a81ca6a555dec4dadfee2946013",
+    "generationFingerprint": "sha256:d04f9d1531f6a85240a55bd68523439accd11ccabf4cf4950250527e3c4c31cd",
     "ir": "contract-ir/1-draft.2",
     "protocol": "jaunt-ts/1-draft.2",
     "toolVersion": "1.7.2",
@@ -173,7 +173,7 @@
   "schema": "contract-ir/1-draft.2",
   "specPath": "packages/app/src/slug/index.jaunt.ts",
   "state": "built",
-  "structuralDigest": "sha256:2982a7a610eb3ed2c40c8e6ea45cd28da1ea53e215dcb692cfbfc24a5359db6b",
+  "structuralDigest": "sha256:a6dab9640a9f915a8389b155763e50b6504a003bbc1e5cb62a3d68f59ac1637b",
   "symbols": [
     {
       "docs": "Convert a title to a lowercase ASCII URL slug.\n\nFirst normalize spacing with `normalizeSpacing`. Lowercase ASCII letters,\nreplace each non-empty run of characters other than ASCII letters and digits\nwith one hyphen, and remove leading or trailing hyphens. Return an empty\nstring when no ASCII letters or digits remain.\n\n@example slugify(\"  Project\\tReferences!  \") // => \"project-references\"",
@@ -187,7 +187,8 @@
       "options": {
         "deps": [
           "ts:packages/core/src/normalize/index#normalizeSpacing"
-        ]
+        ],
+        "prompt": "Keep callback parameters explicitly typed so this remains strict before referenced-project declarations are emitted."
       },
       "signatures": [
         {

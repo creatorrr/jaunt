@@ -9,6 +9,7 @@ import pytest
 
 from jaunt.header import format_stub_header, parse_stub_header
 from jaunt.stub_emitter import (
+    _format_stub_with_owner_config,
     build_stub_source,
     format_stub_best_effort,
     generated_content_digest,
@@ -751,6 +752,69 @@ def test_format_stub_best_effort_uses_owner_ruff_config_and_stamps_bytes(
         text=True,
     )
     assert check.returncode == 0, check.stdout + check.stderr
+
+
+def test_owner_format_isolated_without_project_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        commands.append(command)
+        input_bytes = kwargs["input"]
+        assert isinstance(input_bytes, bytes)
+        return subprocess.CompletedProcess(command, 0, stdout=input_bytes, stderr=b"")
+
+    monkeypatch.setattr("shutil.which", lambda _name: "/bundled/ruff")
+    monkeypatch.setattr("subprocess.run", fake_run)
+    stub_path = tmp_path / "src" / "pkg" / "values.pyi"
+
+    formatted, error = _format_stub_with_owner_config(
+        "def value() -> int: ...\n", filename=stub_path
+    )
+
+    assert error is None
+    assert formatted == "def value() -> int: ...\n"
+    assert commands == [
+        [
+            "/bundled/ruff",
+            "format",
+            "--isolated",
+            "--stdin-filename",
+            str(stub_path.resolve()),
+            "-",
+        ]
+    ]
+
+
+def test_owner_format_pins_nearest_project_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        commands.append(command)
+        input_bytes = kwargs["input"]
+        assert isinstance(input_bytes, bytes)
+        return subprocess.CompletedProcess(command, 0, stdout=input_bytes, stderr=b"")
+
+    config = tmp_path / "pyproject.toml"
+    config.write_text("[tool.ruff]\nline-length = 88\n", encoding="utf-8")
+    monkeypatch.setattr("shutil.which", lambda _name: "/bundled/ruff")
+    monkeypatch.setattr("subprocess.run", fake_run)
+    stub_path = tmp_path / "src" / "pkg" / "values.pyi"
+
+    _formatted, error = _format_stub_with_owner_config(
+        "def value() -> int: ...\n", filename=stub_path
+    )
+
+    assert error is None
+    assert commands[0][0:4] == ["/bundled/ruff", "format", "--config", str(config)]
+    assert "--isolated" not in commands[0]
 
 
 def test_owner_configured_crlf_is_preserved_and_fresh(tmp_path: Path) -> None:

@@ -3,8 +3,8 @@
 # jaunt:kind=stub
 # jaunt:source_module=jaunt.guard
 # jaunt:generated_digest=sha256:cb84723a66195c1ecbae41e62c070774dc68833ed9b2df59168108b6a0e30f09
-# jaunt:inputs_digest=sha256:fe6d980e61f3fe96bb9926f5e151827967aac39e96b1e97487f6560eb2fd3d56
-# jaunt:rendered_digest=sha256:79971494521614d1074b97062ab56c99c387de8802d613be24b454c590554d31
+# jaunt:inputs_digest=sha256:a3fc9e64c944a4e3dcd76ce72582ace989855cea32e60389ed5b08c8084e35e0
+# jaunt:rendered_digest=sha256:cbbbf0796513f145cefe5ff9b414d53c7ce83d7a9e7b7c4f30247dff08814c63
 
 _FILE_KEYS = ("file_path", "path", "notebook_path")
 

@@ -3,7 +3,7 @@
   "apiMirrorPath": "packages/core/src/normalize/__generated__/index.api.ts",
   "artifactHashes": {
     "packages/core/src/normalize/__generated__/index.api.ts": "sha256:a8d2bbd51e22d9fd15fdaeb1f7b67dbc873702cbc41aee5997fa540fa7ac3df1",
-    "packages/core/src/normalize/__generated__/index.ts": "sha256:c985ec0ca3ff9c82df48741bc9a2a655fe1a1984bbe04da0d6957e8434e2505d",
+    "packages/core/src/normalize/__generated__/index.ts": "sha256:a8aafd7f814f87f618defa85c99e0f8475aa0126e6fe5e2929c2262b47eb7967",
     "packages/core/src/normalize/index.ts": "sha256:1db00b0df482881a7fe6f67c5d84bf3d48659187a8e4ed17909cf395260f6874"
   },
   "contextDocs": [
@@ -146,7 +146,7 @@
   "facadePath": "packages/core/src/normalize/index.ts",
   "fingerprint": {
     "compilerOptionsHash": "sha256:733b0de60903c3a6ff99040ca855c84b231f4a33ec486b0681a52c9fd9c80560",
-    "generationFingerprint": "sha256:be394cee1d92f01f12346309b497362505c37a81ca6a555dec4dadfee2946013",
+    "generationFingerprint": "sha256:d04f9d1531f6a85240a55bd68523439accd11ccabf4cf4950250527e3c4c31cd",
     "ir": "contract-ir/1-draft.2",
     "protocol": "jaunt-ts/1-draft.2",
     "toolVersion": "1.7.2",

@@ -3,8 +3,8 @@
 # jaunt:kind=stub
 # jaunt:source_module=jaunt.contract.drift
 # jaunt:generated_digest=sha256:c34c920ca1b0ddd76ce02330c8601352cfbb4d44fb9f3f144dfcf29050549793
-# jaunt:inputs_digest=sha256:caa191110f2c7979653645e64d88c8c47fff0afb8acda8e3329c190223303438
-# jaunt:rendered_digest=sha256:81eed3fd54be9858de4ce9cebc5b8fd0f3d992267a3927d61e943164e6c9edce
+# jaunt:inputs_digest=sha256:c46341793fa0b9bec57f2c2c3ff147c4a93d0017aafaf719643eeced73016657
+# jaunt:rendered_digest=sha256:ceb33e185771a714f327423a9d05c33fb578411ab57681aff52b7b2ceb268677
 
 import enum
 

@@ -5,15 +5,11 @@
 // jaunt:prose=sha256:fe36c3763b8865671942e43121b369178cedb891ef3436c7263ba68da757b456
 // jaunt:api=sha256:a52511dad24073a9fc2e95259368ead606971bd859f5af8ecb222f6ec1d1fd46
 import type * as __JauntApi from "./index.api.js";
-const ASCII_WHITESPACE = /[\t\n\v\f\r ]+/g;
-const LEADING_OR_TRAILING_ASCII_WHITESPACE = /^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$/g;
-
 function __jaunt_impl_normalizeSpacing(value: string): string {
-  return value
-    .replace(LEADING_OR_TRAILING_ASCII_WHITESPACE, "")
-    .replace(ASCII_WHITESPACE, " ");
+  return value.replace(/[\t\n\v\f\r ]+/g, " ").replace(/^ | $/g, "");
 }
 
+Object.defineProperty(__jaunt_impl_normalizeSpacing, "name", { value: "normalizeSpacing", configurable: true });
 /**
  * Normalize spacing in a title.
  *
