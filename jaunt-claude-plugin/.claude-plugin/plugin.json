@@ -1,6 +1,6 @@
 {
   "name": "jaunt",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Workspace-aware Python and TypeScript Jaunt support for Claude Code: generated-file guards, freshness summaries, build and conversion workflows, doctor, and first-build review.",
   "author": { "name": "Jaunt Contributors" },
   "homepage": "https://jaunt.ing/docs/guides/claude-code-plugin",

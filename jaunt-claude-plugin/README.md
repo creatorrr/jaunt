@@ -4,7 +4,7 @@ This plugin packages Jaunt's workspace-aware Python and TypeScript authoring
 loop for Claude Code: generated-file guards, session freshness, build and
 conversion skills, a read-only doctor, and a first-build reviewer.
 
-Version 1.2.1 understands version-2 TypeScript targets as well as Python
+Version 1.2.2 understands version-2 TypeScript targets as well as Python
 workspace routing. One root `jaunt.toml` may cover several Python and
 JavaScript packages; ownership follows the nearest `pyproject.toml` or
 `package.json` for the target.
@@ -55,8 +55,11 @@ unavailable tools, or timeouts.
 
 There is no MCP server. Jaunt's JSON CLI is the machine interface.
 
-The command hooks require Bash. SessionStart runs `jaunt status`, which imports
-discovered spec modules; enable it only for workspaces whose Python code you
-trust.
+The command hooks use Bash when it is available. Both launchers always return
+success to the host, so a missing Bash silently disables the hook instead of
+failing the session. SessionStart stays inside the active Git worktree (or
+nearest parent `jaunt.toml`) and ignores nested Claude/Codex managed worktrees
+and repositories. It runs `jaunt status`, which imports discovered spec modules;
+enable it only for workspaces whose Python code you trust.
 CLI calls prefer a compatible installed `jaunt`, use the existing uv environment for a uv
 project, and otherwise use `uvx jaunt` in JavaScript-only projects.
