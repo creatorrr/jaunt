@@ -22,9 +22,15 @@ class TypeScriptTargetConfig:
     test_runner: str = "vitest"
     vitest_config: str = ""
     vitest_args: list[str] = field(default_factory=list)
+    auto_skills: bool | None = None
     auto_class_tests: bool = False
     fast_check_runs: int = 50
     contract_battery_dir: str = "tests/contract"
+
+    def auto_skills_enabled(self, shared_default: bool) -> bool:
+        """Resolve the target-local override without changing Python behavior."""
+
+        return shared_default if self.auto_skills is None else self.auto_skills
 
 
 @dataclass(frozen=True, slots=True)

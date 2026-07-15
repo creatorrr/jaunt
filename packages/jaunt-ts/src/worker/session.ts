@@ -8,6 +8,7 @@ import {
   type AnalyzeContractsParams,
   type AnalyzeContractsResult,
   type AnalyzeWorkspaceResult,
+  type AnalyzeWorkspaceParams,
   type CancelParams,
   type ContractAnalysisRecord,
   type FindOrphansParams,
@@ -34,6 +35,7 @@ import {
   type ProjectGraph,
 } from "../analyzer/config.js";
 import {
+  collapseProvenanceDiagnostics,
   discoverWorkspace,
   type DiscoveryResult,
 } from "../analyzer/discovery.js";
@@ -550,11 +552,69 @@ export class AnalyzerSession {
         "orphans",
         "invalidate",
         "contract-projection",
+        "scoped-diagnostics",
       ],
     };
   }
 
-  analyzeWorkspace(): AnalyzeWorkspaceResult {
+  analyzeWorkspace(
+    params: AnalyzeWorkspaceParams = {},
+  ): AnalyzeWorkspaceResult {
+    const selected = moduleSelection(params.moduleIds);
+    let discoveryDiagnostics = this.discovery.diagnostics;
+    if (selected) {
+      const selectedModules = new Set<DiscoveryResult["modules"][number]>();
+      const pending = this.discovery.modules.filter((module) =>
+        selected.has(module.route.moduleId),
+      );
+      while (pending.length > 0) {
+        const module = pending.pop()!;
+        if (selectedModules.has(module)) continue;
+        selectedModules.add(module);
+        pending.push(...module.dependencyModules);
+      }
+      const relevantPaths = new Set<string>();
+      for (const module of selectedModules) {
+        for (const path of [
+          module.route.specPath,
+          module.route.contextPath,
+          module.route.facadePath,
+          module.route.apiMirrorPath,
+          module.route.implementationPath,
+          module.route.sidecarPath,
+        ]) {
+          if (path) relevantPaths.add(resolve(this.root, path));
+        }
+      }
+      for (const testSpec of this.discovery.testSpecs) {
+        if (
+          testSpec.targets.some((target) =>
+            [...selectedModules].some((module) =>
+              target.startsWith(`${module.route.moduleId}#`),
+            ),
+          )
+        ) {
+          relevantPaths.add(resolve(this.root, testSpec.path));
+        }
+      }
+      const importPending = [...relevantPaths];
+      while (importPending.length > 0) {
+        const path = importPending.pop()!;
+        for (const dependency of this.discovery.importAdjacency.get(path) ??
+          []) {
+          if (relevantPaths.has(dependency)) continue;
+          relevantPaths.add(dependency);
+          importPending.push(dependency);
+        }
+      }
+      discoveryDiagnostics = collapseProvenanceDiagnostics(
+        this.discovery.scopedDiagnostics.filter(
+          (diagnostic) =>
+            !diagnostic.path ||
+            relevantPaths.has(resolve(this.root, diagnostic.path)),
+        ),
+      );
+    }
     return {
       ...this.metadata(),
       projects: this.graph.records,
@@ -562,7 +622,7 @@ export class AnalyzerSession {
       specs: this.discovery.specs,
       testSpecs: this.discovery.testSpecs,
       contracts: this.discovery.contracts,
-      diagnostics: [...this.graph.diagnostics, ...this.discovery.diagnostics],
+      diagnostics: [...this.graph.diagnostics, ...discoveryDiagnostics],
     };
   }
 
@@ -909,6 +969,20 @@ export class AnalyzerSession {
       if (expected.has(path)) continue;
       const content = readOptional(resolve(this.root, path));
       if (!content) continue;
+      // Generated Vitest batteries are owned by the Python test/contract
+      // lifecycle, which validates their provenance against authored test
+      // intent. They may be co-located under a configured source root, but
+      // are never implementation artifacts owned by this worker scan.
+      if (
+        /\.(?:example|derived|contract)\.test\.(?:ts|tsx)$/.test(path) &&
+        (content.startsWith(
+          "// ⚙️ jaunt:generated — DO NOT EDIT. Regenerate with `jaunt test`.\n",
+        ) ||
+          content.startsWith(
+            "// ⚙️ jaunt:contract-battery — DO NOT EDIT. Regenerate with `jaunt reconcile`.\n",
+          ))
+      )
+        continue;
       const sidecar = path.endsWith(".jaunt.json");
       if (
         !content.includes("jaunt:") &&
@@ -962,6 +1036,16 @@ export function parseAnalyzeContractsParams(
 ): AnalyzeContractsParams {
   const input = record(value, "analyzeContracts params");
   assertOnlyParamKeys(input, new Set(["moduleIds"]), "analyzeContracts");
+  return input.moduleIds === undefined
+    ? {}
+    : { moduleIds: stringArray(input, "moduleIds") };
+}
+
+export function parseAnalyzeWorkspaceParams(
+  value: unknown,
+): AnalyzeWorkspaceParams {
+  const input = record(value, "analyzeWorkspace params");
+  assertOnlyParamKeys(input, new Set(["moduleIds"]), "analyzeWorkspace");
   return input.moduleIds === undefined
     ? {}
     : { moduleIds: stringArray(input, "moduleIds") };

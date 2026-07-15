@@ -886,7 +886,9 @@ def _typescript_builtin_skill_names(args: argparse.Namespace, cfg: JauntConfig) 
 
 
 def _typescript_auto_skills_enabled(args: argparse.Namespace, cfg: JauntConfig) -> bool:
-    return bool(cfg.skills.auto) and not bool(getattr(args, "no_auto_skills", False))
+    target = cfg.typescript_target
+    enabled = target.auto_skills_enabled(bool(cfg.skills.auto)) if target else False
+    return enabled and not bool(getattr(args, "no_auto_skills", False))
 
 
 def _typescript_error(command: str, error: Exception, *, json_mode: bool, code: int) -> int:
@@ -1408,7 +1410,7 @@ def _prepare_mixed_typescript_skills(
         getattr(args, "no_builtin_skills", False)
     )
     args._mixed_builtin_skill_names = tuple(cfg.skills.builtin_skills) if builtin_enabled else ()
-    auto_enabled = bool(cfg.skills.auto) and not bool(getattr(args, "no_auto_skills", False))
+    auto_enabled = _typescript_auto_skills_enabled(args, cfg)
     args._mixed_npm_skill_metadata = {}
     if not auto_enabled:
         return
@@ -3934,6 +3936,19 @@ def _maybe_load_dotenv(root: Path) -> None:
     load_dotenv_into_environ(root / ".env")
 
 
+def _ensure_jaunt_gitignore(root: Path) -> tuple[str, ...]:
+    """Seed all Jaunt-owned local cache directories exactly once."""
+
+    gitignore = root / ".gitignore"
+    existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+    lines = existing.splitlines()
+    missing = tuple(entry for entry in (".jaunt/", ".jaunt-vitest-cache/") if entry not in lines)
+    if missing:
+        joiner = "" if (not existing or existing.endswith("\n")) else "\n"
+        gitignore.write_text(existing + joiner + "".join(f"{entry}\n" for entry in missing))
+    return missing
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     from jaunt import journal as _journal
 
@@ -3964,11 +3979,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     (root / _journal.JOURNAL_FILE).touch(exist_ok=True)
     _journal.ensure_union_merge_attribute(root)
-    gitignore = root / ".gitignore"
-    existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
-    if ".jaunt/" not in existing.splitlines():
-        joiner = "" if (not existing or existing.endswith("\n")) else "\n"
-        gitignore.write_text(existing + joiner + ".jaunt/\n", encoding="utf-8")
+    _ensure_jaunt_gitignore(root)
 
     if json_mode:
         payload = {"command": "init", "ok": True, "path": str(toml_path)}
@@ -4051,11 +4062,7 @@ def _cmd_init_typescript(*, root: Path, toml_path: Path, json_mode: bool) -> int
 
     (root / _journal.JOURNAL_FILE).touch(exist_ok=True)
     _journal.ensure_union_merge_attribute(root)
-    gitignore = root / ".gitignore"
-    existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
-    if ".jaunt/" not in existing.splitlines():
-        joiner = "" if (not existing or existing.endswith("\n")) else "\n"
-        gitignore.write_text(existing + joiner + ".jaunt/\n", encoding="utf-8")
+    _ensure_jaunt_gitignore(root)
 
     if (root / "pnpm-lock.yaml").exists():
         install_command = (
@@ -4915,6 +4922,7 @@ def _cmd_typescript_migrate_loaded(args: argparse.Namespace, root: Path, cfg: Ja
             return EXIT_CONFIG_OR_DISCOVERY
 
         applied_paths = apply_typescript_migration(plan)
+        _ensure_jaunt_gitignore(root)
         applied_payload = plan.to_json(applied=True, applied_paths=applied_paths)
         if json_mode:
             _emit_json(applied_payload)

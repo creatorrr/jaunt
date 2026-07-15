@@ -182,6 +182,7 @@ _V2_TS_TARGET_KEYS = frozenset(
         "test_runner",
         "vitest_config",
         "vitest_args",
+        "auto_skills",
         "auto_class_tests",
         "fast_check_runs",
         "contract_battery_dir",
@@ -657,6 +658,11 @@ def _normalize_v2_data(
             test_runner=test_runner,
             vitest_config=vitest_config,
             vitest_args=vitest_args,
+            auto_skills=(
+                _as_bool(ts_tbl["auto_skills"], name="target.ts.auto_skills")
+                if "auto_skills" in ts_tbl
+                else None
+            ),
             auto_class_tests=_as_bool(
                 ts_tbl.get("auto_class_tests", False), name="target.ts.auto_class_tests"
             ),

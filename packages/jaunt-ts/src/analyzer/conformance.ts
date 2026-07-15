@@ -50,6 +50,7 @@ export function renderConformanceSource(
     if (symbol.kind === "class") return [renderClassConformance(ir, symbol)];
     return [
       `const __jaunt_check_${symbol.name}: typeof __JauntSpec.${symbol.name} = __jaunt_impl_${symbol.name};`,
+      `void __jaunt_check_${symbol.name};`,
     ];
   });
   return [
@@ -68,17 +69,22 @@ export function renderMirrorConformanceSource(ir: ContractModuleIR): string {
   const checks = ir.symbols.flatMap((symbol, index) => [
     `declare const __spec_${index}: typeof __JauntSpec.${symbol.name};`,
     `const __api_from_spec_${index}: typeof __JauntApi.${symbol.name} = __spec_${index};`,
+    `void __api_from_spec_${index};`,
     `declare const __api_${index}: typeof __JauntApi.${symbol.name};`,
     `const __spec_from_api_${index}: typeof __JauntSpec.${symbol.name} = __api_${index};`,
+    `void __spec_from_api_${index};`,
   ]);
-  const typeChecks = ir.typeDeclarations.map((declaration, index) => {
+  const typeChecks = ir.typeDeclarations.flatMap((declaration, index) => {
     const parameters = declarationTypeParameters(
       ir,
       declaration.typeParameters,
       "__JauntSpec",
     );
     const arguments_ = declarationTypeArguments(declaration.typeParameters);
-    return `function __mirror_type_${index}${parameters}(spec: __JauntSpec.${declaration.name}${arguments_}, api: __JauntApi.${declaration.name}${arguments_}): void { const apiFromSpec: __JauntApi.${declaration.name}${arguments_} = spec; const specFromApi: __JauntSpec.${declaration.name}${arguments_} = api; void apiFromSpec; void specFromApi; }`;
+    return [
+      `function __mirror_type_${index}${parameters}(spec: __JauntSpec.${declaration.name}${arguments_}, api: __JauntApi.${declaration.name}${arguments_}): void { const apiFromSpec: __JauntApi.${declaration.name}${arguments_} = spec; const specFromApi: __JauntSpec.${declaration.name}${arguments_} = api; void apiFromSpec; void specFromApi; }`,
+      `void __mirror_type_${index};`,
+    ];
   });
   return [
     `import type * as __JauntSpec from ${JSON.stringify(spec)};`,
@@ -93,10 +99,10 @@ export function renderMirrorConformanceSource(ir: ContractModuleIR): string {
 export function renderFacadeConformanceSource(ir: ContractModuleIR): string {
   const facade = relativeModuleSpecifier(ir.implementationPath, ir.facadePath);
   const api = relativeModuleSpecifier(ir.implementationPath, ir.apiMirrorPath);
-  const valueChecks = ir.symbols.map(
-    (symbol, index) =>
-      `const __facade_value_${index}: typeof __JauntApi.${symbol.name} = __JauntFacade.${symbol.name};`,
-  );
+  const valueChecks = ir.symbols.flatMap((symbol, index) => [
+    `const __facade_value_${index}: typeof __JauntApi.${symbol.name} = __JauntFacade.${symbol.name};`,
+    `void __facade_value_${index};`,
+  ]);
   const declarationChecks = ir.typeDeclarations.flatMap(
     (declaration, index) => {
       const parameters = declarationTypeParameters(
@@ -107,6 +113,7 @@ export function renderFacadeConformanceSource(ir: ContractModuleIR): string {
       const arguments_ = declarationTypeArguments(declaration.typeParameters);
       return [
         `function __facade_type_${index}${parameters}(facade: __JauntFacade.${declaration.name}${arguments_}, api: __JauntApi.${declaration.name}${arguments_}): void { const apiFromFacade: __JauntApi.${declaration.name}${arguments_} = facade; const facadeFromApi: __JauntFacade.${declaration.name}${arguments_} = api; void apiFromFacade; void facadeFromApi; }`,
+        `void __facade_type_${index};`,
       ];
     },
   );
@@ -121,6 +128,7 @@ export function renderFacadeConformanceSource(ir: ContractModuleIR): string {
       const arguments_ = declarationTypeArguments(symbol.typeParameters);
       return [
         `function __facade_class_${index}${parameters}(facade: __JauntFacade.${symbol.name}${arguments_}, api: __JauntApi.${symbol.name}${arguments_}): void { const apiFromFacade: __JauntApi.${symbol.name}${arguments_} = facade; const facadeFromApi: __JauntFacade.${symbol.name}${arguments_} = api; void apiFromFacade; void facadeFromApi; }`,
+        `void __facade_class_${index};`,
       ];
     });
   return [

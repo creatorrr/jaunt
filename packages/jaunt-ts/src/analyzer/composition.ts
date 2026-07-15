@@ -131,6 +131,40 @@ function candidateClass(
   return undefined;
 }
 
+function hasFreshFunctionBinding(
+  compiler: typeof import("@typescript/typescript6"),
+  sourceFile: ts.SourceFile,
+  name: string,
+): boolean {
+  for (const statement of sourceFile.statements) {
+    if (
+      compiler.isFunctionDeclaration(statement) &&
+      statement.name?.text === name
+    ) {
+      return true;
+    }
+    if (!compiler.isVariableStatement(statement)) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (
+        !compiler.isIdentifier(declaration.name) ||
+        declaration.name.text !== name ||
+        !declaration.initializer
+      ) {
+        continue;
+      }
+      let initializer = declaration.initializer;
+      while (compiler.isParenthesizedExpression(initializer)) {
+        initializer = initializer.expression;
+      }
+      return (
+        compiler.isArrowFunction(initializer) ||
+        compiler.isFunctionExpression(initializer)
+      );
+    }
+  }
+  return false;
+}
+
 function validateClassSurface(
   compiler: typeof import("@typescript/typescript6"),
   root: string,
@@ -467,6 +501,11 @@ function injectRuntimeImports(
 
 function renderedBoundary(ir: ContractModuleIR): readonly string[] {
   return ir.symbols.flatMap((symbol) => [
+    ...(symbol.kind === "function"
+      ? [
+          `Object.defineProperty(__jaunt_impl_${symbol.name}, "name", { value: ${JSON.stringify(symbol.name)}, configurable: true });`,
+        ]
+      : []),
     `${renderDocs(symbol.docs)}export const ${symbol.name}: typeof __JauntApi.${symbol.name} = __jaunt_impl_${symbol.name};`,
     ...(symbol.kind === "class" ? [renderClassTypeAlias(symbol)] : []),
   ]);
@@ -474,6 +513,11 @@ function renderedBoundary(ir: ContractModuleIR): readonly string[] {
 
 function renderedBoundaryStatements(ir: ContractModuleIR): readonly string[] {
   return ir.symbols.flatMap((symbol) => [
+    ...(symbol.kind === "function"
+      ? [
+          `Object.defineProperty(__jaunt_impl_${symbol.name}, "name", { value: ${JSON.stringify(symbol.name)}, configurable: true });`,
+        ]
+      : []),
     `export const ${symbol.name}: typeof __JauntApi.${symbol.name} = __jaunt_impl_${symbol.name};`,
     ...(symbol.kind === "class" ? [renderClassTypeAlias(symbol)] : []),
   ]);
@@ -1560,6 +1604,16 @@ export function composeCandidate(
         code: "JAUNT_TS_MISSING_BINDING",
         severity: "error",
         message: `Candidate must declare reserved binding ${reserved}`,
+        path,
+      });
+    } else if (
+      symbol.kind === "function" &&
+      !hasFreshFunctionBinding(compiler, sourceFile, reserved)
+    ) {
+      diagnostics.push({
+        code: "JAUNT_TS_FUNCTION_ALIAS",
+        severity: "error",
+        message: `Generated function ${symbol.name} must use a fresh function declaration, expression, or arrow binding`,
         path,
       });
     }

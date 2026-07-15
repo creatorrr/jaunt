@@ -59,6 +59,7 @@ class TargetStatus:
     digests: Mapping[str, str] = field(default_factory=dict)
     orphans: tuple[TargetArtifact, ...] = ()
     diagnostics: tuple[TargetDiagnostic, ...] = ()
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

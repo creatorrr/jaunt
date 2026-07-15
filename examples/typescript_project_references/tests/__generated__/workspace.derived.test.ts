@@ -2,47 +2,46 @@
 // jaunt:tier=derived
 // jaunt:source=tests/workspace.jaunt-test.ts
 // jaunt:test_spec_digest=sha256:9c467f35f3e59eaadb19aa958d10a76b439ce6edafa34db4cb8985f3a3979149
-// jaunt:target_api_digest=sha256:5e82905133ea007e2411af78b1c42783d341d40a7d4d553e110974d40e0d7e09
+// jaunt:target_api_digest=sha256:d993da6ae5cc96c03cf70ec87458f53e00fa96f7626129e8a23a587c02dff9fa
 // jaunt:vitest_fingerprint=sha256:e1d72b03464ea5f6015fff626717b40b076abf906d7c97b33815a9e27eddb28b
 // jaunt:fast_check_fingerprint=sha256:68ea27c23927294821104fb6e5ff72601122f29737a2d94654138edf4836f6d0
-// jaunt:runner_fingerprint=sha256:784f8b7a06ae4b2e79b4d5f349b1e530713d3168aaaeba4a714fd68d44b772fa
+// jaunt:runner_fingerprint=sha256:d18e1385cd1c7e9204ff14ece768846b47144325b3177f549074baf7038a08d8
 // jaunt:prompt_fingerprint=sha256:264ea8cccd2cb754b5ab7f46bf018f7245195b9851026a0edb87ab956359d82d
 // jaunt:policy_fingerprint=sha256:babe1406e8e4cc1024536374f7e50070a88000c5e80db5f17d2914c1e7752693
 // jaunt:skills_fingerprint=462d7ee5b605e739480d217bc7874e1490ce7a1a8d700cb2a516c776f04fbcaf
-// jaunt:battery_fingerprint=sha256:3f899a70f12627f80b2190c7c31b4c3b6ad677947ce180760029e60c2acc149e
-// jaunt:body_digest=sha256:dacccb284874639f058ffc29d22044b215727aa7f90021a430a8b8395d799804
+// jaunt:battery_fingerprint=sha256:8d04959508e35d1f9e5aa18d61aca68460cd65d180e160f754a487753a9fa60c
+// jaunt:body_digest=sha256:8e73f72f24bd9e4cdac001f999dfe9a33959a298ba3222eb5de5b86a7890e0c1
 
-import { expect, test } from "vitest";
+import { describe, expect, test } from "vitest";
 
 import { slugify } from "../../packages/app/src/slug/index.js";
 import { normalizeSpacing } from "../../packages/core/src/normalize/index.js";
 
-const normalizationCases: ReadonlyArray<readonly [string, string, string]> = [
-  ["d001", "\t\r\n Alpha\v\fBeta \tGamma\r\n", "Alpha Beta Gamma"],
-  ["d002", " \t\n\v\f\r ", ""],
-  ["d003", "", ""],
-  ["d004", "\u00a0  Alpha\tBeta  \u2003", "\u00a0 Alpha Beta \u2003"],
-  ["d005", "Already compact", "Already compact"],
-];
-
-for (const [caseId, input, expected] of normalizationCases) {
-  test(caseId, () => {
-    expect(normalizeSpacing(input)).toBe(expected);
+describe("normalizeSpacing", () => {
+  test.each([
+    ["D-N-001", "", ""],
+    ["D-N-002", " \t\n\v\f\r ", ""],
+    ["D-N-003", "alpha\t\n\v\f\rbeta", "alpha beta"],
+    ["D-N-004", "\r\nalpha   beta\t", "alpha beta"],
+    ["D-N-005", "alpha\u00a0beta", "alpha\u00a0beta"],
+    ["D-N-006", "alpha-beta", "alpha-beta"],
+  ] as const)("%s", (_caseId, value, expected) => {
+    expect(normalizeSpacing(value)).toBe(expected);
   });
-}
+});
 
-const slugCases: ReadonlyArray<readonly [string, string, string]> = [
-  ["d006", "API42___Ready...NOW", "api42-ready-now"],
-  ["d007", "---Café déjà vu---", "caf-d-j-vu"],
-  ["d008", "123ABCxyz789", "123abcxyz789"],
-  ["d009", "中文🙂", ""],
-  ["d010", " A--B__ C!!!D ", "a-b-c-d"],
-  ["d011", "İstanbul AKB", "stanbul-a-b"],
-  ["d012", "9", "9"],
-];
-
-for (const [caseId, input, expected] of slugCases) {
-  test(caseId, () => {
-    expect(slugify(input)).toBe(expected);
+describe("slugify", () => {
+  test.each([
+    ["D-S-001", "", ""],
+    ["D-S-002", " \t\n\v\f\r ", ""],
+    ["D-S-003", "API Version 2", "api-version-2"],
+    ["D-S-004", "---Alpha___Beta...", "alpha-beta"],
+    ["D-S-005", "99 Bottles", "99-bottles"],
+    ["D-S-006", "caf\u00e9 au lait", "caf-au-lait"],
+    ["D-S-007", "\u4f60\u597d", ""],
+    ["D-S-008", "a!@#$%^&*()b", "a-b"],
+    ["D-S-009", "Already-Normalized", "already-normalized"],
+  ] as const)("%s", (_caseId, value, expected) => {
+    expect(slugify(value)).toBe(expected);
   });
-}
+});

@@ -540,4 +540,5 @@ def test_typescript_migrate_apply_obeys_dirty_guard_and_force(
     applied = json.loads(capsys.readouterr().out)
     assert applied["applied"] is True
     assert applied["applied_paths"] == [write.path]
+    assert ".jaunt-vitest-cache/" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
     assert (tmp_path / write.path).read_text() == "export {};\n"

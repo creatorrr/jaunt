@@ -17,7 +17,7 @@ from jaunt.generate.base import (
     generation_request_cache_key,
 )
 from jaunt.generate.request_cache import generate_request_cached
-from jaunt.skills_npm import ensure_npm_skills
+from jaunt.skills_npm import ensure_npm_skills, plan_npm_skills
 from jaunt.typescript.builder import _build_request, _generation_fingerprint
 from jaunt.typescript.contracts import _contract_generation_fingerprint
 
@@ -192,6 +192,26 @@ def _install_npm_fixture(owner: Path, package: str) -> None:
         f'{{"name":"{package}","version":"1.0.0","description":"demo"}}\n'
     )
     (package_root / "README.md").write_text(f"# {package}\n")
+
+
+def test_npm_skill_plan_reports_files_and_bytes_without_writing(tmp_path: Path) -> None:
+    owner = tmp_path / "app"
+    owner.mkdir()
+    (owner / "package.json").write_text('{"dependencies":{"one":"1.0.0"}}\n')
+    _install_npm_fixture(owner, "one")
+
+    plan = plan_npm_skills(project_root=tmp_path, package_owners=(owner,))
+
+    assert plan.file_count == 1
+    assert plan.total_bytes > 0
+    assert plan.packages == ("one",)
+    assert not (tmp_path / ".agents").exists()
+
+    result = ensure_npm_skills(project_root=tmp_path, package_owners=(owner,))
+    assert result.metadata()["plan"] == {
+        "file_count": plan.file_count,
+        "total_bytes": plan.total_bytes,
+    }
 
 
 def test_npm_skill_reconciliation_removes_only_stale_managed_skills(tmp_path: Path) -> None:

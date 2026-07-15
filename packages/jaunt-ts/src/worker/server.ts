@@ -8,6 +8,7 @@ import {
 import {
   AnalyzerSession,
   parseAnalyzeContractsParams,
+  parseAnalyzeWorkspaceParams,
   parseCancelParams,
   parseEmptyParams,
   parseFindOrphansParams,
@@ -92,8 +93,9 @@ export class WorkerServer {
         "initialize must be the first request",
       );
     if (request.method === "analyzeWorkspace") {
-      parseEmptyParams(request.params, "analyzeWorkspace");
-      return session.analyzeWorkspace();
+      return session.analyzeWorkspace(
+        parseAnalyzeWorkspaceParams(request.params),
+      );
     }
     if (request.method === "analyzeContracts") {
       return session.analyzeContracts(

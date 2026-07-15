@@ -27,6 +27,7 @@ generated_dir = "__generated__"
 test_runner = "vitest"
 vitest_config = "vitest.config.ts"
 vitest_args = [] # reserved; the protected runner requires this to remain empty
+auto_skills = false # this fixture needs only its authored context and Node built-ins
 auto_class_tests = false
 fast_check_runs = 50
 contract_battery_dir = "tests/contract"

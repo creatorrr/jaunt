@@ -1,9 +1,9 @@
 {
-  "apiDigest": "sha256:fc47b3f9b77ec6f05296ec589683f99f07cb2cea6b88eaed56b908d9d3e97853",
+  "apiDigest": "sha256:6486dbf30772cafc0cab87e3059efec93b55580aba6624919c45594597a21b6a",
   "apiMirrorPath": "src/tokens/__generated__/index.api.ts",
   "artifactHashes": {
-    "src/tokens/__generated__/index.api.ts": "sha256:076acf24442695d8a0344d9bd4489d74d4e9ba04a4aed7b11e7b9e7529aa359a",
-    "src/tokens/__generated__/index.ts": "sha256:b15a06364f13d94fa3085ae87ba244ba0cb747c33f3a646930753d33b951b8de",
+    "src/tokens/__generated__/index.api.ts": "sha256:4f5013ee13b215fc1c3eae267dfa223d3fd0660886113174316308174ac21b74",
+    "src/tokens/__generated__/index.ts": "sha256:799dc19187cd742eebe001020ef2c5dc7a55a6a6ffad6df37a2e12433a235ef6",
     "src/tokens/index.ts": "sha256:a557dfccc4f76ec1b590833f5dd02d7ccb5c8d3d8aa40b85d6a5149d6f22a5c6"
   },
   "contextDocs": [
@@ -142,12 +142,12 @@
   "facadePath": "src/tokens/index.ts",
   "fingerprint": {
     "compilerOptionsHash": "sha256:b9ea51a23f8558ef7cc2b60bf6e4f944cebcd9735dfe803ab6d8dcab9a13a61a",
-    "generationFingerprint": "sha256:fd0ee9143bfe7d7d1b86323ff0aafaf27e374967ef096a604cfb76573881765a",
+    "generationFingerprint": "sha256:534443334bd96d5419209e3e0f4e87f95ebc787ee99a567fabe6bb55a88b5563",
     "ir": "contract-ir/1-draft.2",
     "protocol": "jaunt-ts/1-draft.2",
     "toolVersion": "1.7.2",
     "typescriptVersion": "5.9.3",
-    "workerVersion": "0.1.0-alpha.0"
+    "workerVersion": "0.1.0-alpha.1"
   },
   "implementationPath": "src/tokens/__generated__/index.ts",
   "moduleId": "ts:src/tokens/index",
@@ -158,7 +158,7 @@
   "schema": "contract-ir/1-draft.2",
   "specPath": "src/tokens/index.jaunt.ts",
   "state": "built",
-  "structuralDigest": "sha256:c134eff9f071a78e297afcc875062b6a7fb5a9807ed93b22915e5cf815451b56",
+  "structuralDigest": "sha256:9c7675a8480c8b1d4dd941956e8fbe89d9b6b04afe73763041fa85171f8592bb",
   "symbols": [
     {
       "docs": "Create an HS256-signed JWT.\n\nStructure: base64url(header) + \".\" + base64url(payload) + \".\" +\nbase64url(signature), where base64url omits \"=\" padding.\n- Header is exactly `{\"alg\":\"HS256\",\"typ\":\"JWT\"}`.\n- Payload is `{\"sub\":userId,\"iat\":now,\"exp\":now+ttl}` with integer unix\n  seconds; default ttl is 3600 seconds, and a non-integer `ttlSeconds` is\n  truncated to whole seconds so iat/exp stay integers.\n- Sign with HMAC-SHA256 using `secret` as the key.\n- Allow any ttl, including negative, so tests can mint expired tokens.\n\n@throws RangeError if `userId` is empty.",

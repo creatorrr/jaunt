@@ -44,6 +44,10 @@ export interface AnalyzeContractsParams {
   readonly moduleIds?: readonly string[];
 }
 
+export interface AnalyzeWorkspaceParams {
+  readonly moduleIds?: readonly string[];
+}
+
 export interface ProjectContractParams {
   readonly source: string;
   readonly symbol: string;

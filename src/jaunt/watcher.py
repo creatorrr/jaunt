@@ -447,7 +447,7 @@ class _WatchCycleRunner:
         self._root = root
         self._config = config
         if mode in {"ts", "mixed"} and targets is not None:
-            from jaunt.cli import _effective_build_instructions
+            from jaunt.cli import _effective_build_instructions, _typescript_auto_skills_enabled
             from jaunt.typescript.builder import _generation_fingerprint, _target, worker_session
 
             builtin_skills = (
@@ -456,7 +456,7 @@ class _WatchCycleRunner:
                 and not bool(getattr(self.args, "no_builtin_skills", False))
                 else ()
             )
-            if config.skills.auto and not bool(getattr(self.args, "no_auto_skills", False)):
+            if _typescript_auto_skills_enabled(self.args, config):
                 from jaunt.skills_npm import ensure_npm_skills, typescript_package_owners
 
                 ensure_npm_skills(
@@ -697,7 +697,11 @@ async def _run_target_build(
             operations.append(_cmd_build_async(_python_child(args)))
         if mode in {"ts", "mixed"} and targets is not None and run_typescript is not False:
             from jaunt.cache import ResponseCache
-            from jaunt.cli import _effective_build_instructions, _make_progress
+            from jaunt.cli import (
+                _effective_build_instructions,
+                _make_progress,
+                _typescript_auto_skills_enabled,
+            )
             from jaunt.typescript.builder import run_build, run_build_in_session
 
             async def build_typescript() -> int:
@@ -741,7 +745,7 @@ async def _run_target_build(
                         progress=progress,
                         repo_map_enabled=use_repo_map,
                         repo_map_block_override=typescript_repo_map_block,
-                        auto_skills_enabled=not bool(getattr(args, "no_auto_skills", False)),
+                        auto_skills_enabled=_typescript_auto_skills_enabled(args, config),
                         builtin_skill_names=builtin_skills,
                     )
                 else:
@@ -812,7 +816,11 @@ async def _run_target_test(
             operations.append(_cmd_test_workspace_async(_python_child(args)))
         if mode in {"ts", "mixed"} and targets is not None and run_typescript is not False:
             from jaunt.cache import ResponseCache
-            from jaunt.cli import _effective_build_instructions, _make_progress
+            from jaunt.cli import (
+                _effective_build_instructions,
+                _make_progress,
+                _typescript_auto_skills_enabled,
+            )
             from jaunt.typescript.tester import run_test
 
             async def test_typescript() -> int:
@@ -855,7 +863,7 @@ async def _run_target_test(
                         config.context.repo_map and not bool(getattr(args, "no_repo_map", False))
                     ),
                     repo_map_block_override=typescript_repo_map_block,
-                    auto_skills_enabled=not bool(getattr(args, "no_auto_skills", False)),
+                    auto_skills_enabled=_typescript_auto_skills_enabled(args, config),
                     builtin_skill_names=builtin_skills,
                 )
                 return report.exit_code

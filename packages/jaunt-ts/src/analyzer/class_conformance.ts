@@ -157,5 +157,10 @@ export function renderClassConformance(
   ir: ContractModuleIR,
   symbol: SymbolIR,
 ): string {
-  return memberAdapters(ir, symbol).join("\n");
+  const adapters = memberAdapters(ir, symbol);
+  const uses = adapters.flatMap((source) => {
+    const name = /^function\s+([A-Za-z_$][\w$]*)/.exec(source)?.[1];
+    return name ? [`void ${name};`] : [];
+  });
+  return [...adapters, ...uses].join("\n");
 }

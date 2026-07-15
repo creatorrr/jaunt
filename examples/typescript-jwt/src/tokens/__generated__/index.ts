@@ -1,167 +1,169 @@
 // ⛓️ jaunt:generated — generated; do not edit.
 // jaunt:state=built
 // jaunt:module=ts:src/tokens/index
-// jaunt:structural=sha256:c134eff9f071a78e297afcc875062b6a7fb5a9807ed93b22915e5cf815451b56
+// jaunt:structural=sha256:9c7675a8480c8b1d4dd941956e8fbe89d9b6b04afe73763041fa85171f8592bb
 // jaunt:prose=sha256:616b419f63caf931be25251541e08d964b503d846e7f0c727d8dbc6468bcce3c
-// jaunt:api=sha256:fc47b3f9b77ec6f05296ec589683f99f07cb2cea6b88eaed56b908d9d3e97853
+// jaunt:api=sha256:6486dbf30772cafc0cab87e3059efec93b55580aba6624919c45594597a21b6a
 import type * as __JauntApi from "./index.api.js";
-import { Buffer } from "node:buffer";
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 import { JwtError, nowSeconds } from "../index.context.js";
 
 type TokenOptions = { ttlSeconds?: number };
+type VerifiedClaims = { sub: string; iat: number; exp: number };
+type StoredToken = { token: string; exp: number };
 
-type TokenClaims = {
-  sub: string;
-  iat: number;
-  exp: number;
-};
+const HEADER = { alg: "HS256", typ: "JWT" };
+const DEFAULT_TTL_SECONDS = 3600;
+const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
 
-type StoredToken = {
-  token: string;
-  exp: number;
-};
-
-const encodedHeader = encodeJson({ alg: "HS256", typ: "JWT" });
-const base64urlPattern = /^[A-Za-z0-9_-]+$/;
-
-function encodeJson(value: object): string {
-  return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+function encodeBase64Url(value: string): string {
+  return Buffer.from(value, "utf8").toString("base64url");
 }
 
-function sign(encodedHeaderAndPayload: string, secret: string): string {
-  return createHmac("sha256", secret).update(encodedHeaderAndPayload).digest("base64url");
-}
-
-function issueToken(subject: string, secret: string, issuedAt: number, expiresAt: number): string {
-  const encodedPayload = encodeJson({ sub: subject, iat: issuedAt, exp: expiresAt });
-  const unsignedToken = `${encodedHeader}.${encodedPayload}`;
-  return `${unsignedToken}.${sign(unsignedToken, secret)}`;
-}
-
-function ttlSeconds(opts?: TokenOptions): number {
-  return Math.trunc(opts?.ttlSeconds ?? 3600);
-}
-
-function isBase64urlSegment(segment: string): boolean {
-  return (
-    segment.length > 0 &&
-    base64urlPattern.test(segment) &&
-    Buffer.from(segment, "base64url").toString("base64url") === segment
-  );
-}
-
-function decodeJson(segment: string): unknown {
-  try {
-    return JSON.parse(Buffer.from(segment, "base64url").toString("utf8"));
-  } catch {
+function decodeBase64Url(segment: string): string {
+  if (!BASE64URL_PATTERN.test(segment)) {
     throw new JwtError("malformed");
   }
+
+  const decoded = Buffer.from(segment, "base64url");
+  if (decoded.toString("base64url") !== segment) {
+    throw new JwtError("malformed");
+  }
+  return decoded.toString("utf8");
+}
+
+function parseJson(source: string): unknown {
+  return JSON.parse(source);
+}
+
+function isRecord(value: unknown): value is object {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function hasExactKeys(value: object, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => keys.includes(key));
+  const keys = Object.keys(value).sort();
+  const sortedExpected = [...expected].sort();
+  return (
+    keys.length === sortedExpected.length &&
+    keys.every((key, index) => key === sortedExpected[index])
+  );
 }
 
-function validateHeader(value: unknown): void {
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    Array.isArray(value) ||
-    !hasExactKeys(value, ["alg", "typ"]) ||
-    !("alg" in value) ||
-    value.alg !== "HS256" ||
-    !("typ" in value) ||
-    value.typ !== "JWT"
-  ) {
-    throw new JwtError("malformed");
-  }
+function sign(encodedHeader: string, encodedPayload: string, secret: string): string {
+  return createHmac("sha256", secret)
+    .update(`${encodedHeader}.${encodedPayload}`)
+    .digest("base64url");
 }
 
-function validateClaims(value: unknown): TokenClaims {
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    Array.isArray(value) ||
-    !hasExactKeys(value, ["sub", "iat", "exp"]) ||
-    !("sub" in value) ||
-    typeof value.sub !== "string" ||
-    !("iat" in value) ||
-    typeof value.iat !== "number" ||
-    !Number.isFinite(value.iat) ||
-    !("exp" in value) ||
-    typeof value.exp !== "number" ||
-    !Number.isFinite(value.exp)
-  ) {
-    throw new JwtError("malformed");
-  }
-
-  return { sub: value.sub, iat: value.iat, exp: value.exp };
+function mintToken(subject: string, secret: string, issuedAt: number, ttlSeconds: number): string {
+  const encodedHeader = encodeBase64Url(JSON.stringify(HEADER));
+  const encodedPayload = encodeBase64Url(
+    JSON.stringify({ sub: subject, iat: issuedAt, exp: issuedAt + ttlSeconds }),
+  );
+  const signature = sign(encodedHeader, encodedPayload, secret);
+  return `${encodedHeader}.${encodedPayload}.${signature}`;
 }
 
-function __jaunt_impl_createToken(
+function normalizedTtl(opts?: TokenOptions): number {
+  return Math.trunc(opts?.ttlSeconds ?? DEFAULT_TTL_SECONDS);
+}
+
+const __jaunt_impl_createToken = (
   userId: string,
   secret: string,
   opts?: TokenOptions,
-): string {
+): string => {
   if (userId.length === 0) {
     throw new RangeError("userId must not be empty");
   }
 
-  const issuedAt = nowSeconds();
-  return issueToken(userId, secret, issuedAt, issuedAt + ttlSeconds(opts));
-}
+  return mintToken(userId, secret, nowSeconds(), normalizedTtl(opts));
+};
 
-function __jaunt_impl_verifyToken(token: string, secret: string): TokenClaims {
+const __jaunt_impl_verifyToken = (token: string, secret: string): VerifiedClaims => {
   const segments = token.split(".");
-  if (segments.length !== 3 || segments.some((segment) => !isBase64urlSegment(segment))) {
+  if (segments.length !== 3 || segments.some((segment) => segment.length === 0)) {
     throw new JwtError("malformed");
   }
 
-  const headerSegment = segments[0];
-  const payloadSegment = segments[1];
-  const signatureSegment = segments[2];
-  if (headerSegment === undefined || payloadSegment === undefined || signatureSegment === undefined) {
+  const encodedHeader = segments[0];
+  const encodedPayload = segments[1];
+  const encodedSignature = segments[2];
+  if (encodedHeader === undefined || encodedPayload === undefined || encodedSignature === undefined) {
     throw new JwtError("malformed");
   }
 
-  const unsignedToken = `${headerSegment}.${payloadSegment}`;
-  const expectedSignature = createHmac("sha256", secret).update(unsignedToken).digest();
-  const actualSignature = Buffer.from(signatureSegment, "base64url");
-  if (
-    actualSignature.length !== expectedSignature.length ||
-    !timingSafeEqual(actualSignature, expectedSignature)
-  ) {
+  const headerSource = decodeBase64Url(encodedHeader);
+  const payloadSource = decodeBase64Url(encodedPayload);
+  decodeBase64Url(encodedSignature);
+
+  const expectedSignature = Buffer.from(
+    sign(encodedHeader, encodedPayload, secret),
+    "base64url",
+  );
+  const actualSignature = Buffer.from(encodedSignature, "base64url");
+  const comparableSignature = Buffer.alloc(expectedSignature.length);
+  actualSignature.copy(comparableSignature, 0, 0, expectedSignature.length);
+  const signatureContentsMatch = timingSafeEqual(comparableSignature, expectedSignature);
+  const signaturesMatch =
+    actualSignature.length === expectedSignature.length && signatureContentsMatch;
+  if (!signaturesMatch) {
     throw new JwtError("invalid-signature");
   }
 
-  validateHeader(decodeJson(headerSegment));
-  const claims = validateClaims(decodeJson(payloadSegment));
-  if (claims.exp <= nowSeconds()) {
+  let header: unknown;
+  let payload: unknown;
+  try {
+    header = parseJson(headerSource);
+    payload = parseJson(payloadSource);
+  } catch {
+    throw new JwtError("malformed");
+  }
+
+  if (
+    !isRecord(header) ||
+    !hasExactKeys(header, ["alg", "typ"]) ||
+    Reflect.get(header, "alg") !== "HS256" ||
+    Reflect.get(header, "typ") !== "JWT"
+  ) {
+    throw new JwtError("malformed");
+  }
+
+  if (!isRecord(payload) || !hasExactKeys(payload, ["sub", "iat", "exp"])) {
+    throw new JwtError("malformed");
+  }
+
+  const sub: unknown = Reflect.get(payload, "sub");
+  const iat: unknown = Reflect.get(payload, "iat");
+  const exp: unknown = Reflect.get(payload, "exp");
+  if (typeof sub !== "string" || typeof iat !== "number" || typeof exp !== "number") {
+    throw new JwtError("malformed");
+  }
+  if (exp <= nowSeconds()) {
     throw new JwtError("expired");
   }
-  return claims;
-}
 
-function __jaunt_impl_rotateToken(
+  return { sub, iat, exp };
+};
+
+const __jaunt_impl_rotateToken = (
   token: string,
   secret: string,
   opts?: TokenOptions,
-): string {
+): string => {
   const claims = __jaunt_impl_verifyToken(token, secret);
-  const issuedAt = Math.max(nowSeconds(), Math.floor(claims.iat) + 1);
-  const expiresAt = Math.max(issuedAt + ttlSeconds(opts), Math.floor(claims.exp) + 1);
-  return issueToken(claims.sub, secret, issuedAt, expiresAt);
-}
+  const ttlSeconds = normalizedTtl(opts);
+  const issuedAt = Math.max(nowSeconds(), claims.iat + 1, claims.exp - ttlSeconds + 1);
+  return mintToken(claims.sub, secret, issuedAt, ttlSeconds);
+};
 
 class __jaunt_impl_TokenStore {
   readonly #clock: () => number;
   readonly #entries = new Map<string, StoredToken>();
 
-  constructor(clock: () => number = nowSeconds) {
-    this.#clock = clock;
+  constructor(clock?: () => number) {
+    this.#clock = clock ?? nowSeconds;
   }
 
   put(subject: string, token: string, exp: number): void {
@@ -177,10 +179,10 @@ class __jaunt_impl_TokenStore {
   }
 
   sweep(): number {
-    const currentTime = this.#clock();
+    const now = this.#clock();
     let removed = 0;
     for (const [subject, entry] of this.#entries) {
-      if (entry.exp <= currentTime) {
+      if (entry.exp <= now) {
         this.#entries.delete(subject);
         removed += 1;
       }
@@ -189,10 +191,10 @@ class __jaunt_impl_TokenStore {
   }
 
   get size(): number {
-    const currentTime = this.#clock();
+    const now = this.#clock();
     let liveEntries = 0;
     for (const entry of this.#entries.values()) {
-      if (entry.exp > currentTime) {
+      if (entry.exp > now) {
         liveEntries += 1;
       }
     }
@@ -200,6 +202,7 @@ class __jaunt_impl_TokenStore {
   }
 }
 
+Object.defineProperty(__jaunt_impl_createToken, "name", { value: "createToken", configurable: true });
 /**
  * Create an HS256-signed JWT.
  *
@@ -215,6 +218,7 @@ class __jaunt_impl_TokenStore {
  * @throws RangeError if `userId` is empty.
  */
 export const createToken: typeof __JauntApi.createToken = __jaunt_impl_createToken;
+Object.defineProperty(__jaunt_impl_rotateToken, "name", { value: "rotateToken", configurable: true });
 /**
  * Verify an existing token and issue a fresh one for the same subject.
  *
@@ -235,6 +239,7 @@ export const rotateToken: typeof __JauntApi.rotateToken = __jaunt_impl_rotateTok
  */
 export const TokenStore: typeof __JauntApi.TokenStore = __jaunt_impl_TokenStore;
 export type TokenStore = __JauntApi.TokenStore;
+Object.defineProperty(__jaunt_impl_verifyToken, "name", { value: "verifyToken", configurable: true });
 /**
  * Verify an HS256-signed JWT and return its claims.
  *

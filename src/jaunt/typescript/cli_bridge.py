@@ -130,7 +130,7 @@ def status_payload(status: TargetStatus) -> dict[str, Any]:
         "invalid": failures_payload(status.invalid, local=True),
         "orphans": orphans,
     }
-    return {
+    payload: dict[str, Any] = {
         "schema_version": 2,
         "command": "status",
         "ok": True,
@@ -144,6 +144,10 @@ def status_payload(status: TargetStatus) -> dict[str, Any]:
         "diagnostics": [diagnostic_payload(item) for item in status.diagnostics],
         "targets": {"ts": target},
     }
+    payload.update(dict(status.metadata))
+    if status.metadata:
+        target.update(dict(status.metadata))
+    return payload
 
 
 def check_payload(report: TargetCheckReport) -> dict[str, Any]:
@@ -289,6 +293,15 @@ def _npm_skill_warnings(payload: Mapping[str, Any]) -> tuple[str, ...]:
 def human_lines(payload: Mapping[str, Any]) -> tuple[str, ...]:
     command = str(payload.get("command", "typescript"))
     lines = [f"TypeScript {command}:"]
+    npm_skills = payload.get("npm_skills")
+    if isinstance(npm_skills, Mapping):
+        plan = npm_skills.get("plan")
+        if isinstance(plan, Mapping):
+            file_count = plan.get("file_count", 0)
+            total_bytes = plan.get("total_bytes", 0)
+            lines.append(f"  npm skill plan: {file_count} files, {total_bytes} bytes")
+        elif npm_skills.get("enabled") is False:
+            lines.append("  npm skill plan: disabled for TypeScript")
     for key in (
         "generated",
         "skipped",

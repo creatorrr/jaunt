@@ -25,17 +25,56 @@ class NpmSkillsResult:
     skipped: tuple[str, ...] = ()
     removed: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    planned_file_count: int = 0
+    planned_total_bytes: int = 0
 
-    def metadata(self) -> dict[str, tuple[str, ...]]:
+    def metadata(self) -> dict[str, Any]:
         """Return report metadata only when a direct dependency was observed."""
 
-        values = {
+        values: dict[str, Any] = {
             "generated": self.generated,
             "skipped": self.skipped,
             "removed": self.removed,
             "warnings": self.warnings,
+            "plan": {
+                "file_count": self.planned_file_count,
+                "total_bytes": self.planned_total_bytes,
+            },
         }
-        return values if any(values.values()) else {}
+        return (
+            values
+            if self.planned_file_count or any(values[key] for key in values if key != "plan")
+            else {}
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class NpmSkillsPlan:
+    """Read-only preview of the npm skill surface before any files are written."""
+
+    file_count: int = 0
+    total_bytes: int = 0
+    packages: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+    def metadata(self) -> dict[str, Any]:
+        return {
+            "enabled": True,
+            "plan": {
+                "file_count": self.file_count,
+                "total_bytes": self.total_bytes,
+                "packages": self.packages,
+            },
+            **({"warnings": self.warnings} if self.warnings else {}),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class _PlannedSkill:
+    package: str
+    version: str
+    skill_name: str
+    content: str
 
 
 def _skill_name(package: str) -> str:
@@ -211,6 +250,71 @@ def _filesystem_warning(skill_name: str, action: str) -> str:
     return f"optional npm skill {skill_name!r} not {action}: filesystem error"
 
 
+def _planned_skills(
+    project_root: Path,
+    package_owners: tuple[Path, ...],
+    max_readme_chars: int,
+) -> tuple[tuple[_PlannedSkill, ...], tuple[str, ...], dict[str, str]]:
+    packages = sorted({name for owner in package_owners for name in _direct_dependencies(owner)})
+    skill_names = _skill_names(tuple(packages))
+    planned: list[_PlannedSkill] = []
+    warnings: list[str] = []
+    for package in packages:
+        installed = next(
+            (
+                resolved
+                for owner in package_owners
+                if (resolved := _installed_package(project_root, owner, package)) is not None
+            ),
+            None,
+        )
+        if installed is None:
+            warnings.append(
+                f"direct npm dependency {package!r} is not installed; skill not generated"
+            )
+            continue
+        package_root, manifest = installed
+        version = str(manifest.get("version", "unknown"))
+        skill_name = skill_names[package]
+        planned.append(
+            _PlannedSkill(
+                package=package,
+                version=version,
+                skill_name=skill_name,
+                content=_render_skill(
+                    package,
+                    version,
+                    str(manifest.get("description", "")),
+                    _readme_excerpt(package_root, max(512, int(max_readme_chars))),
+                    skill_name=skill_name,
+                ),
+            )
+        )
+    return tuple(planned), tuple(warnings), skill_names
+
+
+def plan_npm_skills(
+    *,
+    project_root: Path,
+    package_owners: tuple[Path, ...],
+    max_readme_chars: int = 8_000,
+) -> NpmSkillsPlan:
+    """Preview the complete direct-dependency skill footprint without writing files."""
+
+    project_root = project_root.resolve()
+    planned, warnings, _skill_names_by_package = _planned_skills(
+        project_root,
+        package_owners,
+        max_readme_chars,
+    )
+    return NpmSkillsPlan(
+        file_count=len(planned),
+        total_bytes=sum(len(item.content.encode("utf-8")) for item in planned),
+        packages=tuple(item.package for item in planned),
+        warnings=warnings,
+    )
+
+
 def _remove_stale_managed_skills(
     project_root: Path,
     desired_names: dict[str, str],
@@ -267,29 +371,18 @@ def ensure_npm_skills(
     project_root = project_root.resolve()
     generated: list[str] = []
     skipped: list[str] = []
-    warnings: list[str] = []
-    packages = sorted({name for owner in package_owners for name in _direct_dependencies(owner)})
-    skill_names = _skill_names(tuple(packages))
+    planned, plan_warnings, skill_names = _planned_skills(
+        project_root,
+        package_owners,
+        max_readme_chars,
+    )
+    warnings: list[str] = list(plan_warnings)
     removed, removal_warnings = _remove_stale_managed_skills(project_root, skill_names)
     warnings.extend(removal_warnings)
-    for package in packages:
-        installed = next(
-            (
-                resolved
-                for owner in package_owners
-                if (resolved := _installed_package(project_root, owner, package)) is not None
-            ),
-            None,
-        )
-        if installed is None:
-            warnings.append(
-                f"direct npm dependency {package!r} is not installed; skill not generated"
-            )
-            continue
-        package_root, manifest = installed
-        version = str(manifest.get("version", "unknown"))
-        description = str(manifest.get("description", ""))
-        skill_name = skill_names[package]
+    for item in planned:
+        package = item.package
+        version = item.version
+        skill_name = item.skill_name
         path = project_root / ".agents" / "skills" / skill_name / "SKILL.md"
         existing = _generated_metadata(path) if path.exists() else None
         if path.exists() and existing is None:
@@ -298,18 +391,8 @@ def ensure_npm_skills(
         if existing == (package, version):
             skipped.append(skill_name)
             continue
-        readme = _readme_excerpt(package_root, max(512, int(max_readme_chars)))
         try:
-            _atomic_write_text(
-                path,
-                _render_skill(
-                    package,
-                    version,
-                    description,
-                    readme,
-                    skill_name=skill_name,
-                ),
-            )
+            _atomic_write_text(path, item.content)
         except OSError:
             warnings.append(_filesystem_warning(skill_name, "written"))
             continue
@@ -319,11 +402,15 @@ def ensure_npm_skills(
         skipped=tuple(skipped),
         removed=removed,
         warnings=tuple(warnings),
+        planned_file_count=len(planned),
+        planned_total_bytes=sum(len(item.content.encode("utf-8")) for item in planned),
     )
 
 
 __all__ = [
     "NpmSkillsResult",
+    "NpmSkillsPlan",
     "ensure_npm_skills",
+    "plan_npm_skills",
     "typescript_package_owners",
 ]

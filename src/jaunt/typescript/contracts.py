@@ -1154,15 +1154,18 @@ async def run_adopt(
         else (tuple(config.skills.builtin_skills) if config.skills.builtin else ())
     )
     npm_skill_metadata: Mapping[str, object] = {}
+    target_config = _target(config)
     use_auto_skills = (
-        bool(config.skills.auto) if auto_skills_enabled is None else auto_skills_enabled
+        target_config.auto_skills_enabled(bool(config.skills.auto))
+        if auto_skills_enabled is None
+        else auto_skills_enabled
     )
     if use_auto_skills:
         from jaunt.skills_npm import ensure_npm_skills, typescript_package_owners
 
         npm_skills = ensure_npm_skills(
             project_root=root,
-            package_owners=typescript_package_owners(root, _target(config)),
+            package_owners=typescript_package_owners(root, target_config),
             max_readme_chars=config.skills.max_chars_per_skill,
         )
         npm_skill_metadata = npm_skills.metadata()
@@ -1381,15 +1384,18 @@ async def run_reconcile(
         else (tuple(config.skills.builtin_skills) if config.skills.builtin else ())
     )
     npm_skill_metadata: Mapping[str, object] = {}
+    target_config = _target(config)
     use_auto_skills = (
-        bool(config.skills.auto) if auto_skills_enabled is None else auto_skills_enabled
+        target_config.auto_skills_enabled(bool(config.skills.auto))
+        if auto_skills_enabled is None
+        else auto_skills_enabled
     )
     if use_auto_skills:
         from jaunt.skills_npm import ensure_npm_skills, typescript_package_owners
 
         npm_skills = ensure_npm_skills(
             project_root=root,
-            package_owners=typescript_package_owners(root, _target(config)),
+            package_owners=typescript_package_owners(root, target_config),
             max_readme_chars=config.skills.max_chars_per_skill,
         )
         npm_skill_metadata = npm_skills.metadata()
@@ -2529,6 +2535,24 @@ def _ordinary_ejected_source(module: Mapping[str, Any], implementation: str) -> 
     # declaration instead of leaving detached comment blocks at the file tail.
     for symbol in symbol_records:
         name = str(symbol["name"])
+        if symbol.get("kind") == "function":
+            name_boundary = (
+                f'Object.defineProperty(__jaunt_impl_{name}, "name", '
+                f"{{ value: {json.dumps(name)}, configurable: true }});"
+            )
+            name_matches = _typescript_code_matches(body, re.compile(re.escape(name_boundary)))
+            if len(name_matches) > 1:
+                raise JauntConfigError(
+                    f"Cannot safely eject {name!r}: repeated generated name boundary"
+                )
+            if name_matches:
+                name_match = name_matches[0]
+                name_end = name_match.end()
+                if body[name_end : name_end + 2] == "\r\n":
+                    name_end += 2
+                elif body[name_end : name_end + 1] == "\n":
+                    name_end += 1
+                body = body[: name_match.start()] + body[name_end:]
         boundary = f"export const {name}: typeof __JauntApi.{name} = __jaunt_impl_{name};"
         boundary_matches = _typescript_code_matches(body, re.compile(re.escape(boundary)))
         if len(boundary_matches) != 1:
