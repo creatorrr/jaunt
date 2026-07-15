@@ -4,7 +4,7 @@ This plugin packages Jaunt's workspace-aware Python and TypeScript authoring
 loop for Claude Code: generated-file guards, session freshness, build and
 conversion skills, a read-only doctor, and a first-build reviewer.
 
-Version 1.2.3 understands version-2 TypeScript targets as well as Python
+Version 1.2.4 understands version-2 TypeScript targets as well as Python
 workspace routing. One root `jaunt.toml` may cover several Python and
 JavaScript packages; ownership follows the nearest `pyproject.toml` or
 `package.json` for the target.
@@ -44,6 +44,12 @@ skills and hooks.
   building. Nested Claude and Codex managed worktrees are skipped.
 - `/jaunt:convert`: explicit-only Python/TypeScript-to-Jaunt conversion.
 - `first-build-reviewer`: read-only review for contract-silence divergence.
+
+For TypeScript builds, the workflow reads `candidate_outcomes` before suggesting
+another run. Jaunt already spends the remaining attempt budget on final
+conformance repair; a failed module should not be rerun blindly. Worker heap
+failures point to `[target.ts].worker_heap_mb` and are never replayed
+automatically.
 
 The SessionStart hook injects a bounded freshness summary, including TypeScript
 unbuilt, invalid, and diagnostic state. The PreToolUse hook

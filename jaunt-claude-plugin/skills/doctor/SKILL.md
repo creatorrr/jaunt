@@ -26,3 +26,11 @@ The report is read-only and makes no model calls. It checks:
 Use `clean --orphans` through the workspace runner for orphaned artifacts. For stale modules,
 follow the build skill's taxonomy and preview likely model calls before
 building. Run `codex login` when authentication is missing.
+
+Keep TypeScript resource failures distinct. A request timeout points to
+`worker_timeout_seconds`; a startup timeout points to
+`worker_startup_timeout_seconds`. A heap OOM is deterministic, is not replayed,
+and points to `[target.ts].worker_heap_mb`. Do not describe any of these as a
+missing worker/compiler unless the structured diagnostic says so. The plugin
+status probe may time out and print an informational message, but its launcher
+must still return success to the host.

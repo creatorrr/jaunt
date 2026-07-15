@@ -85,4 +85,6 @@
 - [x] Prune implementation-only imports from strict API mirrors and isolate independent sync batches.
 - [x] Batch status overlays, release compiler state between batches, and make worker heap/OOM behavior explicit.
 - [x] Preserve public optionality in generated private helper types and add real-worker regressions.
+- [x] Document TypeScript candidate outcomes, retry accounting, and the 1.7.6 upgrade path.
+- [x] Refresh both plugin skill bundles with conformance, OOM, and hermetic-generation guidance.
 - [x] Cut Jaunt 1.7.6 / @usejaunt/ts alpha.5, run full validation, and obtain an independent Codex review.

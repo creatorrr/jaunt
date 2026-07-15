@@ -33,6 +33,8 @@ All notable changes to jaunt. Generated from conventional commits by
 
 - Publish `@usejaunt/ts` `0.1.0-alpha.5` with strict mirror pruning and bounded overlay
   compiler state.
+- Publish Codex plugin `1.1.4` and Claude Code plugin `1.2.4` with
+  attempt-outcome, deterministic-OOM, and hermetic-generation guidance.
 
 ## [1.7.5] - 2026-07-15
 

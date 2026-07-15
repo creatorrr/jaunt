@@ -63,6 +63,26 @@ Run `status --json --progress none` through the workspace runner before a build.
 likely model work, but do not invent a price. Report the actual cost printed by
 the build afterward.
 
+## TypeScript recovery boundaries (Jaunt 1.7.6+)
+
+- `sync` and `status` validate bounded dependency batches. Strict mirrors keep
+  only imports used by the public declaration surface; never add consumer-side
+  lint exceptions for Jaunt placeholders or mirrors.
+- A final compiler/conformance rejection is already retried inside the module's
+  remaining attempt budget with the rejected source and exact diagnostics.
+  Read `candidate_outcomes` in build JSON before proposing another paid run.
+- Treat `JAUNT_TS_CANDIDATE_SELF_IMPORT`,
+  `JAUNT_TS_GENERATED_PRIVATE_IMPORT`, and optionality/nullability TS2322
+  failures as spec/prompt or generator issues. Never patch the generated
+  implementation or add an import of its facade, API mirror, or generated path.
+- A `WorkerOutOfMemoryError` is deterministic and is not replayed. Do not retry
+  the same command unchanged or rely on `NODE_OPTIONS`; set
+  `[target.ts].worker_heap_mb` to an intentional MiB value, then rerun once.
+- Paid Jaunt Codex subprocesses ignore user Codex config on current CLIs, so
+  this plugin's hooks and unrelated MCP tools are not nested inside generation.
+  Older Codex CLIs fall back to legacy behavior; recommend an upgrade when that
+  distinction matters.
+
 ## Authoring specs
 
 - Prefer `jaunt.magic_module(__name__)` plus top-level strict stubs. Valid

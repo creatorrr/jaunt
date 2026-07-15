@@ -34,7 +34,7 @@ def _frontmatter(text: str) -> dict[str, str]:
 def test_plugin_manifest_shape():
     manifest = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())
     assert manifest["name"] == "jaunt"
-    assert manifest["version"] == "1.2.3"
+    assert manifest["version"] == "1.2.4"
     assert "TypeScript" in manifest["description"]
 
 

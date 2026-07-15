@@ -5,7 +5,7 @@ expects: edit specs, preview stale or unbuilt work, build through the CLI, and
 review generated output without hand-editing machine-owned files.
 
 It is CLI-backed. There is no MCP server, app connector, or public-directory
-submission in version 1.1.3.
+submission in version 1.1.4.
 
 ## Install
 
@@ -52,6 +52,12 @@ trust the bundled SessionStart and PreToolUse hooks.
 The build workflow delegates a first build to one read-only explorer subagent
 when that capability is available. It runs the same checklist in the main
 thread otherwise.
+
+For TypeScript builds, the workflow reads `candidate_outcomes` before suggesting
+another run. Jaunt already spends the remaining attempt budget on final
+conformance repair; a failed module should not be rerun blindly. Worker heap
+failures point to `[target.ts].worker_heap_mb` and are never replayed
+automatically.
 
 ## Hooks
 
