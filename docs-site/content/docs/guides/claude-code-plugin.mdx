@@ -3,7 +3,7 @@ title: Claude Code Plugin
 description: "Install Jaunt's Claude Code plugin for workspace-aware build skills, freshness context, and generated-file approval guards."
 ---
 
-Version 1.2.0 adds version-2 TypeScript target awareness to the Claude Code
+Version 1.2.2 supports version-2 TypeScript targets in the Claude Code
 plugin. It packages the same CLI-backed Python and TypeScript authoring loop as
 the Codex plugin, while keeping Claude's approval-style PreToolUse decision and
 first-build reviewer agent.
@@ -29,7 +29,9 @@ On a rerun, the installer refreshes the marketplace and calls
 Start a new Claude Code session after installation. For one-session development,
 use `claude --plugin-dir ./jaunt-claude-plugin`.
 
-The bundled command hooks require Bash.
+The bundled command hooks use Bash when it is available. Their launchers always
+return success to Claude Code, so a host without Bash skips the hooks instead of
+reporting a failed lifecycle event.
 
 ## Workspace routing
 
@@ -54,7 +56,7 @@ fingerprint, or artifact change.
   run the Python or TypeScript native gates.
 - `/jaunt:doctor`: authentication, Node/npm/worker/compiler readiness,
   workspace health, current stale or unbuilt state, diagnostics, orphans, and
-  duplicate Claude/Codex guards.
+  duplicate Claude guards. It ignores nested Claude and Codex managed worktrees.
 - `/jaunt:convert`: explicit-only Python or TypeScript conversion, with
   characterization tests before the first model call.
 - `first-build-reviewer`: read-only contract-silence review after a module's
@@ -74,8 +76,11 @@ work before a build and reports the actual cost afterward.
 
 ## Hooks
 
-The shared SessionStart script reads payload `cwd` and injects a bounded
-freshness/orphan summary for each discovered workspace, including TypeScript
+The shared SessionStart script reads payload `cwd`. It uses the nearest parent
+`jaunt.toml` when one owns the session; otherwise it scans below the session
+directory without crossing the active Git worktree. Nested Git repositories and
+`.claude/worktrees` or `.codex/worktrees` checkouts are excluded. Each discovered
+workspace contributes a bounded freshness/orphan summary, including TypeScript
 unbuilt, invalid, and diagnostic counts.
 Because `jaunt status` imports discovered spec modules, enable SessionStart only
 for workspaces whose Python code you trust.
@@ -86,12 +91,15 @@ approval before editing an existing provenance-headed generated `.pyi` and
 points to the matching `.py` spec.
 
 Both hooks fail open on malformed input, missing configuration, unavailable
-tools, or timeouts. `/jaunt:doctor` flags hand-written guards in either Claude
-or Codex config once the matching plugin hook is enabled.
+tools, or timeouts. Their launchers force a success exit after invoking the
+scripts, so optional environment failures do not become Claude Code hook errors.
+`/jaunt:doctor` flags hand-written guards in Claude configuration once the
+plugin hook is enabled.
 
 There is no MCP server; Jaunt's JSON CLI is the machine interface.
 
-Plugin commands prefer a compatible installed `jaunt`, use `uv run --no-sync jaunt` in a
-uv project, and fall back to `uvx jaunt` for a JavaScript-only workspace.
+Plugin commands prefer a compatible installed `jaunt`, use
+`uv run --no-sync jaunt` in a uv project, and fall back to `uvx jaunt` for a
+JavaScript-only workspace.
 
 Next: [PyPI Skills](/docs/guides/pypi-skills).
