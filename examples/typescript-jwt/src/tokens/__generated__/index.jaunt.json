@@ -1,9 +1,9 @@
 {
-  "apiDigest": "sha256:a80b0313d3531e626e89bfc3ec72663bc969bff52191f932241a00c379775e6c",
+  "apiDigest": "sha256:d59bf98b21bf7b951f00eae822249a4ae16915d927b5c9d210455b8e18dccf02",
   "apiMirrorPath": "src/tokens/__generated__/index.api.ts",
   "artifactHashes": {
-    "src/tokens/__generated__/index.api.ts": "sha256:52979c7a8115d019242a96c6aba6af3e8347b896bc84df5526f9613049d00a1a",
-    "src/tokens/__generated__/index.ts": "sha256:db09218becbf2c4e09d067e7c9252801096c562f161f68801de439c94a9aa737",
+    "src/tokens/__generated__/index.api.ts": "sha256:a5904eddd4bb8ba3a360f014d8af61967c6b86e8de98cd5be17cc42b119f291f",
+    "src/tokens/__generated__/index.ts": "sha256:cbd4039c34f10951477d6052fed12762b2a09dc9b076a68712f33bb63a504e57",
     "src/tokens/index.ts": "sha256:a557dfccc4f76ec1b590833f5dd02d7ccb5c8d3d8aa40b85d6a5149d6f22a5c6"
   },
   "contextDocs": [
@@ -142,12 +142,12 @@
   "facadePath": "src/tokens/index.ts",
   "fingerprint": {
     "compilerOptionsHash": "sha256:b9ea51a23f8558ef7cc2b60bf6e4f944cebcd9735dfe803ab6d8dcab9a13a61a",
-    "generationFingerprint": "sha256:04f0831edd46dcdbff01ff6c38cff4996b9fc60a89a851aabca11444218c2280",
+    "generationFingerprint": "sha256:07a0a2e4e417cff8f3ebca468c5680de6566ec32f064f7b65f948a5be789e8d7",
     "ir": "contract-ir/1-draft.2",
     "protocol": "jaunt-ts/1-draft.2",
-    "toolVersion": "1.7.6",
+    "toolVersion": "1.7.7",
     "typescriptVersion": "5.9.3",
-    "workerVersion": "0.1.0-alpha.5"
+    "workerVersion": "0.1.0-alpha.6"
   },
   "implementationPath": "src/tokens/__generated__/index.ts",
   "moduleId": "ts:src/tokens/index",
@@ -159,7 +159,7 @@
   "semanticEnvironmentDigest": "sha256:7554f74599dafd10d1665daf1b9cc2b2f081527c3ab6ade6056bf179a282fe8f",
   "specPath": "src/tokens/index.jaunt.ts",
   "state": "built",
-  "structuralDigest": "sha256:709185d185eb5b5df04fe7f318a2094fbd1abde0cd49a4b91569c3bae1087c30",
+  "structuralDigest": "sha256:0532c7518f2b61d29e180198678dce4cb692bebf2a3eec22961bbfa7ccded757",
   "symbols": [
     {
       "docs": "Create an HS256-signed JWT.\n\nStructure: base64url(header) + \".\" + base64url(payload) + \".\" +\nbase64url(signature), where base64url omits \"=\" padding.\n- Header is exactly `{\"alg\":\"HS256\",\"typ\":\"JWT\"}`.\n- Payload is `{\"sub\":userId,\"iat\":now,\"exp\":now+ttl}` with integer unix\n  seconds; default ttl is 3600 seconds, and a non-integer `ttlSeconds` is\n  truncated to whole seconds so iat/exp stay integers.\n- Sign with HMAC-SHA256 using `secret` as the key.\n- Allow any ttl, including negative, so tests can mint expired tokens.\n\n@throws RangeError if `userId` is empty.",

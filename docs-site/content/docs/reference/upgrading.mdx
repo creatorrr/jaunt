@@ -12,6 +12,16 @@ invalidate built modules. The exception is a correctness repair for artifacts
 whose provenance was previously marked fresh incorrectly; that safety migration
 is called out explicitly below.
 
+## 1.7.7
+
+Pair Jaunt 1.7.7 with `@usejaunt/ts` 0.1.0-alpha.6. This hotfix preserves the
+bounded 1.7.6 compiler workflow while restoring full `status` and `check`
+coverage for handwritten consumers. Scoped candidate validation now follows
+reverse consumers only from modules that actually change, so an unrelated
+pre-existing error below an unchanged dependency does not reject the target.
+Strict API mirrors also remove imports shadowed by value parameters in public
+`typeof` declarations.
+
 ## 1.7.6
 
 Pair Jaunt 1.7.6 with `@usejaunt/ts` 0.1.0-alpha.5. Existing alpha.4

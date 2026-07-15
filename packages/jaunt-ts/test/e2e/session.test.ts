@@ -66,18 +66,22 @@ describe("analyzer vertical path", () => {
       resolve(workspace.root, "src/slug/index.jaunt.ts"),
       `import * as jaunt from "@usejaunt/ts/spec";
 import type { Store } from "../store/index.jaunt.js";
-import { runtimeOnly } from "../support.js";
-jaunt.magicModule({ deps: [runtimeOnly] });
+import { Foo, runtimeOnly } from "../support.js";
+jaunt.magicModule({ deps: [Foo, runtimeOnly] });
 export interface PublicOptions { Store?: string; runtimeOnly?: string; }
 export type PublicBox<Store, runtimeOnly> = readonly [Store, runtimeOnly];
 /** Normalize a title. */
 export function slugify(title: string): string { return jaunt.magic(); }
+/** Return a parameter's runtime type. */
+export function inspect(Foo: string): typeof Foo { return jaunt.magic(); }
 void (undefined as unknown as Store);
 `,
     );
     writeFileSync(
       resolve(workspace.root, "src/support.ts"),
-      "export const runtimeOnly = (value: string): string => value.trim();\n",
+      `export const Foo = "foo";
+export const runtimeOnly = (value: string): string => value.trim();
+`,
     );
     const session = await AnalyzerSession.create({
       root: workspace.root,
@@ -521,6 +525,21 @@ export function value(input: number): number { return jaunt.magic(); }
     const value = refreshed
       .analyzeContracts({ moduleIds: ["ts:src/value/index"] })
       .modules.find((contract) => contract.moduleId === "ts:src/value/index")!;
+    const scopedSync = refreshed.validateOverlay({
+      sessionId: metadata.sessionId,
+      expectedEpoch: metadata.epoch,
+      expectedSnapshot: metadata.snapshot,
+      candidates: {},
+      moduleIds: [value.moduleId],
+      syncModuleIds: [value.moduleId],
+      scopeToModuleIds: true,
+      baselineUnselected: true,
+    });
+    expect(scopedSync.valid).toBe(false);
+    expect(scopedSync.diagnostics).toContainEqual(
+      expect.objectContaining({ path: "src/consumer.ts" }),
+    );
+
     const scopedCandidate = refreshed.validateOverlay({
       sessionId: metadata.sessionId,
       expectedEpoch: metadata.epoch,
@@ -536,6 +555,75 @@ export function value(input: number): number { return jaunt.magic(); }
     expect(scopedCandidate.valid).toBe(false);
     expect(scopedCandidate.diagnostics).toContainEqual(
       expect.objectContaining({ path: "src/consumer.ts" }),
+    );
+  });
+
+  test("scoped candidate validation excludes consumers of unchanged dependencies", async () => {
+    const workspace = createFixtureWorkspace({ withClass: true });
+    roots.push(workspace.root);
+    writeFileSync(
+      resolve(workspace.root, "src/slug/index.jaunt.ts"),
+      `import * as jaunt from "@usejaunt/ts/spec";
+import { Store } from "../store/index.jaunt.js";
+jaunt.magicModule({ deps: [Store] });
+/** Normalize a title. */
+export function slugify(title: string): string { return jaunt.magic(); }
+`,
+    );
+    const params = {
+      root: workspace.root,
+      projects: ["tsconfig.json"],
+      testProjects: [],
+      sourceRoots: ["src"],
+      testRoots: ["tests"],
+      generatedDir: "__generated__",
+      toolOwner: ".",
+      compilerModulePath: workspace.compilerModulePath,
+      clientVersion: "test",
+      toolVersion: "test",
+    } as const;
+    const original = await AnalyzerSession.create(params);
+    const originalModules = original.analyzeContracts().modules;
+    const originalMetadata = original.metadata();
+    const bootstrap = original.validateOverlay({
+      sessionId: originalMetadata.sessionId,
+      expectedEpoch: originalMetadata.epoch,
+      expectedSnapshot: originalMetadata.snapshot,
+      candidates: {},
+      moduleIds: originalModules.map((module) => module.moduleId),
+      syncModuleIds: originalModules.map((module) => module.moduleId),
+    });
+    expect(bootstrap.valid, JSON.stringify(bootstrap.diagnostics)).toBe(true);
+    commit(workspace.root, bootstrap.artifacts);
+
+    writeFileSync(
+      resolve(workspace.root, "src/store-consumer.ts"),
+      `import { Store } from "./store/index.js";
+export const invalid: number = new Store().get("missing");
+`,
+    );
+    const refreshed = await AnalyzerSession.create(params);
+    const modules = refreshed.analyzeContracts().modules;
+    const slug = modules.find(
+      (module) => module.moduleId === "ts:src/slug/index",
+    )!;
+    const metadata = refreshed.metadata();
+    const candidate = refreshed.validateOverlay({
+      sessionId: metadata.sessionId,
+      expectedEpoch: metadata.epoch,
+      expectedSnapshot: metadata.snapshot,
+      candidates: {
+        [slug.moduleId]:
+          "const __jaunt_impl_slugify = (title: string): string => title.trim();",
+      },
+      moduleIds: modules.map((module) => module.moduleId),
+      scopeToModuleIds: true,
+      baselineUnselected: true,
+    });
+
+    expect(candidate.valid, JSON.stringify(candidate.diagnostics)).toBe(true);
+    expect(candidate.diagnostics).not.toContainEqual(
+      expect.objectContaining({ path: "src/store-consumer.ts" }),
     );
   });
 

@@ -253,7 +253,33 @@ function surfaceUsesBinding(
   binding: string,
 ): boolean {
   let found = false;
+  const bindingNameDeclares = (name: ts.BindingName): boolean => {
+    if (compiler.isIdentifier(name)) return name.text === binding;
+    return name.elements.some(
+      (element) =>
+        !compiler.isOmittedExpression(element) &&
+        bindingNameDeclares(element.name),
+    );
+  };
+  const isInside = (node: ts.Node, ancestor: ts.Node): boolean => {
+    let current: ts.Node | undefined = node;
+    while (current) {
+      if (current === ancestor) return true;
+      current = current.parent;
+    }
+    return false;
+  };
+  const isValueReference = (node: ts.Node): boolean => {
+    let current: ts.Node | undefined = node.parent;
+    while (current) {
+      if (compiler.isTypeQueryNode(current))
+        return isInside(node, current.exprName);
+      current = current.parent;
+    }
+    return false;
+  };
   const isShadowed = (node: ts.Node): boolean => {
+    const valueReference = isValueReference(node);
     let current: ts.Node | undefined = node.parent;
     while (current) {
       const typeParameters = (
@@ -262,6 +288,16 @@ function surfaceUsesBinding(
         }
       ).typeParameters;
       if (typeParameters?.some((parameter) => parameter.name.text === binding))
+        return true;
+      const parameters = (
+        current as ts.Node & {
+          readonly parameters?: readonly ts.ParameterDeclaration[];
+        }
+      ).parameters;
+      if (
+        valueReference &&
+        parameters?.some((parameter) => bindingNameDeclares(parameter.name))
+      )
         return true;
       current = current.parent;
     }

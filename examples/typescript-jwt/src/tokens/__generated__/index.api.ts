@@ -1,8 +1,8 @@
 // ⛓️ jaunt:api-mirror — generated; do not edit.
 // jaunt:module=ts:src/tokens/index
-// jaunt:structural=sha256:709185d185eb5b5df04fe7f318a2094fbd1abde0cd49a4b91569c3bae1087c30
+// jaunt:structural=sha256:0532c7518f2b61d29e180198678dce4cb692bebf2a3eec22961bbfa7ccded757
 // jaunt:prose=sha256:616b419f63caf931be25251541e08d964b503d846e7f0c727d8dbc6468bcce3c
-// jaunt:api=sha256:a80b0313d3531e626e89bfc3ec72663bc969bff52191f932241a00c379775e6c
+// jaunt:api=sha256:d59bf98b21bf7b951f00eae822249a4ae16915d927b5c9d210455b8e18dccf02
 /**
  * Decoded token payload.
  */

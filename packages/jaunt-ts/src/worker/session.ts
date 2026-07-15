@@ -933,16 +933,23 @@ export class AnalyzerSession {
           ) ?? []),
         ]
       : this.discovery.modules;
+    const consumerModuleIds = new Set([
+      ...Object.keys(params.candidates),
+      ...syncModules,
+    ]);
+    const consumerModules = this.discovery.modules.filter((module) =>
+      consumerModuleIds.has(module.route.moduleId),
+    );
     const consumerRoots =
       params.scopeToModuleIds &&
       params.baselineUnselected &&
-      Object.keys(params.candidates).length > 0
+      consumerModules.length > 0
         ? reverseConsumerRoots(
             this.root,
             this.graph.projects,
             this.discovery.modules,
             this.discovery.importAdjacency,
-            validationModules,
+            consumerModules,
           )
         : [];
     const allIrs = timed("contract-ir", () =>

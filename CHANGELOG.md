@@ -3,6 +3,23 @@
 All notable changes to jaunt. Generated from conventional commits by
 [git-cliff](https://git-cliff.org); one section per published PyPI release.
 
+## [1.7.7] - 2026-07-15
+
+### Fixes
+
+- Preserve handwritten-consumer diagnostics when full TypeScript status and check
+  validate sync work in bounded batches.
+- Seed scoped reverse-consumer validation from the modules whose candidate or API
+  mirror actually changes, rather than unrelated dependencies loaded into the
+  validation closure.
+- Prune API-mirror imports shadowed by value parameters in public `typeof`
+  declarations as well as imports shadowed by generic type parameters.
+
+### Packages
+
+- Publish `@usejaunt/ts` `0.1.0-alpha.6` with the scoped validation and mirror
+  pruning corrections.
+
 ## [1.7.6] - 2026-07-15
 
 ### Fixes
