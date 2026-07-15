@@ -1,9 +1,9 @@
 {
-  "apiDigest": "sha256:b0ce7b20b9272fc10a5704a8e52183f53995cbf051cda698caa650b43ee66f97",
+  "apiDigest": "sha256:25dc8ed149b1baade404b433db359d1b7c0503d43bc21ba25c670e75fdaa9708",
   "apiMirrorPath": "packages/app/src/slug/__generated__/index.api.ts",
   "artifactHashes": {
-    "packages/app/src/slug/__generated__/index.api.ts": "sha256:d099ce7931123eea31b5426046e9008d908a4a802ff6ea53384c4df7d0151462",
-    "packages/app/src/slug/__generated__/index.ts": "sha256:e446646be0e5425d6a2b9ece8505cf2eb9f85693b988ecc54dded0cfe956267e",
+    "packages/app/src/slug/__generated__/index.api.ts": "sha256:e51304f3704b76000f085029f0739bcb8e6ec915679374ae50c37515acb6e95c",
+    "packages/app/src/slug/__generated__/index.ts": "sha256:1a368f2f98623ae0318e78c5fed00daec7a181b5a7f371cc5da2d48a426aa3af",
     "packages/app/src/slug/index.ts": "sha256:1db00b0df482881a7fe6f67c5d84bf3d48659187a8e4ed17909cf395260f6874"
   },
   "contextDocs": [
@@ -157,12 +157,12 @@
   "facadePath": "packages/app/src/slug/index.ts",
   "fingerprint": {
     "compilerOptionsHash": "sha256:22dff1df026f3de9770281305f24eaeca1459083c36584842d4be246c15e0423",
-    "generationFingerprint": "sha256:3efd14ad7db9256159e2532279f260052a8e4d623d7f6055102d530dca2305dd",
+    "generationFingerprint": "sha256:84e024f656992d27aec9da4874b9139e1f61ba26aaea549a56df1ce48d5e61f1",
     "ir": "contract-ir/1-draft.2",
     "protocol": "jaunt-ts/1-draft.2",
-    "toolVersion": "1.7.3",
+    "toolVersion": "1.7.4",
     "typescriptVersion": "5.9.3",
-    "workerVersion": "0.1.0-alpha.2"
+    "workerVersion": "0.1.0-alpha.3"
   },
   "implementationPath": "packages/app/src/slug/__generated__/index.ts",
   "moduleId": "ts:packages/app/src/slug/index",
@@ -174,7 +174,7 @@
   "semanticEnvironmentDigest": "sha256:b357afc60c2822d15b465d4892ebd43a733fe516fb3c6ad961b8819379a2fadc",
   "specPath": "packages/app/src/slug/index.jaunt.ts",
   "state": "built",
-  "structuralDigest": "sha256:89acbb3eaf10776d231f759334050eaa3c8b97e24b234fdb5634ab79daa60120",
+  "structuralDigest": "sha256:a20c485c1a8ce4aa263bb88d898e88df8c64b38cd78767b1cb9c65c0e71c4f08",
   "symbols": [
     {
       "docs": "Convert a title to a lowercase ASCII URL slug.\n\nFirst normalize spacing with `normalizeSpacing`. Lowercase ASCII letters,\nreplace each non-empty run of characters other than ASCII letters and digits\nwith one hyphen, and remove leading or trailing hyphens. Return an empty\nstring when no ASCII letters or digits remain.\n\n@example slugify(\"  Project\\tReferences!  \") // => \"project-references\"",

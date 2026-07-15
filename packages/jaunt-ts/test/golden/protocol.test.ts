@@ -2,7 +2,7 @@ import { readFileSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import ts from "@typescript/typescript6";
 import Ajv, { type ValidateFunction } from "ajv";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { serializeType } from "../../src/analyzer/ir.js";
 import {
   parseRequest,
@@ -73,6 +73,72 @@ describe("protocol-v1 golden fixtures", () => {
     expect(validate(value), JSON.stringify(validate.errors)).toBe(true);
     value.error.__futureDraftField = true;
     expect(validate(value)).toBe(false);
+  });
+
+  test("unexpected overlay failures report the active worker phase", async () => {
+    const workspace = createFixtureWorkspace({ withTestSpec: true });
+    const server = new WorkerServer();
+    try {
+      const initialized = await server.dispatch(
+        parseRequest({
+          protocol: PROTOCOL_VERSION,
+          id: "phase-init",
+          method: "initialize",
+          params: {
+            root: workspace.root,
+            projects: ["tsconfig.json"],
+            testProjects: ["tsconfig.test.json"],
+            sourceRoots: ["src"],
+            testRoots: ["tests"],
+            generatedDir: "__generated__",
+            toolOwner: ".",
+            compilerModulePath: workspace.compilerModulePath,
+            clientVersion: "test",
+            toolVersion: "test",
+          },
+        }),
+      );
+      expect(initialized.ok, JSON.stringify(initialized)).toBe(true);
+      const metadata = initialized.result as Record<string, unknown>;
+      const validation = vi
+        .spyOn(AnalyzerSession.prototype, "validateOverlay")
+        .mockImplementation((_params, reportPhase) => {
+          reportPhase?.({
+            phase: "module-overlays",
+            state: "start",
+            elapsedMs: 1,
+          });
+          throw new Error("synthetic compiler failure");
+        });
+      try {
+        const response = await server.dispatch(
+          parseRequest({
+            protocol: PROTOCOL_VERSION,
+            id: "phase-overlay",
+            method: "validateOverlay",
+            params: {
+              sessionId: metadata.sessionId,
+              expectedEpoch: metadata.epoch,
+              expectedSnapshot: metadata.snapshot,
+              candidates: {},
+            },
+          }),
+        );
+        expect(validate(response), JSON.stringify(validate.errors)).toBe(true);
+        expect(response).toMatchObject({
+          ok: false,
+          error: {
+            code: "INTERNAL_ERROR",
+            message:
+              "validateOverlay failed during phase=module-overlays: synthetic compiler failure",
+          },
+        });
+      } finally {
+        validation.mockRestore();
+      }
+    } finally {
+      rmSync(workspace.root, { recursive: true, force: true });
+    }
   });
 
   test("request validation is strict and preserves deadlineMs", () => {

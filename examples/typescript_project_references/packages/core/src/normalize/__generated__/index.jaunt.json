@@ -1,9 +1,9 @@
 {
-  "apiDigest": "sha256:b5494ae5d16bbc5df3a21ff0e52fa2d01a155eda59a3c5dcb87978dd01854dca",
+  "apiDigest": "sha256:1ea00d36c67c8754c1e4d3a846685f60afad599466397e157228b389c5c835e7",
   "apiMirrorPath": "packages/core/src/normalize/__generated__/index.api.ts",
   "artifactHashes": {
-    "packages/core/src/normalize/__generated__/index.api.ts": "sha256:f1c955529bd3ee312da33d1d08d3459e37c3f0eeba9a01119eaaa47726425d13",
-    "packages/core/src/normalize/__generated__/index.ts": "sha256:eadd720c7bd9e01c08274a7f73eb2276ed404df813c485e151c6bf9976959c0b",
+    "packages/core/src/normalize/__generated__/index.api.ts": "sha256:9a5eaff9514c14ba0582c1e6111bc4a61531b719fa707833405e5e340fefd5f2",
+    "packages/core/src/normalize/__generated__/index.ts": "sha256:e6c42194c1a60487966803705f7b766fc3f415a0707408f853e76826b0521d9b",
     "packages/core/src/normalize/index.ts": "sha256:1db00b0df482881a7fe6f67c5d84bf3d48659187a8e4ed17909cf395260f6874"
   },
   "contextDocs": [
@@ -146,12 +146,12 @@
   "facadePath": "packages/core/src/normalize/index.ts",
   "fingerprint": {
     "compilerOptionsHash": "sha256:733b0de60903c3a6ff99040ca855c84b231f4a33ec486b0681a52c9fd9c80560",
-    "generationFingerprint": "sha256:3efd14ad7db9256159e2532279f260052a8e4d623d7f6055102d530dca2305dd",
+    "generationFingerprint": "sha256:84e024f656992d27aec9da4874b9139e1f61ba26aaea549a56df1ce48d5e61f1",
     "ir": "contract-ir/1-draft.2",
     "protocol": "jaunt-ts/1-draft.2",
-    "toolVersion": "1.7.3",
+    "toolVersion": "1.7.4",
     "typescriptVersion": "5.9.3",
-    "workerVersion": "0.1.0-alpha.2"
+    "workerVersion": "0.1.0-alpha.3"
   },
   "implementationPath": "packages/core/src/normalize/__generated__/index.ts",
   "moduleId": "ts:packages/core/src/normalize/index",
@@ -163,7 +163,7 @@
   "semanticEnvironmentDigest": "sha256:038457cd31aebbca3d7dc6ea38590ec29a7e4749af667402998ba09d7659c0ca",
   "specPath": "packages/core/src/normalize/index.jaunt.ts",
   "state": "built",
-  "structuralDigest": "sha256:0375dbc30154f77275f307f8bd48ee440b7083c8f4e1cc4b4a919fd7bd85e09c",
+  "structuralDigest": "sha256:328aced8e2d1839fb54bbcc7542d6e9d9f4640de700f25ae4061ace829c31cb5",
   "symbols": [
     {
       "docs": "Normalize spacing in a title.\n\nTrim leading and trailing ASCII whitespace and replace each non-empty run of\nASCII whitespace characters with one literal space. Return an empty string\nwhen the input is empty or contains only ASCII whitespace.\n\n@example normalizeSpacing(\"  Jaunt\\tTS  \") // => \"Jaunt TS\"",
