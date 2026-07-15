@@ -171,6 +171,7 @@ function moduleClosure(
   compiler: typeof import("@typescript/typescript6"),
   root: string,
   modules: DiscoveryResult["modules"],
+  importAdjacency: DiscoveryResult["importAdjacency"],
   selected: ReadonlySet<string> | undefined,
 ): ReadonlySet<DiscoveryResult["modules"][number]> | undefined {
   if (!selected) return undefined;
@@ -195,6 +196,21 @@ function moduleClosure(
     if (closure.has(module)) continue;
     closure.add(module);
     pending.push(...module.dependencyModules);
+    const pathPending = [resolve(module.sourceFile.fileName)];
+    const seenPaths = new Set<string>();
+    while (pathPending.length > 0) {
+      const path = pathPending.pop()!;
+      if (seenPaths.has(path)) continue;
+      seenPaths.add(path);
+      for (const dependency of importAdjacency.get(path) ?? []) {
+        const imported = moduleByPath.get(resolve(dependency));
+        if (imported) {
+          if (imported !== module) pending.push(imported);
+        } else {
+          pathPending.push(resolve(dependency));
+        }
+      }
+    }
     for (const specifier of candidateModuleSpecifiers(
       compiler,
       module.sourceFile.fileName,
@@ -627,6 +643,7 @@ export class AnalyzerSession {
       this.compiler,
       this.root,
       this.discovery.modules,
+      this.discovery.importAdjacency,
       selected,
     );
     let discoveryDiagnostics = this.discovery.diagnostics;
@@ -711,6 +728,7 @@ export class AnalyzerSession {
       this.compiler,
       this.root,
       this.discovery.modules,
+      this.discovery.importAdjacency,
       selected,
     );
     const modules: ContractAnalysisRecord[] = this.discovery.modules
@@ -861,6 +879,7 @@ export class AnalyzerSession {
             this.compiler,
             this.root,
             this.discovery.modules,
+            this.discovery.importAdjacency,
             selected,
           ) ?? []),
         ]

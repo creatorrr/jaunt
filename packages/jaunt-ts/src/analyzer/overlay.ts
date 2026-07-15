@@ -141,6 +141,62 @@ function facadeDiagnostics(
   return diagnostics;
 }
 
+function globalDeclarationRoots(
+  compiler: typeof import("@typescript/typescript6"),
+  project: LoadedProject,
+): readonly string[] {
+  return project.parsed.fileNames.filter((path) => {
+    if (/\.d\.[cm]?ts$/.test(path)) return true;
+    const source = compiler.sys.readFile(path);
+    if (source === undefined) return false;
+    const sourceFile = compiler.createSourceFile(
+      path,
+      source,
+      compiler.ScriptTarget.Latest,
+      true,
+      path.endsWith(".tsx") ? compiler.ScriptKind.TSX : compiler.ScriptKind.TS,
+    );
+    const externalModule = (
+      sourceFile as ts.SourceFile & { externalModuleIndicator?: ts.Node }
+    ).externalModuleIndicator;
+    if (externalModule === undefined) {
+      return sourceFile.statements.some((statement) => {
+        if (
+          compiler.isInterfaceDeclaration(statement) ||
+          compiler.isTypeAliasDeclaration(statement) ||
+          compiler.isModuleDeclaration(statement) ||
+          compiler.isEnumDeclaration(statement)
+        ) {
+          return true;
+        }
+        return (
+          compiler.canHaveModifiers(statement) &&
+          (compiler
+            .getModifiers(statement)
+            ?.some(
+              (modifier) =>
+                modifier.kind === compiler.SyntaxKind.DeclareKeyword,
+            ) ??
+            false)
+        );
+      });
+    }
+    let declaresGlobal = false;
+    const visit = (node: ts.Node): void => {
+      if (
+        compiler.isModuleDeclaration(node) &&
+        (node.flags & compiler.NodeFlags.GlobalAugmentation) !== 0
+      ) {
+        declaresGlobal = true;
+        return;
+      }
+      if (!declaresGlobal) compiler.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+    return declaresGlobal;
+  });
+}
+
 function validateSources(
   compiler: typeof import("@typescript/typescript6"),
   root: string,
@@ -185,9 +241,7 @@ function validateSources(
     // .tsbuildinfo file; candidate SourceFiles are still recreated on changes.
     incremental: false,
   };
-  const ambientRoots = project.parsed.fileNames.filter((path) =>
-    /\.d\.[cm]?ts$/.test(path),
-  );
+  const ambientRoots = globalDeclarationRoots(compiler, project);
   const nativeProgram = programFor("native", nativeOptions, [
     ...(scopedRoots ? ambientRoots : project.parsed.fileNames),
     ...overlayRoots,
@@ -1191,9 +1245,7 @@ export function validateProjectOverlayClosure(
         absolute(root, module.implementationPath),
         absolute(root, module.facadePath),
       ]);
-    const ambientRoots = project.parsed.fileNames.filter((path) =>
-      /\.d\.[cm]?ts$/.test(path),
-    );
+    const ambientRoots = globalDeclarationRoots(compiler, project);
     const roots = [
       ...new Set(
         scopedRoots

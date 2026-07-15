@@ -224,9 +224,13 @@ export function makeModel(value: string): Model { return jaunt.magic(); }
 `,
     );
     writeFileSync(
+      resolve(workspace.root, "src/model/barrel.ts"),
+      'export type { Model } from "./index.js";\n',
+    );
+    writeFileSync(
       resolve(workspace.root, "src/slug/index.jaunt.ts"),
       `import * as jaunt from "@usejaunt/ts/spec";
-import type { Model } from "../model/index.jaunt.js";
+import type { Model } from "../model/barrel.js";
 jaunt.magicModule();
 /** Read a model value. */
 export function slugify(model: Model): string { return jaunt.magic(); }
@@ -264,19 +268,29 @@ export function slugify(model: Model): string { return jaunt.magic(); }
     expect(scoped.valid, JSON.stringify(scoped.diagnostics)).toBe(true);
   });
 
-  test("scoped bootstrap retains configured ambient declaration roots", async () => {
+  test("scoped bootstrap retains configured global declaration roots", async () => {
     const workspace = createFixtureWorkspace();
     roots.push(workspace.root);
     writeFileSync(
-      resolve(workspace.root, "src/globals.d.ts"),
-      "declare type AmbientText = string;\n",
+      resolve(workspace.root, "src/globals.ts"),
+      "export {};\ndeclare global { type AmbientText = string; }\n",
     );
+    writeFileSync(
+      resolve(workspace.root, "src/global-script.ts"),
+      "interface AmbientMarker { readonly marker?: true; }\n",
+    );
+    const tsconfigPath = resolve(workspace.root, "tsconfig.json");
+    const tsconfig = JSON.parse(readFileSync(tsconfigPath, "utf8")) as {
+      compilerOptions: Record<string, unknown>;
+    };
+    tsconfig.compilerOptions.moduleDetection = "legacy";
+    writeFileSync(tsconfigPath, `${JSON.stringify(tsconfig, null, 2)}\n`);
     writeFileSync(
       resolve(workspace.root, "src/slug/index.jaunt.ts"),
       `import * as jaunt from "@usejaunt/ts/spec";
 jaunt.magicModule();
 /** Return ambient text unchanged. */
-export function slugify(value: AmbientText): AmbientText { return jaunt.magic(); }
+export function slugify(value: AmbientText & AmbientMarker): AmbientText { return jaunt.magic(); }
 `,
     );
     const session = await AnalyzerSession.create({

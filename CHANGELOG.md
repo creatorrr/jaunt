@@ -15,7 +15,8 @@ All notable changes to jaunt. Generated from conventional commits by
   `refrozen` remains the umbrella for every model-free reuse path, while
   `recomposed` identifies the compatible-toolchain subset.
 - Make targeted TypeScript contract responses and overlay validation follow
-  only the selected modules and their explicit or public-import closure.
+  only the selected modules and their explicit or public-import closure,
+  including ordinary barrels/context files and configured global declarations.
   Unrelated project errors and unbuilt sibling placeholders no longer force
   adopters to rotate roots or `tsconfig` includes between builds.
 - Split full-workspace contract analysis into bounded responses and deterministic

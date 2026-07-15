@@ -65,6 +65,7 @@
 
 - [x] Scope targeted TypeScript contract responses and validation to the explicit and public-import closure.
 - [x] Preserve the worker's public-import closure through the Python bridge and retain ambient declarations.
+- [x] Traverse ordinary barrels/context files and retain regular `.ts` global declarations.
 - [x] Bound full-workspace contract responses and batch sync validation in dependency order.
 - [x] Commit independent successful TypeScript candidates when one sibling fails.
 - [x] Revalidate each independent landing unit against the committed sibling baseline.
