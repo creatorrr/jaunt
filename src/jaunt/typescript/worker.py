@@ -37,6 +37,7 @@ REQUIRED_WORKER_CAPABILITIES = (
     "orphans",
     "invalidate",
     "contract-projection",
+    "recompose",
 )
 _CRASH_REPLAY_METHODS = frozenset(
     {
@@ -484,6 +485,7 @@ def worker_environment(environ: Mapping[str, str] | None = None) -> dict[str, st
     source = os.environ if environ is None else environ
     result = {key: value for key, value in source.items() if key in _ENV_ALLOWLIST}
     result["JAUNT_TS_PROTOCOL"] = PROTOCOL_VERSION
+    result["JAUNT_TS_PHASE_TELEMETRY"] = "1"
     return result
 
 
@@ -681,8 +683,15 @@ class WorkerClient:
                 response = await asyncio.wait_for(exchange(), timeout=effective_timeout)
             except TimeoutError as exc:
                 await self._terminate()
+                timeout_setting = (
+                    "worker_startup_timeout_seconds"
+                    if method == "initialize"
+                    else "worker_timeout_seconds"
+                )
                 raise WorkerTimeoutError(
-                    f"TypeScript worker request {method!r} timed out"
+                    f"TypeScript worker request {method!r} timed out after "
+                    f"{effective_timeout:.3g}s. Increase "
+                    f"[target.ts].{timeout_setting} for a larger project."
                     + (f"\nstderr:\n{self.stderr}" if self.stderr else "")
                 ) from exc
             except asyncio.CancelledError:

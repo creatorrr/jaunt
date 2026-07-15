@@ -23,6 +23,11 @@ export interface CompositionResult {
   readonly diagnostics: readonly DiagnosticRecord[];
 }
 
+export interface DecompositionResult {
+  readonly candidateSource?: string;
+  readonly diagnostics: readonly DiagnosticRecord[];
+}
+
 interface TripleSlashDirectiveRange {
   readonly start: number;
   readonly end: number;
@@ -523,13 +528,144 @@ function renderedBoundaryStatements(ir: ContractModuleIR): readonly string[] {
   ]);
 }
 
-function maskPreservedBodiesForAudit(
+function compactStatement(source: string): string {
+  return source.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Recover the model-authored candidate from a provenance-checked generated
+ * implementation so a newer deterministic composer can rebuild its boundary.
+ * Both the current boundary and the alpha.0 boundary without function-name
+ * assignments are accepted; every public boundary statement must still match
+ * the current contract exactly.
+ */
+export function decomposeGeneratedImplementation(
   compiler: typeof import("@typescript/typescript6"),
-  root: string,
+  ir: ContractModuleIR,
+  source: string,
+): DecompositionResult {
+  const sourceFile = compiler.createSourceFile(
+    ir.implementationPath,
+    source,
+    compiler.ScriptTarget.Latest,
+    true,
+    ir.implementationPath.endsWith(".tsx")
+      ? compiler.ScriptKind.TSX
+      : compiler.ScriptKind.TS,
+  );
+  const diagnostics: DiagnosticRecord[] = [];
+  const apiImports = sourceFile.statements.filter(
+    (statement): statement is ts.ImportDeclaration =>
+      compiler.isImportDeclaration(statement) &&
+      statement.importClause?.isTypeOnly === true &&
+      statement.importClause.namedBindings !== undefined &&
+      compiler.isNamespaceImport(statement.importClause.namedBindings) &&
+      statement.importClause.namedBindings.name.text === "__JauntApi",
+  );
+  if (apiImports.length !== 1 || sourceFile.statements[0] !== apiImports[0]) {
+    return {
+      diagnostics: [
+        {
+          code: "JAUNT_TS_RECOMPOSE_BOUNDARY",
+          severity: "error",
+          message:
+            "Existing generated implementation has no unique leading __JauntApi boundary import",
+          path: ir.implementationPath,
+        },
+      ],
+    };
+  }
+
+  let cursor = sourceFile.statements.length;
+  const expectPrevious = (expected: string, label: string): boolean => {
+    if (cursor <= 1) {
+      diagnostics.push({
+        code: "JAUNT_TS_RECOMPOSE_BOUNDARY",
+        severity: "error",
+        message: `Existing generated implementation is missing ${label}`,
+        path: ir.implementationPath,
+      });
+      return false;
+    }
+    const statement = sourceFile.statements[cursor - 1]!;
+    if (
+      compactStatement(statement.getText(sourceFile)) !==
+      compactStatement(expected)
+    ) {
+      diagnostics.push({
+        code: "JAUNT_TS_RECOMPOSE_BOUNDARY",
+        severity: "error",
+        message: `Existing generated implementation has an incompatible ${label}`,
+        path: ir.implementationPath,
+      });
+      return false;
+    }
+    cursor -= 1;
+    return true;
+  };
+
+  for (const symbol of [...ir.symbols].reverse()) {
+    if (
+      symbol.kind === "class" &&
+      !expectPrevious(
+        renderClassTypeAlias(symbol),
+        `type boundary for ${symbol.name}`,
+      )
+    )
+      break;
+    if (
+      !expectPrevious(
+        `export const ${symbol.name}: typeof __JauntApi.${symbol.name} = __jaunt_impl_${symbol.name};`,
+        `value boundary for ${symbol.name}`,
+      )
+    )
+      break;
+    if (symbol.kind === "function" && cursor > 1) {
+      const nameBoundary = `Object.defineProperty(__jaunt_impl_${symbol.name}, "name", { value: ${JSON.stringify(symbol.name)}, configurable: true });`;
+      const previous = sourceFile.statements[cursor - 1]!;
+      if (
+        compactStatement(previous.getText(sourceFile)) ===
+        compactStatement(nameBoundary)
+      )
+        cursor -= 1;
+    }
+  }
+  if (diagnostics.length > 0 || cursor >= sourceFile.statements.length) {
+    return { diagnostics: sortDiagnostics(diagnostics) };
+  }
+  const firstBoundary = sourceFile.statements[cursor]!;
+  const recoveredCandidate = source
+    .slice(apiImports[0]!.end, firstBoundary.getFullStart())
+    .trim();
+  const candidateSource = stripPreservedContentForRecomposition(
+    compiler,
+    ir,
+    recoveredCandidate,
+  ).trim();
+  if (candidateSource === "") {
+    diagnostics.push({
+      code: "JAUNT_TS_RECOMPOSE_CANDIDATE",
+      severity: "error",
+      message:
+        "Existing generated implementation contains no recoverable candidate",
+      path: ir.implementationPath,
+    });
+  }
+  return {
+    ...(candidateSource === ""
+      ? {}
+      : { candidateSource: `${candidateSource}\n` }),
+    diagnostics: sortDiagnostics(diagnostics),
+  };
+}
+
+function stripPreservedContent(
+  compiler: typeof import("@typescript/typescript6"),
   ir: ContractModuleIR,
   candidate: string,
+  stripDeterministicDocs: boolean,
 ): string {
-  const path = resolve(root, ir.implementationPath);
+  const path = ir.implementationPath;
   const sourceFile = compiler.createSourceFile(
     path,
     candidate,
@@ -537,7 +673,7 @@ function maskPreservedBodiesForAudit(
     true,
     path.endsWith(".tsx") ? compiler.ScriptKind.TSX : compiler.ScriptKind.TS,
   );
-  const edits: { start: number; end: number }[] = [];
+  const edits: { start: number; end: number; content: string }[] = [];
   for (const symbol of ir.symbols.filter((item) => item.kind === "class")) {
     const declaration = candidateClass(
       compiler,
@@ -561,14 +697,51 @@ function maskPreservedBodiesForAudit(
       )[];
       if (matches.length !== 1) continue;
       const body = matches[0]!.body!;
-      edits.push({ start: body.getStart(sourceFile), end: body.end });
+      edits.push({
+        start: body.getStart(sourceFile),
+        end: body.end,
+        content: "{}",
+      });
+      if (!stripDeterministicDocs || !member.docs) continue;
+      const memberStart = matches[0]!.getStart(sourceFile);
+      const lineStart = candidate.lastIndexOf("\n", memberStart - 1) + 1;
+      const indent = candidate.slice(lineStart, memberStart);
+      const renderedDocs = renderDocs(member.docs, indent);
+      const insertedDocs = `${
+        renderedDocs.startsWith(indent)
+          ? renderedDocs.slice(indent.length)
+          : renderedDocs
+      }${indent}`;
+      const docsStart = memberStart - insertedDocs.length;
+      if (
+        docsStart >= 0 &&
+        candidate.slice(docsStart, memberStart) === insertedDocs
+      ) {
+        edits.push({ start: docsStart, end: memberStart, content: "" });
+      }
     }
   }
   let output = candidate;
   for (const edit of edits.sort((left, right) => right.start - left.start)) {
-    output = `${output.slice(0, edit.start)}{}${output.slice(edit.end)}`;
+    output = `${output.slice(0, edit.start)}${edit.content}${output.slice(edit.end)}`;
   }
   return output;
+}
+
+function maskPreservedBodiesForAudit(
+  compiler: typeof import("@typescript/typescript6"),
+  ir: ContractModuleIR,
+  candidate: string,
+): string {
+  return stripPreservedContent(compiler, ir, candidate, false);
+}
+
+function stripPreservedContentForRecomposition(
+  compiler: typeof import("@typescript/typescript6"),
+  ir: ContractModuleIR,
+  candidate: string,
+): string {
+  return stripPreservedContent(compiler, ir, candidate, true);
 }
 
 /** Re-run current candidate policy over the model-authored portion of built output. */
@@ -634,7 +807,7 @@ export function auditBuiltImplementationPolicy(
     compiler,
     root,
     ir,
-    maskPreservedBodiesForAudit(compiler, root, ir, candidate),
+    maskPreservedBodiesForAudit(compiler, ir, candidate),
     resolvePackageImport,
   ).diagnostics;
   if (/^\s*\/\/\s*@ts-(?:ignore|expect-error|nocheck)/m.test(source)) {

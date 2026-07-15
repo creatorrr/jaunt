@@ -81,6 +81,13 @@ class _MigrationWorker:
             "implementationPath": "src/__generated__/math.ts",
             "project": "tsconfig.json",
             "packageOwner": ".",
+            "dependencies": [],
+            "options": {},
+            "symbols": [{"name": "double", "kind": "function"}],
+            "typeDeclarations": [],
+            "typeImports": [],
+            "contextDocs": [],
+            "semanticEnvironmentDigest": "sha256:semantic-environment",
             "structuralDigest": "sha256:structural",
             "proseDigest": "sha256:prose",
             "apiDigest": "sha256:api",
@@ -93,8 +100,6 @@ class _MigrationWorker:
         self.module: dict[str, Any] = {
             **self.sidecar_value,
             "sidecarPath": "src/__generated__/math.jaunt.json",
-            "symbols": [{"name": "double", "kind": "function"}],
-            "dependencies": [],
             "apiSource": self.api,
             "placeholderSource": self.placeholder,
             "sidecar": self._expected_sidecar(),
@@ -175,6 +180,18 @@ class _MigrationWorker:
             else self.placeholder
         )
         restamp = bool(params.get("restampModuleIds"))
+        recompose = bool(params.get("recomposeModuleIds"))
+        if recompose:
+            implementation = (
+                "// jaunt:state=built\n"
+                "// jaunt:module=ts:src/math\n"
+                f"// jaunt:structural={self.sidecar_value['structuralDigest']}\n"
+                f"// jaunt:prose={self.sidecar_value['proseDigest']}\n"
+                f"// jaunt:api={self.sidecar_value['apiDigest']}\n"
+                "const __jaunt_impl_double = (value: number): number => value * 2;\n"
+                'Object.defineProperty(__jaunt_impl_double, "name", '
+                '{ value: "double", configurable: true });\n'
+            )
         facade = 'export * from "./__generated__/math.js";\n'
         sidecar = dict(self.sidecar_value)
         sidecar.update(
@@ -196,12 +213,12 @@ class _MigrationWorker:
                 "sidecar",
             ),
         ]
-        if not implementation_path.exists() or restamp:
+        if not implementation_path.exists() or restamp or recompose:
             artifacts.append(
                 self._artifact(
                     "src/__generated__/math.ts",
                     implementation,
-                    "implementation" if restamp else "placeholder",
+                    "implementation" if (restamp or recompose) else "placeholder",
                 )
             )
         return {
@@ -283,7 +300,7 @@ async def test_typescript_migrate_repairs_artifacts_model_free_and_is_idempotent
 
 
 @pytest.mark.asyncio
-async def test_typescript_migrate_restamps_compatible_fingerprint_drift(
+async def test_typescript_migrate_recomposes_compatible_fingerprint_drift(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
@@ -293,12 +310,68 @@ async def test_typescript_migrate_restamps_compatible_fingerprint_drift(
     plan = await plan_typescript_migration(tmp_path, config, worker_factory=lambda *_: worker)
 
     assert not plan.requires_rebuild
-    assert any(action.classification == "free-restamp" for action in plan.actions)
+    assert any(action.classification == "free-recompose" for action in plan.actions)
     validation = [params for method, params in worker.requests if method == "validateOverlay"]
-    assert validation[-1]["restampModuleIds"] == ["ts:src/math"]
+    assert validation[-1]["recomposeModuleIds"] == ["ts:src/math"]
     apply_typescript_migration(plan)
     sidecar = json.loads((tmp_path / "src/__generated__/math.jaunt.json").read_text())
     assert sidecar["fingerprint"]["toolVersion"] == "current"
+
+
+@pytest.mark.asyncio
+async def test_typescript_migrate_requires_rebuild_for_proofless_legacy_sidecar(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    worker = _MigrationWorker(tmp_path)
+    _write_built_artifacts(tmp_path, worker)
+    sidecar_path = tmp_path / "src/__generated__/math.jaunt.json"
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    sidecar.pop("semanticEnvironmentDigest")
+    sidecar_path.write_text(json.dumps(sidecar, sort_keys=True) + "\n", encoding="utf-8")
+
+    plan = await plan_typescript_migration(tmp_path, config, worker_factory=lambda *_: worker)
+
+    assert plan.requires_rebuild
+    assert any(
+        diagnostic.code == "JAUNT_TS_MIGRATE_REBUILD_REQUIRED"
+        and "environment proof" in diagnostic.message
+        for diagnostic in plan.diagnostics
+    )
+    assert all(method != "validateOverlay" for method, _params in worker.requests)
+
+
+@pytest.mark.asyncio
+async def test_typescript_migrate_recomposes_digest_scheme_upgrade_without_model(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    worker = _MigrationWorker(tmp_path)
+    _write_built_artifacts(tmp_path, worker)
+    worker.sidecar_value.update(
+        {
+            "structuralDigest": "sha256:structural-v2",
+            "apiDigest": "sha256:api-v2",
+        }
+    )
+    worker.module.update(worker.sidecar_value)
+    worker.refresh_expected_sidecar()
+
+    plan = await plan_typescript_migration(tmp_path, config, worker_factory=lambda *_: worker)
+
+    assert not plan.requires_rebuild
+    assert any(action.classification == "free-recompose" for action in plan.actions)
+    validation = [params for method, params in worker.requests if method == "validateOverlay"]
+    assert validation[-1]["recomposeModuleIds"] == ["ts:src/math"]
+    assert all(method != "generate" for method, _params in worker.requests)
+
+    apply_typescript_migration(plan)
+    implementation = (tmp_path / "src/__generated__/math.ts").read_text(encoding="utf-8")
+    sidecar = json.loads(
+        (tmp_path / "src/__generated__/math.jaunt.json").read_text(encoding="utf-8")
+    )
+    assert "jaunt:structural=sha256:structural-v2" in implementation
+    assert sidecar["structuralDigest"] == "sha256:structural-v2"
 
 
 @pytest.mark.asyncio

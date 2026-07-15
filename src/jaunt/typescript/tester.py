@@ -693,6 +693,7 @@ def _existing_test_battery_action(
     provenance: Mapping[str, str],
     force: bool,
     generated_dirs: Sequence[str] = (),
+    allow_recomposed_targets: bool = False,
 ) -> tuple[str, str | None]:
     """Classify an existing managed battery without trusting its header alone.
 
@@ -728,9 +729,12 @@ def _existing_test_battery_action(
     if not mismatches:
         return "skip", source
 
-    allowed = _TEST_REHEADER_FINGERPRINTS | {"battery_fingerprint"}
+    allowed_tooling = set(_TEST_REHEADER_FINGERPRINTS)
+    if allow_recomposed_targets:
+        allowed_tooling.add("target_api_digest")
+    allowed = allowed_tooling | {"battery_fingerprint"}
     if (
-        not mismatches.intersection(_TEST_REHEADER_FINGERPRINTS)
+        not mismatches.intersection(allowed_tooling)
         or "battery_fingerprint" not in mismatches
         or not mismatches.issubset(allowed)
     ):
@@ -3197,6 +3201,13 @@ async def _run_test_batches(
     )
 
 
+def _all_test_targets_recomposed(
+    selected_module_ids: Sequence[str], recomposed_modules: set[str]
+) -> bool:
+    selected = set(selected_module_ids)
+    return bool(selected) and selected.issubset(recomposed_modules)
+
+
 async def run_test(
     root: Path,
     config: JauntConfig,
@@ -3317,6 +3328,11 @@ async def run_test(
                 exit_code=build.exit_code,
             )
 
+    recomposed_modules = {
+        str(module_id)
+        for module_id in build_metadata.get("recomposed", ())
+        if isinstance(module_id, str)
+    }
     backend = generator or _default_backend(config)
     cost = phase_cost_tracker()
     overlays: dict[str, str] = {}
@@ -3412,7 +3428,7 @@ async def run_test(
                 ),
             )
 
-        for _test_spec, spec_path, _selected_module_ids, request in prepared_requests:
+        for _test_spec, spec_path, selected_module_ids, request in prepared_requests:
             tier = str(request.cache_payload.get("tier", "example"))
             provenance = _test_provenance(
                 root,
@@ -3432,6 +3448,9 @@ async def run_test(
                 provenance=provenance,
                 force=force,
                 generated_dirs=(_target(config).generated_dir,),
+                allow_recomposed_targets=_all_test_targets_recomposed(
+                    selected_module_ids, recomposed_modules
+                ),
             )
             if action == "skip":
                 skipped.add(request.target_path)

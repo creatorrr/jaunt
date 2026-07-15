@@ -161,6 +161,7 @@ describe("protocol-v1 golden fixtures", () => {
         "typeDeclarations",
         "typeImports",
         "contextDocs",
+        "semanticEnvironmentDigest",
         "dependencies",
         "structuralDigest",
         "proseDigest",

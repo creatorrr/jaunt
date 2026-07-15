@@ -167,6 +167,7 @@
             "exports": [{ "symbol": "Base", "docs": "Base behavior." }]
           }
         ],
+        "semanticEnvironmentDigest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
         "dependencies": ["ts:src/base/index#Base"],
         "structuralDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
         "proseDigest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",

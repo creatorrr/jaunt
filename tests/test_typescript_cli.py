@@ -49,6 +49,8 @@ def test_init_typescript_scaffolds_v2_without_mutating_package_json(tmp_path: Pa
     assert config.target_languages == ("ts",)
     assert config.typescript_target is not None
     assert config.typescript_target.projects == ["tsconfig.json"]
+    assert config.typescript_target.worker_timeout_seconds == 30
+    assert config.typescript_target.worker_startup_timeout_seconds == 10
 
 
 def test_init_typescript_creates_a_missing_root(tmp_path: Path, capsys) -> None:

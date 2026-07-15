@@ -31,6 +31,7 @@ async function freshnessDigests(workspace: FixtureWorkspace): Promise<{
   structural: string;
   prose: string;
   api: string;
+  environment: string;
 }> {
   const session = await AnalyzerSession.create({
     root: workspace.root,
@@ -49,6 +50,7 @@ async function freshnessDigests(workspace: FixtureWorkspace): Promise<{
     structural: contract.structuralDigest,
     prose: contract.proseDigest,
     api: contract.apiDigest,
+    environment: contract.semanticEnvironmentDigest!,
   };
 }
 
@@ -353,22 +355,23 @@ export function slugify(title: string, options: SlugOptions): string {
 }
 `,
   );
-  const original = await structuralDigest(workspace);
+  const original = await freshnessDigests(workspace);
 
   write(
     workspace.root,
     "node_modules/@fixture/contracts/index.d.ts",
     "export interface SlugOptions { separator: string; maxLength: number; }\n",
   );
-  const declarationEdit = await structuralDigest(workspace);
-  expect(declarationEdit).not.toBe(original);
+  const declarationEdit = await freshnessDigests(workspace);
+  expect(declarationEdit.structural).not.toBe(original.structural);
+  expect(declarationEdit.environment).not.toBe(original.environment);
 
   write(
     workspace.root,
     "node_modules/@fixture/contracts/index.d.ts",
     "// comment\nexport interface SlugOptions { separator : string ; maxLength : number ; }\n",
   );
-  expect(await structuralDigest(workspace)).toBe(declarationEdit);
+  expect(await freshnessDigests(workspace)).toEqual(declarationEdit);
 
   write(
     workspace.root,
@@ -382,8 +385,121 @@ export function slugify(title: string, options: SlugOptions): string {
       2,
     )}\n`,
   );
-  expect(await structuralDigest(workspace)).not.toBe(declarationEdit);
+  const lockEdit = await freshnessDigests(workspace);
+  expect(lockEdit.structural).not.toBe(declarationEdit.structural);
+  expect(lockEdit.environment).not.toBe(declarationEdit.environment);
 });
+
+test("compatibility identity normalizes only Jaunt tool package metadata", async () => {
+  const workspace = createFixtureWorkspace();
+  roots.push(workspace.root);
+  const manifest = (version: string) =>
+    `${JSON.stringify({
+      name: "fixture",
+      private: true,
+      type: "module",
+      devDependencies: {
+        "@usejaunt/ts": version,
+        typescript: "6.0.2",
+      },
+    })}\n`;
+  const lock = (version: string) =>
+    `${JSON.stringify({
+      lockfileVersion: 3,
+      packages: {
+        "": { devDependencies: { "@usejaunt/ts": version } },
+        "node_modules/@usejaunt/ts": { version },
+      },
+    })}\n`;
+  write(workspace.root, "package.json", manifest("0.1.0-alpha.1"));
+  write(workspace.root, "package-lock.json", lock("0.1.0-alpha.1"));
+  const before = await freshnessDigests(workspace);
+
+  write(workspace.root, "package.json", manifest("0.1.0-alpha.2"));
+  write(workspace.root, "package-lock.json", lock("0.1.0-alpha.2"));
+  const after = await freshnessDigests(workspace);
+
+  expect(after.structural).not.toBe(before.structural);
+  expect(after.environment).toBe(before.environment);
+});
+
+test.each([
+  {
+    name: "pnpm",
+    path: "pnpm-lock.yaml",
+    lock: (tool: string, other: string) => `lockfileVersion: '9.0'
+importers:
+  .:
+    devDependencies:
+      '@usejaunt/ts':
+        specifier: ${tool}
+        version: ${tool}
+packages:
+  '@usejaunt/ts@${tool}':
+    resolution: {integrity: sha512-tool-${tool}}
+  'left-pad@${other}':
+    resolution: {integrity: sha512-left-${other}}
+`,
+  },
+  {
+    name: "Yarn",
+    path: "yarn.lock",
+    lock: (tool: string, other: string) => `"@usejaunt/ts@${tool}":
+  version "${tool}"
+  resolved "https://registry.npmjs.org/@usejaunt/ts/-/ts-${tool}.tgz"
+  integrity sha512-tool-${tool}
+
+"left-pad@${other}":
+  version "${other}"
+  integrity sha512-left-${other}
+`,
+  },
+  {
+    name: "Bun",
+    path: "bun.lock",
+    lock: (tool: string, other: string) => `{
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": { "devDependencies": { "@usejaunt/ts": "${tool}" } },
+  },
+  "packages": {
+    "@usejaunt/ts": ["@usejaunt/ts@${tool}", "", {}, "sha512-tool-${tool}"],
+    "left-pad": ["left-pad@${other}", "", {}, "sha512-left-${other}"],
+  },
+}
+`,
+  },
+])(
+  "$name lockfiles preserve non-tool changes in the compatibility identity",
+  async ({ path, lock }) => {
+    const workspace = createFixtureWorkspace();
+    roots.push(workspace.root);
+    const manifest = (version: string) =>
+      `${JSON.stringify({
+        name: "fixture",
+        private: true,
+        type: "module",
+        devDependencies: {
+          "@usejaunt/ts": version,
+          typescript: "6.0.2",
+        },
+      })}\n`;
+    write(workspace.root, "package.json", manifest("0.1.0-alpha.1"));
+    write(workspace.root, path, lock("0.1.0-alpha.1", "1.0.0"));
+    const before = await freshnessDigests(workspace);
+
+    write(workspace.root, "package.json", manifest("0.1.0-alpha.2"));
+    write(workspace.root, path, lock("0.1.0-alpha.2", "1.0.0"));
+    const toolUpgrade = await freshnessDigests(workspace);
+    expect(toolUpgrade.structural).not.toBe(before.structural);
+    expect(toolUpgrade.environment).toBe(before.environment);
+
+    write(workspace.root, path, lock("0.1.0-alpha.2", "1.1.0"));
+    const dependencyUpgrade = await freshnessDigests(workspace);
+    expect(dependencyUpgrade.structural).not.toBe(toolUpgrade.structural);
+    expect(dependencyUpgrade.environment).not.toBe(toolUpgrade.environment);
+  },
+);
 
 test("external package declarations stay in the worker snapshot but not writable preconditions", async () => {
   const workspace = createFixtureWorkspace();

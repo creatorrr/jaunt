@@ -278,7 +278,12 @@ async def worker_session(
     target = _target(config)
     if worker_factory is None:
         installation = resolve_worker_installation(root, target)
-        client: WorkerLike = WorkerClient(root=root, installation=installation)
+        client: WorkerLike = WorkerClient(
+            root=root,
+            installation=installation,
+            request_timeout=target.worker_timeout_seconds,
+            startup_timeout=target.worker_startup_timeout_seconds,
+        )
     else:
         created = worker_factory(root, target)
         client = await created if inspect.isawaitable(created) else created
@@ -413,12 +418,15 @@ async def validate_overlay(
     *,
     sync_module_ids: Sequence[str] = (),
     restamp_module_ids: Sequence[str] = (),
+    recompose_module_ids: Sequence[str] = (),
 ) -> ValidateOverlayResult:
     wire = _stamp_params(analysis, candidates, module_ids).to_wire()
     if sync_module_ids:
         wire["syncModuleIds"] = list(sync_module_ids)
     if restamp_module_ids:
         wire["restampModuleIds"] = list(restamp_module_ids)
+    if recompose_module_ids:
+        wire["recomposeModuleIds"] = list(recompose_module_ids)
     raw = await client.request(
         "validateOverlay",
         wire,
@@ -1354,6 +1362,7 @@ async def run_build_in_session(
     generated: set[str] = set()
     skipped: set[str] = set()
     refrozen: set[str] = set()
+    recomposed: set[str] = set()
     effective_instructions = (
         tuple(build_instructions)
         if build_instructions is not None
@@ -1388,6 +1397,9 @@ async def run_build_in_session(
         reason = status.stale.get(module_id)
         if not force and reason == "fingerprint":
             refrozen.add(module_id)
+        elif not force and reason == "toolchain":
+            refrozen.add(module_id)
+            recomposed.add(module_id)
         elif not force and reason == "prose" and gate_enabled:
             if await _gate_prose_change(
                 root,
@@ -1580,12 +1592,15 @@ async def run_build_in_session(
             for module_id in sorted(unit_ids.intersection(candidates))
         }
         unit_refrozen = tuple(sorted(unit_ids.intersection(refrozen)))
+        unit_recomposed = tuple(sorted(unit_ids.intersection(recomposed)))
+        unit_restamped = tuple(sorted(set(unit_refrozen) - set(unit_recomposed)))
         validated = await validate_overlay(
             client,
             analysis,
             unit_candidates,
             tuple(sorted(set(unit_candidates) | set(unit_refrozen))),
-            restamp_module_ids=unit_refrozen,
+            restamp_module_ids=unit_restamped,
+            recompose_module_ids=unit_recomposed,
         )
         if not validated.valid:
             diagnostics = _diagnostics(validated.diagnostics)
@@ -1627,7 +1642,11 @@ async def run_build_in_session(
     _clear_recovered_build_manifests(root, analysis.modules)
     for module_id in sorted(actionable_ids - progress_advanced):
         if module_id in committed_refrozen:
-            _progress_phase(progress, module_id, "refrozen")
+            _progress_phase(
+                progress,
+                module_id,
+                "recomposed" if module_id in recomposed else "refrozen",
+            )
         _progress_advance(progress, module_id, ok=module_id not in failed)
     _progress_finish(progress)
 
@@ -1638,7 +1657,15 @@ async def run_build_in_session(
             for module_id in sorted(generated)
         ]
         + [
-            JournalEvent("refreeze", module_id, "TypeScript contract equivalent")
+            JournalEvent(
+                "recompose" if module_id in recomposed else "refreeze",
+                module_id,
+                (
+                    "TypeScript candidate recomposed for compatible toolchain"
+                    if module_id in recomposed
+                    else "TypeScript contract equivalent"
+                ),
+            )
             for module_id in sorted(committed_refrozen)
         ],
     )
@@ -1655,6 +1682,7 @@ async def run_build_in_session(
             "build_units": tuple(unit.module_ids for unit in units),
             "jobs": effective_jobs,
             "generation_fingerprint": request_fingerprint,
+            "recomposed": tuple(sorted(committed_refrozen.intersection(recomposed))),
             **(
                 {"cache": {"hits": response_cache.hits, "misses": response_cache.misses}}
                 if response_cache is not None

@@ -34,6 +34,7 @@ from jaunt.typescript.builder import (
     validate_overlay,
     worker_session,
 )
+from jaunt.typescript.upgrade import compatible_semantic_modules
 
 _PLACEHOLDER_MARKERS = ("state=unbuilt", 'state = "unbuilt"', "state: unbuilt")
 
@@ -136,6 +137,7 @@ def classify_modules(
     unbuilt: set[str] = set()
     invalid: dict[str, tuple[TargetDiagnostic, ...]] = {}
     digests: dict[str, str] = {}
+    compatible_toolchain_modules = compatible_semantic_modules(root, tuple(modules))
 
     for module in modules:
         module_id = _module_id(module)
@@ -245,15 +247,25 @@ def classify_modules(
         actual_prose = _digest(actual_sidecar, "proseDigest")
         expected_api_digest = _digest(expected_sidecar, "apiDigest")
         actual_api_digest = _digest(actual_sidecar, "apiDigest")
+        expected_environment = _digest(expected_sidecar, "semanticEnvironmentDigest")
+        actual_environment = _digest(actual_sidecar, "semanticEnvironmentDigest")
         stale_reason: str | None = None
-        if expected_structural != actual_structural:
+        compatible_toolchain_drift = module_id in compatible_toolchain_modules
+        if expected_environment is not None and actual_environment is None:
+            # Legacy sidecars cannot prove that their model-facing environment
+            # is unchanged. Rebuild once instead of attempting an old-boundary
+            # restamp that may fail or preserve an incompatible candidate.
             stale_reason = "structural"
+        elif expected_structural != actual_structural:
+            stale_reason = "toolchain" if compatible_toolchain_drift else "structural"
         elif expected_prose != actual_prose:
             stale_reason = "prose"
         elif expected_api_digest != actual_api_digest:
             # ``apiDigest`` covers both structure and prose. Check it only after
             # their individual digests so a docs-only edit reaches the semantic
             # gate instead of being misreported as structural drift.
+            stale_reason = "toolchain" if compatible_toolchain_drift else "structural"
+        elif expected_environment != actual_environment:
             stale_reason = "structural"
         elif any(
             expected_sidecar.get(key) != actual_sidecar.get(key)
@@ -268,7 +280,7 @@ def classify_modules(
             )
             if key in expected_sidecar
         ):
-            stale_reason = "fingerprint"
+            stale_reason = "toolchain" if compatible_toolchain_drift else "fingerprint"
         if stale_reason is not None:
             stale[module_id] = stale_reason
             continue

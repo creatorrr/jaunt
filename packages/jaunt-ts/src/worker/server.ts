@@ -23,6 +23,18 @@ export class WorkerServer {
   readonly #cancelled = new Set<string>();
   shutdownRequested = false;
 
+  private reportTiming(
+    request: WorkerRequest,
+    phase: string,
+    state: "start" | "finish",
+    elapsedMs: number,
+  ): void {
+    if (process.env.JAUNT_TS_PHASE_TELEMETRY !== "1") return;
+    process.stderr.write(
+      `[jaunt:phase] request=${request.id} method=${request.method} phase=${phase} state=${state} elapsed_ms=${Math.round(elapsedMs)}\n`,
+    );
+  }
+
   async dispatch(request: WorkerRequest): Promise<WorkerResponse> {
     try {
       const result = await this.withDeadline(request, () =>
@@ -71,9 +83,20 @@ export class WorkerServer {
           "ALREADY_INITIALIZED",
           "Worker is already initialized",
         );
-      this.#session = await AnalyzerSession.create(
-        parseInitializeParams(request.params),
-      );
+      const startedAt = performance.now();
+      this.reportTiming(request, "initialize", "start", 0);
+      try {
+        this.#session = await AnalyzerSession.create(
+          parseInitializeParams(request.params),
+        );
+      } finally {
+        this.reportTiming(
+          request,
+          "initialize",
+          "finish",
+          performance.now() - startedAt,
+        );
+      }
       return this.#session.initializeResult();
     }
     if (request.method === "cancel") {
@@ -110,6 +133,8 @@ export class WorkerServer {
     if (request.method === "validateOverlay") {
       return session.validateOverlay(
         parseValidateOverlayParams(request.params),
+        ({ phase, state, elapsedMs }) =>
+          this.reportTiming(request, phase, state, elapsedMs),
       );
     }
     if (request.method === "findOrphans") {

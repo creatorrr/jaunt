@@ -3,7 +3,10 @@ import { dirname, resolve } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { AnalyzerSession } from "../../src/worker/session.js";
 import ts from "@typescript/typescript6";
-import { composeCandidate } from "../../src/analyzer/composition.js";
+import {
+  composeCandidate,
+  decomposeGeneratedImplementation,
+} from "../../src/analyzer/composition.js";
 import { loadProjectGraph } from "../../src/analyzer/config.js";
 import { validateApiMirrorEquivalence } from "../../src/analyzer/overlay.js";
 import {
@@ -824,6 +827,151 @@ const __jaunt_impl_slugify = (title: string): string => dep(title);`,
           (item) => item.code === "JAUNT_TS_DYNAMIC_IMPORT",
         ),
       ).toBe(false);
+    }
+  });
+
+  test("recovers current and alpha.0 candidates for deterministic recomposition", async () => {
+    const { session, workspace } = await sessionFor();
+    const contract = session.analyzeContracts().modules[0]!;
+    const candidate =
+      "const __jaunt_impl_slugify = (title: string): string => title.toLowerCase();";
+    const composed = composeCandidate(ts, workspace.root, contract, candidate);
+    expect(composed.diagnostics).toEqual([]);
+
+    const current = decomposeGeneratedImplementation(
+      ts,
+      contract,
+      composed.source,
+    );
+    const legacy = decomposeGeneratedImplementation(
+      ts,
+      contract,
+      composed.source.replace(
+        /Object\.defineProperty\(__jaunt_impl_slugify[^\n]*\);\n/,
+        "",
+      ),
+    );
+
+    expect(current.diagnostics).toEqual([]);
+    expect(legacy.diagnostics).toEqual([]);
+    expect(current.candidateSource?.trim()).toBe(candidate);
+    expect(legacy.candidateSource?.trim()).toBe(candidate);
+  });
+
+  test("revalidates and recomposes a committed implementation without a candidate", async () => {
+    const { session, workspace } = await sessionFor();
+    const contract = session.analyzeContracts().modules[0]!;
+    const metadata = session.metadata();
+    const candidate =
+      "const __jaunt_impl_slugify = (title: string): string => title.toLowerCase();";
+    const built = session.validateOverlay({
+      sessionId: metadata.sessionId,
+      expectedEpoch: metadata.epoch,
+      expectedSnapshot: metadata.snapshot,
+      candidates: { [contract.moduleId]: candidate },
+    });
+    expect(built.valid, JSON.stringify(built.diagnostics)).toBe(true);
+    commit(workspace.root, built.artifacts);
+
+    const refreshed = session.invalidate({
+      paths: built.artifacts.map((artifact) => artifact.path),
+    });
+    const recomposed = session.validateOverlay({
+      sessionId: refreshed.sessionId,
+      expectedEpoch: refreshed.epoch,
+      expectedSnapshot: refreshed.snapshot,
+      moduleIds: [contract.moduleId],
+      candidates: {},
+      recomposeModuleIds: [contract.moduleId],
+    });
+
+    expect(recomposed.valid, JSON.stringify(recomposed.diagnostics)).toBe(true);
+    const implementation = recomposed.artifacts.find(
+      (artifact) => artifact.kind === "implementation",
+    )?.content;
+    expect(implementation).toContain(candidate);
+    expect(implementation).toContain(
+      'Object.defineProperty(__jaunt_impl_slugify, "name", { value: "slugify", configurable: true });',
+    );
+  });
+
+  test("recomposition masks preserved bodies and does not duplicate their docs", async () => {
+    const { workspace } = await sessionFor();
+    writeFileSync(
+      resolve(workspace.root, "src/slug/index.jaunt.ts"),
+      `import * as jaunt from "@usejaunt/ts/spec";
+jaunt.magicModule();
+/** A formatter with one audited handwritten operation. */
+export class Formatter {
+  constructor() { jaunt.magic(); }
+  /** Preserve this cast exactly. @jauntPreserve */
+  format(value: string): string { return (value as any).trim(); }
+  /** Normalize a formatted value. */
+  normalize(value: string): string { return jaunt.magic(); }
+}
+`,
+    );
+    writeFileSync(
+      resolve(workspace.root, "src/app.ts"),
+      `import { Formatter } from "./slug/index.js";
+export const result = new Formatter().format(" value ");
+`,
+    );
+    const session = await AnalyzerSession.create({
+      root: workspace.root,
+      projects: ["tsconfig.json"],
+      testProjects: [],
+      sourceRoots: ["src"],
+      testRoots: ["tests"],
+      generatedDir: "__generated__",
+      toolOwner: ".",
+      compilerModulePath: workspace.compilerModulePath,
+      clientVersion: "test",
+      toolVersion: "0.1.0-alpha.0",
+    });
+    const contract = session.analyzeContracts().modules[0]!;
+    const metadata = session.metadata();
+    const built = session.validateOverlay({
+      sessionId: metadata.sessionId,
+      expectedEpoch: metadata.epoch,
+      expectedSnapshot: metadata.snapshot,
+      candidates: {
+        [contract.moduleId]: `class __jaunt_impl_Formatter {
+  constructor() {}
+  format(value: string): string { return value; }
+  normalize(value: string): string { return value.toLowerCase(); }
+}`,
+      },
+    });
+    expect(built.valid, JSON.stringify(built.diagnostics)).toBe(true);
+    commit(workspace.root, built.artifacts);
+
+    let refreshed = session.invalidate({
+      paths: built.artifacts.map((artifact) => artifact.path),
+    });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const recomposed = session.validateOverlay({
+        sessionId: refreshed.sessionId,
+        expectedEpoch: refreshed.epoch,
+        expectedSnapshot: refreshed.snapshot,
+        moduleIds: [contract.moduleId],
+        candidates: {},
+        recomposeModuleIds: [contract.moduleId],
+      });
+      expect(recomposed.valid, JSON.stringify(recomposed.diagnostics)).toBe(
+        true,
+      );
+      const implementation = recomposed.artifacts.find(
+        (artifact) => artifact.kind === "implementation",
+      )!.content;
+      expect(implementation).toContain("return (value as any).trim();");
+      expect(implementation.match(/Preserve this cast exactly/g)).toHaveLength(
+        1,
+      );
+      commit(workspace.root, recomposed.artifacts);
+      refreshed = session.invalidate({
+        paths: recomposed.artifacts.map((artifact) => artifact.path),
+      });
     }
   });
 

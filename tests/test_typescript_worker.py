@@ -291,7 +291,12 @@ def test_worker_client_rejects_oversized_stdout(tmp_path: Path) -> None:
 def test_worker_client_times_out_and_kills_process_group(tmp_path: Path) -> None:
     installation = _installation(
         tmp_path,
-        "import sys, time\nfor _line in sys.stdin:\n time.sleep(60)\n",
+        "import sys, time\n"
+        "for _line in sys.stdin:\n"
+        " phase = '[jaunt:phase] method=validateOverlay '\n"
+        " sys.stderr.write(phase + 'phase=module-overlays state=start elapsed_ms=7\\n')\n"
+        " sys.stderr.flush()\n"
+        " time.sleep(60)\n",
     )
 
     async def run() -> None:
@@ -300,8 +305,24 @@ def test_worker_client_times_out_and_kills_process_group(tmp_path: Path) -> None
             installation=installation,
             request_timeout=0.05,
         )
-        with pytest.raises(WorkerTimeoutError, match="timed out"):
+        with pytest.raises(WorkerTimeoutError, match="worker_timeout_seconds") as raised:
             await client.request("hang", {})
+        assert "phase=module-overlays" in str(raised.value)
+        await client.close()
+
+    asyncio.run(run())
+
+
+def test_worker_client_initialization_timeout_names_startup_setting(tmp_path: Path) -> None:
+    installation = _installation(
+        tmp_path,
+        "import sys, time\nfor _line in sys.stdin:\n time.sleep(60)\n",
+    )
+
+    async def run() -> None:
+        client = WorkerClient(root=tmp_path, installation=installation)
+        with pytest.raises(WorkerTimeoutError, match="worker_startup_timeout_seconds"):
+            await client.request("initialize", {}, timeout=0.05)
         await client.close()
 
     asyncio.run(run())
@@ -611,6 +632,7 @@ def test_worker_environment_drops_node_injection_variables() -> None:
     )
     assert env["PATH"] == "/bin"
     assert env["JAUNT_TS_PROTOCOL"] == PROTOCOL_VERSION
+    assert env["JAUNT_TS_PHASE_TELEMETRY"] == "1"
     assert "NODE_OPTIONS" not in env
     assert "NODE_PATH" not in env
     assert "TS_NODE_PROJECT" not in env

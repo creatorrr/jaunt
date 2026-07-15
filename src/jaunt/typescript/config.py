@@ -26,6 +26,8 @@ class TypeScriptTargetConfig:
     auto_class_tests: bool = False
     fast_check_runs: int = 50
     contract_battery_dir: str = "tests/contract"
+    worker_timeout_seconds: float = 30.0
+    worker_startup_timeout_seconds: float = 10.0
 
     def auto_skills_enabled(self, shared_default: bool) -> bool:
         """Resolve the target-local override without changing Python behavior."""

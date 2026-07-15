@@ -713,6 +713,7 @@
         "typeDeclarations",
         "typeImports",
         "contextDocs",
+        "semanticEnvironmentDigest",
         "dependencies",
         "structuralDigest",
         "proseDigest",
@@ -745,6 +746,7 @@
           "type": "array",
           "items": { "$ref": "#/definitions/contextDocs" }
         },
+        "semanticEnvironmentDigest": { "$ref": "#/definitions/digest" },
         "dependencies": {
           "type": "array",
           "items": { "type": "string" },
@@ -775,6 +777,7 @@
           "typeDeclarations",
           "typeImports",
           "contextDocs",
+          "semanticEnvironmentDigest",
           "dependencies",
           "structuralDigest",
           "proseDigest",
@@ -809,6 +812,7 @@
           "typeDeclarations",
           "typeImports",
           "contextDocs",
+          "semanticEnvironmentDigest",
           "dependencies",
           "structuralDigest",
           "proseDigest",
