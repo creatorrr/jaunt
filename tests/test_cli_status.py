@@ -46,8 +46,59 @@ def test_status_json_previews_generation_fanout_and_seeded_skills(tmp_path: Path
         assert plan["candidate_modules"] == [f"{pkg}.specs"]
         assert plan["max_attempts_per_unit"] >= 2
         assert plan["max_generation_attempts"] >= 2
-        assert plan["modules"][f"{pkg}.specs"]["initial_generation_units"] == 1
+        module_plan = plan["modules"][f"{pkg}.specs"]
+        assert module_plan["initial_generation_units"] == 1
+        assert module_plan["strategy"] == "monolithic"
+        assert module_plan["fallback_condition"] == "none"
         assert "not prompt tokens" in plan["skills_workspace_seeded"]["note"]
+    finally:
+        clear_registries()
+        sys.path[:] = orig_path
+        for name in list(sys.modules):
+            if name not in before_modules:
+                del sys.modules[name]
+
+
+def test_status_explains_split_components_and_fallback_condition(tmp_path: Path, capsys) -> None:
+    from jaunt.registry import clear_registries
+
+    pkg = "status_split_plan_pkg"
+    _make_spec_project(tmp_path, pkg=pkg)
+    spec_path = tmp_path / "src" / pkg / "specs.py"
+    spec_path.write_text(
+        spec_path.read_text(encoding="utf-8")
+        + "\n\n@jaunt.magic()\n"
+        + "def farewell(name: str) -> str:\n"
+        + '    """Say goodbye."""\n'
+        + '    raise RuntimeError("stub")\n',
+        encoding="utf-8",
+    )
+    before_modules = set(sys.modules)
+    orig_path = list(sys.path)
+    try:
+        assert jaunt.cli.main(["status", "--json", "--root", str(tmp_path)]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        module_plan = payload["generation_plan"]["modules"][f"{pkg}.specs"]
+        assert module_plan["initial_generation_units"] == 2
+        assert module_plan["split_fallback_units"] == 1
+        assert module_plan["strategy"] == "split-components"
+        assert (
+            module_plan["fallback_condition"]
+            == "any split component, merge, or whole-module validation fails"
+        )
+
+        assert jaunt.cli.main(["status", "--json", "--jobs", "1", "--root", str(tmp_path)]) == 0
+        serial_payload = json.loads(capsys.readouterr().out)
+        serial_plan = serial_payload["generation_plan"]["modules"][f"{pkg}.specs"]
+        assert serial_plan["initial_generation_units"] == 1
+        assert serial_plan["split_fallback_units"] == 0
+        assert serial_plan["strategy"] == "monolithic"
+
+        assert jaunt.cli.main(["status", "--root", str(tmp_path)]) == 0
+        output = capsys.readouterr().out
+        assert f"- {pkg}.specs: 2 split component unit(s)" in output
+        assert "1 monolithic fallback unit(s)" in output
+        assert "if any split component, merge, or whole-module validation fails" in output
     finally:
         clear_registries()
         sys.path[:] = orig_path
@@ -293,6 +344,8 @@ def test_cmd_status_with_stale_specs_non_json(tmp_path: Path, monkeypatch, capsy
         assert "Stale (1):" in captured.out
         assert f"- {pkg}.specs" in captured.out
         assert "Fresh (0):" in captured.out
+        assert f"- {pkg}.specs: 1 monolithic generation unit(s)" in captured.out
+        assert "no split fallback" in captured.out
     finally:
         clear_registries()
         sys.path[:] = orig_path

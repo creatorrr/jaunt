@@ -1,14 +1,17 @@
 // ⛓️ jaunt:generated — generated; do not edit.
 // jaunt:state=built
 // jaunt:module=ts:src/index
-// jaunt:structural=sha256:23a67a585a57b6b12f7fed9afe069f6d85c316423e96ec6c197972d70329da27
+// jaunt:structural=sha256:d8a1f0a2cc5817e5a16eadb561f837307e5cea57af8a7027252d6aff59556c47
 // jaunt:prose=sha256:8f49f368d319309f41bb7828c151e17873012884a4a4f6241f0c8a555cac0e43
-// jaunt:api=sha256:e3f04853e092ff31480725d9d75e53f7c9c5c6ea46f23347990fa791d42969cb
+// jaunt:api=sha256:e86e0a408e9f000d7677a2ca5e6398274c8ac27e8dc1cd89331e4dca4b872932
 import type * as __JauntApi from "./index.api.js";
-function __jaunt_impl_slugify(title: string): string {
-  return title.match(/[A-Za-z0-9]+/g)?.map((part) => part.toLowerCase()).join("-") ?? "";
-}
+const __jaunt_impl_slugify = (title: string): string =>
+  title
+    .replace(/[^A-Za-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .toLowerCase();
 
+Object.defineProperty(__jaunt_impl_slugify, "name", { value: "slugify", configurable: true });
 /**
  * Convert a title to a lowercase URL slug.
  *

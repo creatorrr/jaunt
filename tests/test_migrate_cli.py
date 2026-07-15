@@ -273,3 +273,48 @@ def test_stub_reemit_migration_clears_stub_staleness(tmp_path: Path, monkeypatch
     assert (
         stub_emitter.stub_staleness(source_file=str(src_file), generated_source=gen_source) is None
     )
+
+
+def test_migrate_does_not_plan_stub_reemission_when_stubs_disabled(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    _legacy_decorator_project(tmp_path)
+    _build(tmp_path, monkeypatch)
+    capsys.readouterr()
+    config = tmp_path / "jaunt.toml"
+    config.write_text(config.read_text(encoding="utf-8") + "\n[build]\nemit_stubs = false\n")
+    stub_path = tmp_path / "src" / "legpkg" / "specs.pyi"
+    stub_path.write_text(
+        stub_path.read_text(encoding="utf-8").replace(
+            "# jaunt:inputs_digest=sha256:", "# jaunt:inputs_digest=sha256:deadbeef", 1
+        ),
+        encoding="utf-8",
+    )
+
+    rc = _run(["migrate", "--json", "--root", str(tmp_path)])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == cli.EXIT_OK
+    assert all(action["migration"] != "stub-reemit" for action in payload["actions"])
+
+
+def test_migrate_preflights_stub_format_before_writing_sources(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    _legacy_decorator_project(tmp_path)
+    _build(tmp_path, monkeypatch)
+    capsys.readouterr()
+    source_path = tmp_path / "src" / "legpkg" / "specs.py"
+    original_source = source_path.read_bytes()
+    stub_path = tmp_path / "src" / "legpkg" / "specs.pyi"
+    stub_path.write_bytes(stub_path.read_bytes() + b"\n")
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+
+    rc = _run(["migrate", "--apply", "--force", "--json", "--root", str(tmp_path)])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == cli.EXIT_GENERATION_ERROR
+    assert payload["ok"] is False
+    assert payload["applied"] is False
+    assert "failed to preflight stub re-emission" in payload["error"]
+    assert source_path.read_bytes() == original_source

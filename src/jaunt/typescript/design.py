@@ -672,16 +672,20 @@ async def run_design(
         if builtin_skill_names is not None
         else (tuple(config.skills.builtin_skills) if config.skills.builtin else ())
     )
+    from jaunt.typescript.builder import _target
+
+    target_config = _target(config)
     use_auto_skills = (
-        bool(config.skills.auto) if auto_skills_enabled is None else auto_skills_enabled
+        target_config.auto_skills_enabled(bool(config.skills.auto))
+        if auto_skills_enabled is None
+        else auto_skills_enabled
     )
     if use_auto_skills and not apply:
         from jaunt.skills_npm import ensure_npm_skills, typescript_package_owners
-        from jaunt.typescript.builder import _target
 
         ensure_npm_skills(
             project_root=root,
-            package_owners=typescript_package_owners(root, _target(config)),
+            package_owners=typescript_package_owners(root, target_config),
             max_readme_chars=config.skills.max_chars_per_skill,
         )
     async with worker_session(root, config, worker_factory=worker_factory) as (client, initialized):

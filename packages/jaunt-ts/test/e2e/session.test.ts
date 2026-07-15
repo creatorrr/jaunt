@@ -56,6 +56,84 @@ function commit(
 }
 
 describe("analyzer vertical path", () => {
+  test("strict unused checks accept private stub parameters and synthetic conformance bindings", async () => {
+    const workspace = createFixtureWorkspace({ withClass: true });
+    roots.push(workspace.root);
+    writeFileSync(
+      resolve(workspace.root, "src/slug/index.jaunt.ts"),
+      `import * as jaunt from "@usejaunt/ts/spec";
+jaunt.magicModule();
+export interface SlugOptions { readonly trim?: boolean; }
+/** Normalize a title. */
+export function slugify(title: string, options?: SlugOptions): string {
+  return jaunt.magic();
+}
+`,
+    );
+    writeFileSync(
+      resolve(workspace.root, "tsconfig.json"),
+      `${JSON.stringify(
+        {
+          compilerOptions: {
+            target: "ES2022",
+            module: "NodeNext",
+            moduleResolution: "NodeNext",
+            strict: true,
+            noEmit: true,
+            noUnusedLocals: true,
+            noUnusedParameters: true,
+            exactOptionalPropertyTypes: true,
+            types: [],
+          },
+          include: ["src/**/*.ts"],
+          exclude: ["src/**/*.jaunt.ts", "src/**/__generated__/**"],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    const session = await AnalyzerSession.create({
+      root: workspace.root,
+      projects: ["tsconfig.json"],
+      testProjects: [],
+      sourceRoots: ["src"],
+      testRoots: ["tests"],
+      generatedDir: "__generated__",
+      toolOwner: ".",
+      compilerModulePath: workspace.compilerModulePath,
+      clientVersion: "test",
+      toolVersion: "test",
+    });
+    const contracts = session.analyzeContracts().modules;
+    const slug = contracts.find(
+      (contract) => contract.moduleId === "ts:src/slug/index",
+    )!;
+    const store = contracts.find(
+      (contract) => contract.moduleId === "ts:src/store/index",
+    )!;
+    const metadata = session.metadata();
+    const result = session.validateOverlay({
+      sessionId: metadata.sessionId,
+      expectedEpoch: metadata.epoch,
+      expectedSnapshot: metadata.snapshot,
+      candidates: {
+        [slug.moduleId]:
+          "const __jaunt_impl_slugify = (title: string, options?: { readonly trim?: boolean }): string => { void options; return title.trim(); };",
+        [store.moduleId]: `class __jaunt_impl_Store {
+  readonly #values = new Map<string, string>();
+  constructor(prefix?: string) { void prefix; }
+  put(key: string, value: string): void { this.#values.set(key, value); }
+  get(key: string): string | null { return this.#values.get(key) ?? null; }
+  get size(): number { return this.#values.size; }
+}`,
+      },
+    });
+    expect(result.valid, JSON.stringify(result.diagnostics)).toBe(true);
+    expect(result.diagnostics).not.toContainEqual(
+      expect.objectContaining({ code: "TS6133" }),
+    );
+  });
+
   test("runs the supported analyzer path on the TypeScript 5.8 lower bound", async () => {
     const { session } = await sessionFor({
       compilerPackage: "@typescript/typescript58",
@@ -122,6 +200,12 @@ describe("analyzer vertical path", () => {
       valid.artifacts.find((artifact) => artifact.kind === "implementation")
         ?.content,
     ).toContain("export const slugify: typeof __JauntApi.slugify");
+    expect(
+      valid.artifacts.find((artifact) => artifact.kind === "implementation")
+        ?.content,
+    ).toContain(
+      'Object.defineProperty(__jaunt_impl_slugify, "name", { value: "slugify", configurable: true });',
+    );
     const repeated = session.validateOverlay({
       sessionId: metadata.sessionId,
       expectedEpoch: metadata.epoch,
@@ -132,6 +216,19 @@ describe("analyzer vertical path", () => {
       },
     });
     expect(repeated.valid, JSON.stringify(repeated.diagnostics)).toBe(true);
+    const aliased = session.validateOverlay({
+      sessionId: metadata.sessionId,
+      expectedEpoch: metadata.epoch,
+      expectedSnapshot: metadata.snapshot,
+      candidates: {
+        [contract.moduleId]:
+          "const shared = (title: string): string => title.trim(); const __jaunt_impl_slugify = shared;",
+      },
+    });
+    expect(aliased.valid).toBe(false);
+    expect(aliased.diagnostics).toContainEqual(
+      expect.objectContaining({ code: "JAUNT_TS_FUNCTION_ALIAS" }),
+    );
     expect(
       session
         .overlayProgramState()
@@ -920,6 +1017,18 @@ export function slugifies(): never {
     });
     expect(sync.valid, JSON.stringify(sync.diagnostics)).toBe(true);
     commit(workspace.root, sync.artifacts);
+    writeFileSync(
+      resolve(workspace.root, "src/slug/__generated__/index.example.test.ts"),
+      "// ⚙️ jaunt:generated — DO NOT EDIT. Regenerate with `jaunt test`.\n// jaunt:tier=example\n// jaunt:source=tests/index.jaunt-test.ts\nexport {};\n",
+    );
+    writeFileSync(
+      resolve(workspace.root, "src/slug/__generated__/index.derived.test.ts"),
+      "// ⚙️ jaunt:generated — DO NOT EDIT. Regenerate with `jaunt test`.\n// jaunt:tier=derived\n// jaunt:source=tests/index.jaunt-test.ts\nexport {};\n",
+    );
+    writeFileSync(
+      resolve(workspace.root, "src/slug/__generated__/index.contract.test.ts"),
+      "// ⛓️ jaunt:generated — generated; do not edit.\n// jaunt:state=unbuilt\n// jaunt:module=ts:src/slug/index.contract.test\n",
+    );
     rmSync(resolve(workspace.root, "src/slug/index.jaunt.ts"));
 
     const refreshed = await AnalyzerSession.create({
@@ -950,6 +1059,21 @@ export function slugifies(): never {
           path: "src/slug/__generated__/index.jaunt.json",
           kind: "sidecar",
           moduleId: "ts:src/slug/index",
+        }),
+        expect.objectContaining({
+          path: "src/slug/__generated__/index.contract.test.ts",
+          kind: "placeholder",
+          moduleId: "ts:src/slug/index.contract.test",
+        }),
+      ]),
+    );
+    expect(refreshed.findOrphans().artifacts).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "src/slug/__generated__/index.example.test.ts",
+        }),
+        expect.objectContaining({
+          path: "src/slug/__generated__/index.derived.test.ts",
         }),
       ]),
     );

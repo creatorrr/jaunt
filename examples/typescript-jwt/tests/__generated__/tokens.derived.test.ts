@@ -2,218 +2,233 @@
 // jaunt:tier=derived
 // jaunt:source=tests/tokens.jaunt-test.ts
 // jaunt:test_spec_digest=sha256:af5a7a64a6ba14f47956cdca7e8990398929d529817d11c369f8f6ca36b53797
-// jaunt:target_api_digest=sha256:a4b0e2960a1a841e6ba2a76b84ce8cbb5290bac199155056a06edb73328f418b
+// jaunt:target_api_digest=sha256:5839e3a8ddc854b669820c035595d8b23a0ac45665353d952eb2c4c0553c0de8
 // jaunt:vitest_fingerprint=sha256:5ef9c3f603f2a5e5aa0967833c5876ba1374afb318d3777d80f2d86c1fb0a905
 // jaunt:fast_check_fingerprint=sha256:97f62ee354ca9285052845e71b421a6e36baf29fd9d99056da8a9e34f27b47d8
-// jaunt:runner_fingerprint=sha256:784f8b7a06ae4b2e79b4d5f349b1e530713d3168aaaeba4a714fd68d44b772fa
+// jaunt:runner_fingerprint=sha256:d18e1385cd1c7e9204ff14ece768846b47144325b3177f549074baf7038a08d8
 // jaunt:prompt_fingerprint=sha256:c01073b453383c0f7394eaaf1cfeebadd1099a87810a688a2e8785b50876635f
 // jaunt:policy_fingerprint=sha256:babe1406e8e4cc1024536374f7e50070a88000c5e80db5f17d2914c1e7752693
 // jaunt:skills_fingerprint=462d7ee5b605e739480d217bc7874e1490ce7a1a8d700cb2a516c776f04fbcaf
-// jaunt:battery_fingerprint=sha256:7e0faac813d42939a20406aa3616a1dd7c2ab8f8c14d40d2899a44a2c714f8eb
-// jaunt:body_digest=sha256:90bc013e3a301a61c64b76e3ffb352ccb1d0fdf14d385b08bcba40c593946854
+// jaunt:battery_fingerprint=sha256:8f21a2b588a48b30f2bad2e48dee246a998157ddc1630ed549934c3e94e97ee9
+// jaunt:body_digest=sha256:fd4826e42afa7e3d396af8de02baa1a1dfe8714c46749a4c4f27354127dcf442
 
 import { createHmac } from "node:crypto";
 
-import { expect, vi } from "vitest";
+import fc from "fast-check";
+import { expect } from "vitest";
 
-import { TokenStore, createToken, rotateToken, verifyToken } from "../../src/tokens/index.js";
 import { test } from "../fixtures.js";
+import {
+  createToken,
+  rotateToken,
+  TokenStore,
+  verifyToken,
+} from "../../src/tokens/index.js";
 
-const FIXED_MILLISECONDS = 1_700_000_000_000;
-const FIXED_SECONDS = FIXED_MILLISECONDS / 1_000;
+const FIXED_MILLISECONDS = 1_700_000_000_123;
+const FIXED_SECONDS = Math.floor(FIXED_MILLISECONDS / 1_000);
 
 function encodeJson(value: unknown): string {
   return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
 }
 
-function signSegments(header: string, payload: string, secret: string): string {
-  const signature = createHmac("sha256", secret)
-    .update(`${header}.${payload}`)
-    .digest("base64url");
-  return `${header}.${payload}.${signature}`;
+function signSegments(header: unknown, payload: unknown, secret: string): string {
+  const signingInput = `${encodeJson(header)}.${encodeJson(payload)}`;
+  const signature = createHmac("sha256", secret).update(signingInput).digest("base64url");
+  return `${signingInput}.${signature}`;
 }
 
-function signedToken(header: unknown, payload: unknown, secret: string): string {
-  return signSegments(encodeJson(header), encodeJson(payload), secret);
-}
-
-function decodeSegment(segment: string): unknown {
-  return JSON.parse(Buffer.from(segment, "base64url").toString("utf8"));
-}
-
-function captureError(action: () => unknown): unknown {
+function errorCode(action: () => unknown): unknown {
   try {
     action();
-  } catch (error) {
-    return error;
+  } catch (error: unknown) {
+    if (typeof error === "object" && error !== null && "code" in error) {
+      return error.code;
+    }
+    throw error;
   }
   throw new Error("expected action to throw");
 }
 
-test("d001", () => {
-  vi.useFakeTimers();
-  vi.setSystemTime(FIXED_MILLISECONDS);
-  try {
-    const token = createToken("user-17", "secret-17", { ttlSeconds: 19.9 });
-    const segments = token.split(".");
+test("d-01", () => {
+  fc.assert(
+    fc.property(
+      fc.string({ minLength: 1, maxLength: 32 }),
+      fc.string({ maxLength: 32 }),
+      fc.integer({ min: -86_400, max: 86_400 }),
+      (subject, secret, ttlSeconds) => {
+        const originalNow = Date.now;
+        Date.now = () => FIXED_MILLISECONDS;
+        try {
+          const token = createToken(subject, secret, { ttlSeconds });
+          const segments = token.split(".");
 
-    expect(segments).toHaveLength(3);
-    expect(segments.every((segment) => segment.length > 0 && !segment.includes("="))).toBe(true);
-    expect(decodeSegment(segments[0]!)).toEqual({ alg: "HS256", typ: "JWT" });
-    expect(decodeSegment(segments[1]!)).toEqual({
-      sub: "user-17",
-      iat: FIXED_SECONDS,
-      exp: FIXED_SECONDS + 19,
-    });
-    expect(token).toBe(signSegments(segments[0]!, segments[1]!, "secret-17"));
-  } finally {
-    vi.useRealTimers();
-  }
+          expect(segments).toHaveLength(3);
+          expect(segments.every((segment) => segment.length > 0 && !segment.includes("="))).toBe(
+            true,
+          );
+          expect(JSON.parse(Buffer.from(segments[0]!, "base64url").toString("utf8"))).toEqual({
+            alg: "HS256",
+            typ: "JWT",
+          });
+
+          const expectedClaims = {
+            sub: subject,
+            iat: FIXED_SECONDS,
+            exp: FIXED_SECONDS + ttlSeconds,
+          };
+          expect(JSON.parse(Buffer.from(segments[1]!, "base64url").toString("utf8"))).toEqual(
+            expectedClaims,
+          );
+          expect(segments[2]).toBe(
+            createHmac("sha256", secret)
+              .update(`${segments[0]}.${segments[1]}`)
+              .digest("base64url"),
+          );
+
+          if (ttlSeconds > 0) {
+            expect(verifyToken(token, secret)).toEqual(expectedClaims);
+          } else {
+            expect(errorCode(() => verifyToken(token, secret))).toBe("expired");
+          }
+        } finally {
+          Date.now = originalNow;
+        }
+      },
+    ),
+    { seed: 130501811, numRuns: 50 },
+  );
 });
 
-test("d002", () => {
-  expect(() => createToken("", "secret")).toThrow(RangeError);
-});
-
-test("d003", () => {
-  vi.useFakeTimers();
-  vi.setSystemTime(FIXED_MILLISECONDS);
+test("d-02", () => {
+  const originalNow = Date.now;
+  Date.now = () => FIXED_MILLISECONDS;
   try {
-    const claims = verifyToken(createToken("subject", "key"), "key");
-    expect(claims).toEqual({
+    const token = createToken("subject", "secret", { ttlSeconds: 7.9 });
+    expect(verifyToken(token, "secret")).toEqual({
       sub: "subject",
       iat: FIXED_SECONDS,
-      exp: FIXED_SECONDS + 3_600,
+      exp: FIXED_SECONDS + 7,
     });
-    expect(Object.keys(claims).sort()).toEqual(["exp", "iat", "sub"]);
+    expect(() => createToken("", "secret")).toThrow(RangeError);
   } finally {
-    vi.useRealTimers();
+    Date.now = originalNow;
   }
 });
 
-test("d004", () => {
-  vi.useFakeTimers();
-  vi.setSystemTime(FIXED_MILLISECONDS);
+test("d-03", () => {
+  const originalNow = Date.now;
+  Date.now = () => FIXED_MILLISECONDS;
   try {
-    const error = captureError(() => verifyToken(createToken("subject", "right-key"), "wrong-key"));
-    expect(error).toMatchObject({ code: "invalid-signature" });
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1, max: 7_200 }),
+        fc.integer({ min: -300, max: 300 }),
+        (originalTtl, requestedTtl) => {
+          const original = verifyToken(
+            createToken("rotating-subject", "rotation-secret", {
+              ttlSeconds: originalTtl,
+            }),
+            "rotation-secret",
+          );
+          const rotated = verifyToken(
+            rotateToken(
+              createToken("rotating-subject", "rotation-secret", {
+                ttlSeconds: originalTtl,
+              }),
+              "rotation-secret",
+              { ttlSeconds: requestedTtl },
+            ),
+            "rotation-secret",
+          );
+
+          expect(rotated.sub).toBe(original.sub);
+          expect(rotated.iat).toBeGreaterThan(original.iat);
+          expect(rotated.exp).toBeGreaterThan(original.exp);
+        },
+      ),
+      { seed: 130501811, numRuns: 50 },
+    );
   } finally {
-    vi.useRealTimers();
+    Date.now = originalNow;
   }
 });
 
-test("d005", () => {
-  for (const token of ["", "a.b", "a..c", "a.b.c.d", "*.b.c"]) {
-    const error = captureError(() => verifyToken(token, "key"));
-    expect(error).toMatchObject({ code: "malformed" });
-  }
-});
-
-test("d006", () => {
-  vi.useFakeTimers();
-  vi.setSystemTime(FIXED_MILLISECONDS);
+test("d-04", () => {
+  const originalNow = Date.now;
+  Date.now = () => FIXED_MILLISECONDS;
   try {
-    const wrongHeader = signedToken(
+    const extraClaim = signSegments(
+      { alg: "HS256", typ: "JWT" },
+      { sub: "subject", iat: FIXED_SECONDS, exp: FIXED_SECONDS + 60, role: "admin" },
+      "secret",
+    );
+    const wrongHeader = signSegments(
       { alg: "HS512", typ: "JWT" },
-      { sub: "subject", iat: FIXED_SECONDS, exp: FIXED_SECONDS + 10 },
-      "key",
-    );
-    const extraClaim = signedToken(
-      { alg: "HS256", typ: "JWT" },
-      { sub: "subject", iat: FIXED_SECONDS, exp: FIXED_SECONDS + 10, role: "admin" },
-      "key",
-    );
-    const wrongType = signedToken(
-      { alg: "HS256", typ: "JWT" },
-      { sub: "subject", iat: String(FIXED_SECONDS), exp: FIXED_SECONDS + 10 },
-      "key",
+      { sub: "subject", iat: FIXED_SECONDS, exp: FIXED_SECONDS + 60 },
+      "secret",
     );
 
-    for (const token of [wrongHeader, extraClaim, wrongType]) {
-      expect(captureError(() => verifyToken(token, "key"))).toMatchObject({ code: "malformed" });
-    }
+    expect(errorCode(() => verifyToken(extraClaim, "secret"))).toBe("malformed");
+    expect(errorCode(() => verifyToken(wrongHeader, "secret"))).toBe("malformed");
+    expect(errorCode(() => verifyToken("one..three", "secret"))).toBe("malformed");
   } finally {
-    vi.useRealTimers();
+    Date.now = originalNow;
   }
 });
 
-test("d007", () => {
-  vi.useFakeTimers();
-  vi.setSystemTime(FIXED_MILLISECONDS);
-  try {
-    const token = signedToken(
-      { alg: "HS256", typ: "JWT" },
-      { sub: "subject", iat: FIXED_SECONDS - 10, exp: FIXED_SECONDS },
-      "key",
-    );
-    expect(captureError(() => verifyToken(token, "key"))).toMatchObject({ code: "expired" });
-  } finally {
-    vi.useRealTimers();
-  }
+test("d-05", ({ clock }) => {
+  fc.assert(
+    fc.property(
+      fc.array(
+        fc.record({
+          subject: fc.string({ minLength: 1, maxLength: 12 }),
+          token: fc.string({ maxLength: 16 }),
+          offset: fc.integer({ min: -30, max: 30 }),
+        }),
+        { maxLength: 40 },
+      ),
+      (entries) => {
+        const store = new TokenStore(clock.now);
+        const latest = new Map<string, { token: string; exp: number }>();
+
+        for (const entry of entries) {
+          const exp = clock.now() + entry.offset;
+          store.put(entry.subject, entry.token, exp);
+          latest.set(entry.subject, { token: entry.token, exp });
+        }
+
+        const live = [...latest.values()].filter(({ exp }) => exp > clock.now()).length;
+        const expired = latest.size - live;
+        expect(store.size).toBe(live);
+        for (const [subject, entry] of latest) {
+          expect(store.get(subject)).toBe(entry.exp > clock.now() ? entry.token : null);
+        }
+
+        expect(store.sweep()).toBe(expired);
+        expect(store.sweep()).toBe(0);
+        expect(store.size).toBe(live);
+      },
+    ),
+    { seed: 130501811, numRuns: 50 },
+  );
 });
 
-test("d008", () => {
-  vi.useFakeTimers();
-  vi.setSystemTime(FIXED_MILLISECONDS);
-  try {
-    const original = createToken("subject", "key", { ttlSeconds: 600 });
-    const rotated = rotateToken(original, "key", { ttlSeconds: 1 });
-    const originalPayload = decodeSegment(original.split(".")[1]!) as {
-      sub: string;
-      iat: number;
-      exp: number;
-    };
-    const rotatedPayload = decodeSegment(rotated.split(".")[1]!) as {
-      sub: string;
-      iat: number;
-      exp: number;
-    };
-
-    expect(rotatedPayload.sub).toBe(originalPayload.sub);
-    expect(rotatedPayload.iat).toBeGreaterThan(originalPayload.iat);
-    expect(rotatedPayload.exp).toBeGreaterThan(originalPayload.exp);
-    expect(verifyToken(rotated, "key")).toEqual(rotatedPayload);
-  } finally {
-    vi.useRealTimers();
-  }
-});
-
-test("d009", () => {
-  vi.useFakeTimers();
-  vi.setSystemTime(FIXED_MILLISECONDS);
-  try {
-    const original = createToken("subject", "right-key");
-    const error = captureError(() => rotateToken(original, "wrong-key"));
-    expect(error).toMatchObject({ code: "invalid-signature" });
-  } finally {
-    vi.useRealTimers();
-  }
-});
-
-test("d010", ({ clock }) => {
+test("d-06", ({ clock }) => {
   const store = new TokenStore(clock.now);
-  const now = clock.now();
-  store.put("live", "token-live", now + 5);
-  store.put("boundary", "token-boundary", now);
-  store.put("past", "token-past", now - 1);
+  store.put("boundary", "old", clock.now());
 
-  expect(store.get("live")).toBe("token-live");
   expect(store.get("boundary")).toBeNull();
-  expect(store.get("past")).toBeNull();
-  expect(store.size).toBe(1);
-  expect(store.sweep()).toBe(2);
-  expect(store.sweep()).toBe(0);
-});
-
-test("d011", ({ clock }) => {
-  const store = new TokenStore(clock.now);
-  store.put("subject", "first", clock.now() + 100);
-  store.put("subject", "second", clock.now() + 2);
-
-  expect(store.size).toBe(1);
-  expect(store.get("subject")).toBe("second");
-  clock.advance(2);
-  expect(store.get("subject")).toBeNull();
+  expect(store.get("boundary")).toBeNull();
   expect(store.size).toBe(0);
+  expect(store.sweep()).toBe(1);
+
+  store.put("moving", "first", clock.now() + 2);
+  store.put("moving", "replacement", clock.now() + 4);
+  clock.advance(3);
+  expect(store.get("moving")).toBe("replacement");
+  expect(store.size).toBe(1);
+  clock.advance(1);
+  expect(store.get("moving")).toBeNull();
   expect(store.sweep()).toBe(1);
 });

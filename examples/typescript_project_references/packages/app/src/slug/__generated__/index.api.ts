@@ -1,8 +1,8 @@
 // ⛓️ jaunt:api-mirror — generated; do not edit.
 // jaunt:module=ts:packages/app/src/slug/index
-// jaunt:structural=sha256:7cefbcc49060158324f2118122b0c1ee22fb7d94c3b810ecd83f343faaccefda
+// jaunt:structural=sha256:a6dab9640a9f915a8389b155763e50b6504a003bbc1e5cb62a3d68f59ac1637b
 // jaunt:prose=sha256:e9fa557be73e969f3cb26837fff759c7cccd3f8a5ca90099486dae5df986e4ee
-// jaunt:api=sha256:ea467c7c9aa5a62e78a124793f4c646ab17c67796aca42e2f9a281688aa01570
+// jaunt:api=sha256:02e22aaff07391d5f95d1ad63c0d30d065836e8a76bd03e6e47b704833b01993
 import type { normalizeSpacing } from "@jaunt-examples/core/normalize/index.js";
 
 /**

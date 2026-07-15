@@ -1,9 +1,9 @@
 {
-  "apiDigest": "sha256:e3f04853e092ff31480725d9d75e53f7c9c5c6ea46f23347990fa791d42969cb",
+  "apiDigest": "sha256:e86e0a408e9f000d7677a2ca5e6398274c8ac27e8dc1cd89331e4dca4b872932",
   "apiMirrorPath": "src/__generated__/index.api.ts",
   "artifactHashes": {
-    "src/__generated__/index.api.ts": "sha256:7d094bbf5dfc9d01cfd4c5ac3d46a4c81fe2f6fbe5e6642082bfc52dd74e9a13",
-    "src/__generated__/index.ts": "sha256:a3a4af3345a48ace7a03723232db72f9e664f979c8e901b896db839629aef873",
+    "src/__generated__/index.api.ts": "sha256:7ef697e7532178c88654075c1bf58fbd669ca16d30d84ad2f2bde1d2dc34b617",
+    "src/__generated__/index.ts": "sha256:6b303d947490211747ea3c0a92d84e82fb22e28952f636f2ce83f398d3fdff91",
     "src/index.ts": "sha256:1db00b0df482881a7fe6f67c5d84bf3d48659187a8e4ed17909cf395260f6874"
   },
   "contextDocs": [
@@ -146,12 +146,12 @@
   "facadePath": "src/index.ts",
   "fingerprint": {
     "compilerOptionsHash": "sha256:675c129a2f6916705a4b5892acd260ec0dc719838ad83ecc17ac49a3890cbfaf",
-    "generationFingerprint": "sha256:fd0ee9143bfe7d7d1b86323ff0aafaf27e374967ef096a604cfb76573881765a",
+    "generationFingerprint": "sha256:d04f9d1531f6a85240a55bd68523439accd11ccabf4cf4950250527e3c4c31cd",
     "ir": "contract-ir/1-draft.2",
     "protocol": "jaunt-ts/1-draft.2",
-    "toolVersion": "1.7.1",
+    "toolVersion": "1.7.2",
     "typescriptVersion": "5.9.3",
-    "workerVersion": "0.1.0-alpha.0"
+    "workerVersion": "0.1.0-alpha.1"
   },
   "implementationPath": "src/__generated__/index.ts",
   "moduleId": "ts:src/index",
@@ -162,7 +162,7 @@
   "schema": "contract-ir/1-draft.2",
   "specPath": "src/index.jaunt.ts",
   "state": "built",
-  "structuralDigest": "sha256:23a67a585a57b6b12f7fed9afe069f6d85c316423e96ec6c197972d70329da27",
+  "structuralDigest": "sha256:d8a1f0a2cc5817e5a16eadb561f837307e5cea57af8a7027252d6aff59556c47",
   "symbols": [
     {
       "docs": "Convert a title to a lowercase URL slug.\n\nTrim leading and trailing whitespace, treat every non-empty run of\nnon-alphanumeric ASCII characters as one hyphen, and omit leading/trailing\nhyphens. An input containing no ASCII letters or digits returns an empty\nstring.\n\n@example slugify(\" Hello, Jaunt TS! \") // => \"hello-jaunt-ts\"",

@@ -16,6 +16,11 @@ interface ImportEdge {
   readonly typeOnly: boolean;
 }
 
+export interface ImportGraphAnalysis {
+  readonly diagnostics: readonly DiagnosticRecord[];
+  readonly adjacency: ReadonlyMap<string, readonly string[]>;
+}
+
 function importEdges(
   compiler: typeof import("@typescript/typescript6"),
   sourceFile: ts.SourceFile,
@@ -251,7 +256,7 @@ export function analyzeImportGraph(
   routes: readonly ModuleRoute[],
   projects: readonly LoadedProject[] = [],
   testRoots: readonly string[] = [],
-): readonly DiagnosticRecord[] {
+): ImportGraphAnalysis {
   const diagnostics: DiagnosticRecord[] = [];
   const routeByContext = new Map(
     routes.flatMap((route) =>
@@ -284,6 +289,7 @@ export function analyzeImportGraph(
     ),
   );
   const adjacency = new Map<string, Set<string>>();
+  const scopeAdjacency = new Map<string, Set<string>>();
   for (const file of files) {
     const source = readFileSync(file, "utf8");
     const sourceFile = compiler.createSourceFile(
@@ -310,6 +316,11 @@ export function analyzeImportGraph(
         compilerOptions,
         virtualPaths,
       );
+      if (resolved) {
+        const values = scopeAdjacency.get(resolve(file)) ?? new Set<string>();
+        values.add(resolved);
+        scopeAdjacency.set(resolve(file), values);
+      }
       if (!edge.typeOnly && resolved) {
         const values = adjacency.get(resolve(file)) ?? new Set<string>();
         values.add(resolved);
@@ -439,5 +450,13 @@ export function analyzeImportGraph(
       });
     }
   }
-  return sortDiagnostics(diagnostics);
+  return {
+    diagnostics: sortDiagnostics(diagnostics),
+    adjacency: new Map(
+      [...scopeAdjacency.entries()].map(([path, dependencies]) => [
+        resolve(path),
+        [...dependencies].map((dependency) => resolve(dependency)).sort(),
+      ]),
+    ),
+  };
 }

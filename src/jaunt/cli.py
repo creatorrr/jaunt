@@ -886,7 +886,9 @@ def _typescript_builtin_skill_names(args: argparse.Namespace, cfg: JauntConfig) 
 
 
 def _typescript_auto_skills_enabled(args: argparse.Namespace, cfg: JauntConfig) -> bool:
-    return bool(cfg.skills.auto) and not bool(getattr(args, "no_auto_skills", False))
+    target = cfg.typescript_target
+    enabled = target.auto_skills_enabled(bool(cfg.skills.auto)) if target else False
+    return enabled and not bool(getattr(args, "no_auto_skills", False))
 
 
 def _typescript_error(command: str, error: Exception, *, json_mode: bool, code: int) -> int:
@@ -1408,7 +1410,7 @@ def _prepare_mixed_typescript_skills(
         getattr(args, "no_builtin_skills", False)
     )
     args._mixed_builtin_skill_names = tuple(cfg.skills.builtin_skills) if builtin_enabled else ()
-    auto_enabled = bool(cfg.skills.auto) and not bool(getattr(args, "no_auto_skills", False))
+    auto_enabled = _typescript_auto_skills_enabled(args, cfg)
     args._mixed_npm_skill_metadata = {}
     if not auto_enabled:
         return
@@ -3934,6 +3936,19 @@ def _maybe_load_dotenv(root: Path) -> None:
     load_dotenv_into_environ(root / ".env")
 
 
+def _ensure_jaunt_gitignore(root: Path) -> tuple[str, ...]:
+    """Seed all Jaunt-owned local cache directories exactly once."""
+
+    gitignore = root / ".gitignore"
+    existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+    lines = existing.splitlines()
+    missing = tuple(entry for entry in (".jaunt/", ".jaunt-vitest-cache/") if entry not in lines)
+    if missing:
+        joiner = "" if (not existing or existing.endswith("\n")) else "\n"
+        gitignore.write_text(existing + joiner + "".join(f"{entry}\n" for entry in missing))
+    return missing
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     from jaunt import journal as _journal
 
@@ -3964,11 +3979,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     (root / _journal.JOURNAL_FILE).touch(exist_ok=True)
     _journal.ensure_union_merge_attribute(root)
-    gitignore = root / ".gitignore"
-    existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
-    if ".jaunt/" not in existing.splitlines():
-        joiner = "" if (not existing or existing.endswith("\n")) else "\n"
-        gitignore.write_text(existing + joiner + ".jaunt/\n", encoding="utf-8")
+    _ensure_jaunt_gitignore(root)
 
     if json_mode:
         payload = {"command": "init", "ok": True, "path": str(toml_path)}
@@ -4051,11 +4062,7 @@ def _cmd_init_typescript(*, root: Path, toml_path: Path, json_mode: bool) -> int
 
     (root / _journal.JOURNAL_FILE).touch(exist_ok=True)
     _journal.ensure_union_merge_attribute(root)
-    gitignore = root / ".gitignore"
-    existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
-    if ".jaunt/" not in existing.splitlines():
-        joiner = "" if (not existing or existing.endswith("\n")) else "\n"
-        gitignore.write_text(existing + joiner + ".jaunt/\n", encoding="utf-8")
+    _ensure_jaunt_gitignore(root)
 
     if (root / "pnpm-lock.yaml").exists():
         install_command = (
@@ -4712,6 +4719,47 @@ def _reemit_stub_for_module(
     generated_dir: str,
     tool_version: str,
 ) -> str | None:
+    rendered = _render_stub_for_module(
+        module_name=module_name,
+        entries=entries,
+        package_dir=package_dir,
+        generated_dir=generated_dir,
+        tool_version=tool_version,
+    )
+    if rendered is None:
+        return None
+    stub_path, new_stub = rendered
+    if stub_path.exists() and stub_path.read_bytes() == new_stub.encode("utf-8"):
+        return str(stub_path)
+    stub_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        dir=str(stub_path.parent),
+        prefix=".jaunt-stub-tmp-",
+        suffix=".pyi",
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(new_stub)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, stub_path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+    return str(stub_path)
+
+
+def _render_stub_for_module(
+    *,
+    module_name: str,
+    entries: list["SpecEntry"],
+    package_dir: Path,
+    generated_dir: str,
+    tool_version: str,
+) -> tuple[Path, str] | None:
     from jaunt import builder, header, paths, stub_emitter
 
     gen_source = builder._read_generated(package_dir, generated_dir, module_name)
@@ -4737,29 +4785,10 @@ def _reemit_stub_for_module(
             generated_module=paths.spec_module_to_generated_module(
                 module_name, generated_dir=generated_dir
             ),
-        )
+        ),
+        filename=stub_path,
     )
-    if stub_path.exists() and stub_path.read_text(encoding="utf-8") == new_stub:
-        return str(stub_path)
-    stub_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(
-        dir=str(stub_path.parent),
-        prefix=".jaunt-stub-tmp-",
-        suffix=".pyi",
-        text=True,
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
-            f.write(new_stub)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, stub_path)
-    finally:
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
-    return str(stub_path)
+    return stub_path, new_stub
 
 
 def _migrate_candidate_files(root: Path, cfg: JauntConfig) -> dict[Path, str]:
@@ -4893,6 +4922,7 @@ def _cmd_typescript_migrate_loaded(args: argparse.Namespace, root: Path, cfg: Ja
             return EXIT_CONFIG_OR_DISCOVERY
 
         applied_paths = apply_typescript_migration(plan)
+        _ensure_jaunt_gitignore(root)
         applied_payload = plan.to_json(applied=True, applied_paths=applied_paths)
         if json_mode:
             _emit_json(applied_payload)
@@ -4990,7 +5020,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             _emit_json({"command": "migrate", "ok": False, "error": str(e)})
         return EXIT_CONFIG_OR_DISCOVERY
 
-    from jaunt import migrate
+    from jaunt import builder, migrate
 
     # Governed qualnames per source file, keyed by resolved path. Full qualnames
     # (not collapsed to the class name) so a single governed C.method does not
@@ -5022,19 +5052,20 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             )
         )
     stub_actions = []
-    for output_base in sorted(set(ctx.workspace.output_bases.values())):
-        routed_specs = {
-            module: entries
-            for module, entries in ctx.module_specs.items()
-            if ctx.workspace.route_for(module).output_base == output_base
-        }
-        stub_actions.extend(
-            migrate.plan_stub_reemissions(
-                module_specs=routed_specs,
-                package_dir=output_base,
-                generated_dir=cfg.paths.generated_dir,
+    if cfg.build.emit_stubs:
+        for output_base in sorted(set(ctx.workspace.output_bases.values())):
+            routed_specs = {
+                module: entries
+                for module, entries in ctx.module_specs.items()
+                if ctx.workspace.route_for(module).output_base == output_base
+            }
+            stub_actions.extend(
+                migrate.plan_stub_reemissions(
+                    module_specs=routed_specs,
+                    package_dir=output_base,
+                    generated_dir=cfg.paths.generated_dir,
+                )
             )
-        )
     migration_order = {
         migrate.LEGACY_STUB_MIGRATION_ID: 0,
         migrate.STUB_REEMIT_MIGRATION_ID: 1,
@@ -5075,6 +5106,45 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             )
         return EXIT_CONFIG_OR_DISCOVERY
 
+    # Render every deterministic stub repair before changing spec sources. Ruff is
+    # a bundled dependency, but a missing executable or invalid owner config must
+    # still fail an apply without leaving the migration half-written.
+    if cfg.build.emit_stubs:
+        preflight_modules = {
+            action.module
+            for action in actions
+            if action.migration_id == migrate.STUB_REEMIT_MIGRATION_ID
+            or (
+                action.migration_id == migrate.LEGACY_STUB_MIGRATION_ID
+                and action.classification == "re-stamp"
+            )
+        }
+        for module in sorted(preflight_modules):
+            entries = ctx.module_specs.get(module)
+            if not entries:
+                continue
+            try:
+                _render_stub_for_module(
+                    module_name=module,
+                    entries=entries,
+                    package_dir=ctx.workspace.route_for(module).output_base,
+                    generated_dir=cfg.paths.generated_dir,
+                    tool_version=builder._tool_version(),
+                )
+            except Exception as exc:  # noqa: BLE001 - convert tool failure to CLI result
+                message = f"{module}: failed to preflight stub re-emission: {exc}"
+                _eprint(f"error: {message}")
+                if json_mode:
+                    _emit_json(
+                        {
+                            "command": "migrate",
+                            "ok": False,
+                            "applied": False,
+                            "error": message,
+                        }
+                    )
+                return EXIT_GENERATION_ERROR
+
     applied_actions = []
     skipped_actions = []
     restamp_rewrite_modules: set[str] = set()
@@ -5110,8 +5180,6 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         if json_mode:
             _emit_json({"command": "migrate", "ok": False, "applied": True, "error": str(e)})
         return EXIT_CONFIG_OR_DISCOVERY
-
-    from jaunt import builder
 
     restamped_modules: set[str] = set()
     needs_rebuild_modules: set[str] = set()
@@ -5149,13 +5217,27 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             entries = ctx_after.module_specs.get(module)
             if not entries:
                 continue
-            stub = _reemit_stub_for_module(
-                module_name=module,
-                entries=entries,
-                package_dir=ctx_after.workspace.route_for(module).output_base,
-                generated_dir=cfg.paths.generated_dir,
-                tool_version=builder._tool_version(),
-            )
+            try:
+                stub = _reemit_stub_for_module(
+                    module_name=module,
+                    entries=entries,
+                    package_dir=ctx_after.workspace.route_for(module).output_base,
+                    generated_dir=cfg.paths.generated_dir,
+                    tool_version=builder._tool_version(),
+                )
+            except Exception as exc:  # noqa: BLE001 - report deterministic repair failure
+                message = f"{module}: failed to re-emit stub: {exc}"
+                _eprint(f"error: {message}")
+                if json_mode:
+                    _emit_json(
+                        {
+                            "command": "migrate",
+                            "ok": False,
+                            "applied": True,
+                            "error": message,
+                        }
+                    )
+                return EXIT_GENERATION_ERROR
             if stub is None:
                 continue
             reemitted_paths.append(stub)
@@ -5970,6 +6052,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             cfg=cfg,
             stale_changes=stale_changes,
             infer_default=infer_default,
+            jobs=(int(args.jobs) if args.jobs is not None else int(cfg.build.jobs)),
         )
 
         if json_mode:
@@ -6039,6 +6122,41 @@ def cmd_status(args: argparse.Namespace) -> int:
                     f"({generation_plan['max_attempts_per_unit']} per unit; "
                     "split fallback included)."
                 )
+                modules_plan = generation_plan.get("modules")
+                per_unit = generation_plan.get("max_attempts_per_unit")
+                if isinstance(modules_plan, dict) and isinstance(per_unit, int):
+                    modules_map = cast("dict[str, object]", modules_plan)
+                    for module in candidates:
+                        if not isinstance(module, str):
+                            continue
+                        row = modules_map.get(module)
+                        if not isinstance(row, dict):
+                            continue
+                        row_map = cast("dict[str, object]", row)
+                        initial = row_map.get("initial_generation_units")
+                        fallback = row_map.get("split_fallback_units")
+                        maximum = row_map.get("max_generation_attempts")
+                        if not all(
+                            isinstance(value, int) for value in (initial, fallback, maximum)
+                        ):
+                            continue
+                        assert isinstance(initial, int)
+                        assert isinstance(fallback, int)
+                        assert isinstance(maximum, int)
+                        if fallback:
+                            print(
+                                f"- {module}: {initial} split component unit(s) "
+                                f"(up to {initial * per_unit} attempt(s)) + "
+                                f"{fallback} monolithic fallback unit(s) "
+                                f"(up to {fallback * per_unit} attempt(s)) if any split "
+                                "component, merge, or whole-module validation fails; "
+                                f"{maximum} maximum."
+                            )
+                        else:
+                            print(
+                                f"- {module}: {initial} monolithic generation unit(s), "
+                                f"up to {maximum} attempt(s); no split fallback."
+                            )
                 seeded = generation_plan["skills_workspace_seeded"]
                 if isinstance(seeded, dict):
                     seeded_map = cast("dict[str, object]", seeded)
@@ -6229,7 +6347,12 @@ def _context_stats_summary_line(module: str, blocks: dict[str, dict[str, int]]) 
 
 
 def _python_generation_plan(
-    *, root: Path, cfg: JauntConfig, stale_changes: dict[str, str], infer_default: bool
+    *,
+    root: Path,
+    cfg: JauntConfig,
+    stale_changes: dict[str, str],
+    infer_default: bool,
+    jobs: int,
 ) -> dict[str, object]:
     """Describe the bounded implementation-call fan-out before a build runs."""
     from jaunt import builder, registry
@@ -6242,9 +6365,9 @@ def _python_generation_plan(
     specs = dict(registry.get_magic_registry())
     graph = build_spec_graph(specs, infer_default=infer_default)
     modules = registry.get_specs_by_module("magic")
-    jobs = max(1, int(cfg.build.jobs))
+    jobs = max(1, jobs)
     per_unit = 2 + int(cfg.build.ty_retry_attempts) if builder._resolve_ty_cmd() else 2
-    module_plan: dict[str, dict[str, int]] = {}
+    module_plan: dict[str, dict[str, object]] = {}
     max_attempts = 0
     for module in candidates:
         entries = modules.get(module, [])
@@ -6258,6 +6381,12 @@ def _python_generation_plan(
             "initial_generation_units": initial_units,
             "split_fallback_units": fallback_units,
             "max_generation_attempts": module_max,
+            "strategy": "split-components" if initial_units > 1 else "monolithic",
+            "fallback_condition": (
+                "any split component, merge, or whole-module validation fails"
+                if fallback_units
+                else "none"
+            ),
         }
         max_attempts += module_max
 

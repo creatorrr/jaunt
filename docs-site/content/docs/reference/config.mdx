@@ -53,6 +53,7 @@ generated_dir = "__generated__"
 test_runner = "vitest"
 vitest_config = ""
 vitest_args = [] # reserved; the protected runner requires this to remain empty
+auto_skills = true # target-local override; omit to inherit [skills].auto
 auto_class_tests = false
 fast_check_runs = 50
 contract_battery_dir = "tests/contract"
@@ -97,6 +98,12 @@ The other shared sections (`llm`, `agent`, `codex`, `daemon`, `skills`,
 schema below. In version 2, `contract.battery_dir` moves to each target as
 `contract_battery_dir`; the remaining `[contract]` keys stay shared. Version-1 files
 keep their existing behavior and JSON output.
+
+Set `[target.ts].auto_skills = false` to disable npm skill generation without
+disabling Python's PyPI skills. `jaunt status --json` reports the planned npm skill
+file count and bytes without writing files. TypeScript skills currently cover every
+installed direct runtime dependency owned by the configured projects; selection by
+the imports reachable from one spec is not yet implemented.
 
 Use `jaunt migrate --config-v2` to preview a deterministic version-1 rewrite and
 `jaunt migrate --config-v2 --apply` to commit it. The migration is model-free and

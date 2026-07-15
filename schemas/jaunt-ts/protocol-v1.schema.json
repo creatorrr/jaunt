@@ -137,7 +137,7 @@
               "type": "object",
               "properties": {
                 "method": { "const": "analyzeWorkspace" },
-                "params": { "$ref": "#/definitions/emptyParams" }
+                "params": { "$ref": "#/definitions/moduleSelectionParams" }
               }
             },
             {
@@ -394,7 +394,7 @@
         "capabilities": {
           "type": "array",
           "minItems": 6,
-          "maxItems": 6,
+          "maxItems": 7,
           "uniqueItems": true,
           "items": {
             "enum": [
@@ -403,7 +403,8 @@
               "sync",
               "orphans",
               "invalidate",
-              "contract-projection"
+              "contract-projection",
+              "scoped-diagnostics"
             ]
           }
         }

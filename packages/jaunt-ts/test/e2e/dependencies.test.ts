@@ -90,6 +90,109 @@ jaunt.magicModule();`,
   expect(consumer.symbols[0]!.options.deps).toEqual(["ts:src/base/index#base"]);
 });
 
+test("same-package tsconfig path aliases are local provenance", async () => {
+  const workspace = createFixtureWorkspace();
+  roots.push(workspace.root);
+  write(
+    workspace.root,
+    "tsconfig.json",
+    `${JSON.stringify(
+      {
+        compilerOptions: {
+          target: "ES2022",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+          strict: true,
+          noEmit: true,
+          baseUrl: ".",
+          paths: { "@/*": ["src/*"] },
+          ignoreDeprecations: "6.0",
+          types: [],
+        },
+        include: ["src/**/*.ts"],
+        exclude: ["src/**/*.jaunt.ts", "src/**/__generated__/**"],
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  write(
+    workspace.root,
+    "src/helper.ts",
+    "export const helper = (value: string): string => value.trim();\n",
+  );
+  write(
+    workspace.root,
+    "src/alias-consumer.ts",
+    'import { helper } from "@/helper";\nexport const value = helper(" x ");\n',
+  );
+
+  const session = await createSession(workspace);
+  expect(
+    session
+      .analyzeWorkspace()
+      .diagnostics.filter(
+        (item) => item.code === "JAUNT_TS_UNDECLARED_PACKAGE",
+      ),
+  ).toEqual([]);
+});
+
+test("repeated provenance failures collapse with an occurrence count", async () => {
+  const workspace = createFixtureWorkspace();
+  roots.push(workspace.root);
+  for (const name of ["one", "two"]) {
+    write(
+      workspace.root,
+      `src/${name}.ts`,
+      'import missing from "undeclared-package";\nvoid missing;\n',
+    );
+  }
+
+  const session = await createSession(workspace);
+  const diagnostics = session
+    .analyzeWorkspace()
+    .diagnostics.filter((item) => item.code === "JAUNT_TS_UNDECLARED_PACKAGE");
+  expect(diagnostics).toHaveLength(1);
+  expect(diagnostics[0]!.message).toContain("2 occurrences");
+});
+
+test("targeted diagnostics keep the selected module's resolved import closure", async () => {
+  const workspace = createFixtureWorkspace();
+  roots.push(workspace.root);
+  write(
+    workspace.root,
+    "src/slug/index.jaunt.ts",
+    `import * as jaunt from "@usejaunt/ts/spec";
+import type { Helper } from "../shared/helper.js";
+jaunt.magicModule();
+/** Normalize a helper value. */
+export function base(value: Helper): string { return jaunt.magic(); }
+`,
+  );
+  write(
+    workspace.root,
+    "src/shared/helper.ts",
+    'import value from "selected-undeclared";\nvoid value;\nexport type Helper = string;\n',
+  );
+  write(
+    workspace.root,
+    "src/unrelated.ts",
+    'import value from "unrelated-undeclared";\nvoid value;\n',
+  );
+
+  const session = await createSession(workspace);
+  const targeted = session.analyzeWorkspace({
+    moduleIds: ["ts:src/slug/index"],
+  });
+  const messages = targeted.diagnostics.map((item) => item.message);
+  expect(
+    messages.some((message) => message.includes("selected-undeclared")),
+  ).toBe(true);
+  expect(
+    messages.some((message) => message.includes("unrelated-undeclared")),
+  ).toBe(false);
+});
+
 test("dependency resolution rejects unknown and ambiguous identifiers", async () => {
   const unknownWorkspace = createFixtureWorkspace();
   roots.push(unknownWorkspace.root);

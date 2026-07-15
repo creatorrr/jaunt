@@ -1788,6 +1788,22 @@ def _aggregate_runner_batches(
             if any(bool(result.get("timedOut", False)) for result in results.values())
             else {}
         ),
+        **(
+            {
+                "exitCode": max(
+                    int(result["exitCode"])
+                    for result in results.values()
+                    if isinstance(result.get("exitCode"), int)
+                    and not isinstance(result.get("exitCode"), bool)
+                )
+            }
+            if any(
+                isinstance(result.get("exitCode"), int)
+                and not isinstance(result.get("exitCode"), bool)
+                for result in results.values()
+            )
+            else {}
+        ),
     }
 
 
@@ -1819,6 +1835,7 @@ _RUNNER_CATEGORIES = {
     "runner",
     "runner-protocol",
 }
+_IMPLEMENTATION_REPAIR_CATEGORIES = {"assertion", "type", "runtime"}
 _RUNNER_DIAGNOSTIC_CODE = re.compile(r"(?:TS\d+|JAUNT_TS_[A-Z0-9_]+)")
 _OPAQUE_CASE_ID = re.compile(r"[0-9a-f]{16}")
 
@@ -1846,6 +1863,9 @@ def _safe_runner_diagnostic(item: object) -> bool:
 
 def _redaction_surface_valid(result: Mapping[str, Any]) -> bool:
     if not isinstance(result.get("ok"), bool):
+        return False
+    exit_code = result.get("exitCode")
+    if exit_code is not None and (isinstance(exit_code, bool) or not isinstance(exit_code, int)):
         return False
     diagnostics = result.get("diagnostics", [])
     if not isinstance(diagnostics, list) or any(
@@ -2014,7 +2034,7 @@ def _runner_surfaces(result: Mapping[str, Any]) -> tuple[list[object], list[obje
     allowed: list[object] = []
     sensitive: list[object] = []
     for key, value in result.items():
-        if key in {"ok", "mode", "timedOut", "skipped"}:
+        if key in {"ok", "mode", "timedOut", "skipped", "exitCode"}:
             allowed.append(value)
             continue
         if key == "tests" and isinstance(value, list):
@@ -2110,7 +2130,7 @@ def _redact_runner_result(result: Mapping[str, Any], *, enabled: bool) -> dict[s
     if not _redaction_surface_valid(result):
         return _redacted_runner_failure(result)
     copy: dict[str, Any] = {"ok": result["ok"]}
-    for key in ("mode", "timedOut", "skipped"):
+    for key in ("mode", "timedOut", "skipped", "exitCode"):
         if key in result:
             copy[key] = result[key]
     diagnostics = result.get("diagnostics")
@@ -2677,6 +2697,30 @@ def _repair_module_ids(
     return tuple(sorted(selected))
 
 
+def _runner_failure_categories(result: Mapping[str, Any]) -> frozenset[str]:
+    categories: set[str] = set()
+    for key in ("failures", "tests"):
+        records = result.get(key, [])
+        if not isinstance(records, list):
+            continue
+        for record in records:
+            if not isinstance(record, Mapping):
+                continue
+            category = record.get("category")
+            if isinstance(category, str) and category in _RUNNER_CATEGORIES:
+                categories.add(category)
+    if result.get("timedOut") is True:
+        categories.add("timeout")
+    return frozenset(categories)
+
+
+def _runner_allows_implementation_repair(result: Mapping[str, Any]) -> bool:
+    """Repair only failures that can reasonably originate in implementation behavior."""
+
+    categories = _runner_failure_categories(result)
+    return bool(categories) and categories.issubset(_IMPLEMENTATION_REPAIR_CATEGORIES)
+
+
 def _cost_summary(*summaries: Mapping[str, Any]) -> dict[str, int | float]:
     merged: dict[str, int | float] = {}
     for summary in summaries:
@@ -2969,9 +3013,23 @@ async def _run_test_runner(
             "ok": False,
             "mode": "typecheck" if typecheck_only else "run",
             "failures": [{"category": "runner-protocol"}],
+            "diagnostics": [
+                {
+                    "code": "JAUNT_TS_RUNNER_PROTOCOL",
+                    "severity": "error",
+                    "message": "The protected test runner returned an invalid response.",
+                }
+            ],
+            "tests": [],
+            "captured": {"stdout": "", "stderr": ""},
         }
+        if process.returncode is not None:
+            failure["exitCode"] = process.returncode
         if not redact_derived:
-            failure["stderr"] = stderr.decode("utf-8", errors="replace")[-4000:]
+            failure["captured"] = {
+                "stdout": stdout.decode("utf-8", errors="replace")[-4000:],
+                "stderr": stderr.decode("utf-8", errors="replace")[-4000:],
+            }
         return _redact_runner_result(failure, enabled=redact_derived)
 
     try:
@@ -2997,15 +3055,17 @@ async def _run_test_runner(
     expected_mode = "typecheck" if typecheck_only else "run"
     if (
         not isinstance(result, Mapping)
-        or process.returncode != 0
         or not _valid_runner_dto(
             result,
             expected_mode=expected_mode,
             redact_derived=redact_derived,
         )
+        or (process.returncode != 0 and result.get("ok") is True)
     ):
         return protocol_failure()
     copy = dict(result)
+    if process.returncode:
+        copy["exitCode"] = process.returncode
     return _redact_runner_result(copy, enabled=redact_derived)
 
 
@@ -3180,8 +3240,11 @@ async def run_test(
         if builtin_skill_names is not None
         else (tuple(config.skills.builtin_skills) if config.skills.builtin else ())
     )
+    target_config = _target(config)
     use_auto_skills = (
-        bool(config.skills.auto) if auto_skills_enabled is None else auto_skills_enabled
+        target_config.auto_skills_enabled(bool(config.skills.auto))
+        if auto_skills_enabled is None
+        else auto_skills_enabled
     )
     npm_skill_metadata: Mapping[str, object] = {}
     if use_auto_skills:
@@ -3189,7 +3252,7 @@ async def run_test(
 
         npm_skills = ensure_npm_skills(
             project_root=root,
-            package_owners=typescript_package_owners(root, _target(config)),
+            package_owners=typescript_package_owners(root, target_config),
             max_readme_chars=config.skills.max_chars_per_skill,
         )
         npm_skill_metadata = npm_skills.metadata()
@@ -3622,7 +3685,13 @@ async def run_test(
 
     initial_runner = runner
     repair_exit_code = 0
-    if not no_build and not no_run and files and not bool(runner.get("ok", False)):
+    if (
+        not no_build
+        and not no_run
+        and files
+        and not bool(runner.get("ok", False))
+        and _runner_allows_implementation_repair(runner)
+    ):
         repair_targets = _repair_module_ids(
             runner,
             targets_by_file=repair_targets_by_file,

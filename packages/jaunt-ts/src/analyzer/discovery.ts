@@ -101,6 +101,39 @@ export interface DiscoveryResult {
   readonly testSpecs: readonly DiscoveredTestSpec[];
   readonly contracts: readonly DiscoveredContract[];
   readonly diagnostics: readonly DiagnosticRecord[];
+  /** Uncollapsed records retained for target-scoped import-closure filtering. */
+  readonly scopedDiagnostics: readonly DiagnosticRecord[];
+  readonly importAdjacency: ReadonlyMap<string, readonly string[]>;
+}
+
+export function collapseProvenanceDiagnostics(
+  records: readonly DiagnosticRecord[],
+): readonly DiagnosticRecord[] {
+  const collapsedCodes = new Set([
+    "JAUNT_TS_UNDECLARED_PACKAGE",
+    "JAUNT_TS_PACKAGE_OWNER_MISSING",
+  ]);
+  const retained: DiagnosticRecord[] = [];
+  const grouped = new Map<string, DiagnosticRecord[]>();
+  for (const diagnostic of records) {
+    if (!collapsedCodes.has(diagnostic.code)) {
+      retained.push(diagnostic);
+      continue;
+    }
+    const key = `${diagnostic.code}\0${diagnostic.message}`;
+    const matches = grouped.get(key) ?? [];
+    matches.push(diagnostic);
+    grouped.set(key, matches);
+  }
+  const collapsed = [...grouped.values()].map((matches) => ({
+    ...matches[0]!,
+    ...(matches.length > 1
+      ? {
+          message: `${matches[0]!.message} (${matches.length} occurrences; first location shown)`,
+        }
+      : {}),
+  }));
+  return sortDiagnostics([...retained, ...collapsed]);
 }
 
 interface TestSpecDiscovery {
@@ -2358,27 +2391,29 @@ export function discoverWorkspace(
     excludes,
     [...sourceRoots, ...testRoots].map((entry) => `${entry}/**/*`),
   );
-  const importDiagnostics = analyzeImportGraph(
+  const importGraph = analyzeImportGraph(
     compiler,
     root,
     importFiles,
     modules.map((module) => module.route),
     projects,
     testRoots,
-  ).filter(
+  );
+  const importDiagnostics = importGraph.diagnostics.filter(
     (diagnostic) =>
       diagnostic.code !== "JAUNT_TS_CROSS_MODULE_DEPENDENCY_UNSUPPORTED" ||
       !dependencyResolution.allowedImportDiagnostics.has(
         diagnosticKey(diagnostic),
       ),
   );
-  const diagnostics = sortDiagnostics([
+  const scopedDiagnostics = sortDiagnostics([
     ...modules.flatMap((module) => module.diagnostics),
     ...routeDiagnostics,
     ...dependencyResolution.diagnostics,
     ...discoveredTests.flatMap((item) => item.diagnostics),
     ...importDiagnostics,
   ]);
+  const diagnostics = collapseProvenanceDiagnostics(scopedDiagnostics);
   if (diagnostics.some((item) => item.severity === "error")) {
     // Keep structured records in the result; callers decide whether this is fatal.
   }
@@ -2395,5 +2430,7 @@ export function discoverWorkspace(
     testSpecs,
     contracts,
     diagnostics,
+    scopedDiagnostics,
+    importAdjacency: importGraph.adjacency,
   };
 }

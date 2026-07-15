@@ -320,22 +320,11 @@ async def analyze(
     *,
     target_ids: Sequence[str] = (),
 ) -> TypeScriptAnalysis:
-    workspace = await client.request("analyzeWorkspace", {})
-    diagnostics = workspace.get("diagnostics", [])
-    errors = (
-        [
-            item
-            for item in diagnostics
-            if isinstance(item, Mapping) and item.get("severity") == "error"
-        ]
-        if isinstance(diagnostics, list)
-        else []
+    supports_scoped_diagnostics = "scoped-diagnostics" in getattr(initialized, "capabilities", ())
+    workspace = await client.request(
+        "analyzeWorkspace",
+        ({"moduleIds": list(target_ids)} if target_ids and supports_scoped_diagnostics else {}),
     )
-    if errors:
-        rendered = "; ".join(
-            str(item.get("message", "TypeScript discovery failed")) for item in errors
-        )
-        raise JauntConfigError(f"TypeScript workspace analysis failed: {rendered}")
     contracts = await client.request("analyzeContracts", {})
     if target_ids:
         raw_modules = contracts.get("modules", [])
@@ -383,6 +372,21 @@ async def analyze(
             **contracts,
             "modules": [module for module in modules if _module_id(module) in selected],
         }
+    diagnostics = workspace.get("diagnostics", [])
+    errors = (
+        [
+            item
+            for item in diagnostics
+            if isinstance(item, Mapping) and item.get("severity") == "error"
+        ]
+        if isinstance(diagnostics, list)
+        else []
+    )
+    if errors:
+        rendered = "; ".join(
+            str(item.get("message", "TypeScript discovery failed")) for item in errors
+        )
+        raise JauntConfigError(f"TypeScript workspace analysis failed: {rendered}")
     return TypeScriptAnalysis(initialized=initialized, workspace=workspace, contracts=contracts)
 
 
@@ -1697,14 +1701,16 @@ async def run_build(
         else (tuple(config.skills.builtin_skills) if config.skills.builtin else ())
     )
     use_repo_map = bool(config.context.repo_map) if repo_map_enabled is None else repo_map_enabled
+    target = _target(config)
     use_auto_skills = (
-        bool(config.skills.auto) if auto_skills_enabled is None else auto_skills_enabled
+        target.auto_skills_enabled(bool(config.skills.auto))
+        if auto_skills_enabled is None
+        else auto_skills_enabled
     )
     npm_skill_metadata: Mapping[str, object] = {}
     if use_auto_skills:
         from jaunt.skills_npm import ensure_npm_skills, typescript_package_owners
 
-        target = _target(config)
         npm_skills = ensure_npm_skills(
             project_root=root,
             package_owners=typescript_package_owners(root, target),

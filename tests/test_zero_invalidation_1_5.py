@@ -84,9 +84,9 @@ def test_advisories_instruction_absent_from_fingerprinted_templates() -> None:
         assert "ADVISORIES" not in template.read_text(encoding="utf-8"), template
 
 
-def test_stub_format_version_tracks_async_contextmanager_emission() -> None:
-    # Cycle-2 adoption feedback changed emitted imports, so existing stubs must
-    # re-emit once through the deterministic stub-only freshness path.
+def test_stub_format_version_tracks_owner_formatting_and_rendered_integrity() -> None:
+    # The 1.7.2 adopter fix makes owner-aware formatting and rendered-byte
+    # integrity a deterministic stub-only migration.
     from jaunt import stub_emitter
 
-    assert stub_emitter._STUB_FORMAT_VERSION == "4"
+    assert stub_emitter._STUB_FORMAT_VERSION == "6"

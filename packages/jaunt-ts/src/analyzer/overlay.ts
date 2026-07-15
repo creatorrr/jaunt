@@ -203,6 +203,11 @@ function validateSources(
           resolve(diagnostic.file.fileName) === specPath
         ) &&
         !(
+          diagnostic.code === 6133 &&
+          diagnostic.file &&
+          resolve(diagnostic.file.fileName) === specPath
+        ) &&
+        !(
           (diagnostic.code === 6059 ||
             diagnostic.code === 6305 ||
             diagnostic.code === 6307) &&
@@ -1275,6 +1280,14 @@ export function validateApiMirrorEquivalence(
     ...mirrorShapeDiagnostics(compiler, ir, apiSource),
     ...compiler
       .getPreEmitDiagnostics(program)
+      .filter(
+        (diagnostic) =>
+          !(
+            diagnostic.code === 6133 &&
+            diagnostic.file &&
+            resolve(diagnostic.file.fileName) === specPath
+          ),
+      )
       .map((diagnostic) =>
         fromTypeScriptDiagnostic(compiler, root, diagnostic),
       ),

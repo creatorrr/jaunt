@@ -126,6 +126,7 @@ def classify_modules(
     *,
     orphans: Sequence[TargetArtifact] = (),
     diagnostics: Sequence[TargetDiagnostic] = (),
+    metadata: Mapping[str, Any] | None = None,
 ) -> TargetStatus:
     """Compare committed artifacts with analyzer-owned IR and sidecars."""
 
@@ -322,6 +323,7 @@ def classify_modules(
         digests=digests,
         orphans=tuple(orphans),
         diagnostics=tuple(transaction_diagnostics),
+        metadata=dict(metadata or {}),
     )
 
 
@@ -522,6 +524,19 @@ async def run_status(
             initialized,
             target_ids=target_ids,
         )
+    npm_skill_metadata: Mapping[str, Any] = {}
+    target = config.typescript_target
+    if target is not None and target.auto_skills_enabled(bool(config.skills.auto)):
+        from jaunt.skills_npm import plan_npm_skills, typescript_package_owners
+
+        npm_skill_metadata = plan_npm_skills(
+            project_root=root,
+            package_owners=typescript_package_owners(root, target),
+            max_readme_chars=config.skills.max_chars_per_skill,
+        ).metadata()
+    elif target is not None:
+        npm_skill_metadata = {"enabled": False}
+
     return classify_modules(
         root,
         analysis.modules,
@@ -536,6 +551,7 @@ async def run_status(
             *validation_diagnostics,
             *battery_diagnostics,
         ),
+        metadata={"npm_skills": npm_skill_metadata},
     )
 
 

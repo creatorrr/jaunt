@@ -9,9 +9,10 @@ import shutil
 import signal
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -35,6 +36,7 @@ from jaunt.typescript.builder import (
     _topological_modules,
     _Write,
     TypeScriptAnalysis,
+    analyze,
     atomic_write_manifest,
     run_build,
     run_sync,
@@ -669,6 +671,57 @@ def _cost(
         "total_tokens": prompt + completion,
         "estimated_cost_usd": estimated,
     }
+
+
+@pytest.mark.asyncio
+async def test_targeted_analysis_ignores_unrelated_file_diagnostics(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    worker = FakeWorker(tmp_path)
+    target = config.typescript_target
+    assert target is not None
+    initialized = await worker.initialize(
+        InitializeParams(
+            root=str(tmp_path),
+            projects=tuple(target.projects),
+            test_projects=tuple(target.test_projects),
+            source_roots=tuple(target.source_roots),
+            test_roots=tuple(target.test_roots),
+            generated_dir=target.generated_dir,
+            tool_owner=target.tool_owner,
+            compiler_module_path="typescript.js",
+            client_version="test",
+            tool_version="test",
+        )
+    )
+    initialized = replace(
+        initialized,
+        capabilities=(*initialized.capabilities, "scoped-diagnostics"),
+    )
+    original_request = worker.request
+
+    async def request(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        result = await original_request(method, params)
+        if method == "analyzeWorkspace":
+            result["diagnostics"] = (
+                []
+                if params.get("moduleIds")
+                else [
+                    {
+                        "code": "JAUNT_TS_UNDECLARED_PACKAGE",
+                        "severity": "error",
+                        "message": "unrelated package error",
+                        "path": "src/unrelated.ts",
+                    }
+                ]
+            )
+        return result
+
+    worker.request = request  # type: ignore[method-assign]
+
+    targeted = await analyze(cast(Any, worker), initialized, target_ids=("ts:src/math",))
+    assert targeted.workspace["diagnostics"] == []
+    with pytest.raises(JauntConfigError, match="unrelated package error"):
+        await analyze(cast(Any, worker), initialized)
 
 
 @pytest.mark.parametrize(
@@ -1603,6 +1656,25 @@ def test_magic_eject_status_reason_prioritizes_blocking_workspace_diagnostic() -
     )
 
 
+def test_status_payload_and_human_output_include_npm_skill_plan() -> None:
+    status = TargetStatus(
+        language="ts",
+        metadata={
+            "npm_skills": {
+                "enabled": True,
+                "plan": {"file_count": 77, "total_bytes": 800_000},
+            }
+        },
+    )
+
+    payload = status_payload(status)
+    assert payload["npm_skills"]["plan"] == {
+        "file_count": 77,
+        "total_bytes": 800_000,
+    }
+    assert "  npm skill plan: 77 files, 800000 bytes" in human_lines(payload)
+
+
 @pytest.mark.asyncio
 async def test_magic_eject_emit_failure_preserves_the_entire_managed_module(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2368,6 +2440,7 @@ class __jaunt_impl_Store {
   get(): string { return "x"; }
   get size(): number { return 1; }
 }
+Object.defineProperty(__jaunt_impl_create, "name", { value: "create", configurable: true });
 /**
  * Create a token.
  */
@@ -2388,6 +2461,7 @@ export type Store = __JauntApi.Store;
     assert "export declare function" not in ordinary
     assert "__jaunt_impl" not in ordinary
     assert "__JauntApi" not in ordinary
+    assert "Object.defineProperty" not in ordinary
     assert ordinary.count("Create a token.") == 1
     assert ordinary.count("Store tokens.") == 1
     assert ordinary.count("Read a stored token.") == 1
@@ -3056,8 +3130,73 @@ async def test_runner_protocol_failure_never_exposes_child_output(
 
     assert protected["ok"] is False
     assert protected["failures"] == [{"category": "runner-protocol"}]
+    assert protected["diagnostics"] == [{"code": "JAUNT_TS_RUNNER_PROTOCOL", "severity": "error"}]
+    if mode in {"malformed", "crash"}:
+        assert protected["exitCode"] == 7
     assert protected["captured"] == {"stdout": "", "stderr": ""}
     assert "CHILD-PROCESS-SENTINEL" not in json.dumps(protected)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reported_ok", [False, True])
+async def test_nonzero_runner_exit_preserves_valid_failure_but_rejects_claimed_success(
+    tmp_path: Path,
+    reported_ok: bool,
+) -> None:
+    config = _config(tmp_path)
+    package_root = tmp_path / "tooling"
+    runner = package_root / "dist/test/runner.js"
+    runner.parent.mkdir(parents=True)
+    result = {
+        "ok": reported_ok,
+        "mode": "run",
+        "diagnostics": (
+            []
+            if reported_ok
+            else [
+                {
+                    "code": "JAUNT_TS_VITEST_COLLECTION",
+                    "severity": "error",
+                    "message": "collection failed",
+                }
+            ]
+        ),
+        "tests": [],
+        "captured": {"stdout": "", "stderr": ""},
+    }
+    runner.write_text(
+        "import json, sys\nsys.stdin.read()\n"
+        f"sys.stdout.write({json.dumps(json.dumps(result))})\n"
+        "raise SystemExit(7)\n",
+        encoding="utf-8",
+    )
+    compiler = tmp_path / "typescript.js"
+    compiler.write_text("", encoding="utf-8")
+    client = SimpleNamespace(
+        installation=SimpleNamespace(
+            node=sys.executable,
+            package_root=package_root,
+            compiler_module_path=compiler,
+        )
+    )
+
+    protected = await _run_test_runner(
+        client,
+        tmp_path,
+        config,
+        files=(),
+        redact_derived=True,
+        timeout=2,
+    )
+
+    assert protected["ok"] is False
+    assert protected["exitCode"] == 7
+    if reported_ok:
+        assert protected["failures"] == [{"category": "runner-protocol"}]
+    else:
+        assert protected["diagnostics"] == [
+            {"code": "JAUNT_TS_VITEST_COLLECTION", "severity": "error"}
+        ]
 
 
 def test_generated_example_test_has_provenance_tier_and_runtime_facade_import(
@@ -3541,6 +3680,68 @@ async def test_passing_test_candidate_commits_disk_then_cache_after_vitest(
     assert saw_run is True
     assert all(output.is_file() for output in outputs)
     assert cache.info()["entries"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "category",
+    ["collection", "runner", "runner-protocol", "timeout"],
+)
+async def test_runner_nonbehavioral_failures_skip_repair_and_do_not_cache_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    category: str,
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    cache = ResponseCache(tmp_path / ".test-response-cache")
+    build_calls: list[dict[str, Any]] = []
+
+    async def fake_build(*_args: Any, **kwargs: Any) -> TargetBuildReport:
+        build_calls.append(dict(kwargs))
+        return TargetBuildReport(language="ts", skipped=frozenset({"ts:src/math"}))
+
+    async def infrastructure_failure(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("typecheck_only"):
+            return {"ok": True, "mode": "typecheck", "tests": []}
+        if category in {"collection", "runner"}:
+            return {
+                "ok": False,
+                "mode": "run",
+                "tests": [
+                    {
+                        "file": "tests/__generated__/math.example.test.ts",
+                        "tier": "example",
+                        "status": "failed",
+                        "caseId": "infrastructure",
+                        "category": category,
+                    }
+                ],
+            }
+        return {
+            "ok": False,
+            "mode": "run",
+            "tests": [],
+            "failures": [{"category": category}],
+            **({"timedOut": True} if category == "timeout" else {}),
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester.run_build", fake_build)
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", infrastructure_failure)
+    report = await run_test(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        response_cache=cache,
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 4
+    assert len(build_calls) == 1
+    assert "repair" not in report.runner
+    assert cache.info()["entries"] == 0
+    assert not (tmp_path / "tests/__generated__/math.example.test.ts").exists()
+    assert not (tmp_path / "tests/__generated__/math.derived.test.ts").exists()
 
 
 @pytest.mark.asyncio

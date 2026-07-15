@@ -39,6 +39,7 @@ projects = ["tsconfig.json"]
 test_projects = ["tsconfig.test.json"]
 tool_owner = "."
 generated_dir = "__generated__"
+auto_skills = false
 """,
     )
 
@@ -51,6 +52,8 @@ generated_dir = "__generated__"
     assert cfg.typescript_target is not None
     assert cfg.typescript_target.projects == ["tsconfig.json"]
     assert cfg.typescript_target.test_projects == ["tsconfig.test.json"]
+    assert cfg.typescript_target.auto_skills is False
+    assert cfg.typescript_target.auto_skills_enabled(True) is False
 
 
 def test_v2_mixed_config_builds_exact_python_compatibility_views(tmp_path: Path) -> None:

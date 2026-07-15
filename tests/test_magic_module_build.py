@@ -155,10 +155,8 @@ def test_fresh_scaffold_builds_with_mocked_backend(tmp_path, monkeypatch, capsys
     assert data["generated"] == ["specs"]
 
 
-def test_fresh_stub_bytes_never_rewritten_across_environments(tmp_path, monkeypatch):
-    """A digest-fresh stub is left byte-for-byte alone on later builds, even when
-    this environment would render it differently (ruff present vs absent) —
-    committed stubs must not churn across machines. (1.4.2 codex review.)"""
+def test_rendered_stub_byte_drift_reemits_deterministically(tmp_path, monkeypatch):
+    """A later build repairs byte drift without regenerating the implementation."""
     project = _governed_project(tmp_path)
     orig_path = list(sys.path)
     monkeypatch.setattr(jaunt.cli, "_build_backend", lambda cfg: _EchoBackend())
@@ -167,14 +165,46 @@ def test_fresh_stub_bytes_never_rewritten_across_environments(tmp_path, monkeypa
         stub = project / "src" / "gm_mod.pyi"
         assert stub.exists()
 
-        # Simulate a different environment's rendering: cosmetic byte change,
-        # header (and therefore inputs digest) untouched.
-        mangled = stub.read_text(encoding="utf-8") + "\n\n"
-        stub.write_text(mangled, encoding="utf-8")
+        original = stub.read_bytes()
+        # Simulate line-ending churn while leaving the semantic inputs and
+        # provenance metadata untouched. The repair comparison must use raw bytes.
+        stub.write_bytes(original.replace(b"\n", b"\r\n"))
 
         _purge(["gm_mod"])
         assert jaunt.cli.main(["build", "--root", str(project)]) == jaunt.cli.EXIT_OK
-        assert stub.read_text(encoding="utf-8") == mangled  # untouched
+        assert stub.read_bytes() == original
+    finally:
+        sys.path[:] = orig_path
+        _purge(["gm_mod"])
+
+
+def test_stub_format_failure_fails_build(tmp_path, monkeypatch, capsys):
+    project = _governed_project(tmp_path)
+    orig_path = list(sys.path)
+    monkeypatch.setattr(jaunt.cli, "_build_backend", lambda cfg: _EchoBackend())
+    try:
+        assert jaunt.cli.main(["build", "--root", str(project)]) == jaunt.cli.EXIT_OK
+        capsys.readouterr()
+        stub = project / "src" / "gm_mod.pyi"
+        stub.write_bytes(stub.read_bytes() + b"\n")
+
+        from jaunt import stub_emitter
+
+        monkeypatch.setattr(
+            stub_emitter,
+            "format_stub_best_effort",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("ruff failed")),
+        )
+        _purge(["gm_mod"])
+        rc = jaunt.cli.main(["build", "--root", str(project), "--json"])
+        payload = json.loads(capsys.readouterr().out)
+
+        assert rc == jaunt.cli.EXIT_GENERATION_ERROR
+        assert payload["ok"] is False
+        assert "gm_mod" in payload["failed"]
+        assert "ruff failed" in payload["failed"]["gm_mod"][0]
+        assert "gm_mod" not in payload["generated"]
+        assert "gm_mod" not in payload["skipped"]
     finally:
         sys.path[:] = orig_path
         _purge(["gm_mod"])

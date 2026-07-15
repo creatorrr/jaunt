@@ -3,6 +3,32 @@
 All notable changes to jaunt. Generated from conventional commits by
 [git-cliff](https://git-cliff.org); one section per published PyPI release.
 
+## [1.7.2] - 2026-07-14
+
+### Fixes
+
+- Format emitted provenance stubs with the owning project's Ruff configuration,
+  then record their rendered bytes so `jaunt status` and `jaunt check` detect
+  formatter or manual drift without a model call.
+- Expand the human-readable generation plan with each module's split-component
+  fan-out, maximum attempts, monolithic fallback, and fallback conditions.
+- Keep generated TypeScript batteries out of the implementation-orphan scan when
+  source and test roots overlap.
+- Preserve exported TypeScript function names and accept strict unused checks in
+  private specs and worker conformance files.
+- Treat Vitest collection, timeout, runner, and protocol failures as
+  non-repairable runner errors. They no longer trigger implementation repair,
+  and failed runs do not commit generated candidates or cache entries.
+- Add a TypeScript-only auto-skills switch, a read-only skill footprint plan, and
+  `.jaunt-vitest-cache/` to generated `.gitignore` entries.
+- Resolve same-package TypeScript path aliases as local imports, scope targeted
+  diagnostics to selected modules, and collapse repeated provenance errors.
+
+### Packages
+
+- Publish `@usejaunt/ts` `0.1.0-alpha.1` with the TypeScript worker fixes in this
+  release.
+
 ## [1.7.1] - 2026-07-14
 
 ### Fixes
