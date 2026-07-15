@@ -3,6 +3,18 @@
 All notable changes to jaunt. Generated from conventional commits by
 [git-cliff](https://git-cliff.org); one section per published PyPI release.
 
+## [1.7.5] - 2026-07-15
+
+### Fixes
+
+- Preserve compiler-validated TypeScript API reuse proof across separate
+  `jaunt build` and `jaunt test` commands. Matching generated Vitest batteries
+  are reheadered and rerun without another model call, including after a later
+  metadata-only restamp.
+- Keep `recomposed` TypeScript modules in pure and mixed-workspace build JSON.
+  `refrozen` remains the umbrella for every model-free reuse path, while
+  `recomposed` identifies the compatible-toolchain subset.
+
 ## [1.7.4] - 2026-07-15
 
 ### Fixes

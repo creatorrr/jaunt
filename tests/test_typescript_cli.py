@@ -189,11 +189,13 @@ def test_typescript_build_payload_is_partitioned_and_structured() -> None:
     report = TargetBuildReport(
         language="ts",
         generated=frozenset({"ts:src/slug/index"}),
+        refrozen=frozenset({"ts:src/reused/index"}),
         failed={
             "ts:src/bad/index": (
                 TargetDiagnostic(code="JAUNT_TS_BAD_RETURN", message="wrong return type"),
             )
         },
+        metadata={"recomposed": ("ts:src/reused/index",)},
         exit_code=3,
     )
 
@@ -202,6 +204,8 @@ def test_typescript_build_payload_is_partitioned_and_structured() -> None:
     assert payload["schema_version"] == 2
     assert payload["generated"] == ["ts:src/slug/index"]
     assert payload["targets"]["ts"]["generated"] == ["src/slug/index"]
+    assert payload["recomposed"] == ["ts:src/reused/index"]
+    assert payload["targets"]["ts"]["recomposed"] == ["src/reused/index"]
     assert payload["failed"]["ts:src/bad/index"][0]["code"] == "JAUNT_TS_BAD_RETURN"
 
 

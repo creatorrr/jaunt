@@ -207,6 +207,12 @@ boundary, and reheaders affected test batteries without a model call. Older side
 without this proof rebuild once. A changed external declaration, non-tooling lockfile
 entry, or dependency contract remains a normal structural rebuild.
 
+The reuse proof also survives the normal two-command workflow: run `jaunt build`, then
+run `jaunt test`. Jaunt stores the exact validated old-to-new API transition under
+`.jaunt/`; the later test command accepts it only while the current analyzed API still
+matches. Build JSON reports every model-free implementation reuse under `refrozen` and
+the compatible-toolchain subset under `recomposed`, including in mixed workspaces.
+
 Property intent uses one deterministic line:
 
 ```ts

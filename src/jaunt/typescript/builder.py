@@ -44,6 +44,7 @@ from jaunt.typescript.protocol import (
     ValidateOverlayParams,
     ValidateOverlayResult,
 )
+from jaunt.typescript.reuse import capture_target_api_records, update_target_api_reuse_proof
 from jaunt.typescript.worker import (
     WorkerClient,
     resolve_worker_installation,
@@ -1317,6 +1318,7 @@ async def run_build_in_session(
     project_overview_enabled: bool | None = None,
     builtin_skill_names: Sequence[str] | None = None,
     generation_fingerprint: str | None = None,
+    reuse_proof_sink: dict[str, dict[str, str]] | None = None,
 ) -> TargetBuildReport:
     """Build against an already initialized analyzer session.
 
@@ -1377,6 +1379,7 @@ async def run_build_in_session(
         project_overview_enabled=overview_enabled,
     )
     analysis = await analyze(client, initialized, target_ids=target_ids)
+    previous_target_api_records = capture_target_api_records(root, analysis.modules)
     pending_designs = [
         _module_id(module)
         for module in analysis.modules
@@ -1639,6 +1642,22 @@ async def run_build_in_session(
         writes.extend(unit_writes)
         generated.update(unit_ids.intersection(candidates))
         committed_refrozen.update(unit_ids.intersection(refrozen))
+    update_target_api_reuse_proof(
+        root,
+        before=previous_target_api_records,
+        modules=analysis.modules,
+        reused_module_ids=committed_refrozen,
+        touched_module_ids=set(generated) | committed_refrozen,
+    )
+    if reuse_proof_sink is not None:
+        reuse_proof_sink.clear()
+        reuse_proof_sink.update(
+            {
+                module_id: dict(previous_target_api_records[module_id])
+                for module_id in committed_refrozen.intersection(recomposed)
+                if module_id in previous_target_api_records
+            }
+        )
     _clear_recovered_build_manifests(root, analysis.modules)
     for module_id in sorted(actionable_ids - progress_advanced):
         if module_id in committed_refrozen:
@@ -1714,6 +1733,7 @@ async def run_build(
     repo_map_block_override: str | None = None,
     auto_skills_enabled: bool | None = None,
     builtin_skill_names: Sequence[str] | None = None,
+    reuse_proof_sink: dict[str, dict[str, str]] | None = None,
 ) -> TargetBuildReport:
     """Generate reserved TypeScript bindings, validate overlays, and commit them."""
 
@@ -1792,6 +1812,7 @@ async def run_build(
             project_overview_enabled=bool(config.context.overview),
             builtin_skill_names=effective_builtin_skills,
             generation_fingerprint=request_fingerprint,
+            reuse_proof_sink=reuse_proof_sink,
         )
     if npm_skill_metadata:
         return TargetBuildReport(

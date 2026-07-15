@@ -54,3 +54,9 @@
 - [x] Include the active worker phase in unexpected overlay failures.
 - [x] Preserve and reuse a request-validated candidate after a later overlay transaction failure.
 - [x] Add regressions and run the full repository validation suite.
+
+## Cycle 9 — 2026-07-15
+
+- [x] Preserve battery reuse proof across separate TypeScript build and test commands.
+- [x] Report `recomposed` modules in pure and mixed TypeScript build JSON.
+- [x] Add regressions and run the full repository validation suite.

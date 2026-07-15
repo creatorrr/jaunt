@@ -1747,6 +1747,7 @@ def _mixed_build_payload(
     ts_generated = list(cast("list[str]", typescript_payload.get("generated", [])))
     ts_skipped = list(cast("list[str]", typescript_payload.get("skipped", [])))
     ts_refrozen = list(cast("list[str]", typescript_payload.get("refrozen", [])))
+    ts_recomposed = list(cast("list[str]", typescript_payload.get("recomposed", [])))
     failed: dict[str, object] = {}
     py_failed = python_payload.get("failed", {})
     if command == "test" and isinstance(python_payload.get("generation_failed"), dict):
@@ -1791,6 +1792,7 @@ def _mixed_build_payload(
         "generated": sorted([*py_generated, *ts_generated]),
         "skipped": sorted([*py_skipped, *ts_skipped]),
         "refrozen": sorted([*py_refrozen, *ts_refrozen]),
+        "recomposed": sorted(ts_recomposed),
         "failed": failed,
         "targets": {"py": py_target, "ts": ts_target},
     }

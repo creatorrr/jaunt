@@ -85,7 +85,12 @@ def test_mixed_build_runs_languages_concurrently_and_preserves_exit_precedence(
     async def run_typescript(*_args, **kwargs):
         observed.update(kwargs)
         barrier.wait(timeout=2)
-        return TargetBuildReport(language="ts", exit_code=3)
+        return TargetBuildReport(
+            language="ts",
+            refrozen=frozenset({"ts:src/math"}),
+            metadata={"recomposed": ("ts:src/math",)},
+            exit_code=3,
+        )
 
     monkeypatch.setattr("jaunt.cli._mixed_typescript_preflight", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("jaunt.cli._mixed_python_preflight", lambda *_: None)
@@ -98,6 +103,8 @@ def test_mixed_build_runs_languages_concurrently_and_preserves_exit_precedence(
     assert payload["schema_version"] == 2
     assert payload["targets"]["py"]["failed"]
     assert payload["targets"]["ts"]["generated"] == []
+    assert payload["recomposed"] == ["ts:src/math"]
+    assert payload["targets"]["ts"]["recomposed"] == ["src/math"]
     assert observed["jobs"] == 2
     assert observed["generator"] is not None
     assert observed["cost_tracker"] is not None

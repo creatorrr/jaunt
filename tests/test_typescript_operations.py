@@ -72,7 +72,6 @@ from jaunt.typescript.protocol import (
 )
 from jaunt.typescript.status import run_check, run_clean, run_status
 from jaunt.typescript.tester import (
-    _all_test_targets_recomposed,
     _assert_no_held_out_leak,
     _HeldOutLeakError,
     _implementation_repair_feedback,
@@ -4918,6 +4917,7 @@ async def test_toolchain_recompose_revalidates_existing_batteries_without_model(
     worker.module["structuralDigest"] = expected["structuralDigest"]
     worker.module["apiDigest"] = expected["apiDigest"]
     worker.module["sidecar"] = json.dumps(expected, sort_keys=True) + "\n"
+    monkeypatch.setattr("jaunt.typescript.reuse._store", lambda *_args: None)
 
     report = await run_test(
         tmp_path,
@@ -4934,12 +4934,149 @@ async def test_toolchain_recompose_revalidates_existing_batteries_without_model(
         assert _strip_test_header((tmp_path / path).read_text()) == bodies[path]
 
 
-def test_battery_reheader_requires_every_selected_target_to_recompose() -> None:
-    selected = ("ts:src/math", "ts:src/format")
+@pytest.mark.asyncio
+async def test_separate_build_preserves_battery_reuse_proof_for_later_test(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
 
-    assert not _all_test_targets_recomposed(selected, {"ts:src/math"})
-    assert _all_test_targets_recomposed(selected, set(selected))
-    assert not _all_test_targets_recomposed((), set(selected))
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    paths = frozenset(seeded.generated)
+    bodies = {path: _strip_test_header((tmp_path / path).read_text()) for path in paths}
+    expected = json.loads(worker.sidecar)
+    expected["structuralDigest"] = "sha256:toolchain-structure"
+    expected["apiDigest"] = "sha256:toolchain-api"
+    worker.module["structuralDigest"] = expected["structuralDigest"]
+    worker.module["apiDigest"] = expected["apiDigest"]
+    worker.module["sidecar"] = json.dumps(expected, sort_keys=True) + "\n"
+
+    build = await run_build(
+        tmp_path,
+        config,
+        generator=ExplodingGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert build.refrozen == frozenset({"ts:src/math"})
+
+    # A second metadata-only restamp must not erase the earlier API transition
+    # before the separately invoked test command has consumed it.
+    restamped = json.loads(str(worker.module["sidecar"]))
+    restamped["fingerprint"] = "draft.2"
+    worker.module["sidecar"] = json.dumps(restamped, sort_keys=True) + "\n"
+    second_build = await run_build(
+        tmp_path,
+        config,
+        generator=ExplodingGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert second_build.refrozen == frozenset({"ts:src/math"})
+
+    report = await run_test(
+        tmp_path,
+        config,
+        generator=ExplodingGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 0
+    assert report.generated == frozenset()
+    assert report.refrozen == paths
+    assert report.runner["build"]["refrozen"] == []
+    for path in paths:
+        assert _strip_test_header((tmp_path / path).read_text()) == bodies[path]
+
+    # Consuming A -> B after the successful reheader means the next cycle
+    # records B -> C rather than collapsing the lineage to A -> C.
+    next_expected = json.loads(str(worker.module["sidecar"]))
+    next_expected["structuralDigest"] = "sha256:next-toolchain-structure"
+    next_expected["apiDigest"] = "sha256:next-toolchain-api"
+    worker.module["structuralDigest"] = next_expected["structuralDigest"]
+    worker.module["apiDigest"] = next_expected["apiDigest"]
+    worker.module["sidecar"] = json.dumps(next_expected, sort_keys=True) + "\n"
+    third_build = await run_build(
+        tmp_path,
+        config,
+        generator=ExplodingGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert third_build.refrozen == frozenset({"ts:src/math"})
+    next_report = await run_test(
+        tmp_path,
+        config,
+        generator=ExplodingGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert next_report.generated == frozenset()
+    assert next_report.refrozen == paths
+
+
+@pytest.mark.asyncio
+async def test_refrozen_build_rejects_an_unproven_battery_api_transition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    for relative in seeded.generated:
+        path = tmp_path / relative
+        source = path.read_text(encoding="utf-8")
+        metadata = dict(_test_header_metadata(source) or {})
+        metadata["target_api_digest"] = "sha256:" + "f" * 64
+        metadata["battery_fingerprint"] = "sha256:" + "e" * 64
+        path.write_text(
+            _with_test_header(
+                _strip_test_header(source),
+                tier=metadata["tier"],
+                source_path=metadata["source"],
+                provenance=metadata,
+            ),
+            encoding="utf-8",
+        )
+
+    expected = json.loads(worker.sidecar)
+    expected["structuralDigest"] = "sha256:toolchain-structure"
+    expected["apiDigest"] = "sha256:toolchain-api"
+    worker.module["structuralDigest"] = expected["structuralDigest"]
+    worker.module["apiDigest"] = expected["apiDigest"]
+    worker.module["sidecar"] = json.dumps(expected, sort_keys=True) + "\n"
+
+    with pytest.raises(AssertionError, match="unexpected model call"):
+        await run_test(
+            tmp_path,
+            config,
+            generator=ExplodingGenerator(),
+            worker_factory=lambda *_: worker,
+        )
 
 
 @pytest.mark.asyncio
