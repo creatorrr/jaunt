@@ -92,7 +92,7 @@ from jaunt.typescript.tester import (
     _with_test_header,
     run_test,
 )
-from jaunt.typescript.worker import REQUIRED_WORKER_CAPABILITIES
+from jaunt.typescript.worker import REQUIRED_WORKER_CAPABILITIES, WorkerRemoteError
 
 
 def _digest(value: str) -> str:
@@ -1052,6 +1052,61 @@ async def test_build_validates_candidate_before_atomic_write(tmp_path: Path) -> 
 
     status = await run_status(tmp_path, config, worker_factory=lambda *_: worker)
     assert status.fresh == frozenset({"ts:src/math"})
+
+
+@pytest.mark.asyncio
+async def test_build_reuses_accepted_candidate_after_final_overlay_internal_error(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+
+    class FailingFinalOverlayWorker(FakeWorker):
+        def __init__(self, root: Path) -> None:
+            super().__init__(root)
+            self.overlay_calls = 0
+
+        async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            if method == "validateOverlay":
+                self.overlay_calls += 1
+                if self.overlay_calls == 2:
+                    raise WorkerRemoteError(
+                        code="INTERNAL_ERROR",
+                        message=(
+                            "validateOverlay failed during phase=module-overlays: "
+                            "synthetic compiler reuse failure"
+                        ),
+                        retryable=False,
+                        diagnostics=(),
+                    )
+            return await super().request(method, params)
+
+    worker = FailingFinalOverlayWorker(tmp_path)
+    response_cache = ResponseCache(tmp_path / ".jaunt" / "cache")
+    with pytest.raises(WorkerRemoteError, match="phase=module-overlays"):
+        await run_build(
+            tmp_path,
+            config,
+            generator=FakeGenerator(),
+            worker_factory=lambda *_: worker,
+            response_cache=response_cache,
+            repo_map_enabled=False,
+            auto_skills_enabled=False,
+        )
+
+    report = await run_build(
+        tmp_path,
+        config,
+        generator=ExplodingGenerator(),
+        worker_factory=lambda *_: worker,
+        response_cache=response_cache,
+        repo_map_enabled=False,
+        auto_skills_enabled=False,
+    )
+
+    assert report.exit_code == 0
+    assert report.generated == frozenset({"ts:src/math"})
+    assert report.metadata["cost"]["cache_hits"] == 1
+    assert worker.overlay_calls == 4
 
 
 @pytest.mark.asyncio

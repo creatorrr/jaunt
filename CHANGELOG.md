@@ -3,6 +3,22 @@
 All notable changes to jaunt. Generated from conventional commits by
 [git-cliff](https://git-cliff.org); one section per published PyPI release.
 
+## [1.7.4] - 2026-07-15
+
+### Fixes
+
+- Unwrap TypeScript package redirect source files before reusing them in a new
+  compiler program. Consecutive overlay validation now works in pnpm and other
+  projects where duplicate package identities produce compiler redirects.
+- Include the active worker phase in unexpected analyzer errors. An
+  implementation candidate accepted before a later transaction failure remains
+  cached and is revalidated on a same-project retry without another model call.
+
+### Packages
+
+- Publish `@usejaunt/ts` `0.1.0-alpha.3` with safe compiler-program reuse and
+  phase-attributed internal errors.
+
 ## [1.7.3] - 2026-07-14
 
 ### Fixes

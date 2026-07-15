@@ -192,6 +192,11 @@ worker_startup_timeout_seconds = 20
 
 Increase the request deadline when a large project closure is valid but slow. Timeout
 errors include the latest worker phase timings and point to the relevant config key.
+Unexpected analyzer errors also name the last active phase. If an implementation
+candidate passes its request validator but a later transaction-level overlay fails,
+Jaunt keeps that accepted candidate in the response cache. A retry with the same
+project identity revalidates the cached source before use and does not call the model
+again.
 
 Starting with `@usejaunt/ts` 0.1.0-alpha.2, sidecars persist a normalized semantic
 environment identity. On a later compatible Jaunt or worker upgrade, Jaunt compares

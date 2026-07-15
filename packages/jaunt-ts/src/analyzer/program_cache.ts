@@ -7,6 +7,7 @@ import {
   sep,
 } from "node:path";
 import type ts from "@typescript/typescript6";
+import { reusableSourceFile } from "./source_file_reuse.js";
 import { digestCanonical } from "./canonical.js";
 import { affectedProjectIds, type LoadedProject } from "./config.js";
 import { compilerOptionsHash } from "./compiler_options.js";
@@ -153,9 +154,10 @@ function analysisHost(
   ) => {
     const absolute = resolve(fileName);
     if (!shouldCreateNewSourceFile && !invalidated.has(absolute)) {
-      const previous =
+      const previous = reusableSourceFile(
         oldProgram.getSourceFile(fileName) ??
-        oldProgram.getSourceFile(absolute);
+          oldProgram.getSourceFile(absolute),
+      );
       if (previous) return previous;
     }
     return getSourceFile(

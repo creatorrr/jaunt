@@ -21,6 +21,7 @@ import {
 export class WorkerServer {
   #session?: AnalyzerSession;
   readonly #cancelled = new Set<string>();
+  readonly #lastPhase = new Map<string, string>();
   shutdownRequested = false;
 
   private reportTiming(
@@ -29,6 +30,7 @@ export class WorkerServer {
     state: "start" | "finish",
     elapsedMs: number,
   ): void {
+    this.#lastPhase.set(request.id, phase);
     if (process.env.JAUNT_TS_PHASE_TELEMETRY !== "1") return;
     process.stderr.write(
       `[jaunt:phase] request=${request.id} method=${request.method} phase=${phase} state=${state} elapsed_ms=${Math.round(elapsedMs)}\n`,
@@ -42,7 +44,19 @@ export class WorkerServer {
       );
       return success(request.id, result);
     } catch (error) {
-      return failure(request.id, normalizeError(error));
+      const normalized = normalizeError(error);
+      const phase = this.#lastPhase.get(request.id);
+      return failure(
+        request.id,
+        normalized.code === "INTERNAL_ERROR" && phase
+          ? {
+              ...normalized,
+              message: `${request.method} failed during phase=${phase}: ${normalized.message}`,
+            }
+          : normalized,
+      );
+    } finally {
+      this.#lastPhase.delete(request.id);
     }
   }
 

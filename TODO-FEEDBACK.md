@@ -47,3 +47,10 @@
 - [x] Record provider usage after each completed retry attempt.
 - [x] Emit partial known cost in JSON when build or test is interrupted.
 - [x] Add regressions and run the full repository validation suite.
+
+## Cycle 8 — 2026-07-15
+
+- [x] Unwrap TypeScript package redirect source files during compiler-program reuse.
+- [x] Include the active worker phase in unexpected overlay failures.
+- [x] Preserve and reuse a request-validated candidate after a later overlay transaction failure.
+- [x] Add regressions and run the full repository validation suite.

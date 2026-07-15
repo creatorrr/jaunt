@@ -28,6 +28,7 @@ import { renderPlaceholder } from "./placeholders.js";
 import type { ArtifactRecord, DiagnosticRecord } from "./types.js";
 import { resolvePackageImportResolution } from "./dependencies.js";
 import type { PackageImportResolution } from "./provenance.js";
+import { reusableSourceFile } from "./source_file_reuse.js";
 
 export interface OverlayValidation {
   readonly valid: boolean;
@@ -705,9 +706,10 @@ function overlayHost(
           !shouldCreateNewSourceFile &&
           previousOverlay.get(absolute) === content
         ) {
-          const previous =
+          const previous = reusableSourceFile(
             oldProgram?.getSourceFile(path) ??
-            oldProgram?.getSourceFile(absolute);
+              oldProgram?.getSourceFile(absolute),
+          );
           if (previous) return previous;
         }
         return compiler.createSourceFile(
@@ -721,9 +723,10 @@ function overlayHost(
         );
       }
       if (!shouldCreateNewSourceFile && !previousOverlay.has(absolute)) {
-        const previous =
+        const previous = reusableSourceFile(
           oldProgram?.getSourceFile(path) ??
-          oldProgram?.getSourceFile(absolute);
+            oldProgram?.getSourceFile(absolute),
+        );
         if (previous) return previous;
       }
       return base.getSourceFile(
