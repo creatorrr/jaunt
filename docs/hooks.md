@@ -26,3 +26,10 @@ returns `deny`.
 Plugin hooks fail open when their payload, configuration, executable, or
 timeout prevents a reliable decision. They are guardrails, not a complete
 security boundary.
+
+The first-party plugins also run a SessionStart freshness hook. It stays within
+the nearest parent Jaunt workspace or the session directory's active Git
+worktree, and it excludes nested Git repositories plus Claude/Codex managed
+worktrees. Both lifecycle launchers return success even when Bash or another
+optional tool is unavailable, so plugin setup problems do not fail the host
+session.
