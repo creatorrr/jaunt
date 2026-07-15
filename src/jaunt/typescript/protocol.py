@@ -391,6 +391,7 @@ class ValidateOverlayParams:
     sync_module_ids: tuple[str, ...] = ()
     restamp_module_ids: tuple[str, ...] = ()
     recompose_module_ids: tuple[str, ...] = ()
+    scope_to_module_ids: bool = False
 
     def to_wire(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -407,6 +408,8 @@ class ValidateOverlayParams:
             result["restampModuleIds"] = list(self.restamp_module_ids)
         if self.recompose_module_ids:
             result["recomposeModuleIds"] = list(self.recompose_module_ids)
+        if self.scope_to_module_ids:
+            result["scopeToModuleIds"] = True
         return result
 
 

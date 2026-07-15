@@ -52,6 +52,8 @@ from jaunt.typescript.worker import (
 )
 
 _DEFAULT_ATTEMPTS = 2
+_ANALYZE_CONTRACT_BATCH_SIZE = 4
+_SYNC_BATCH_SIZE = 4
 _PLACEHOLDER_MARKERS = ("state=unbuilt", 'state = "unbuilt"', "state: unbuilt")
 MISSING_INPUT = "<missing>"
 
@@ -331,7 +333,46 @@ async def analyze(
         "analyzeWorkspace",
         ({"moduleIds": list(target_ids)} if target_ids and supports_scoped_diagnostics else {}),
     )
-    contracts = await client.request("analyzeContracts", {})
+    supports_scoped_analysis = "scoped-analysis" in getattr(initialized, "capabilities", ())
+    raw_specs = workspace.get("specs", [])
+    workspace_module_ids = (
+        list(
+            dict.fromkeys(
+                str(item["moduleId"])
+                for item in raw_specs
+                if isinstance(item, Mapping) and isinstance(item.get("moduleId"), str)
+            )
+        )
+        if isinstance(raw_specs, list)
+        else []
+    )
+    requested_module_ids = list(dict.fromkeys(target.split("#", 1)[0] for target in target_ids))
+    if target_ids and supports_scoped_analysis:
+        batches = [requested_module_ids]
+    elif not target_ids and workspace_module_ids:
+        batches = [
+            workspace_module_ids[index : index + _ANALYZE_CONTRACT_BATCH_SIZE]
+            for index in range(0, len(workspace_module_ids), _ANALYZE_CONTRACT_BATCH_SIZE)
+        ]
+    else:
+        batches = [[]]
+    contract_responses = [
+        await client.request(
+            "analyzeContracts",
+            ({"moduleIds": batch} if batch else {}),
+        )
+        for batch in batches
+    ]
+    contracts = dict(contract_responses[0])
+    merged_modules: dict[str, Mapping[str, Any]] = {}
+    for response in contract_responses:
+        raw_modules = response.get("modules", [])
+        if not isinstance(raw_modules, list):
+            continue
+        for module in raw_modules:
+            if isinstance(module, Mapping):
+                merged_modules[_module_id(module)] = module
+    contracts["modules"] = list(merged_modules.values())
     if target_ids:
         raw_modules = contracts.get("modules", [])
         modules = (
@@ -420,6 +461,7 @@ async def validate_overlay(
     sync_module_ids: Sequence[str] = (),
     restamp_module_ids: Sequence[str] = (),
     recompose_module_ids: Sequence[str] = (),
+    scoped_validation: bool = False,
 ) -> ValidateOverlayResult:
     wire = _stamp_params(analysis, candidates, module_ids).to_wire()
     if sync_module_ids:
@@ -428,6 +470,8 @@ async def validate_overlay(
         wire["restampModuleIds"] = list(restamp_module_ids)
     if recompose_module_ids:
         wire["recomposeModuleIds"] = list(recompose_module_ids)
+    if scoped_validation and "scoped-validation" in analysis.initialized.capabilities:
+        wire["scopeToModuleIds"] = True
     raw = await client.request(
         "validateOverlay",
         wire,
@@ -634,22 +678,32 @@ async def run_sync(
     root = root.resolve()
     async with worker_session(root, config, worker_factory=worker_factory) as (client, initialized):
         analysis = await analyze(client, initialized, target_ids=target_ids)
-        modules = analysis.modules
+        modules = _topological_modules(analysis.modules)
         output_preconditions = _artifact_preconditions(root, modules)
         module_ids = tuple(_module_id(module) for module in modules)
-        validated = await validate_overlay(
-            client,
-            analysis,
-            {},
-            module_ids,
-            sync_module_ids=module_ids,
+        validated_batches: list[ValidateOverlayResult] = []
+        for index in range(0, len(module_ids), _SYNC_BATCH_SIZE):
+            batch = module_ids[index : index + _SYNC_BATCH_SIZE]
+            validated = await validate_overlay(
+                client,
+                analysis,
+                {},
+                batch,
+                sync_module_ids=batch,
+                scoped_validation=bool(target_ids),
+            )
+            if not validated.valid:
+                failed = {
+                    module_id: _diagnostics(validated.diagnostics) for module_id in module_ids
+                }
+                return SyncReport(failed=failed, exit_code=2)
+            validated_batches.append(validated)
+        validated_writes = tuple(
+            write for validated in validated_batches for write in _artifact_writes(validated)
         )
-        if not validated.valid:
-            failed = {module_id: _diagnostics(validated.diagnostics) for module_id in module_ids}
-            return SyncReport(failed=failed, exit_code=2)
         writes = atomic_write_manifest(
             root,
-            _artifact_writes(validated),
+            validated_writes,
             expected_inputs={
                 **_input_hashes(analysis.contracts),
                 **output_preconditions,
@@ -910,66 +964,19 @@ def _topological_modules(
 
 
 def _build_units(
-    analysis: TypeScriptAnalysis,
+    _analysis: TypeScriptAnalysis,
     modules: Sequence[Mapping[str, Any]],
 ) -> tuple[_BuildUnit, ...]:
-    """Group writes by package owner and connected project references.
+    """Group only dependency-connected writes into atomic transactions.
 
-    Package owners remain independent inside a reference-connected compiler
-    component, so unrelated workspace packages can make progress independently.
-    Explicit Jaunt dependency edges union their units: candidates that must be
-    checked together are never committed on opposite sides of a failed
-    transaction.
+    A shared package owner or project-reference graph is a validation scope,
+    not a reason to discard unrelated successful candidates. Explicit Jaunt
+    dependency edges still keep candidates that must move together in one unit.
     """
 
     by_id = {_module_id(module): module for module in modules}
     if not by_id:
         return ()
-
-    project_parent: dict[str, str] = {}
-
-    def project_find(value: str) -> str:
-        project_parent.setdefault(value, value)
-        while project_parent[value] != value:
-            project_parent[value] = project_parent[project_parent[value]]
-            value = project_parent[value]
-        return value
-
-    def project_union(left: str, right: str) -> None:
-        left_root = project_find(left)
-        right_root = project_find(right)
-        if left_root != right_root:
-            first, second = sorted((left_root, right_root))
-            project_parent[second] = first
-
-    raw_projects = analysis.workspace.get("projects", [])
-    projects = (
-        [item for item in raw_projects if isinstance(item, Mapping)]
-        if isinstance(raw_projects, list)
-        else []
-    )
-    for project in projects:
-        project_id = project.get("id")
-        if not isinstance(project_id, str):
-            continue
-        project_find(project_id)
-        if project.get("role") == "solution":
-            # A solution tsconfig is a build entry point, not a semantic edge
-            # between every otherwise-independent package it happens to list.
-            continue
-        references = project.get("references", [])
-        if isinstance(references, list):
-            for reference in references:
-                if isinstance(reference, str):
-                    project_union(project_id, reference)
-    for module in modules:
-        project = module.get("project")
-        if isinstance(project, str):
-            project_find(project)
-
-    component_projects: dict[str, set[str]] = {}
-    for project_id in tuple(project_parent):
-        component_projects.setdefault(project_find(project_id), set()).add(project_id)
 
     module_parent = {module_id: module_id for module_id in by_id}
 
@@ -985,22 +992,6 @@ def _build_units(
         if left_root != right_root:
             first, second = sorted((left_root, right_root))
             module_parent[second] = first
-
-    grouping_keys: dict[tuple[str, str], str] = {}
-    for module_id, module in sorted(by_id.items()):
-        project = str(module.get("project", ""))
-        owner = str(module.get("packageOwner", "."))
-        component = project_find(project) if project else project
-        connected = component_projects.get(component, {project})
-        if len(connected) > 1:
-            group = ("references", f"{component}:{owner}")
-        else:
-            group = ("owner", f"{project}:{owner}")
-        previous = grouping_keys.get(group)
-        if previous is None:
-            grouping_keys[group] = module_id
-        else:
-            module_union(previous, module_id)
 
     for module_id, module in by_id.items():
         for dependency in _dependency_module_ids(module):
@@ -1032,7 +1023,7 @@ def _component_failure(module_id: str, failed_ids: Sequence[str]) -> TargetDiagn
     return TargetDiagnostic(
         code="JAUNT_TS_COMPONENT_ABORTED",
         message=(
-            f"No artifacts were written for {module_id} because its owner/reference "
+            f"No artifacts were written for {module_id} because its dependency-connected "
             f"component failed: {rendered}"
         ),
         data={"failed_modules": tuple(sorted(failed_ids))},
@@ -1500,6 +1491,7 @@ async def run_build_in_session(
                 analysis,
                 proposed,
                 tuple(sorted(proposed)),
+                scoped_validation=bool(target_ids),
             )
             if validation.valid:
                 return []
@@ -1604,6 +1596,7 @@ async def run_build_in_session(
             tuple(sorted(set(unit_candidates) | set(unit_refrozen))),
             restamp_module_ids=unit_restamped,
             recompose_module_ids=unit_recomposed,
+            scoped_validation=bool(target_ids),
         )
         if not validated.valid:
             diagnostics = _diagnostics(validated.diagnostics)

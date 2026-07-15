@@ -5,7 +5,7 @@ expects: edit specs, preview stale or unbuilt work, build through the CLI, and
 review generated output without hand-editing machine-owned files.
 
 It is CLI-backed. There is no MCP server, app connector, or public-directory
-submission in version 1.1.2.
+submission in version 1.1.3.
 
 ## Install
 

@@ -151,6 +151,7 @@ function validateSources(
   overlayRoots: readonly string[] = [...sources.keys()],
   referencedOverlayPaths: ReadonlySet<string> = new Set(),
   programCache?: OverlayProgramCache,
+  scopedRoots = false,
 ): DiagnosticRecord[] {
   function programFor(
     profile: "native" | "strict",
@@ -159,7 +160,7 @@ function validateSources(
   ): ts.Program {
     if (programCache) {
       return programCache.create(
-        `${project.id}:${profile}`,
+        `${project.id}:${profile}:${scopedRoots ? "scoped" : "full"}`,
         compiler,
         roots,
         options,
@@ -185,7 +186,7 @@ function validateSources(
     incremental: false,
   };
   const nativeProgram = programFor("native", nativeOptions, [
-    ...project.parsed.fileNames,
+    ...(scopedRoots ? [] : project.parsed.fileNames),
     ...overlayRoots,
     ...extraRoots,
   ]);
@@ -781,6 +782,7 @@ export function validateModuleOverlay(
   preflightModules: readonly ContractModuleIR[] = [],
   preflightCandidates: Readonly<Record<string, string>> = {},
   programCache?: OverlayProgramCache,
+  scopedRoots = false,
 ): OverlayValidation {
   const composed = composeCandidate(
     compiler,
@@ -851,6 +853,7 @@ export function validateModuleOverlay(
       moduleValidationRoots(root, project, ir, overlay, preflightModules),
       referencedModulePaths(root, project, preflightModules),
       programCache,
+      scopedRoots,
     ),
   ];
   const sorted = sortDiagnostics(diagnostics);
@@ -910,6 +913,7 @@ export function validateSyncOverlay(
   restampBuilt = false,
   preflightCandidates: Readonly<Record<string, string>> = {},
   programCache?: OverlayProgramCache,
+  scopedRoots = false,
 ): OverlayValidation {
   const apiSource = renderApiMirror(ir);
   const apiPath = absolute(root, ir.apiMirrorPath);
@@ -1012,6 +1016,7 @@ export function validateSyncOverlay(
       moduleValidationRoots(root, project, ir, overlay, preflightModules),
       referencedModulePaths(root, project, preflightModules),
       programCache,
+      scopedRoots,
     ),
     ...facadeDiagnostics(ir, facadeContent),
     ...mirrorShapeDiagnostics(compiler, ir, apiSource),
@@ -1120,6 +1125,7 @@ export function validateProjectOverlayClosure(
   proposedArtifacts: readonly ArtifactRecord[],
   affectedIds: readonly string[],
   programCache?: OverlayProgramCache,
+  scopedRoots = false,
 ): readonly DiagnosticRecord[] {
   const overlay = new Map<string, string>();
   for (const module of modules) {
@@ -1183,11 +1189,15 @@ export function validateProjectOverlayClosure(
         absolute(root, module.facadePath),
       ]);
     const roots = [
-      ...new Set([...project.parsed.fileNames, ...ownedOverlayRoots]),
+      ...new Set(
+        scopedRoots
+          ? ownedOverlayRoots
+          : [...project.parsed.fileNames, ...ownedOverlayRoots],
+      ),
     ];
     const program = programCache
       ? programCache.create(
-          `${project.id}:closure`,
+          `${project.id}:closure:${scopedRoots ? "scoped" : "full"}`,
           compiler,
           roots,
           options,

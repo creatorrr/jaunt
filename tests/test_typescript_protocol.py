@@ -254,6 +254,8 @@ def test_validate_overlay_params_serialize_deterministic_sync_ids() -> None:
         candidates={},
         sync_module_ids=("ts:src/token",),
         restamp_module_ids=("ts:src/restamp",),
+        scope_to_module_ids=True,
     )
     assert params.to_wire()["syncModuleIds"] == ["ts:src/token"]
     assert params.to_wire()["restampModuleIds"] == ["ts:src/restamp"]
+    assert params.to_wire()["scopeToModuleIds"] is True

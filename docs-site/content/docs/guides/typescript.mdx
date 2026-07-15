@@ -150,7 +150,17 @@ uvx jaunt status --language ts
 `sync` is deterministic and does not call Codex or the semantic gate. It writes the
 API mirror, creates a canonical facade only when none exists, and supplies an exact
 typed throwing placeholder for a missing implementation. The editor can then typecheck
-the module, while `status` and `check` still report it as unbuilt.
+the module, while `status` and `check` still report it as unbuilt. The placeholder
+consumes its temporary parameters and runtime imports, so `noUnusedLocals` and
+`noUnusedParameters` can stay enabled while sibling modules are still unbuilt.
+
+Full-workspace analysis and sync use bounded internal batches. Sync orders those
+batches by Jaunt dependencies, validates every batch first, then commits one artifact
+transaction. `--target` is narrower: contract responses, bootstrap placeholders,
+and overlay compiler validation include the selected module and its dependency
+closure, not unrelated configured sources. A broad stable root or glob can therefore
+remain in `jaunt.toml`; you should not need to rotate roots or `tsconfig` includes as
+each module is built.
 
 ## Build, test, and check
 
@@ -164,7 +174,10 @@ The model writes reserved internal bindings. The worker rejects model-authored
 exports, `any`, TypeScript suppressions, and unsafe boundary casts, then composes the
 public exports itself. Candidate files are typechecked in an in-memory overlay. Jaunt
 writes the implementation, API mirror, sidecar, and any new facade only after the
-complete validation succeeds.
+complete validation succeeds. Modules that merely share a package owner or project
+reference are separate write transactions. If one candidate fails, validated
+independent siblings can still land; explicit Jaunt dependency-connected modules
+remain atomic.
 
 Authored test intent lives in `*.jaunt-test.ts`. Generated batteries use Vitest and
 import the public facade. Example-tier failures retain normal detail. Derived-tier
@@ -176,6 +189,10 @@ Every package that owns a configured test project must declare `vitest` directly
 `devDependencies`; add `fast-check` there too when that package uses `@prop`. A
 hoisted installation alone is not authorization, and Jaunt checks the supported peer
 version before spending a model call.
+
+Ordinary co-located `*.test.ts[x]` and `*.spec.ts[x]` files are native project tests,
+not implementation provenance. Their `vitest` imports do not need to be production
+dependencies. Jaunt test intent still uses the distinct `*.jaunt-test.ts[x]` suffix.
 
 Leave `[target.ts].vitest_config` empty for pure generated batteries unless they need
 application-specific plugins or setup. Pointing Jaunt at a Vite application config can
@@ -300,6 +317,12 @@ export class Formatter {
 Preserved code may use parameters, `this`, local bindings, standard globals, and
 runtime imports from the paired context module. It cannot pull arbitrary runtime
 dependencies or private spec modules into generated code.
+
+Module-level runtime constants and authored default objects are not preserved by the
+current alpha. Keep them in the paired context module, or keep the public module as a
+small handwritten wrapper around a generated pure core. Broad `source_roots` globs
+can cover those core modules; targeted contract analysis does not require one literal
+root per wrapper/core pair.
 
 ## Mixed Python and TypeScript workspaces
 

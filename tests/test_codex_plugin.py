@@ -21,7 +21,7 @@ CLAUDE_PLUGIN = REPO / "jaunt-claude-plugin"
 def test_manifest_and_marketplace_shape() -> None:
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text())
     assert manifest["name"] == "jaunt"
-    assert manifest["version"] == "1.1.2"
+    assert manifest["version"] == "1.1.3"
     assert "TypeScript" in manifest["description"]
     assert manifest["skills"] == "./skills/"
     assert "hooks" not in manifest
@@ -826,6 +826,74 @@ JSON
     assert "worker/compiler unavailable: compiler unavailable" in doctor.stdout
     assert "JAUNT_TS_COMPILER: install TypeScript" in doctor.stdout
     assert "worker/compiler ready" not in doctor.stdout
+
+
+def test_status_hooks_report_timeouts_without_claiming_compiler_failure(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    (tmp_path / "jaunt.toml").write_text("version = 2\n[target.ts]\n")
+    _write_executable(
+        bin_dir / "jaunt",
+        'if [ "$1" = "--version" ]; then echo "jaunt 1.7.5"; exit 0; fi\nexit 124\n',
+    )
+    _write_executable(bin_dir / "codex", 'echo "Logged in"\n')
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin",
+        "JAUNT_WORKSPACE_ROOT": str(tmp_path),
+        "JAUNT_PLUGIN_STATUS_TIMEOUT_SECONDS": "17",
+    }
+
+    session = subprocess.run(
+        ["bash", str(PLUGIN / "scripts" / "session-status.sh")],
+        input=json.dumps({"cwd": str(tmp_path)}),
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    doctor = subprocess.run(
+        ["bash", str(PLUGIN / "scripts" / "doctor.sh")],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+
+    assert "TS status unavailable: status timed out after 17 seconds" in session.stdout
+    assert "TypeScript status unavailable: status timed out after 17 seconds" in doctor.stdout
+    assert "worker/compiler unavailable" not in session.stdout
+    assert "worker/compiler unavailable" not in doctor.stdout
+
+
+def test_mixed_status_hook_reuses_one_workspace_probe(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    calls = tmp_path / "calls.log"
+    (tmp_path / "jaunt.toml").write_text(
+        "version = 2\n[target.py]\nsource_roots=['src']\n[target.ts]\nsource_roots=['src']\n"
+    )
+    _write_executable(
+        bin_dir / "jaunt",
+        f'''if [ "$1" = "--version" ]; then echo "jaunt 1.7.5"; exit 0; fi
+printf '%s\n' "$*" >> "{calls}"
+echo '{{"command":"status","ok":false,"error":{{"message":"Python status failed"}},"targets":{{'
+echo '"ts":{{"unbuilt":[],"invalid":{{}}}}}}}}'
+''',
+    )
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin"}
+
+    result = subprocess.run(
+        ["bash", str(PLUGIN / "scripts" / "session-status.sh")],
+        input=json.dumps({"cwd": str(tmp_path)}),
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+
+    assert "status unavailable: Python status failed; TS: 0 unbuilt, 0 invalid" in result.stdout
+    assert calls.read_text().splitlines() == ["status --json --progress none"]
 
 
 def _fake_guard_bin(tmp_path: Path, *, fail: bool = False) -> Path:

@@ -513,6 +513,7 @@ async def run_status(
                 {},
                 module_ids,
                 sync_module_ids=module_ids,
+                scoped_validation=bool(target_ids),
             )
             validation_diagnostics = tuple(
                 _diagnostic(diagnostic) for diagnostic in validated.diagnostics

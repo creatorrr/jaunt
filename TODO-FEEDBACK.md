@@ -60,3 +60,15 @@
 - [x] Preserve battery reuse proof across separate TypeScript build and test commands.
 - [x] Report `recomposed` modules in pure and mixed TypeScript build JSON.
 - [x] Add regressions and run the full repository validation suite.
+
+## Cycle 10 — 2026-07-15
+
+- [x] Scope targeted TypeScript contract responses and validation to the dependency closure.
+- [x] Bound full-workspace contract responses and batch sync validation in dependency order.
+- [x] Commit independent successful TypeScript candidates when one sibling fails.
+- [x] Make unbuilt placeholders safe under strict unused checks.
+- [x] Exclude ordinary co-located native tests from production import provenance.
+- [x] Fix mixed `clean --orphans` preflight argument defaults.
+- [x] Make plugin status timeouts informative and avoid duplicate mixed-workspace probes.
+- [x] Refresh both plugin versions so adopters receive the fail-open hook launchers.
+- [x] Add regressions and run the full repository validation suite.

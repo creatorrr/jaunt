@@ -115,6 +115,23 @@ export function slugify(title: string, options?: SlugOptions): string {
       (contract) => contract.moduleId === "ts:src/store/index",
     )!;
     const metadata = session.metadata();
+    const placeholders = session.validateOverlay({
+      sessionId: metadata.sessionId,
+      expectedEpoch: metadata.epoch,
+      expectedSnapshot: metadata.snapshot,
+      candidates: {},
+      moduleIds: contracts.map((contract) => contract.moduleId),
+      syncModuleIds: contracts.map((contract) => contract.moduleId),
+    });
+    expect(placeholders.valid, JSON.stringify(placeholders.diagnostics)).toBe(
+      true,
+    );
+    expect(placeholders.diagnostics).not.toContainEqual(
+      expect.objectContaining({ code: "TS6133" }),
+    );
+    expect(placeholders.diagnostics).not.toContainEqual(
+      expect.objectContaining({ code: "TS6192" }),
+    );
     const result = session.validateOverlay({
       sessionId: metadata.sessionId,
       expectedEpoch: metadata.epoch,
@@ -144,6 +161,53 @@ export function slugify(title: string, options?: SlugOptions): string {
     expect(session.initializeResult().typescriptVersion).toBe("5.8.3");
     expect(session.analyzeWorkspace().diagnostics).toEqual([]);
     expect(session.analyzeContracts().modules).toHaveLength(1);
+  });
+
+  test("scoped bootstrap ignores unrelated project diagnostics", async () => {
+    const workspace = createFixtureWorkspace();
+    roots.push(workspace.root);
+    writeFileSync(
+      resolve(workspace.root, "src/unrelated.ts"),
+      'const broken: number = "not-a-number";\nvoid broken;\n',
+    );
+    const session = await AnalyzerSession.create({
+      root: workspace.root,
+      projects: ["tsconfig.json"],
+      testProjects: [],
+      sourceRoots: ["src"],
+      testRoots: ["tests"],
+      generatedDir: "__generated__",
+      toolOwner: ".",
+      compilerModulePath: workspace.compilerModulePath,
+      clientVersion: "test",
+      toolVersion: "test",
+    });
+    const contract = session.analyzeContracts().modules[0]!;
+    const metadata = session.metadata();
+
+    const scoped = session.validateOverlay({
+      sessionId: metadata.sessionId,
+      expectedEpoch: metadata.epoch,
+      expectedSnapshot: metadata.snapshot,
+      candidates: {},
+      moduleIds: [contract.moduleId],
+      syncModuleIds: [contract.moduleId],
+      scopeToModuleIds: true,
+    });
+    const full = session.validateOverlay({
+      sessionId: metadata.sessionId,
+      expectedEpoch: metadata.epoch,
+      expectedSnapshot: metadata.snapshot,
+      candidates: {},
+      moduleIds: [contract.moduleId],
+      syncModuleIds: [contract.moduleId],
+    });
+
+    expect(scoped.valid, JSON.stringify(scoped.diagnostics)).toBe(true);
+    expect(full.valid).toBe(false);
+    expect(full.diagnostics).toContainEqual(
+      expect.objectContaining({ code: "TS2322", path: "src/unrelated.ts" }),
+    );
   });
 
   test("discovers, renders IR, and validates an unbuilt sync transaction", async () => {

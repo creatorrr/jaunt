@@ -20,6 +20,7 @@ from jaunt.cli import (
     _command_semantic_exec,
     _capture_python_json,
     _mixed_runtime_args,
+    _mixed_python_preflight,
     _mixed_typescript_preflight,
     _validated_typescript_contract_targets,
     parse_args,
@@ -112,6 +113,13 @@ def test_mixed_build_runs_languages_concurrently_and_preserves_exit_precedence(
     assert observed["python_runtime"].jobs == 2
     assert observed["repo_map_enabled"] is True
     assert isinstance(observed["repo_map_block_override"], str)
+
+
+def test_mixed_clean_preflight_supplies_status_only_defaults(tmp_path: Path) -> None:
+    _mixed_config(tmp_path)
+    args = parse_args(["clean", "--root", str(tmp_path), "--orphans", "--dry-run", "--json"])
+
+    _mixed_python_preflight("clean", args)
 
 
 def test_mixed_test_runs_languages_concurrently(tmp_path: Path, monkeypatch, capsys) -> None:

@@ -1608,7 +1608,15 @@ def _mixed_python_preflight(command: str, args: argparse.Namespace) -> None:
         from jaunt import tester
 
         tester.ensure_pytest_available()
-    code, payload = _capture_python_json(cmd_status, args)
+    status_args = argparse.Namespace(**vars(args))
+    # A mixed mutation reuses the Python status command as its read-only
+    # preflight. Clean/reconcile parsers do not own every status-only flag, so
+    # populate their neutral defaults instead of leaking argparse shape into
+    # the status implementation.
+    for name, value in (("force", False), ("no_infer_deps", False), ("target", [])):
+        if not hasattr(status_args, name):
+            setattr(status_args, name, value)
+    code, payload = _capture_python_json(cmd_status, status_args)
     if code == EXIT_OK:
         return
     raw_error = payload.get("error", "Python target discovery failed")

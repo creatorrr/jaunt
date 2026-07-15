@@ -88,6 +88,42 @@ jaunt.magicModule();`,
   // implementation dependency. Candidate facade imports are checked later.
   expect(consumer.dependencies).not.toContain("availableToTheSpec");
   expect(consumer.symbols[0]!.options.deps).toEqual(["ts:src/base/index#base"]);
+  expect(
+    session
+      .analyzeWorkspace({ moduleIds: ["ts:src/slug/index"] })
+      .specs.map((spec) => spec.moduleId),
+  ).toEqual(["ts:src/base/index", "ts:src/slug/index"]);
+  expect(
+    session
+      .analyzeContracts({ moduleIds: ["ts:src/slug/index"] })
+      .modules.map((module) => module.moduleId),
+  ).toEqual(["ts:src/base/index", "ts:src/slug/index"]);
+});
+
+test("ordinary co-located tests use test provenance and retain import boundaries", async () => {
+  const workspace = createFixtureWorkspace();
+  roots.push(workspace.root);
+  write(
+    workspace.root,
+    "src/native.test.ts",
+    'import { describe } from "vitest";\nimport "./slug/index.jaunt.js";\ndescribe("native", () => {});\n',
+  );
+
+  const session = await createSession(workspace);
+
+  expect(
+    session
+      .analyzeWorkspace()
+      .diagnostics.filter(
+        (item) => item.code === "JAUNT_TS_UNDECLARED_PACKAGE",
+      ),
+  ).toEqual([]);
+  expect(session.analyzeWorkspace().diagnostics).toContainEqual(
+    expect.objectContaining({
+      code: "JAUNT_TS_RUNTIME_SPEC_IMPORT",
+      path: "src/native.test.ts",
+    }),
+  );
 });
 
 test("same-package tsconfig path aliases are local provenance", async () => {

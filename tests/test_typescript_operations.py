@@ -712,7 +712,12 @@ async def test_targeted_analysis_ignores_unrelated_file_diagnostics(tmp_path: Pa
     )
     initialized = replace(
         initialized,
-        capabilities=(*initialized.capabilities, "scoped-diagnostics"),
+        capabilities=(
+            *initialized.capabilities,
+            "scoped-diagnostics",
+            "scoped-analysis",
+            "scoped-validation",
+        ),
     )
     original_request = worker.request
 
@@ -737,6 +742,10 @@ async def test_targeted_analysis_ignores_unrelated_file_diagnostics(tmp_path: Pa
 
     targeted = await analyze(cast(Any, worker), initialized, target_ids=("ts:src/math",))
     assert targeted.workspace["diagnostics"] == []
+    assert worker.requests[-1] == (
+        "analyzeContracts",
+        {"moduleIds": ["ts:src/math"]},
+    )
     with pytest.raises(JauntConfigError, match="unrelated package error"):
         await analyze(cast(Any, worker), initialized)
 
@@ -1141,6 +1150,66 @@ async def test_build_bounds_parallel_generation_by_jobs_and_owner_units(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_analysis_batches_large_contract_responses(tmp_path: Path) -> None:
+    modules = [_scheduled_module(f"module_{index}", owner=".") for index in range(9)]
+    worker = _SchedulingWorker(
+        tmp_path,
+        modules,
+        [{"id": "tsconfig.json", "references": []}],
+    )
+    initialized = await worker.initialize(
+        InitializeParams(
+            root=str(tmp_path),
+            projects=("tsconfig.json",),
+            test_projects=(),
+            source_roots=("src",),
+            test_roots=("tests",),
+            generated_dir="__generated__",
+            tool_owner=".",
+            compiler_module_path="typescript.js",
+            client_version="test",
+            tool_version="test",
+        )
+    )
+
+    analysis = await analyze(cast(Any, worker), initialized)
+
+    batches = [
+        params["moduleIds"] for method, params in worker.requests if method == "analyzeContracts"
+    ]
+    assert [len(batch) for batch in batches] == [4, 4, 1]
+    assert len(analysis.modules) == 9
+
+
+@pytest.mark.asyncio
+async def test_sync_validates_dependency_ordered_bounded_batches(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    dependency = _scheduled_module("z_dependency", owner=".")
+    dependent = _scheduled_module(
+        "a_dependent",
+        owner=".",
+        dependencies=[f"{dependency['moduleId']}#value"],
+    )
+    modules = [dependent, *[_scheduled_module(f"module_{index}", owner=".") for index in range(7)]]
+    modules.append(dependency)
+    worker = _SchedulingWorker(
+        tmp_path,
+        modules,
+        [{"id": "tsconfig.json", "references": []}],
+    )
+
+    report = await run_sync(tmp_path, config, worker_factory=lambda *_: worker)
+
+    assert report.ok
+    batches = [
+        params["moduleIds"] for method, params in worker.requests if method == "validateOverlay"
+    ]
+    assert [len(batch) for batch in batches] == [4, 4, 1]
+    ordered = [module_id for batch in batches for module_id in batch]
+    assert ordered.index(dependency["moduleId"]) < ordered.index(dependent["moduleId"])
+
+
+@pytest.mark.asyncio
 async def test_build_propagates_dependency_failure_but_commits_unrelated_owner(
     tmp_path: Path,
 ) -> None:
@@ -1184,7 +1253,7 @@ async def test_build_propagates_dependency_failure_but_commits_unrelated_owner(
 
 
 @pytest.mark.asyncio
-async def test_build_keeps_failed_owner_transaction_atomic_and_commits_other_owner(
+async def test_build_commits_independent_same_owner_modules(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
@@ -1209,15 +1278,47 @@ async def test_build_keeps_failed_owner_transaction_atomic_and_commits_other_own
         worker_factory=lambda *_: worker,
     )
 
-    assert report.exit_code == 3
-    assert report.generated == frozenset({str(unrelated["moduleId"])})
-    assert set(report.failed) == {str(first["moduleId"]), str(second["moduleId"])}
-    assert not (tmp_path / str(first["implementationPath"])).exists()
-    assert not (tmp_path / str(second["implementationPath"])).exists()
+    assert report.exit_code == 0
+    assert report.generated == frozenset(str(module["moduleId"]) for module in modules)
+    assert report.failed == {}
+    assert (tmp_path / str(first["implementationPath"])).is_file()
+    assert (tmp_path / str(second["implementationPath"])).is_file()
     assert (tmp_path / str(unrelated["implementationPath"])).is_file()
 
 
-def test_build_units_union_reference_components_and_explicit_dependencies(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_invalid_candidate_does_not_abort_independent_same_owner_modules(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    failing = _scheduled_module("failing", owner="packages/together")
+    sibling = _scheduled_module("sibling", owner="packages/together")
+    modules = [failing, sibling]
+    worker = _SchedulingWorker(
+        tmp_path,
+        modules,
+        [{"id": "tsconfig.json", "references": []}],
+    )
+    generator = _SchedulingGenerator(fail_paths={str(failing["implementationPath"])})
+
+    report = await run_build(
+        tmp_path,
+        config,
+        force=True,
+        jobs=2,
+        max_attempts=1,
+        generator=generator,
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 3
+    assert report.generated == frozenset({str(sibling["moduleId"])})
+    assert set(report.failed) == {str(failing["moduleId"])}
+    assert not (tmp_path / str(failing["implementationPath"])).exists()
+    assert (tmp_path / str(sibling["implementationPath"])).is_file()
+
+
+def test_build_units_union_only_explicit_dependencies(tmp_path: Path) -> None:
     initialized = InitializeResult(
         worker_version="0.1.0",
         protocol=PROTOCOL_VERSION,
@@ -1243,6 +1344,11 @@ def test_build_units_union_reference_components_and_explicit_dependencies(tmp_pa
         project="tsconfig.consumer.json",
         dependencies=[f"{lone['moduleId']}#lone"],
     )
+    independent = _scheduled_module(
+        "independent",
+        owner="packages/app",
+        project="packages/app/tsconfig.json",
+    )
     analysis = TypeScriptAnalysis(
         initialized=initialized,
         workspace={
@@ -1266,7 +1372,7 @@ def test_build_units_union_reference_components_and_explicit_dependencies(tmp_pa
                 {"id": "tsconfig.consumer.json", "references": []},
             ]
         },
-        contracts={"modules": [core, app, lone, consumer]},
+        contracts={"modules": [core, app, lone, consumer, independent]},
     )
 
     units = _build_units(analysis, analysis.modules)
@@ -1274,6 +1380,7 @@ def test_build_units_union_reference_components_and_explicit_dependencies(tmp_pa
     assert {frozenset(unit.module_ids) for unit in units} == {
         frozenset({str(core["moduleId"]), str(app["moduleId"])}),
         frozenset({str(lone["moduleId"]), str(consumer["moduleId"])}),
+        frozenset({str(independent["moduleId"])}),
     }
 
 
