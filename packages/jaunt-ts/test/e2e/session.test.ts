@@ -210,6 +210,60 @@ export function slugify(title: string, options?: SlugOptions): string {
     );
   });
 
+  test("scoped bootstrap includes Jaunt modules referenced by public type imports", async () => {
+    const workspace = createFixtureWorkspace();
+    roots.push(workspace.root);
+    mkdirSync(resolve(workspace.root, "src/model"), { recursive: true });
+    writeFileSync(
+      resolve(workspace.root, "src/model/index.jaunt.ts"),
+      `import * as jaunt from "@usejaunt/ts/spec";
+jaunt.magicModule();
+export interface Model { readonly value: string; }
+/** Create a model. */
+export function makeModel(value: string): Model { return jaunt.magic(); }
+`,
+    );
+    writeFileSync(
+      resolve(workspace.root, "src/slug/index.jaunt.ts"),
+      `import * as jaunt from "@usejaunt/ts/spec";
+import type { Model } from "../model/index.jaunt.js";
+jaunt.magicModule();
+/** Read a model value. */
+export function slugify(model: Model): string { return jaunt.magic(); }
+`,
+    );
+    const session = await AnalyzerSession.create({
+      root: workspace.root,
+      projects: ["tsconfig.json"],
+      testProjects: [],
+      sourceRoots: ["src"],
+      testRoots: ["tests"],
+      generatedDir: "__generated__",
+      toolOwner: ".",
+      compilerModulePath: workspace.compilerModulePath,
+      clientVersion: "test",
+      toolVersion: "test",
+    });
+    const contracts = session.analyzeContracts({
+      moduleIds: ["ts:src/slug/index"],
+    }).modules;
+    expect(contracts.map((contract) => contract.moduleId).sort()).toEqual([
+      "ts:src/model/index",
+      "ts:src/slug/index",
+    ]);
+    const metadata = session.metadata();
+    const scoped = session.validateOverlay({
+      sessionId: metadata.sessionId,
+      expectedEpoch: metadata.epoch,
+      expectedSnapshot: metadata.snapshot,
+      candidates: {},
+      moduleIds: contracts.map((contract) => contract.moduleId),
+      syncModuleIds: contracts.map((contract) => contract.moduleId),
+      scopeToModuleIds: true,
+    });
+    expect(scoped.valid, JSON.stringify(scoped.diagnostics)).toBe(true);
+  });
+
   test("discovers, renders IR, and validates an unbuilt sync transaction", async () => {
     const { session } = await sessionFor();
     const workspace = session.analyzeWorkspace();

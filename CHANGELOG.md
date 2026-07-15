@@ -15,9 +15,9 @@ All notable changes to jaunt. Generated from conventional commits by
   `refrozen` remains the umbrella for every model-free reuse path, while
   `recomposed` identifies the compatible-toolchain subset.
 - Make targeted TypeScript contract responses and overlay validation follow
-  only the selected modules and their dependency closure. Unrelated project
-  errors and unbuilt sibling placeholders no longer force adopters to rotate
-  roots or `tsconfig` includes between builds.
+  only the selected modules and their explicit or public-import closure.
+  Unrelated project errors and unbuilt sibling placeholders no longer force
+  adopters to rotate roots or `tsconfig` includes between builds.
 - Split full-workspace contract analysis into bounded responses and deterministic
   sync validation into dependency-ordered batches. Artifact writes remain one
   atomic transaction, while large workspaces no longer need one oversized worker
@@ -30,9 +30,10 @@ All notable changes to jaunt. Generated from conventional commits by
   provenance.
 - Fix mixed-workspace `clean --orphans` preflight when its parser does not carry
   status-only flags.
-- Make plugin health probes use one status request per mixed workspace, give
-  TypeScript analysis a longer bounded window, and report timeouts as status
-  failures instead of claiming that the worker or compiler is unavailable.
+- Make plugin health probes use one status request per mixed workspace without
+  dropping TypeScript diagnostics, give analysis a longer bounded window, and
+  report timeouts as status failures instead of claiming that the worker or
+  compiler is unavailable.
 
 ### Packages
 

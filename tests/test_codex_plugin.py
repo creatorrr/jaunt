@@ -878,7 +878,9 @@ def test_mixed_status_hook_reuses_one_workspace_probe(tmp_path: Path) -> None:
         f'''if [ "$1" = "--version" ]; then echo "jaunt 1.7.5"; exit 0; fi
 printf '%s\n' "$*" >> "{calls}"
 echo '{{"command":"status","ok":false,"error":{{"message":"Python status failed"}},"targets":{{'
-echo '"ts":{{"unbuilt":[],"invalid":{{}}}}}}}}'
+echo '"ts":{{"unbuilt":[],"invalid":{{}},"diagnostics":['
+echo '{{"code":"JAUNT_TS_NOTE","message":"review"}}]}}}},'
+echo '"diagnostics":[{{"code":"JAUNT_TS_NOTE","message":"review"}}]}}'
 ''',
     )
     env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin"}
@@ -892,7 +894,10 @@ echo '"ts":{{"unbuilt":[],"invalid":{{}}}}}}}}'
         check=True,
     )
 
-    assert "status unavailable: Python status failed; TS: 0 unbuilt, 0 invalid" in result.stdout
+    assert (
+        "status unavailable: Python status failed; TS: 0 unbuilt, 0 invalid, 1 diagnostics "
+        "[JAUNT_TS_NOTE]" in result.stdout
+    )
     assert calls.read_text().splitlines() == ["status --json --progress none"]
 
 

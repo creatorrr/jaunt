@@ -168,10 +168,24 @@ function moduleSelection(
 }
 
 function moduleClosure(
+  compiler: typeof import("@typescript/typescript6"),
+  root: string,
   modules: DiscoveryResult["modules"],
   selected: ReadonlySet<string> | undefined,
 ): ReadonlySet<DiscoveryResult["modules"][number]> | undefined {
   if (!selected) return undefined;
+  const moduleByPath = new Map<string, DiscoveryResult["modules"][number]>();
+  for (const module of modules) {
+    for (const path of [
+      module.route.specPath,
+      module.route.facadePath,
+      module.route.apiMirrorPath,
+      module.route.implementationPath,
+    ]) {
+      moduleByPath.set(resolve(root, path), module);
+    }
+  }
+  const virtualPaths = new Set(moduleByPath.keys());
   const closure = new Set<DiscoveryResult["modules"][number]>();
   const pending = modules.filter((module) =>
     selected.has(module.route.moduleId),
@@ -181,6 +195,23 @@ function moduleClosure(
     if (closure.has(module)) continue;
     closure.add(module);
     pending.push(...module.dependencyModules);
+    for (const specifier of candidateModuleSpecifiers(
+      compiler,
+      module.sourceFile.fileName,
+      module.source,
+    )) {
+      const resolved = resolveWorkspaceModuleSpecifier(
+        compiler,
+        module.sourceFile.fileName,
+        specifier,
+        module.compilerOptions,
+        virtualPaths,
+      );
+      const imported = resolved
+        ? moduleByPath.get(resolve(resolved))
+        : undefined;
+      if (imported && imported !== module) pending.push(imported);
+    }
   }
   return closure;
 }
@@ -591,7 +622,12 @@ export class AnalyzerSession {
     params: AnalyzeWorkspaceParams = {},
   ): AnalyzeWorkspaceResult {
     const selected = moduleSelection(params.moduleIds);
-    const selectedModules = moduleClosure(this.discovery.modules, selected);
+    const selectedModules = moduleClosure(
+      this.compiler,
+      this.root,
+      this.discovery.modules,
+      selected,
+    );
     let discoveryDiagnostics = this.discovery.diagnostics;
     if (selected && selectedModules) {
       const relevantPaths = new Set<string>();
@@ -670,7 +706,12 @@ export class AnalyzerSession {
     params: AnalyzeContractsParams = {},
   ): AnalyzeContractsResult {
     const selected = moduleSelection(params.moduleIds);
-    const selectedModules = moduleClosure(this.discovery.modules, selected);
+    const selectedModules = moduleClosure(
+      this.compiler,
+      this.root,
+      this.discovery.modules,
+      selected,
+    );
     const modules: ContractAnalysisRecord[] = this.discovery.modules
       .filter((module) => !selectedModules || selectedModules.has(module))
       .map((module) => {
@@ -808,7 +849,14 @@ export class AnalyzerSession {
     const diagnostics: DiagnosticRecord[] = [];
     const changedProjects = new Set<string>();
     const validationModules = params.scopeToModuleIds
-      ? [...(moduleClosure(this.discovery.modules, selected) ?? [])]
+      ? [
+          ...(moduleClosure(
+            this.compiler,
+            this.root,
+            this.discovery.modules,
+            selected,
+          ) ?? []),
+        ]
       : this.discovery.modules;
     const allIrs = timed("contract-ir", () =>
       validationModules.map((module) => this.contractIr(module)),

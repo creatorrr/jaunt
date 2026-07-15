@@ -2376,7 +2376,11 @@ def _cmd_mixed_status(args: argparse.Namespace, root: Path, cfg: JauntConfig) ->
     }
     digests.update({str(key): value for key, value in ts_digests.items()})
     targets = ts_payload.get("targets", {})
-    ts_target = targets.get("ts", {}) if isinstance(targets, dict) else {}
+    raw_ts_target = targets.get("ts", {}) if isinstance(targets, dict) else {}
+    ts_target = dict(raw_ts_target) if isinstance(raw_ts_target, dict) else {}
+    raw_ts_diagnostics = ts_payload.get("diagnostics", [])
+    ts_diagnostics = raw_ts_diagnostics if isinstance(raw_ts_diagnostics, list) else []
+    ts_target["diagnostics"] = ts_diagnostics
     py_target = {
         key: py_payload.get(key, default)
         for key, default in (
@@ -2408,6 +2412,7 @@ def _cmd_mixed_status(args: argparse.Namespace, root: Path, cfg: JauntConfig) ->
         "digests": digests,
         "unbuilt": list(cast("list[str]", ts_payload.get("unbuilt", []))),
         "invalid": ts_payload.get("invalid", {}),
+        "diagnostics": ts_diagnostics,
         "orphans": sorted(
             [
                 *cast("list[str]", py_payload.get("orphans", [])),

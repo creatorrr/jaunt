@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
+from typing import cast
 
 from jaunt.cli import (
+    _cmd_mixed_status,
     _aggregate_cost_payloads,
     _capture_python_json,
     _mixed_typescript_targets,
@@ -11,7 +14,7 @@ from jaunt.cli import (
     main,
     parse_args,
 )
-from jaunt.config import load_config
+from jaunt.config import JauntConfig, load_config
 from jaunt.errors import JauntConfigError
 from jaunt.targets.base import TargetBuildReport, TargetDiagnostic, TargetTestReport
 from jaunt.typescript.cli_bridge import (
@@ -19,6 +22,53 @@ from jaunt.typescript.cli_bridge import (
     human_lines,
     test_payload as _test_payload,
 )
+
+
+def test_mixed_status_preserves_typescript_diagnostics(tmp_path: Path, monkeypatch, capsys) -> None:
+    from jaunt.targets.base import TargetStatus
+    from jaunt.typescript import status as status_module
+
+    monkeypatch.setattr(
+        "jaunt.cli._capture_python_json",
+        lambda _command, _args: (
+            0,
+            {
+                "command": "status",
+                "ok": True,
+                "fresh": [],
+                "stale": [],
+                "stale_changes": {},
+                "digests": {},
+                "orphans": [],
+            },
+        ),
+    )
+
+    async def fake_status(*_args, **_kwargs):
+        return TargetStatus(
+            language="ts",
+            diagnostics=(
+                TargetDiagnostic(
+                    code="JAUNT_TS_WARNING",
+                    message="review this warning",
+                    severity="warning",
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(status_module, "run_status", fake_status)
+    args = argparse.Namespace(target=[], json_output=True)
+
+    assert _cmd_mixed_status(args, tmp_path, cast(JauntConfig, object())) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["diagnostics"] == [
+        {
+            "code": "JAUNT_TS_WARNING",
+            "message": "review this warning",
+            "severity": "warning",
+        }
+    ]
+    assert payload["targets"]["ts"]["diagnostics"] == payload["diagnostics"]
 
 
 def test_init_typescript_scaffolds_v2_without_mutating_package_json(tmp_path: Path, capsys) -> None:
