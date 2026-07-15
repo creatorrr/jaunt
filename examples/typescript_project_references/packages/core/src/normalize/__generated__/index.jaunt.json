@@ -146,7 +146,7 @@
   "facadePath": "packages/core/src/normalize/index.ts",
   "fingerprint": {
     "compilerOptionsHash": "sha256:733b0de60903c3a6ff99040ca855c84b231f4a33ec486b0681a52c9fd9c80560",
-    "generationFingerprint": "sha256:b4a477b0c8c9bc806a447867c341b93dc904533cab47d4b5a345f2f2cd8a2d80",
+    "generationFingerprint": "sha256:38e7b5ece11b2004de05bc5dbea275d16e75744dc40f17e6ce35d07b87bb75f2",
     "ir": "contract-ir/1-draft.2",
     "protocol": "jaunt-ts/1-draft.2",
     "toolVersion": "1.7.5",
