@@ -16,6 +16,34 @@ if isinstance(cwd, str) and cwd:
 ' 2>/dev/null || true)
 root="${payload_cwd:-${JAUNT_WORKSPACE_ROOT:-${CLAUDE_PROJECT_DIR:-$PWD}}}"
 [ -d "$root" ] || exit 0
+
+# Stay inside the active project/worktree. Prefer the nearest parent config so
+# deeply nested packages are not hidden by the bounded recursive scan. A broad
+# session cwd such as $HOME must not discover unrelated repositories below it.
+root=$(cd "$root" 2>/dev/null && pwd -P) || exit 0
+project_root=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null || true)
+if [ -n "$project_root" ]; then
+  project_root=$(cd "$project_root" 2>/dev/null && pwd -P) || project_root=""
+fi
+cursor="$root"
+workspace_root=""
+while :; do
+  if [ -f "$cursor/jaunt.toml" ]; then
+    workspace_root="$cursor"
+    break
+  fi
+  [ "$cursor" = "/" ] && break
+  [ -n "$project_root" ] && [ "$cursor" = "$project_root" ] && break
+  cursor=$(dirname "$cursor")
+done
+if [ -n "$workspace_root" ]; then
+  root="$workspace_root"
+elif [ -n "$project_root" ] && [ -d "$project_root" ]; then
+  : # Keep descendant discovery anchored at the session cwd.
+else
+  exit 0
+fi
+
 uv_cache="${UV_CACHE_DIR:-${PLUGIN_DATA:-${CLAUDE_PLUGIN_DATA:-${TMPDIR:-/tmp}/jaunt-plugin-uv-cache-${UID:-user}}}}"
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
@@ -151,7 +179,26 @@ print(f"TS: {unbuilt_count} unbuilt, {invalid_count} invalid, {len(diagnostics)}
 
 configs=$(find "$root" -maxdepth 5 -name jaunt.toml \
   -not -path '*/.venv/*' -not -path '*/node_modules/*' \
-  -not -path '*/.jaunt/*' -not -path '*/.git/*' 2>/dev/null | sort)
+  -not -path '*/.jaunt/*' -not -path '*/.git/*' \
+  -not -path "$root/.claude/worktrees/*" \
+  -not -path "$root/.codex/worktrees/*" 2>/dev/null | sort)
+if [ -n "$configs" ]; then
+  bounded_configs=""
+  while IFS= read -r cfg; do
+    cfg_root=$(git -C "$(dirname "$cfg")" rev-parse --show-toplevel 2>/dev/null || true)
+    if [ -n "$cfg_root" ]; then
+      cfg_root=$(cd "$cfg_root" 2>/dev/null && pwd -P) || cfg_root=""
+    fi
+    if [ -n "$project_root" ]; then
+      [ "$cfg_root" = "$project_root" ] || continue
+    else
+      [ -z "$cfg_root" ] || continue
+    fi
+    [ -z "$bounded_configs" ] || bounded_configs+=$'\n'
+    bounded_configs+="$cfg"
+  done <<<"$configs"
+  configs="$bounded_configs"
+fi
 [ -n "$configs" ] || exit 0
 total=$(printf '%s\n' "$configs" | wc -l | tr -d ' ')
 limit=6

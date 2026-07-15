@@ -21,7 +21,7 @@ CLAUDE_PLUGIN = REPO / "jaunt-claude-plugin"
 def test_manifest_and_marketplace_shape() -> None:
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text())
     assert manifest["name"] == "jaunt"
-    assert manifest["version"] == "1.1.1"
+    assert manifest["version"] == "1.1.2"
     assert "TypeScript" in manifest["description"]
     assert manifest["skills"] == "./skills/"
     assert "hooks" not in manifest
@@ -88,6 +88,49 @@ def test_hooks_reference_existing_executable_scripts() -> None:
             script = PLUGIN / ref.lstrip("/")
             assert script.is_file()
             assert script.stat().st_mode & 0o111
+
+
+@pytest.mark.parametrize(
+    ("plugin", "root_variable"),
+    ((PLUGIN, "PLUGIN_ROOT"), (CLAUDE_PLUGIN, "CLAUDE_PLUGIN_ROOT")),
+)
+def test_lifecycle_hook_launchers_fail_open_without_bash(
+    tmp_path: Path, plugin: Path, root_variable: str
+) -> None:
+    sh = shutil.which("sh")
+    if sh is None:  # pragma: no cover
+        pytest.skip("POSIX shell unavailable")
+    assert sh is not None
+    hooks = json.loads((plugin / "hooks" / "hooks.json").read_text())["hooks"]
+    guard_command = str(hooks["PreToolUse"][0]["hooks"][0]["command"])
+    session_command = str(hooks["SessionStart"][0]["hooks"][0]["command"])
+    env: dict[str, str] = {
+        **os.environ,
+        "PATH": str(tmp_path),
+        root_variable: str(plugin),
+    }
+
+    guard = subprocess.run(
+        [sh, "-c", guard_command],
+        input="{}",
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    assert guard.stdout == ""
+    assert guard.returncode == 0
+
+    session = subprocess.run(
+        [sh, "-c", session_command],
+        input="{}",
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    assert session.stdout == ""
+    assert session.returncode == 0
 
 
 def test_shared_scripts_are_byte_identical() -> None:
@@ -254,6 +297,237 @@ echo '{"command":"status","ok":true,"fresh":[],"stale":[],"orphans":[]}'
     assert "== duplicate Claude hooks" in claude.stdout
     assert str(tmp_path / ".claude" / "settings.json") in claude.stdout
     assert str(tmp_path / ".codex" / "config.toml") not in claude.stdout
+
+    session = subprocess.run(
+        ["bash", str(PLUGIN / "scripts" / "session-status.sh")],
+        input=json.dumps({"cwd": str(tmp_path)}),
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    assert session.stdout.count("- .: 0 fresh") == 1
+    assert ".claude/worktrees" not in session.stdout
+    assert ".codex/worktrees" not in session.stdout
+
+
+def test_session_status_ignores_unrelated_projects_below_non_project_cwd(
+    tmp_path: Path,
+) -> None:
+    unrelated = tmp_path / "repos" / "unrelated"
+    unrelated.mkdir(parents=True)
+    (unrelated / "jaunt.toml").write_text("version = 1\n")
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    _write_executable(
+        bin_dir / "jaunt",
+        """if [ "$1" = "--version" ]; then echo "jaunt 1.7.4"; exit 0; fi
+echo '{"command":"status","ok":true,"fresh":[],"stale":[],"orphans":[]}'
+""",
+    )
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin"}
+
+    result = subprocess.run(
+        ["bash", str(PLUGIN / "scripts" / "session-status.sh")],
+        input=json.dumps({"cwd": str(tmp_path)}),
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+
+    assert result.stdout == ""
+
+
+def test_session_status_runs_in_active_managed_worktree(tmp_path: Path) -> None:
+    worktree = tmp_path / ".codex" / "worktrees" / "active"
+    worktree.mkdir(parents=True)
+    (worktree / "jaunt.toml").write_text("version = 1\n")
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    _write_executable(
+        bin_dir / "jaunt",
+        """if [ "$1" = "--version" ]; then echo "jaunt 1.7.4"; exit 0; fi
+echo '{"command":"status","ok":true,"fresh":[],"stale":[],"orphans":[]}'
+""",
+    )
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin"}
+
+    result = subprocess.run(
+        ["bash", str(PLUGIN / "scripts" / "session-status.sh")],
+        input=json.dumps({"cwd": str(worktree)}),
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+
+    assert "- .: 0 fresh" in result.stdout
+
+
+def test_session_status_preserves_deeply_nested_active_workspace(tmp_path: Path) -> None:
+    if shutil.which("git") is None:  # pragma: no cover
+        pytest.skip("git unavailable")
+    repo = tmp_path / "repo"
+    workspace = repo.joinpath("one", "two", "three", "four", "five", "six")
+    workspace.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (workspace / "jaunt.toml").write_text("version = 1\n")
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    _write_executable(
+        bin_dir / "jaunt",
+        """if [ "$1" = "--version" ]; then echo "jaunt 1.7.4"; exit 0; fi
+echo '{"command":"status","ok":true,"fresh":[],"stale":[],"orphans":[]}'
+""",
+    )
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin"}
+
+    result = subprocess.run(
+        ["bash", str(PLUGIN / "scripts" / "session-status.sh")],
+        input=json.dumps({"cwd": str(workspace)}),
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+
+    assert "- .: 0 fresh" in result.stdout
+
+
+def test_session_status_preserves_deep_descendant_from_session_cwd(
+    tmp_path: Path,
+) -> None:
+    if shutil.which("git") is None:  # pragma: no cover
+        pytest.skip("git unavailable")
+    repo = tmp_path / "repo"
+    session = repo.joinpath("one", "two", "three", "four", "five", "six")
+    workspace = session / "child"
+    workspace.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (workspace / "jaunt.toml").write_text("version = 1\n")
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    _write_executable(
+        bin_dir / "jaunt",
+        """if [ "$1" = "--version" ]; then echo "jaunt 1.7.4"; exit 0; fi
+echo '{"command":"status","ok":true,"fresh":[],"stale":[],"orphans":[]}'
+""",
+    )
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin"}
+
+    result = subprocess.run(
+        ["bash", str(PLUGIN / "scripts" / "session-status.sh")],
+        input=json.dumps({"cwd": str(session)}),
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+
+    assert "- child: 0 fresh" in result.stdout
+
+
+def test_session_status_normalizes_git_root_before_ancestor_boundary(
+    tmp_path: Path,
+) -> None:
+    parent_config = tmp_path / "jaunt.toml"
+    parent_config.write_text("version = 1\n")
+    repo = tmp_path / "repo"
+    session = repo / "nested"
+    session.mkdir(parents=True)
+    alias = tmp_path / "repo-alias"
+    alias.symlink_to(repo, target_is_directory=True)
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    _write_executable(bin_dir / "git", f'echo "{alias}"\n')
+    _write_executable(
+        bin_dir / "jaunt",
+        """if [ "$1" = "--version" ]; then echo "jaunt 1.7.4"; exit 0; fi
+echo '{"command":"status","ok":true,"fresh":[],"stale":[],"orphans":[]}'
+""",
+    )
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin"}
+
+    result = subprocess.run(
+        ["bash", str(PLUGIN / "scripts" / "session-status.sh")],
+        input=json.dumps({"cwd": str(session)}),
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+
+    assert result.stdout == ""
+
+
+def test_session_status_excludes_nested_git_repositories(tmp_path: Path) -> None:
+    if shutil.which("git") is None:  # pragma: no cover
+        pytest.skip("git unavailable")
+    outer = tmp_path / "tracked-home"
+    owned = outer / "packages" / "owned"
+    unrelated = outer / "repos" / "unrelated"
+    owned.mkdir(parents=True)
+    unrelated.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(outer)], check=True)
+    subprocess.run(["git", "init", "-q", str(unrelated)], check=True)
+    (owned / "jaunt.toml").write_text("version = 1\n")
+    (unrelated / "jaunt.toml").write_text("version = 1\n")
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    _write_executable(
+        bin_dir / "jaunt",
+        """if [ "$1" = "--version" ]; then echo "jaunt 1.7.4"; exit 0; fi
+echo '{"command":"status","ok":true,"fresh":[],"stale":[],"orphans":[]}'
+""",
+    )
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin"}
+
+    result = subprocess.run(
+        ["bash", str(PLUGIN / "scripts" / "session-status.sh")],
+        input=json.dumps({"cwd": str(outer)}),
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+
+    assert "- packages/owned: 0 fresh" in result.stdout
+    assert "repos/unrelated" not in result.stdout
+
+
+def test_session_status_excludes_nested_repo_from_non_git_workspace(
+    tmp_path: Path,
+) -> None:
+    if shutil.which("git") is None:  # pragma: no cover
+        pytest.skip("git unavailable")
+    workspace = tmp_path / "workspace"
+    unrelated = workspace / "repos" / "unrelated"
+    unrelated.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(unrelated)], check=True)
+    (workspace / "jaunt.toml").write_text("version = 1\n")
+    (unrelated / "jaunt.toml").write_text("version = 1\n")
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    _write_executable(
+        bin_dir / "jaunt",
+        """if [ "$1" = "--version" ]; then echo "jaunt 1.7.4"; exit 0; fi
+echo '{"command":"status","ok":true,"fresh":[],"stale":[],"orphans":[]}'
+""",
+    )
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin"}
+
+    result = subprocess.run(
+        ["bash", str(PLUGIN / "scripts" / "session-status.sh")],
+        input=json.dumps({"cwd": str(workspace)}),
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+
+    assert "- .: 0 fresh" in result.stdout
+    assert "repos/unrelated" not in result.stdout
 
 
 def _write_executable(path: Path, body: str) -> None:

@@ -5,7 +5,7 @@ expects: edit specs, preview stale or unbuilt work, build through the CLI, and
 review generated output without hand-editing machine-owned files.
 
 It is CLI-backed. There is no MCP server, app connector, or public-directory
-submission in version 1.1.1.
+submission in version 1.1.2.
 
 ## Install
 
@@ -67,9 +67,12 @@ implementations, and sidecars point back to their private `*.jaunt.ts[x]`
 spec. Environment failures, missing configuration, malformed payloads, and
 timeouts fail open. Review the hook source and trust decision in `/hooks`.
 
-The bundled command hooks require Bash (macOS, Linux, or a Windows environment
-that provides Bash). SessionStart runs `jaunt status`, which imports discovered
-spec modules; trust this hook only for workspaces whose Python code you trust.
+The bundled command hooks use Bash when it is available. Both launchers always
+return success to the host, so a missing Bash silently disables the hook instead
+of failing the session. SessionStart stays inside the active Git worktree (or
+nearest parent `jaunt.toml`) and ignores nested Claude/Codex managed worktrees
+and repositories. It runs `jaunt status`, which imports discovered spec modules;
+trust this hook only for workspaces whose Python code you trust.
 CLI calls prefer a compatible installed `jaunt`, use the existing uv environment for a uv
 project, and otherwise use `uvx jaunt`, so JavaScript-only projects do not need
 a `pyproject.toml`.

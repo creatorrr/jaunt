@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${PLUGIN_ROOT}/scripts/codex-guard.sh\"",
+            "command": "bash \"${PLUGIN_ROOT}/scripts/codex-guard.sh\"; exit 0",
             "timeout": 10,
             "statusMessage": "Checking Jaunt-owned files"
           }
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${PLUGIN_ROOT}/scripts/session-status.sh\"",
+            "command": "bash \"${PLUGIN_ROOT}/scripts/session-status.sh\"; exit 0",
             "timeout": 120,
             "statusMessage": "Checking Jaunt workspace freshness"
           }
