@@ -163,13 +163,89 @@ export function slugify(title: string, options?: SlugOptions): string {
     expect(session.analyzeContracts().modules).toHaveLength(1);
   });
 
-  test("scoped bootstrap ignores unrelated project diagnostics", async () => {
+  test.each(["auto", "force"] as const)(
+    "scoped bootstrap ignores unrelated project diagnostics with %s module detection",
+    async (moduleDetection) => {
+      const workspace = createFixtureWorkspace();
+      roots.push(workspace.root);
+      writeFileSync(
+        resolve(workspace.root, "src/unrelated.ts"),
+        'const broken: number = "not-a-number";\nvoid broken;\n',
+      );
+      const tsconfigPath = resolve(workspace.root, "tsconfig.json");
+      const tsconfig = JSON.parse(readFileSync(tsconfigPath, "utf8")) as {
+        compilerOptions: Record<string, unknown>;
+      };
+      tsconfig.compilerOptions.moduleDetection = moduleDetection;
+      writeFileSync(tsconfigPath, `${JSON.stringify(tsconfig, null, 2)}\n`);
+      const session = await AnalyzerSession.create({
+        root: workspace.root,
+        projects: ["tsconfig.json"],
+        testProjects: [],
+        sourceRoots: ["src"],
+        testRoots: ["tests"],
+        generatedDir: "__generated__",
+        toolOwner: ".",
+        compilerModulePath: workspace.compilerModulePath,
+        clientVersion: "test",
+        toolVersion: "test",
+      });
+      const contract = session.analyzeContracts().modules[0]!;
+      const metadata = session.metadata();
+
+      const scoped = session.validateOverlay({
+        sessionId: metadata.sessionId,
+        expectedEpoch: metadata.epoch,
+        expectedSnapshot: metadata.snapshot,
+        candidates: {},
+        moduleIds: [contract.moduleId],
+        syncModuleIds: [contract.moduleId],
+        scopeToModuleIds: true,
+      });
+      const full = session.validateOverlay({
+        sessionId: metadata.sessionId,
+        expectedEpoch: metadata.epoch,
+        expectedSnapshot: metadata.snapshot,
+        candidates: {},
+        moduleIds: [contract.moduleId],
+        syncModuleIds: [contract.moduleId],
+      });
+
+      expect(scoped.valid, JSON.stringify(scoped.diagnostics)).toBe(true);
+      expect(full.valid).toBe(false);
+      expect(full.diagnostics).toContainEqual(
+        expect.objectContaining({ code: "TS2322", path: "src/unrelated.ts" }),
+      );
+    },
+  );
+
+  test("scoped bootstrap honors JSX auto-module detection", async () => {
     const workspace = createFixtureWorkspace();
     roots.push(workspace.root);
+    const packagePath = resolve(workspace.root, "package.json");
+    const packageJson = JSON.parse(readFileSync(packagePath, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    packageJson.type = "commonjs";
+    writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);
     writeFileSync(
-      resolve(workspace.root, "src/unrelated.ts"),
-      'const broken: number = "not-a-number";\nvoid broken;\n',
+      resolve(workspace.root, "src/unrelated.jsx"),
+      '/** @type {number} */ const broken = "not-a-number";\nconst view = <div />;\nvoid broken; void view;\n',
     );
+    const tsconfigPath = resolve(workspace.root, "tsconfig.json");
+    const tsconfig = JSON.parse(readFileSync(tsconfigPath, "utf8")) as {
+      compilerOptions: Record<string, unknown>;
+      include: string[];
+    };
+    Object.assign(tsconfig.compilerOptions, {
+      allowJs: true,
+      checkJs: true,
+      jsx: "react-jsx",
+      moduleDetection: "auto",
+    });
+    tsconfig.include = ["src/**/*"];
+    writeFileSync(tsconfigPath, `${JSON.stringify(tsconfig, null, 2)}\n`);
     const session = await AnalyzerSession.create({
       root: workspace.root,
       projects: ["tsconfig.json"],
@@ -184,29 +260,25 @@ export function slugify(title: string, options?: SlugOptions): string {
     });
     const contract = session.analyzeContracts().modules[0]!;
     const metadata = session.metadata();
+    const request = {
+      sessionId: metadata.sessionId,
+      expectedEpoch: metadata.epoch,
+      expectedSnapshot: metadata.snapshot,
+      candidates: {},
+      moduleIds: [contract.moduleId],
+      syncModuleIds: [contract.moduleId],
+    } as const;
 
     const scoped = session.validateOverlay({
-      sessionId: metadata.sessionId,
-      expectedEpoch: metadata.epoch,
-      expectedSnapshot: metadata.snapshot,
-      candidates: {},
-      moduleIds: [contract.moduleId],
-      syncModuleIds: [contract.moduleId],
+      ...request,
       scopeToModuleIds: true,
     });
-    const full = session.validateOverlay({
-      sessionId: metadata.sessionId,
-      expectedEpoch: metadata.epoch,
-      expectedSnapshot: metadata.snapshot,
-      candidates: {},
-      moduleIds: [contract.moduleId],
-      syncModuleIds: [contract.moduleId],
-    });
+    const full = session.validateOverlay(request);
 
     expect(scoped.valid, JSON.stringify(scoped.diagnostics)).toBe(true);
     expect(full.valid).toBe(false);
     expect(full.diagnostics).toContainEqual(
-      expect.objectContaining({ code: "TS2322", path: "src/unrelated.ts" }),
+      expect.objectContaining({ path: "src/unrelated.jsx" }),
     );
   });
 
@@ -277,7 +349,11 @@ export function slugify(model: Model): string { return jaunt.magic(); }
     );
     writeFileSync(
       resolve(workspace.root, "src/global-script.ts"),
-      "interface AmbientMarker { readonly marker?: true; }\n",
+      `interface AmbientMarker { readonly marker?: true; }
+class AmbientClass { readonly value = "ambient"; }
+function ambientFunction(): AmbientClass { return new AmbientClass(); }
+const ambientValue = ambientFunction();
+`,
     );
     const tsconfigPath = resolve(workspace.root, "tsconfig.json");
     const tsconfig = JSON.parse(readFileSync(tsconfigPath, "utf8")) as {
@@ -290,7 +366,10 @@ export function slugify(model: Model): string { return jaunt.magic(); }
       `import * as jaunt from "@usejaunt/ts/spec";
 jaunt.magicModule();
 /** Return ambient text unchanged. */
-export function slugify(value: AmbientText & AmbientMarker): AmbientText { return jaunt.magic(); }
+export function slugify(
+  value: AmbientText & AmbientMarker & AmbientClass,
+  current: typeof ambientValue,
+): ReturnType<typeof ambientFunction> { return jaunt.magic(); }
 `,
     );
     const session = await AnalyzerSession.create({

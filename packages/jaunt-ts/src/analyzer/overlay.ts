@@ -149,12 +149,28 @@ function globalDeclarationRoots(
     if (/\.d\.[cm]?ts$/.test(path)) return true;
     const source = compiler.sys.readFile(path);
     if (source === undefined) return false;
+    const moduleDetectionCompiler = compiler as typeof compiler & {
+      getSetExternalModuleIndicator(
+        options: ts.CompilerOptions,
+      ): (file: ts.SourceFile) => void;
+    };
     const sourceFile = compiler.createSourceFile(
       path,
       source,
-      compiler.ScriptTarget.Latest,
+      {
+        languageVersion: compiler.ScriptTarget.Latest,
+        impliedNodeFormat: compiler.getImpliedNodeFormatForFile(
+          path,
+          undefined,
+          compiler.sys,
+          project.parsed.options,
+        ),
+        setExternalModuleIndicator:
+          moduleDetectionCompiler.getSetExternalModuleIndicator(
+            project.parsed.options,
+          ),
+      },
       true,
-      path.endsWith(".tsx") ? compiler.ScriptKind.TSX : compiler.ScriptKind.TS,
     );
     const externalModule = (
       sourceFile as ts.SourceFile & { externalModuleIndicator?: ts.Node }
@@ -162,7 +178,10 @@ function globalDeclarationRoots(
     if (externalModule === undefined) {
       return sourceFile.statements.some((statement) => {
         if (
+          compiler.isClassDeclaration(statement) ||
+          compiler.isFunctionDeclaration(statement) ||
           compiler.isInterfaceDeclaration(statement) ||
+          compiler.isVariableStatement(statement) ||
           compiler.isTypeAliasDeclaration(statement) ||
           compiler.isModuleDeclaration(statement) ||
           compiler.isEnumDeclaration(statement)
