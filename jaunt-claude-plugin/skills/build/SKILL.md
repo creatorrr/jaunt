@@ -53,10 +53,21 @@ bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" --run 
 
 Review `newly_governed` before accepting the result.
 
+For a TypeScript build, inspect `candidate_outcomes` for every attempted module.
+`attempts`, `retry_count`, `retry_reasons`, and `phase` distinguish a repaired
+candidate from an exhausted budget. Jaunt performs final conformance retries
+inside this command and charges each attempt separately. Do not rerun an
+unchanged failed target just to consume the same budget again; fix the spec or
+its explicit module prompt when the reported reason is contractual.
+
+If the command reports a deterministic worker heap OOM, do not replay it
+unchanged. Set `[target.ts].worker_heap_mb` to a deliberate MiB limit and rerun
+once. `NODE_OPTIONS` is intentionally not forwarded to the worker.
+
 ## 4. Gate the result
 
 1. Surface advisories verbatim.
-2. Report the actual cost from the completed build.
+2. Report the actual cost and per-module attempt outcome from the completed build.
 3. Run `check` through the selected runner.
 4. Run the package's unchanged tests and target checks: Ruff/ty for Python;
    TypeScript typecheck, emit, and Vitest for TypeScript.

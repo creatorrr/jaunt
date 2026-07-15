@@ -8,6 +8,10 @@ When `_context/dependencies.json` exists, it is the allowlist of public Jaunt fa
 the candidate may import; use each listed runtime `facadeSpecifier` and never its
 private spec, API mirror, or generated implementation path.
 
+Keep same-module helpers in this candidate and call its reserved bindings by bare
+name. Private input types must preserve the API mirror's optional and nullable
+property shapes exactly; do not make an optional public property required.
+
 Write the complete candidate to `{{target_path}}`. Define every binding listed in
 `{{reserved_bindings}}` and no exports. Match the owning project's module convention:
 `{{module_kind}}` with `{{module_resolution}}` resolution. Source import specifiers

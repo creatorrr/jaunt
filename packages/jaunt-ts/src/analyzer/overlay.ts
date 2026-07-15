@@ -859,6 +859,7 @@ export function validateModuleOverlay(
   preflightCandidates: Readonly<Record<string, string>> = {},
   programCache?: OverlayProgramCache,
   scopedRoots = false,
+  consumerRoots: readonly string[] = [],
 ): OverlayValidation {
   const composed = composeCandidate(
     compiler,
@@ -873,7 +874,7 @@ export function validateModuleOverlay(
       preflightModules,
     ),
   );
-  const apiSource = renderApiMirror(ir);
+  const apiSource = renderApiMirror(compiler, ir);
   const overlay = new Map<string, string>();
   const apiPath = absolute(root, ir.apiMirrorPath);
   const implementationPath = absolute(root, ir.implementationPath);
@@ -925,7 +926,7 @@ export function validateModuleOverlay(
       project,
       ir,
       overlay,
-      [],
+      consumerRoots,
       moduleValidationRoots(root, project, ir, overlay, preflightModules),
       referencedModulePaths(root, project, preflightModules),
       programCache,
@@ -990,8 +991,9 @@ export function validateSyncOverlay(
   preflightCandidates: Readonly<Record<string, string>> = {},
   programCache?: OverlayProgramCache,
   scopedRoots = false,
+  consumerRoots: readonly string[] = [],
 ): OverlayValidation {
-  const apiSource = renderApiMirror(ir);
+  const apiSource = renderApiMirror(compiler, ir);
   const apiPath = absolute(root, ir.apiMirrorPath);
   const implementationPath = absolute(root, ir.implementationPath);
   const facadePath = absolute(root, ir.facadePath);
@@ -1088,7 +1090,7 @@ export function validateSyncOverlay(
       project,
       ir,
       overlay,
-      [],
+      consumerRoots,
       moduleValidationRoots(root, project, ir, overlay, preflightModules),
       referencedModulePaths(root, project, preflightModules),
       programCache,
@@ -1171,7 +1173,7 @@ function addPreflightModules(
     const apiPath = absolute(root, module.apiMirrorPath);
     const implementationPath = absolute(root, module.implementationPath);
     const facadePath = absolute(root, module.facadePath);
-    overlay.set(apiPath, renderApiMirror(module));
+    overlay.set(apiPath, renderApiMirror(compiler, module));
     const candidate = candidates[module.moduleId];
     if (candidate !== undefined) {
       overlay.set(
@@ -1202,10 +1204,14 @@ export function validateProjectOverlayClosure(
   affectedIds: readonly string[],
   programCache?: OverlayProgramCache,
   scopedRoots = false,
+  consumerRoots: readonly string[] = [],
 ): readonly DiagnosticRecord[] {
   const overlay = new Map<string, string>();
   for (const module of modules) {
-    overlay.set(absolute(root, module.apiMirrorPath), renderApiMirror(module));
+    overlay.set(
+      absolute(root, module.apiMirrorPath),
+      renderApiMirror(compiler, module),
+    );
     const implementationPath = absolute(root, module.implementationPath);
     const candidate = candidates[module.moduleId];
     overlay.set(
@@ -1265,10 +1271,16 @@ export function validateProjectOverlayClosure(
         absolute(root, module.facadePath),
       ]);
     const ambientRoots = globalDeclarationRoots(compiler, project);
+    const projectFiles = new Set(
+      project.parsed.fileNames.map((path) => resolve(path)),
+    );
+    const ownedConsumerRoots = consumerRoots.filter((path) =>
+      projectFiles.has(resolve(path)),
+    );
     const roots = [
       ...new Set(
         scopedRoots
-          ? [...ambientRoots, ...ownedOverlayRoots]
+          ? [...ambientRoots, ...ownedOverlayRoots, ...ownedConsumerRoots]
           : [...project.parsed.fileNames, ...ownedOverlayRoots],
       ),
     ];

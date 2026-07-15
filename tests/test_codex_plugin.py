@@ -21,7 +21,7 @@ CLAUDE_PLUGIN = REPO / "jaunt-claude-plugin"
 def test_manifest_and_marketplace_shape() -> None:
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text())
     assert manifest["name"] == "jaunt"
-    assert manifest["version"] == "1.1.3"
+    assert manifest["version"] == "1.1.4"
     assert "TypeScript" in manifest["description"]
     assert manifest["skills"] == "./skills/"
     assert "hooks" not in manifest

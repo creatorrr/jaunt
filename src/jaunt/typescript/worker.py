@@ -83,6 +83,10 @@ class WorkerCrashedError(TypeScriptWorkerError):
     """The worker exited before completing a request."""
 
 
+class WorkerOutOfMemoryError(WorkerCrashedError):
+    """The Node analyzer exhausted its configured heap."""
+
+
 class WorkerRemoteError(TypeScriptWorkerError):
     """A well-formed worker response reported an operation failure."""
 
@@ -503,6 +507,7 @@ class WorkerClient:
         max_message_bytes: int = _DEFAULT_MAX_MESSAGE_BYTES,
         stderr_limit: int = _DEFAULT_STDERR_BYTES,
         environ: Mapping[str, str] | None = None,
+        heap_mb: int | None = None,
     ) -> None:
         self.root = root.resolve()
         self.installation = installation
@@ -511,6 +516,7 @@ class WorkerClient:
         self.max_message_bytes = max_message_bytes
         self.stderr_limit = stderr_limit
         self._environment = worker_environment(environ)
+        self.heap_mb = heap_mb
         self._process: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
@@ -545,8 +551,10 @@ class WorkerClient:
         kwargs: dict[str, Any] = {}
         if os.name == "posix":
             kwargs["start_new_session"] = True
+        node_args = [f"--max-old-space-size={self.heap_mb}"] if self.heap_mb is not None else []
         self._process = await asyncio.create_subprocess_exec(
             self.installation.node,
+            *node_args,
             str(self.installation.worker_entry),
             cwd=str(self.root),
             env=self._environment,
@@ -619,7 +627,9 @@ class WorkerClient:
                 timeout=timeout,
                 deadline_ms=deadline_ms,
             )
-        except WorkerCrashedError:
+        except WorkerCrashedError as error:
+            if self._is_out_of_memory(error):
+                raise WorkerOutOfMemoryError(self._oom_message(method)) from error
             if method not in _CRASH_REPLAY_METHODS or self._initialize_params is None:
                 raise
             await self._restart_and_initialize(failed_generation)
@@ -819,6 +829,10 @@ class WorkerClient:
             return
 
         returncode = await process.wait()
+        stderr_task = self._stderr_task
+        if stderr_task is not None and stderr_task is not asyncio.current_task():
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await stderr_task
         if self._pending:
             self._fail_pending(WorkerCrashedError(self._crash_message(returncode)))
 
@@ -843,6 +857,28 @@ class WorkerClient:
         if self.stderr:
             message += f"\nstderr:\n{self.stderr}"
         return message
+
+    @staticmethod
+    def _is_out_of_memory(error: BaseException) -> bool:
+        message = str(error).lower()
+        return "fatal error" in message and any(
+            marker in message
+            for marker in (
+                "heap out of memory",
+                "reached heap limit",
+                "allocation failed - javascript heap",
+            )
+        )
+
+    def _oom_message(self, method: str) -> str:
+        configured = f"{self.heap_mb} MiB" if self.heap_mb is not None else "Node's default"
+        return (
+            f"TypeScript worker exhausted {configured} heap during {method!r}; "
+            "the deterministic request was not replayed. Jaunt batches scoped overlay "
+            "validation; if this project's dependency closure still exceeds the default, "
+            "set [target.ts].worker_heap_mb to a larger MiB value."
+            + (f"\nstderr:\n{self.stderr}" if self.stderr else "")
+        )
 
     async def _terminate(self) -> None:
         await self._kill_process()

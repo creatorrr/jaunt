@@ -25,6 +25,7 @@ from jaunt.typescript.builder import (
     WorkerFactory,
     _diagnostic,
     _module_id,
+    _module_closure_ids,
     _module_path,
     _path_hash,
     _safe_path,
@@ -37,6 +38,7 @@ from jaunt.typescript.builder import (
 from jaunt.typescript.upgrade import compatible_semantic_modules
 
 _PLACEHOLDER_MARKERS = ("state=unbuilt", 'state = "unbuilt"', "state: unbuilt")
+_STATUS_BATCH_SIZE = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -507,17 +509,31 @@ async def run_status(
         module_ids = tuple(_module_id(module) for module in analysis.modules)
         validation_diagnostics: tuple[TargetDiagnostic, ...] = ()
         if module_ids:
-            validated = await validate_overlay(
-                client,
-                analysis,
-                {},
-                module_ids,
-                sync_module_ids=module_ids,
-                scoped_validation=bool(target_ids),
-            )
-            validation_diagnostics = tuple(
-                _diagnostic(diagnostic) for diagnostic in validated.diagnostics
-            )
+            unique: dict[tuple[object, ...], TargetDiagnostic] = {}
+            for index in range(0, len(module_ids), _STATUS_BATCH_SIZE):
+                batch = module_ids[index : index + _STATUS_BATCH_SIZE]
+                closure = _module_closure_ids(analysis.modules, batch)
+                validated = await validate_overlay(
+                    client,
+                    analysis,
+                    {},
+                    closure,
+                    sync_module_ids=batch,
+                    scoped_validation=True,
+                    baseline_unselected=True,
+                )
+                for raw in validated.diagnostics:
+                    diagnostic = _diagnostic(raw)
+                    key = (
+                        diagnostic.code,
+                        diagnostic.message,
+                        diagnostic.severity,
+                        diagnostic.path,
+                        diagnostic.line,
+                        diagnostic.column,
+                    )
+                    unique.setdefault(key, diagnostic)
+            validation_diagnostics = tuple(unique.values())
         params: dict[str, Any] = {}
         if target_ids:
             params["moduleIds"] = list(target_ids)

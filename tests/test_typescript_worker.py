@@ -15,6 +15,7 @@ from jaunt.typescript.worker import (
     WorkerClient,
     WorkerCrashedError,
     WorkerInstallation,
+    WorkerOutOfMemoryError,
     WorkerProtocolError,
     WorkerRemoteError,
     WorkerTimeoutError,
@@ -413,6 +414,116 @@ for line in sys.stdin:
         result = await client.request("analyzeWorkspace", {})
         assert result["method"] == "analyzeWorkspace"
         assert marker.read_text() == "crashed"
+        await client.close()
+
+    asyncio.run(run())
+
+
+def test_worker_client_does_not_replay_deterministic_heap_oom(tmp_path: Path) -> None:
+    marker = tmp_path / "validate-count"
+    installation = _installation(
+        tmp_path,
+        f'''\
+import json
+import os
+import pathlib
+import sys
+
+marker = pathlib.Path({str(marker)!r})
+stamp = {{"sessionId": "s", "epoch": 0, "snapshot": "same", "inputHashes": {{}}}}
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request["method"]
+    if method == "initialize":
+        result = {{
+            "workerVersion": "0.1",
+            "protocol": "{PROTOCOL_VERSION}",
+            "typescriptVersion": "6.0.2",
+            "capabilities": {list(REQUIRED_WORKER_CAPABILITIES)!r},
+            **stamp,
+        }}
+    elif method == "validateOverlay":
+        count = int(marker.read_text()) + 1 if marker.exists() else 1
+        marker.write_text(str(count))
+        sys.stderr.write(
+            "FATAL ERROR: Reached heap limit Allocation failed - "
+            "JavaScript heap out of memory\\n"
+        )
+        sys.stderr.flush()
+        os._exit(134)
+    else:
+        result = {{"method": method, **stamp}}
+    print(json.dumps({{
+        "protocol": "{PROTOCOL_VERSION}",
+        "id": request["id"],
+        "ok": True,
+        "result": result,
+    }}), flush=True)
+''',
+    )
+
+    async def run() -> None:
+        client = WorkerClient(root=tmp_path, installation=installation)
+        await client.initialize(_initialize_params(tmp_path))
+        with pytest.raises(WorkerOutOfMemoryError, match="was not replayed"):
+            await client.request("validateOverlay", {})
+        assert marker.read_text() == "1"
+        await client.close()
+
+    asyncio.run(run())
+
+
+def test_worker_client_waits_for_delayed_stderr_before_classifying_oom(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "validate-count"
+    installation = _installation(
+        tmp_path,
+        f'''\
+import json
+import os
+import pathlib
+import sys
+
+marker = pathlib.Path({str(marker)!r})
+stamp = {{"sessionId": "s", "epoch": 0, "snapshot": "same", "inputHashes": {{}}}}
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request["method"]
+    if method == "initialize":
+        result = {{
+            "workerVersion": "0.1",
+            "protocol": "{PROTOCOL_VERSION}",
+            "typescriptVersion": "6.0.2",
+            "capabilities": {list(REQUIRED_WORKER_CAPABILITIES)!r},
+            **stamp,
+        }}
+    elif method == "validateOverlay":
+        count = int(marker.read_text()) + 1 if marker.exists() else 1
+        marker.write_text(str(count))
+        sys.stderr.write("FATAL ERROR: JavaScript heap out of memory\\n")
+        sys.stderr.flush()
+        os._exit(134)
+    print(json.dumps({{
+        "protocol": "{PROTOCOL_VERSION}",
+        "id": request["id"],
+        "ok": True,
+        "result": result,
+    }}), flush=True)
+''',
+    )
+
+    class DelayedStderrClient(WorkerClient):
+        async def _read_stderr(self) -> None:
+            await asyncio.sleep(0.05)
+            await super()._read_stderr()
+
+    async def run() -> None:
+        client = DelayedStderrClient(root=tmp_path, installation=installation)
+        await client.initialize(_initialize_params(tmp_path))
+        with pytest.raises(WorkerOutOfMemoryError, match="was not replayed"):
+            await client.request("validateOverlay", {})
+        assert marker.read_text() == "1"
         await client.close()
 
     asyncio.run(run())

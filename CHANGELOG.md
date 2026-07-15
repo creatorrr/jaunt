@@ -3,6 +3,39 @@
 All notable changes to jaunt. Generated from conventional commits by
 [git-cliff](https://git-cliff.org); one section per published PyPI release.
 
+## [1.7.6] - 2026-07-15
+
+### Fixes
+
+- Feed final TypeScript unit-conformance failures back into the remaining generation
+  budget. The rejected candidate is retained as the repair seed, same-module private
+  imports and TS2322 optionality drift receive exact diagnostics, and build JSON reports
+  per-module attempts, retry counts/reasons, and terminal phase.
+- Run paid Codex generation without user-level Codex configuration. Project-seeded
+  skills and explicit Jaunt Codex settings remain available, while unrelated MCPs,
+  plugins, and hooks no longer inflate target prompts or fail inside generation. Older
+  Codex CLIs that reject the hermetic flag fall back once before any model call.
+- Prune type and runtime imports that are not used by the public TypeScript declaration
+  surface. Strict `noUnusedLocals` projects no longer reject API mirrors for dependencies
+  needed only by the eventual implementation.
+- Validate full-workspace TypeScript status and sync operations in scoped dependency
+  batches, deduplicate repeated diagnostics, and attribute sync failures to the owning
+  module without poisoning independent batches. Candidate landing scopes retain reverse
+  handwritten consumers so a proposed public API cannot land while breaking application
+  code; model-free target bootstrap remains isolated from unrelated consumers.
+- Charge every TypeScript repair attempt as a distinct API call and enforce the cost
+  ceiling between attempts instead of only after their aggregate returns.
+- Release compiler Program state between scoped overlay batches. A validated
+  `[target.ts].worker_heap_mb` setting provides a supported Node heap override, and a
+  deterministic heap OOM is reported once with the active request instead of replayed.
+
+### Packages
+
+- Publish `@usejaunt/ts` `0.1.0-alpha.5` with strict mirror pruning and bounded overlay
+  compiler state.
+- Publish Codex plugin `1.1.4` and Claude Code plugin `1.2.4` with
+  attempt-outcome, deterministic-OOM, and hermetic-generation guidance.
+
 ## [1.7.5] - 2026-07-15
 
 ### Fixes

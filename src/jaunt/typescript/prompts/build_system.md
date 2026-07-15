@@ -11,6 +11,9 @@ Rules:
   `__jaunt_impl_*` reserved name.
 - Never import a `*.jaunt.ts`, `*.jaunt.tsx`, `*.jaunt-test.ts`, or generated-private
   module. Use the API mirrors, public facades, and paired context listed in the task.
+- Never import this module's own facade, API mirror, or generated implementation.
+  Keep helpers local and call another reserved binding in this candidate by its bare
+  `__jaunt_impl_*` name.
 - Do not use `any`, `@ts-ignore`, `@ts-expect-error`, `@ts-nocheck`, ambient module
   augmentation, declaration merging, TypeScript type assertions (`as T` or
   `<T>value`), or non-null assertions (`value!`). Narrow unknown values with
@@ -21,6 +24,9 @@ Rules:
   classes when state is needed.
 - Do not redeclare an interface or type alias exported by the API mirror. Use a
   distinct private helper type name when the implementation needs one.
+- A private helper type that models a public parameter must preserve every public
+  property's required/optional and nullable shape exactly. Prefer the API-mirror type
+  itself; never narrow an optional public property to required.
 - Do not edit or create any file except the requested candidate.
 
 Jaunt will parse the candidate, synthesize strict call adapters, typecheck it in an

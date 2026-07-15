@@ -1132,6 +1132,90 @@ async def test_build_reuses_accepted_candidate_after_final_overlay_internal_erro
 
 
 @pytest.mark.asyncio
+async def test_build_repairs_candidate_rejected_by_final_unit_conformance(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+
+    class FinalConformanceWorker(FakeWorker):
+        async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            if (
+                method == "validateOverlay"
+                and params.get("baselineUnselected")
+                and "__FINAL_FAIL__" in str(params.get("candidates", {}))
+            ):
+                return {
+                    **self._stamp(),
+                    "valid": False,
+                    "artifacts": [],
+                    "diagnostics": [
+                        {
+                            "code": "TS2322",
+                            "severity": "error",
+                            "message": "optional content_blocks was narrowed to required",
+                            "path": "src/__generated__/math.ts",
+                        },
+                        {
+                            "code": "TS2322",
+                            "severity": "error",
+                            "message": "optional content_blocks was narrowed to required",
+                            "path": "src/__generated__/math.ts",
+                        },
+                    ],
+                    "affectedProjects": ["tsconfig.json"],
+                }
+            return await super().request(method, params)
+
+    class RepairingGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls = 0
+            self.feedback: list[list[str] | None] = []
+
+        async def generate_request(
+            self,
+            request: GenerationRequest,
+            **kwargs: Any,
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            extra_error_context = kwargs.get("extra_error_context")
+            self.calls += 1
+            self.feedback.append(
+                extra_error_context if isinstance(extra_error_context, list) else None
+            )
+            source = (
+                "const __FINAL_FAIL__ = true;\n"
+                if self.calls == 1
+                else "const __jaunt_impl_double = (value: number): number => value * 2;\n"
+            )
+            return source, TokenUsage(2, 1, "fake-ts", "fake"), ()
+
+    generator = RepairingGenerator()
+    report = await run_build(
+        tmp_path,
+        config,
+        generator=generator,
+        worker_factory=lambda *_: FinalConformanceWorker(tmp_path),
+        repo_map_enabled=False,
+        auto_skills_enabled=False,
+    )
+
+    assert report.exit_code == 0
+    assert generator.calls == 2
+    assert generator.feedback[1] == [
+        "previous output errors: TS2322: optional content_blocks was narrowed to required "
+        "(src/__generated__/math.ts)"
+    ]
+    outcome = report.metadata["candidate_outcomes"]["ts:src/math"]
+    assert outcome == {
+        "attempts": 2,
+        "retry_count": 1,
+        "retry_reasons": (
+            "TS2322: optional content_blocks was narrowed to required (src/__generated__/math.ts)",
+        ),
+        "phase": "committed",
+    }
+
+
+@pytest.mark.asyncio
 async def test_build_bounds_parallel_generation_by_jobs_and_owner_units(tmp_path: Path) -> None:
     config = _config(tmp_path)
     modules = [

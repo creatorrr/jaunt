@@ -95,6 +95,29 @@ record; version-1 errors remain strings.
   that has no artifact yet: `{module: [symbol, ...]}`. Those modules build on the
   next run.
 
+A version-2 TypeScript build adds `candidate_outcomes` for every module that
+entered model generation:
+
+```json
+{
+  "candidate_outcomes": {
+    "ts:src/detect/index": {
+      "attempts": 2,
+      "retry_count": 1,
+      "retry_reasons": [
+        "TS2322: optional content_blocks was narrowed to required (src/detect/__generated__/index.ts)"
+      ],
+      "phase": "committed"
+    }
+  }
+}
+```
+
+`attempts` counts paid candidate calls, including final transaction repair.
+`retry_reasons` is deduplicated in encounter order. `phase` is `committed` or
+`failed`. The top-level `cost.api_calls` charges every attempt separately, and
+the configured build cost ceiling is checked before another retry begins.
+
 ## status
 
 ```json

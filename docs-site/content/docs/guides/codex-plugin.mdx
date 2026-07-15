@@ -4,7 +4,7 @@ description: "Install Jaunt's Codex plugin for workspace-aware build skills, fre
 ---
 
 Jaunt's Codex plugin packages five CLI-backed skills and two hooks. It does not
-run an MCP server or app connector. Version 1.1.2 is distributed from this
+run an MCP server or app connector. Version 1.1.4 is distributed from this
 repository's `.agents/plugins/marketplace.json`.
 
 ## Install
@@ -77,6 +77,19 @@ The plugin reports Jaunt's current reasons without fixed price estimates:
 | `stub` | deterministic `.pyi` re-emission when implementation inputs are unchanged |
 
 The build skill reports the actual cost after the command completes.
+
+For TypeScript, the build skill also reads per-module `candidate_outcomes`.
+Jaunt performs final conformance repair inside the advertised attempt budget,
+so the plugin does not recommend an unchanged paid rerun after that budget is
+exhausted. Deterministic worker heap failures point to
+`[target.ts].worker_heap_mb`; the workflow does not replay them or suggest
+`NODE_OPTIONS`.
+
+Current Codex CLIs keep Jaunt's paid subprocesses separate from user plugin
+hooks and MCP configuration through `--ignore-user-config`. This prevents the
+installed Jaunt plugin from loading recursively during a build. Older CLIs that
+reject the flag fall back before the model call; upgrade Codex to restore the
+hermetic path.
 
 ## Hooks
 

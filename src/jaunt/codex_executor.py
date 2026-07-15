@@ -80,6 +80,7 @@ class CodexExecutor(AgentExecutor):
                     model=self._model,
                     reasoning_effort=self._codex.reasoning_effort,
                     extra_config=dict(self._codex.config or {}),
+                    ignore_user_config=True,
                 )
             except Exception as e:
                 output = ""

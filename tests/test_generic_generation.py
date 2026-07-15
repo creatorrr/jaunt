@@ -84,11 +84,13 @@ def test_codex_generic_request_writes_only_safe_workspace_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     observed: dict[str, str] = {}
+    flags: dict[str, bool] = {}
 
     async def fake_exec(**kwargs):
         cwd = Path(kwargs["cwd"])
         observed["context"] = (cwd / "_context/spec.ts").read_text(encoding="utf-8")
         observed["prompt"] = kwargs["prompt"]
+        flags["ignore_user_config"] = kwargs["ignore_user_config"]
         (cwd / "out").mkdir(exist_ok=True)
         (cwd / "out/index.ts").write_text("export const answer = 42;\n", encoding="utf-8")
         return CodexExecResult(
@@ -120,6 +122,7 @@ def test_codex_generic_request_writes_only_safe_workspace_paths(
     assert advisories == ()
     assert observed["context"].startswith("export declare")
     assert "out/index.ts" in observed["prompt"]
+    assert flags["ignore_user_config"] is True
 
 
 def test_codex_generic_request_rejects_workspace_escape() -> None:

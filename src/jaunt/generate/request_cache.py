@@ -12,6 +12,7 @@ from jaunt.generate.base import (
     GenerationRequest,
     GenerationResult,
     GeneratorBackend,
+    TokenUsage,
     generation_request_cache_key,
 )
 
@@ -70,6 +71,8 @@ async def generate_request_cached(
     response_cache: ResponseCache | None = None,
     cost_tracker: CostTracker | None = None,
     progress: RequestProgress | None = None,
+    usage_callback: Callable[[TokenUsage], None] | None = None,
+    usage_label: str | None = None,
     cached_validator: CacheValidator | None = None,
     store: bool = True,
 ) -> GenerationResult:
@@ -111,10 +114,20 @@ async def generate_request_cached(
             if progress is not None:
                 progress("cache rejected", errors[0] if errors else "validation failed")
 
+    attempt_usage_callback = usage_callback
+    if attempt_usage_callback is None and cost_tracker is not None:
+
+        def record_usage(usage: TokenUsage) -> None:
+            cost_tracker.record(usage_label or request.target_path, usage)
+            cost_tracker.check_budget()
+
+        attempt_usage_callback = record_usage
+
     result = await backend.generate_request_with_retry(
         request,
         max_attempts=max_attempts,
         progress=progress,
+        usage_callback=attempt_usage_callback,
     )
     if result.source is None or result.errors:
         return result

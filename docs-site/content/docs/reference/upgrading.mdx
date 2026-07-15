@@ -12,6 +12,28 @@ invalidate built modules. The exception is a correctness repair for artifacts
 whose provenance was previously marked fresh incorrectly; that safety migration
 is called out explicitly below.
 
+## 1.7.6
+
+Pair Jaunt 1.7.6 with `@usejaunt/ts` 0.1.0-alpha.5. Existing alpha.4
+implementations with valid semantic-environment proof recompose through the
+current worker without a model call; matching Vitest batteries are reheadered
+and rerun. If the saved proof is missing or the dependency contract changed,
+`status` reports the normal rebuild reason instead.
+
+- Final TypeScript conformance failures now consume the remaining per-module
+  attempt budget. Build JSON reports `candidate_outcomes`, and cost accounting
+  records each attempt instead of one aggregate call.
+- Strict API mirrors drop implementation-only imports. Status and sync validate
+  bounded dependency batches and release compiler program state between
+  batches.
+- Large projects can set `[target.ts].worker_heap_mb`. Jaunt passes the limit
+  directly to Node, distinguishes heap OOMs from timeouts and missing tooling,
+  and never replays a deterministic OOM.
+- Paid Codex subprocesses ignore user Codex configuration on current CLIs, so
+  unrelated hooks, plugins, and MCP tools do not inflate generation context.
+- Refresh the companion plugins to Codex 1.1.4 or Claude Code 1.2.4, then start
+  a new host session. Loaded sessions keep their old skill and hook snapshot.
+
 ## 1.7.0
 
 Jaunt 1.7 adds the first alpha TypeScript target. The Python package is now

@@ -3514,15 +3514,13 @@ async def run_test(
                 generation_fingerprint=cache_fingerprint,
                 response_cache=cache_for_request,
                 cost_tracker=cost,
+                usage_label=key,
                 progress=lambda stage, detail, path=request.target_path: _progress_phase(
                     progress, path, stage, detail
                 ),
                 cached_validator=validate_candidate,
                 store=False,
             )
-            if result.usage is not None:
-                cost.record(key, result.usage)
-                cost.check_budget()
             if result.source is None or result.errors:
                 failed[key] = tuple(
                     TargetDiagnostic(code="JAUNT_TS_TEST_GENERATION", message=error)

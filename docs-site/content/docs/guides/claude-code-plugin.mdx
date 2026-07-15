@@ -3,7 +3,7 @@ title: Claude Code Plugin
 description: "Install Jaunt's Claude Code plugin for workspace-aware build skills, freshness context, and generated-file approval guards."
 ---
 
-Version 1.2.2 supports version-2 TypeScript targets in the Claude Code
+Version 1.2.4 supports version-2 TypeScript targets in the Claude Code
 plugin. It packages the same CLI-backed Python and TypeScript authoring loop as
 the Codex plugin, while keeping Claude's approval-style PreToolUse decision and
 first-build reviewer agent.
@@ -64,6 +64,12 @@ fingerprint, or artifact change.
 
 The plugin does not use fixed dollar estimates. It distinguishes likely model
 work before a build and reports the actual cost afterward.
+
+For TypeScript, it also reads per-module `candidate_outcomes`. Final
+conformance repair happens inside the advertised attempt budget, so the plugin
+does not recommend an unchanged paid rerun after that budget is exhausted.
+Deterministic worker heap failures point to `[target.ts].worker_heap_mb` and are
+not replayed.
 
 ## Freshness reasons
 

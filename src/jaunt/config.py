@@ -189,6 +189,7 @@ _V2_TS_TARGET_KEYS = frozenset(
         "contract_battery_dir",
         "worker_timeout_seconds",
         "worker_startup_timeout_seconds",
+        "worker_heap_mb",
     }
 )
 _V2_BUILD_KEYS = frozenset({"jobs", "include_target_tests", "instructions"})
@@ -609,6 +610,11 @@ def _normalize_v2_data(
             ts_tbl.get("worker_startup_timeout_seconds", 10.0),
             name="target.ts.worker_startup_timeout_seconds",
         )
+        worker_heap_mb = (
+            _as_int(ts_tbl["worker_heap_mb"], name="target.ts.worker_heap_mb")
+            if "worker_heap_mb" in ts_tbl
+            else None
+        )
         test_runner = _as_str(ts_tbl.get("test_runner", "vitest"), name="target.ts.test_runner")
         if not ts_source_roots:
             raise JauntConfigError("Invalid config: target.ts.source_roots must not be empty.")
@@ -627,6 +633,8 @@ def _normalize_v2_data(
                 "Invalid config: target.ts.worker_startup_timeout_seconds "
                 "must be finite and positive."
             )
+        if worker_heap_mb is not None and worker_heap_mb < 256:
+            raise JauntConfigError("Invalid config: target.ts.worker_heap_mb must be at least 256.")
         if test_runner != "vitest":
             raise JauntConfigError(
                 "Invalid config: target.ts.test_runner must be 'vitest' in the initial "
@@ -690,6 +698,7 @@ def _normalize_v2_data(
             contract_battery_dir=contract_battery_dir,
             worker_timeout_seconds=worker_timeout_seconds,
             worker_startup_timeout_seconds=worker_startup_timeout_seconds,
+            worker_heap_mb=worker_heap_mb,
         )
 
     def _prompt_value(table: dict[str, Any], key: str, name: str) -> str:

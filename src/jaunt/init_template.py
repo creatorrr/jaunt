@@ -197,6 +197,7 @@ test_runner = "vitest"
 fast_check_runs = 50
 worker_timeout_seconds = 30
 worker_startup_timeout_seconds = 10
+# worker_heap_mb = 4096  # optional Node heap limit in MiB for large workspaces
 
 [build]
 jobs = 8

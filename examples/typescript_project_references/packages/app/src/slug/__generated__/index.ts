@@ -1,9 +1,9 @@
 // ⛓️ jaunt:generated — generated; do not edit.
 // jaunt:state=built
 // jaunt:module=ts:packages/app/src/slug/index
-// jaunt:structural=sha256:fe9e05675270c15fb583dba79cf37b3e17d854d732875d86ee458f8dbcf5054c
+// jaunt:structural=sha256:c928b5532fb470e586878858f889fb357268f42cd311798eeab678a99393bf97
 // jaunt:prose=sha256:e9fa557be73e969f3cb26837fff759c7cccd3f8a5ca90099486dae5df986e4ee
-// jaunt:api=sha256:66de5c7a91634c623bcf7725fd0d504fcaa063ac4dd20e9ca2e2d8dc07334ac7
+// jaunt:api=sha256:983831719868a4868d24a5fad83043deeade789aa0da72424188bb445f318553
 import type * as __JauntApi from "./index.api.js";
 import { normalizeSpacing } from "@jaunt-examples/core/normalize/index.js";
 

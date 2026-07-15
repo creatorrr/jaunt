@@ -232,6 +232,50 @@ function moduleClosure(
   return closure;
 }
 
+function reverseConsumerRoots(
+  root: string,
+  projects: ProjectGraph["projects"],
+  modules: DiscoveryResult["modules"],
+  importAdjacency: DiscoveryResult["importAdjacency"],
+  selectedModules: readonly DiscoveryResult["modules"][number][],
+): readonly string[] {
+  const configured = new Set(
+    projects.flatMap((project) =>
+      project.parsed.fileNames.map((path) => resolve(path)),
+    ),
+  );
+  const selectedPaths = new Set(
+    selectedModules.flatMap((module) =>
+      [
+        module.route.specPath,
+        module.route.facadePath,
+        module.route.apiMirrorPath,
+        module.route.implementationPath,
+      ].map((path) => resolve(root, path)),
+    ),
+  );
+  const reverse = new Map<string, Set<string>>();
+  for (const [importer, dependencies] of importAdjacency) {
+    for (const dependency of dependencies) {
+      const consumers = reverse.get(resolve(dependency)) ?? new Set<string>();
+      consumers.add(resolve(importer));
+      reverse.set(resolve(dependency), consumers);
+    }
+  }
+  const consumers = new Set<string>();
+  const pending = [...selectedPaths];
+  while (pending.length > 0) {
+    const dependency = pending.pop()!;
+    for (const importer of reverse.get(dependency) ?? []) {
+      if (!configured.has(importer) || selectedPaths.has(importer)) continue;
+      if (consumers.has(importer)) continue;
+      consumers.add(importer);
+      pending.push(importer);
+    }
+  }
+  return [...consumers].sort();
+}
+
 function record(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new WorkerError("INVALID_REQUEST", `${label} must be an object`);
@@ -741,7 +785,7 @@ export class AnalyzerSession {
         return {
           ...ir,
           routes: module.route,
-          apiSource: renderApiMirror(ir),
+          apiSource: renderApiMirror(this.compiler, ir),
           placeholderSource: renderPlaceholder(ir),
           sidecar: renderSidecar(ir),
           specSource: module.source,
@@ -764,6 +808,11 @@ export class AnalyzerSession {
     params: ValidateOverlayParams,
     reportPhase?: WorkerPhaseReporter,
   ): ValidateOverlayResult {
+    // Scoped baseline requests are independent validation transactions. Retaining
+    // prior Programs here pins whole-project ASTs and makes the next batch peak at
+    // the sum of both closures instead of the current closure alone.
+    if (params.scopeToModuleIds && params.baselineUnselected)
+      this.#overlayPrograms.clear();
     const startedAt = performance.now();
     const timed = <T>(phase: string, operation: () => T): T => {
       reportPhase?.({
@@ -884,6 +933,18 @@ export class AnalyzerSession {
           ) ?? []),
         ]
       : this.discovery.modules;
+    const consumerRoots =
+      params.scopeToModuleIds &&
+      params.baselineUnselected &&
+      Object.keys(params.candidates).length > 0
+        ? reverseConsumerRoots(
+            this.root,
+            this.graph.projects,
+            this.discovery.modules,
+            this.discovery.importAdjacency,
+            validationModules,
+          )
+        : [];
     const allIrs = timed("contract-ir", () =>
       validationModules.map((module) => this.contractIr(module)),
     );
@@ -936,6 +997,12 @@ export class AnalyzerSession {
             "CONFIG_INVALID",
             `Missing owner project ${ir.project}`,
           );
+        const projectFiles = new Set(
+          project.parsed.fileNames.map((path) => resolve(path)),
+        );
+        const projectConsumerRoots = consumerRoots.filter((path) =>
+          projectFiles.has(path),
+        );
         if (candidate !== undefined) {
           const specifiers = candidateModuleSpecifiers(
             this.compiler,
@@ -1059,6 +1126,7 @@ export class AnalyzerSession {
                 candidates,
                 this.#overlayPrograms,
                 params.scopeToModuleIds ?? false,
+                projectConsumerRoots,
               )
             : validateModuleOverlay(
                 this.compiler,
@@ -1070,6 +1138,7 @@ export class AnalyzerSession {
                 candidates,
                 this.#overlayPrograms,
                 params.scopeToModuleIds ?? false,
+                projectConsumerRoots,
               );
         artifacts.push(...result.artifacts);
         diagnostics.push(...result.diagnostics);
@@ -1095,6 +1164,7 @@ export class AnalyzerSession {
             affectedProjects,
             this.#overlayPrograms,
             params.scopeToModuleIds ?? false,
+            consumerRoots,
           ),
         ),
       );
