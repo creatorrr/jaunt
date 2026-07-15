@@ -600,7 +600,7 @@ async def run_check(
             client,
             initialized,
         ):
-            analysis = await analyze(client, initialized)
+            analysis = await analyze(client, initialized, target_ids=target_ids)
             modules = {_module_id(module): module for module in analysis.modules}
             test_specs = _selected_test_specs(
                 root,

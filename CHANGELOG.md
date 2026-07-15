@@ -12,6 +12,8 @@ All notable changes to jaunt. Generated from conventional commits by
   are reheadered and rerun without another model call, including after a later
   metadata-only restamp.
 - Keep `recomposed` TypeScript modules in pure and mixed-workspace build JSON.
+- Keep targeted TypeScript test generation and magic battery checks on the selected
+  contract closure.
   `refrozen` remains the umbrella for every model-free reuse path, while
   `recomposed` identifies the compatible-toolchain subset.
 - Make targeted TypeScript contract responses and overlay validation follow

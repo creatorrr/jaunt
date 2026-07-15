@@ -1517,9 +1517,7 @@ def _mixed_typescript_preflight(
                     "`jaunt design --target <module#symbol>` first: "
                     + ", ".join(sorted(pending_designs))
                 )
-            analysis = (
-                await analyze(client, initialized) if for_test and target_ids else target_analysis
-            )
+            analysis = target_analysis
             if for_test:
                 from jaunt.typescript.tester import (
                     _group_test_files,

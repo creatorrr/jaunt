@@ -1405,11 +1405,23 @@ def _selected_test_specs(
     if not target_ids:
         return tuple(test_specs)
     requested = {target.split("#", 1)[0] for target in target_ids}
-    return tuple(
-        item
-        for item in test_specs
-        if any(_module_id(module) in requested for module in _selected_test_modules(item, modules))
-    )
+    selected: list[Mapping[str, Any]] = []
+    for item in test_specs:
+        raw_targets = item.get("targets", [])
+        declared_modules = (
+            {
+                target.split("#", 1)[0]
+                for target in raw_targets
+                if isinstance(target, str) and target.startswith("ts:")
+            }
+            if isinstance(raw_targets, list)
+            else set()
+        )
+        if declared_modules and requested.isdisjoint(declared_modules):
+            continue
+        if any(_module_id(module) in requested for module in _selected_test_modules(item, modules)):
+            selected.append(item)
+    return tuple(selected)
 
 
 def _selected_generated_test_files(
@@ -3347,7 +3359,7 @@ async def run_test(
             yield session
 
     async with operation_worker() as (client, initialized):
-        analysis = await analyze(client, initialized)
+        analysis = await analyze(client, initialized, target_ids=target_ids)
         modules = {_module_id(module): module for module in analysis.modules}
         test_specs = _selected_test_specs(
             root,

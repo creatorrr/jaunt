@@ -4328,6 +4328,17 @@ model = "gpt-5.6-sol"
     contract_battery.write_text('import { test } from "vitest";\ntest("value", () => {});\n')
 
     class MultiProjectWorker(FakeWorker):
+        async def initialize(self, _params: InitializeParams) -> InitializeResult:
+            initialized = await super().initialize(_params)
+            return replace(
+                initialized,
+                capabilities=(
+                    *initialized.capabilities,
+                    "scoped-diagnostics",
+                    "scoped-analysis",
+                ),
+            )
+
         async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
             if method == "analyzeWorkspace":
                 self.requests.append((method, params))
@@ -4380,7 +4391,20 @@ model = "gpt-5.6-sol"
                     "sidecarPath": "packages/b/src/machine/triple.jaunt.json",
                     "symbols": [{"name": "triple", "kind": "function"}],
                 }
-                return {**self._stamp(), "modules": [self.module, triple]}
+                modules = [self.module, triple]
+                selected = {
+                    str(item).split("#", 1)[0]
+                    for item in params.get("moduleIds", [])
+                    if isinstance(item, str)
+                }
+                return {
+                    **self._stamp(),
+                    "modules": [
+                        module
+                        for module in modules
+                        if not selected or str(module["moduleId"]) in selected
+                    ],
+                }
             return await super().request(method, params)
 
     worker = MultiProjectWorker(tmp_path)
@@ -4437,6 +4461,7 @@ model = "gpt-5.6-sol"
     }
 
     calls.clear()
+    worker.requests.clear()
     targeted = await run_test(
         tmp_path,
         config,
@@ -4451,6 +4476,8 @@ model = "gpt-5.6-sol"
     assert {call[1] for call in calls} == {"packages/a/tsconfig.test.json"}
     assert all(b_output.relative_to(tmp_path).as_posix() not in call[2] for call in calls)
     assert all(contract_battery.relative_to(tmp_path).as_posix() not in call[2] for call in calls)
+    assert ("analyzeWorkspace", {"moduleIds": ["ts:src/math"]}) in worker.requests
+    assert ("analyzeContracts", {"moduleIds": ["ts:src/math"]}) in worker.requests
 
 
 @pytest.mark.asyncio

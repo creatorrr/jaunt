@@ -64,6 +64,7 @@
 ## Cycle 10 — 2026-07-15
 
 - [x] Scope targeted TypeScript contract responses and validation to the explicit and public-import closure.
+- [x] Keep targeted test generation and magic battery checks on the same scoped contract path.
 - [x] Preserve the worker's public-import closure through the Python bridge and retain ambient declarations.
 - [x] Traverse ordinary barrels/context files and retain regular `.ts` global declarations.
 - [x] Bound full-workspace contract responses and batch sync validation in dependency order.
