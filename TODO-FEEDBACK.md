@@ -76,3 +76,13 @@
 - [x] Make plugin status timeouts informative, preserve TS diagnostics, and avoid duplicate mixed probes.
 - [x] Refresh both plugin versions so adopters receive the fail-open hook launchers.
 - [x] Add regressions and run the full repository validation suite.
+
+## Cycle 11 — 2026-07-15
+
+- [x] Retry final TypeScript unit-conformance failures with the rejected candidate and exact diagnostics.
+- [x] Report per-module attempt counts, retry phases, and deduplicated reasons in JSON.
+- [x] Keep Codex generation hermetic so user plugins and hooks do not inflate target prompts.
+- [x] Prune implementation-only imports from strict API mirrors and isolate independent sync batches.
+- [x] Batch status overlays, release compiler state between batches, and make worker heap/OOM behavior explicit.
+- [x] Preserve public optionality in generated private helper types and add real-worker regressions.
+- [x] Cut Jaunt 1.7.6 / @usejaunt/ts alpha.5, run full validation, and obtain an independent Codex review.

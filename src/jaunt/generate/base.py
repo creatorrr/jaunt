@@ -113,6 +113,7 @@ class GenerationResult:
     errors: list[str]
     usage: TokenUsage | None = None
     advisories: tuple[str, ...] = ()
+    attempt_errors: tuple[tuple[str, ...], ...] = ()
 
 
 GenerationModuleResult: TypeAlias = (
@@ -212,6 +213,7 @@ class GeneratorBackend(ABC):
         last_errors: list[str] = []
         extra_ctx = list(initial_error_context) if initial_error_context else None
         advisories: tuple[str, ...] = ()
+        attempt_errors: list[tuple[str, ...]] = []
         total_prompt = 0
         total_completion = 0
         total_cached_prompt = 0
@@ -245,10 +247,12 @@ class GeneratorBackend(ABC):
                         total_prompt, total_completion, total_cached_prompt
                     ),
                     advisories=advisories,
+                    attempt_errors=tuple(attempt_errors),
                 )
+            attempt_errors.append(tuple(last_errors))
             if attempts < max_attempts:
                 if progress is not None:
-                    progress("retry", f"attempt {attempts}")
+                    progress("retry", last_errors[0] if last_errors else f"attempt {attempts}")
                 retry_context = [f"previous output errors: {error}" for error in last_errors]
                 extra_ctx = [*(extra_ctx or []), *retry_context]
                 attempt_request = replace(request, seed_target_content=last_source)
@@ -259,6 +263,7 @@ class GeneratorBackend(ABC):
             errors=last_errors,
             usage=self._aggregate_usage(total_prompt, total_completion, total_cached_prompt),
             advisories=advisories,
+            attempt_errors=tuple(attempt_errors),
         )
 
     def _aggregate_usage(

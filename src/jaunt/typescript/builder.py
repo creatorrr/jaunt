@@ -7,8 +7,8 @@ returns exact bytes and the workspace inputs still match the analyzed snapshot.
 
 from __future__ import annotations
 
-import contextlib
 import asyncio
+import contextlib
 import hashlib
 import inspect
 import json
@@ -19,7 +19,7 @@ import tempfile
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
 from typing import Any, Protocol, TypeAlias, cast
@@ -29,10 +29,10 @@ from jaunt.cache import ResponseCache
 from jaunt.config import JauntConfig
 from jaunt.cost import CostTracker
 from jaunt.errors import JauntConfigError, JauntGenerationError
-from jaunt.generate.base import GenerationRequest, GeneratorBackend, TokenUsage
+from jaunt.generate.base import GenerationRequest, GenerationResult, GeneratorBackend, TokenUsage
 from jaunt.generate.codex_backend import CodexBackend
 from jaunt.generate.codex_backend import run_codex_exec
-from jaunt.generate.request_cache import generate_request_cached
+from jaunt.generate.request_cache import generate_request_cached, store_generation_result
 from jaunt.journal import JournalEvent, append_events
 from jaunt.skill_seed import skills_fingerprint
 from jaunt.targets.base import TargetBuildReport, TargetDiagnostic
@@ -51,7 +51,7 @@ from jaunt.typescript.worker import (
     validate_worker_capabilities,
 )
 
-_DEFAULT_ATTEMPTS = 2
+_DEFAULT_ATTEMPTS = 3
 _ANALYZE_CONTRACT_BATCH_SIZE = 4
 _SYNC_BATCH_SIZE = 4
 _PLACEHOLDER_MARKERS = ("state=unbuilt", 'state = "unbuilt"', "state: unbuilt")
@@ -233,7 +233,38 @@ def _diagnostic(value: ProtocolDiagnostic | Mapping[str, Any]) -> TargetDiagnost
 def _diagnostics(
     values: Sequence[ProtocolDiagnostic | Mapping[str, Any]],
 ) -> tuple[TargetDiagnostic, ...]:
-    return tuple(_diagnostic(value) for value in values)
+    unique: dict[tuple[object, ...], TargetDiagnostic] = {}
+    for value in values:
+        diagnostic = _diagnostic(value)
+        key = (
+            diagnostic.code,
+            diagnostic.message,
+            diagnostic.severity,
+            diagnostic.path,
+            diagnostic.line,
+            diagnostic.column,
+        )
+        unique.setdefault(key, diagnostic)
+    return tuple(unique.values())
+
+
+def _module_closure_ids(
+    modules: Sequence[Mapping[str, Any]], requested: Sequence[str]
+) -> tuple[str, ...]:
+    by_id = {_module_id(module): module for module in modules}
+    selected: set[str] = set()
+    pending = [module_id for module_id in requested if module_id in by_id]
+    while pending:
+        module_id = pending.pop()
+        if module_id in selected:
+            continue
+        selected.add(module_id)
+        pending.extend(
+            dependency
+            for dependency in _dependency_module_ids(by_id[module_id])
+            if dependency in by_id
+        )
+    return tuple(_module_id(module) for module in modules if _module_id(module) in selected)
 
 
 def _initialize_params(
@@ -286,6 +317,7 @@ async def worker_session(
             installation=installation,
             request_timeout=target.worker_timeout_seconds,
             startup_timeout=target.worker_startup_timeout_seconds,
+            heap_mb=target.worker_heap_mb,
         )
     else:
         created = worker_factory(root, target)
@@ -686,21 +718,36 @@ async def run_sync(
         output_preconditions = _artifact_preconditions(root, modules)
         module_ids = tuple(_module_id(module) for module in modules)
         validated_batches: list[ValidateOverlayResult] = []
+        failed: dict[str, tuple[TargetDiagnostic, ...]] = {}
         for index in range(0, len(module_ids), _SYNC_BATCH_SIZE):
             batch = module_ids[index : index + _SYNC_BATCH_SIZE]
+            closure = _module_closure_ids(modules, batch)
             validated = await validate_overlay(
                 client,
                 analysis,
                 {},
-                batch,
+                closure,
                 sync_module_ids=batch,
-                scoped_validation=bool(target_ids),
+                scoped_validation=True,
+                baseline_unselected=True,
             )
             if not validated.valid:
-                failed = {
-                    module_id: _diagnostics(validated.diagnostics) for module_id in module_ids
+                diagnostics = _diagnostics(validated.diagnostics)
+                paths = {
+                    _module_path(module, key): _module_id(module)
+                    for module in modules
+                    for key in ("specPath", "facadePath", "apiMirrorPath", "implementationPath")
+                    if (
+                        isinstance(module.get(key), str)
+                        or isinstance(module.get("routes"), Mapping)
+                    )
                 }
-                return SyncReport(failed=failed, exit_code=2)
+                owners = {
+                    paths[diagnostic.path] for diagnostic in diagnostics if diagnostic.path in paths
+                }
+                for module_id in sorted(owners or set(batch)):
+                    failed[module_id] = diagnostics
+                continue
             validated_batches.append(validated)
         validated_writes = tuple(
             write for validated in validated_batches for write in _artifact_writes(validated)
@@ -724,6 +771,8 @@ async def run_sync(
         mirrors=tuple(sorted(write.path for write in writes if write.kind == "api-mirror")),
         placeholders=tuple(sorted(write.path for write in writes if write.kind == "placeholder")),
         created_facades=tuple(sorted(write.path for write in writes if write.kind == "facade")),
+        failed=failed,
+        exit_code=2 if failed else 0,
     )
 
 
@@ -1452,6 +1501,10 @@ async def run_build_in_session(
     actionable_modules = [by_id[module_id] for module_id in sorted(actionable_ids)]
     units = _build_units(analysis, actionable_modules)
     failed: dict[str, tuple[TargetDiagnostic, ...]] = {}
+    requests: dict[str, GenerationRequest] = {}
+    candidate_attempts: dict[str, int] = {}
+    candidate_retries: dict[str, int] = {}
+    candidate_retry_reasons: dict[str, list[str]] = {}
     pending = set(selected_ids)
     semaphore = asyncio.Semaphore(effective_jobs)
     progress_advanced: set[str] = set()
@@ -1485,7 +1538,9 @@ async def run_build_in_session(
             stack.extend(selected_dependencies(dependency))
         return found
 
-    async def generate_one(module_id: str) -> tuple[str, Any]:
+    async def generate_one(
+        module_id: str,
+    ) -> tuple[str, GenerationRequest, GenerationResult]:
         module = by_id[module_id]
 
         async def candidate_validator(source: str) -> list[str]:
@@ -1495,7 +1550,7 @@ async def run_build_in_session(
                 analysis,
                 proposed,
                 tuple(sorted(proposed)),
-                scoped_validation=bool(target_ids),
+                scoped_validation=True,
             )
             if validation.valid:
                 return []
@@ -1526,9 +1581,10 @@ async def run_build_in_session(
                 generation_fingerprint=request_fingerprint,
                 response_cache=(None if force else response_cache),
                 cost_tracker=cost,
+                usage_label=module_id,
                 progress=lambda stage, detail: _progress_phase(progress, module_id, stage, detail),
             )
-        return module_id, result
+        return module_id, request, result
 
     while pending:
         propagated = False
@@ -1553,11 +1609,14 @@ async def run_build_in_session(
             # defensive guard against malformed dependency data changing mid-run.
             raise JauntConfigError("TypeScript dependency scheduler made no progress")
         results = await asyncio.gather(*(generate_one(module_id) for module_id in ready))
-        for module_id, result in results:
+        for module_id, request, result in results:
             pending.remove(module_id)
-            if result.usage is not None:
-                cost.record(module_id, result.usage)
-                cost.check_budget()
+            requests[module_id] = request
+            candidate_attempts[module_id] = result.attempts
+            candidate_retries[module_id] = max(0, result.attempts - 1)
+            candidate_retry_reasons[module_id] = [
+                error for attempt in result.attempt_errors for error in attempt
+            ]
             if result.source is None or result.errors:
                 failed[module_id] = tuple(
                     TargetDiagnostic(code="JAUNT_TS_GENERATION", message=error)
@@ -1604,16 +1663,118 @@ async def run_build_in_session(
         unit_refrozen = tuple(sorted(unit_ids.intersection(refrozen)))
         unit_recomposed = tuple(sorted(unit_ids.intersection(recomposed)))
         unit_restamped = tuple(sorted(set(unit_refrozen) - set(unit_recomposed)))
-        validated = await validate_overlay(
-            client,
-            analysis,
-            unit_candidates,
-            tuple(sorted(set(unit_candidates) | set(unit_refrozen))),
-            restamp_module_ids=unit_restamped,
-            recompose_module_ids=unit_recomposed,
-            scoped_validation=bool(target_ids),
-            baseline_unselected=True,
-        )
+
+        async def validate_unit(
+            proposed: Mapping[str, str],
+            *,
+            active_analysis: TypeScriptAnalysis = analysis,
+            refrozen_ids: tuple[str, ...] = unit_refrozen,
+            restamped_ids: tuple[str, ...] = unit_restamped,
+            recomposed_ids: tuple[str, ...] = unit_recomposed,
+        ) -> ValidateOverlayResult:
+            return await validate_overlay(
+                client,
+                active_analysis,
+                proposed,
+                tuple(sorted(set(proposed) | set(refrozen_ids))),
+                restamp_module_ids=restamped_ids,
+                recompose_module_ids=recomposed_ids,
+                scoped_validation=True,
+                baseline_unselected=True,
+            )
+
+        validated = await validate_unit(unit_candidates)
+        while not validated.valid:
+            diagnostics = _diagnostics(validated.diagnostics)
+            implementation_owners = {
+                _module_path(by_id[module_id], "implementationPath"): module_id
+                for module_id in unit_candidates
+            }
+            implicated = [
+                implementation_owners[diagnostic.path]
+                for diagnostic in diagnostics
+                if diagnostic.path in implementation_owners
+            ]
+            repairable = next(
+                (
+                    module_id
+                    for module_id in dict.fromkeys([*implicated, *sorted(unit_candidates)])
+                    if candidate_attempts.get(module_id, 0) < max_attempts
+                ),
+                None,
+            )
+            if repairable is None:
+                break
+            owned_diagnostics = [
+                diagnostic
+                for diagnostic in diagnostics
+                if diagnostic.path in {None, _module_path(by_id[repairable], "implementationPath")}
+            ] or list(diagnostics)
+            reasons = [
+                f"{diagnostic.code}: {diagnostic.message}"
+                + (f" ({diagnostic.path})" if diagnostic.path else "")
+                for diagnostic in owned_diagnostics
+            ]
+            candidate_retry_reasons.setdefault(repairable, []).extend(reasons)
+
+            async def unit_candidate_validator(
+                source: str,
+                *,
+                module_id: str = repairable,
+                current_candidates: dict[str, str] = unit_candidates,
+            ) -> list[str]:
+                proposed = {**current_candidates, module_id: source}
+                result = await validate_unit(proposed)
+                if result.valid:
+                    return []
+                return [
+                    f"{diagnostic.code}: {diagnostic.message}"
+                    + (f" ({diagnostic.path})" if diagnostic.path else "")
+                    for diagnostic in _diagnostics(result.diagnostics)
+                ] or ["TypeScript unit overlay validation failed"]
+
+            repair_request = replace(
+                requests[repairable],
+                seed_target_content=unit_candidates[repairable],
+                validator=unit_candidate_validator,
+            )
+            _progress_phase(
+                progress,
+                repairable,
+                "retrying final conformance",
+                reasons[0] if reasons else "unit overlay failed",
+            )
+            async with semaphore:
+
+                def record_repair_usage(usage: TokenUsage, item: str = repairable) -> None:
+                    cost.record(item, usage)
+                    cost.check_budget()
+
+                repaired = await backend.generate_request_with_retry(
+                    repair_request,
+                    max_attempts=1,
+                    initial_error_context=[
+                        f"previous output errors: {reason}" for reason in reasons
+                    ],
+                    progress=lambda stage, detail, item=repairable: _progress_phase(
+                        progress, item, stage, detail
+                    ),
+                    usage_callback=record_repair_usage,
+                )
+            candidate_attempts[repairable] = (
+                candidate_attempts.get(repairable, 0) + repaired.attempts
+            )
+            candidate_retries[repairable] = candidate_retries.get(repairable, 0) + 1
+            candidate_retry_reasons[repairable].extend(
+                error for attempt in repaired.attempt_errors for error in attempt
+            )
+            if repaired.source is None:
+                break
+            unit_candidates[repairable] = repaired.source
+            candidates[repairable] = repaired.source
+            if repaired.advisories:
+                advisories[repairable] = repaired.advisories
+            validated = await validate_unit(unit_candidates)
         if not validated.valid:
             diagnostics = _diagnostics(validated.diagnostics)
             for module_id in unit_ids:
@@ -1635,6 +1796,19 @@ async def run_build_in_session(
         writes.extend(unit_writes)
         generated.update(unit_ids.intersection(candidates))
         committed_refrozen.update(unit_ids.intersection(refrozen))
+        for module_id in sorted(unit_candidates):
+            store_generation_result(
+                None if force else response_cache,
+                backend,
+                requests[module_id],
+                GenerationResult(
+                    attempts=candidate_attempts.get(module_id, 0),
+                    source=unit_candidates[module_id],
+                    errors=[],
+                    advisories=advisories.get(module_id, ()),
+                ),
+                generation_fingerprint=request_fingerprint,
+            )
         later_units = units[index + 1 :]
         if any(
             set(later.module_ids).intersection(actionable_ids)
@@ -1706,6 +1880,17 @@ async def run_build_in_session(
             "jobs": effective_jobs,
             "generation_fingerprint": request_fingerprint,
             "recomposed": tuple(sorted(committed_refrozen.intersection(recomposed))),
+            "candidate_outcomes": {
+                module_id: {
+                    "attempts": candidate_attempts.get(module_id, 0),
+                    "retry_count": candidate_retries.get(module_id, 0),
+                    "retry_reasons": tuple(
+                        dict.fromkeys(candidate_retry_reasons.get(module_id, ()))
+                    ),
+                    "phase": "committed" if module_id in generated else "failed",
+                }
+                for module_id in sorted(candidate_attempts)
+            },
             **(
                 {"cache": {"hits": response_cache.hits, "misses": response_cache.misses}}
                 if response_cache is not None

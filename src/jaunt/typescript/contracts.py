@@ -1071,11 +1071,9 @@ async def _generate_battery(
         generation_fingerprint=fingerprint,
         response_cache=response_cache,
         cost_tracker=cost_tracker,
+        usage_label=f"{source.relative_to(root).as_posix()}#{symbol}",
         progress=progress,
     )
-    if result.usage is not None and cost_tracker is not None:
-        cost_tracker.record(f"{source.relative_to(root).as_posix()}#{symbol}", result.usage)
-        cost_tracker.check_budget()
     if result.source is None or result.errors:
         raise JauntGenerationError(
             "Could not derive the TypeScript contract battery: "

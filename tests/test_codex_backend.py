@@ -231,6 +231,43 @@ def test_generate_module_command_line_flags(monkeypatch) -> None:
     asyncio.run(run())
 
 
+@pytest.mark.asyncio
+async def test_run_codex_exec_falls_back_when_cli_lacks_hermetic_flag(
+    monkeypatch,
+) -> None:
+    import jaunt.generate.codex_backend as cb
+
+    calls: list[list[str]] = []
+
+    async def fake_exec(*args, **_kwargs):
+        call = list(args)
+        calls.append(call)
+        if "--ignore-user-config" in call:
+            return _FakeProc(
+                b"",
+                b"error: unexpected argument '--ignore-user-config' found\n",
+                2,
+            )
+        return _FakeProc(
+            _usage_jsonl("done", input_tokens=3, output_tokens=1),
+        )
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    result = await cb.run_codex_exec(
+        prompt="work",
+        cwd="/tmp",
+        sandbox="read-only",
+        model="gpt-5.6-sol",
+        reasoning_effort="medium",
+        ignore_user_config=True,
+    )
+
+    assert result.final_message == "done"
+    assert len(calls) == 2
+    assert "--ignore-user-config" in calls[0]
+    assert "--ignore-user-config" not in calls[1]
+
+
 def test_generate_module_retries_once_without_offending_config_key(monkeypatch) -> None:
     async def run() -> None:
         backend = CodexBackend(

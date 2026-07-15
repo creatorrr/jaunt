@@ -59,6 +59,47 @@ function commit(
 }
 
 describe("analyzer vertical path", () => {
+  test("API mirrors prune imports used only by implementation intent", async () => {
+    const workspace = createFixtureWorkspace({ withClass: true });
+    roots.push(workspace.root);
+    writeFileSync(
+      resolve(workspace.root, "src/slug/index.jaunt.ts"),
+      `import * as jaunt from "@usejaunt/ts/spec";
+import type { Store } from "../store/index.jaunt.js";
+import { runtimeOnly } from "../support.js";
+jaunt.magicModule({ deps: [runtimeOnly] });
+export interface PublicOptions { Store?: string; runtimeOnly?: string; }
+export type PublicBox<Store, runtimeOnly> = readonly [Store, runtimeOnly];
+/** Normalize a title. */
+export function slugify(title: string): string { return jaunt.magic(); }
+void (undefined as unknown as Store);
+`,
+    );
+    writeFileSync(
+      resolve(workspace.root, "src/support.ts"),
+      "export const runtimeOnly = (value: string): string => value.trim();\n",
+    );
+    const session = await AnalyzerSession.create({
+      root: workspace.root,
+      projects: ["tsconfig.json"],
+      testProjects: [],
+      sourceRoots: ["src"],
+      testRoots: ["tests"],
+      generatedDir: "__generated__",
+      toolOwner: ".",
+      compilerModulePath: workspace.compilerModulePath,
+      clientVersion: "test",
+      toolVersion: "test",
+    });
+
+    const slug = session
+      .analyzeContracts()
+      .modules.find((module) => module.moduleId === "ts:src/slug/index")!;
+    expect(slug.typeImports).toHaveLength(2);
+    expect(slug.apiSource).not.toContain("../store/index.jaunt.js");
+    expect(slug.apiSource).not.toContain("../support.js");
+  });
+
   test("strict unused checks accept private stub parameters and synthetic conformance bindings", async () => {
     const workspace = createFixtureWorkspace({ withClass: true });
     roots.push(workspace.root);
@@ -476,6 +517,26 @@ export function value(input: number): number { return jaunt.magic(); }
       expect.objectContaining({ code: "TS2345", path: "src/consumer.ts" }),
     );
     expect(baseline.valid, JSON.stringify(baseline.diagnostics)).toBe(true);
+
+    const value = refreshed
+      .analyzeContracts({ moduleIds: ["ts:src/value/index"] })
+      .modules.find((contract) => contract.moduleId === "ts:src/value/index")!;
+    const scopedCandidate = refreshed.validateOverlay({
+      sessionId: metadata.sessionId,
+      expectedEpoch: metadata.epoch,
+      expectedSnapshot: metadata.snapshot,
+      candidates: {
+        [value.moduleId]:
+          "const __jaunt_impl_value = (input: number): number => input;",
+      },
+      moduleIds: [value.moduleId],
+      scopeToModuleIds: true,
+      baselineUnselected: true,
+    });
+    expect(scopedCandidate.valid).toBe(false);
+    expect(scopedCandidate.diagnostics).toContainEqual(
+      expect.objectContaining({ path: "src/consumer.ts" }),
+    );
   });
 
   test("discovers, renders IR, and validates an unbuilt sync transaction", async () => {

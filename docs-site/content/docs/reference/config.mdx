@@ -59,6 +59,7 @@ fast_check_runs = 50
 contract_battery_dir = "tests/contract"
 worker_timeout_seconds = 30
 worker_startup_timeout_seconds = 10
+worker_heap_mb = 6144 # optional; omit to use Node's default
 
 [build]
 jobs = 8
@@ -109,8 +110,13 @@ the imports reachable from one spec is not yet implemented.
 
 `worker_timeout_seconds` limits each analyzer request; raise it for large TypeScript
 project closures. `worker_startup_timeout_seconds` separately limits worker startup
-and initialization. Both values must be positive. When a request times out, Jaunt
-includes the worker's latest phase timing lines and names the setting to adjust.
+and initialization. Both values must be positive. `worker_heap_mb` is an optional
+integer of at least 256 MiB; Jaunt passes it directly to Node as
+`--max-old-space-size` without accepting arbitrary `NODE_OPTIONS`. When a request times
+out, Jaunt includes the worker's latest phase timing lines and names the setting to
+adjust. Status and sync validate scoped dependency batches and release compiler state
+between them. If one closure still exhausts the configured heap, Jaunt reports the
+request once and does not replay the deterministic OOM.
 
 Use `jaunt migrate --config-v2` to preview a deterministic version-1 rewrite and
 `jaunt migrate --config-v2 --apply` to commit it. The migration is model-free and

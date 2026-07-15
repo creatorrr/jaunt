@@ -1,4 +1,5 @@
 import { dirname, relative, sep } from "node:path";
+import type ts from "@typescript/typescript6";
 import type {
   ClassMemberIR,
   ContractModuleIR,
@@ -217,7 +218,106 @@ export function renderTypeImport(
   return `import ${renderAsRuntime ? "" : "type "}${parts.join(", ")} from ${JSON.stringify(item.specifier)};`;
 }
 
-export function renderApiMirror(ir: ContractModuleIR): string {
+function isReferenceIdentifier(
+  compiler: typeof import("@typescript/typescript6"),
+  node: ts.Identifier,
+): boolean {
+  const parent = node.parent;
+  if (
+    ((compiler.isPropertySignature(parent) ||
+      compiler.isMethodSignature(parent) ||
+      compiler.isPropertyDeclaration(parent) ||
+      compiler.isMethodDeclaration(parent) ||
+      compiler.isGetAccessorDeclaration(parent) ||
+      compiler.isSetAccessorDeclaration(parent)) &&
+      parent.name === node &&
+      !compiler.isComputedPropertyName(parent.name)) ||
+    ((compiler.isFunctionDeclaration(parent) ||
+      compiler.isClassDeclaration(parent) ||
+      compiler.isInterfaceDeclaration(parent) ||
+      compiler.isTypeAliasDeclaration(parent) ||
+      compiler.isParameter(parent) ||
+      compiler.isTypeParameterDeclaration(parent)) &&
+      parent.name === node) ||
+    (compiler.isQualifiedName(parent) && parent.right === node) ||
+    (compiler.isPropertyAccessExpression(parent) && parent.name === node)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function surfaceUsesBinding(
+  compiler: typeof import("@typescript/typescript6"),
+  sourceFile: ts.SourceFile,
+  binding: string,
+): boolean {
+  let found = false;
+  const isShadowed = (node: ts.Node): boolean => {
+    let current: ts.Node | undefined = node.parent;
+    while (current) {
+      const typeParameters = (
+        current as ts.Node & {
+          readonly typeParameters?: readonly ts.TypeParameterDeclaration[];
+        }
+      ).typeParameters;
+      if (typeParameters?.some((parameter) => parameter.name.text === binding))
+        return true;
+      current = current.parent;
+    }
+    return false;
+  };
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (
+      compiler.isIdentifier(node) &&
+      node.text === binding &&
+      isReferenceIdentifier(compiler, node) &&
+      !isShadowed(node)
+    ) {
+      found = true;
+      return;
+    }
+    compiler.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return found;
+}
+
+function publicSurfaceImport(
+  compiler: typeof import("@typescript/typescript6"),
+  item: ContractModuleIR["typeImports"][number],
+  sourceFile: ts.SourceFile,
+): ContractModuleIR["typeImports"][number] | undefined {
+  const defaultImport =
+    item.defaultImport &&
+    surfaceUsesBinding(compiler, sourceFile, item.defaultImport)
+      ? item.defaultImport
+      : undefined;
+  const namespaceImport =
+    item.namespaceImport &&
+    surfaceUsesBinding(compiler, sourceFile, item.namespaceImport)
+      ? item.namespaceImport
+      : undefined;
+  const namedImports = item.namedImports.filter((binding) =>
+    surfaceUsesBinding(compiler, sourceFile, binding.local),
+  );
+  if (!defaultImport && !namespaceImport && namedImports.length === 0)
+    return undefined;
+  return {
+    specifier: item.specifier,
+    typeOnly: item.typeOnly,
+    runtime: item.runtime,
+    ...(defaultImport === undefined ? {} : { defaultImport }),
+    ...(namespaceImport === undefined ? {} : { namespaceImport }),
+    namedImports,
+  };
+}
+
+export function renderApiMirror(
+  compiler: typeof import("@typescript/typescript6"),
+  ir: ContractModuleIR,
+): string {
   const header = [
     "// ⛓️ jaunt:api-mirror — generated; do not edit.",
     `// jaunt:module=${ir.moduleId}`,
@@ -226,9 +326,6 @@ export function renderApiMirror(ir: ContractModuleIR): string {
     `// jaunt:api=${ir.apiDigest}`,
     "",
   ].join("\n");
-  const imports = ir.typeImports
-    .map((item) => renderTypeImport(item))
-    .join("\n");
   const types = ir.typeDeclarations
     .map(
       (declaration) =>
@@ -236,6 +333,27 @@ export function renderApiMirror(ir: ContractModuleIR): string {
     )
     .join("\n\n");
   const symbols = ir.symbols.map(renderSymbol).join("\n\n");
+  // Dependency imports remain in contract IR for graph/prompt purposes, but an API
+  // mirror is only the public declaration surface. Carrying implementation-only
+  // imports into strict projects produces TS6133/TS6196 before a module is built.
+  const publicSurface = [types, symbols].filter(Boolean).join("\n\n");
+  const sourceFile = compiler.createSourceFile(
+    ir.apiMirrorPath,
+    publicSurface,
+    compiler.ScriptTarget.Latest,
+    true,
+    ir.apiMirrorPath.endsWith(".tsx")
+      ? compiler.ScriptKind.TSX
+      : compiler.ScriptKind.TS,
+  );
+  const imports = ir.typeImports
+    .map((item) => publicSurfaceImport(compiler, item, sourceFile))
+    .filter(
+      (item): item is ContractModuleIR["typeImports"][number] =>
+        item !== undefined,
+    )
+    .map((item) => renderTypeImport(item))
+    .join("\n");
   const body = [imports, types, symbols].filter(Boolean).join("\n\n");
   return `${header}${body}\n`;
 }

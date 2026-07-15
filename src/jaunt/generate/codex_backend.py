@@ -224,6 +224,27 @@ async def run_codex_exec(
     stdout = stdout_bytes.decode("utf-8", errors="replace")
     stderr = stderr_bytes.decode("utf-8", errors="replace")
 
+    if (
+        ignore_user_config
+        and proc.returncode != 0
+        and "--ignore-user-config" in stderr
+        and any(
+            marker in stderr.lower()
+            for marker in ("unexpected argument", "unknown option", "unrecognized option")
+        )
+    ):
+        # Older Codex CLIs predate the hermetic flag. A parser rejection occurs
+        # before a model call, so it is safe to retry once with legacy behavior.
+        return await run_codex_exec(
+            prompt=prompt,
+            cwd=cwd,
+            sandbox=sandbox,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            extra_config=extra_config,
+            ignore_user_config=False,
+        )
+
     parsed = _parse_jsonl(stdout)
     returncode = proc.returncode if proc.returncode is not None else -1
     failure_message = parsed.failure_message
@@ -475,6 +496,7 @@ class CodexBackend(GeneratorBackend):
                 model=self._model,
                 reasoning_effort=self._codex.reasoning_effort,
                 extra_config=extra_config,
+                ignore_user_config=True,
             )
         except JauntGenerationError as exc:
             message = str(exc)
@@ -493,6 +515,7 @@ class CodexBackend(GeneratorBackend):
                 model=self._model,
                 reasoning_effort=self._codex.reasoning_effort,
                 extra_config=retry_config,
+                ignore_user_config=True,
             )
 
     async def generate_module(
@@ -546,6 +569,7 @@ class CodexBackend(GeneratorBackend):
                     model=self._model,
                     reasoning_effort=self._codex.reasoning_effort,
                     extra_config=extra_config,
+                    ignore_user_config=True,
                 )
             except JauntGenerationError as exc:
                 message = str(exc)
@@ -564,6 +588,7 @@ class CodexBackend(GeneratorBackend):
                     model=self._model,
                     reasoning_effort=self._codex.reasoning_effort,
                     extra_config=retry_config,
+                    ignore_user_config=True,
                 )
             source = target.read_text(encoding="utf-8")
             usage = self._usage_from(result)
@@ -664,6 +689,7 @@ class CodexBackend(GeneratorBackend):
                 sandbox="read-only",
                 model=self._model,
                 reasoning_effort=self._codex.reasoning_effort,
+                ignore_user_config=True,
             )
             return result.final_message, self._usage_from(result)
 

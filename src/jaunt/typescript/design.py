@@ -16,7 +16,7 @@ from typing import Any
 from jaunt.config import JauntConfig
 from jaunt.cost import CostTracker
 from jaunt.errors import JauntConfigError, JauntGenerationError
-from jaunt.generate.base import GenerationRequest, GeneratorBackend
+from jaunt.generate.base import GenerationRequest, GeneratorBackend, TokenUsage
 from jaunt.journal import JournalEvent, append_events
 from jaunt.targets.base import TargetDiagnostic
 from jaunt.typescript.artifacts import _atomic_text, _fsync_directory
@@ -776,14 +776,17 @@ async def run_design(
         # newly reviewable proposal, while apply consumes only the exact persisted
         # proposal bytes and never calls the model.
         _progress_phase(progress, symbol_id, "generating design proposal")
+
+        def record_usage(usage: TokenUsage) -> None:
+            cost.record(symbol_id, usage)
+            cost.check_budget()
+
         result = await backend.generate_request_with_retry(
             request,
             max_attempts=max_attempts,
             progress=lambda stage, detail: _progress_phase(progress, symbol_id, stage, detail),
+            usage_callback=record_usage,
         )
-        if result.usage is not None:
-            cost.record(symbol_id, result.usage)
-            cost.check_budget()
         if result.source is None or result.errors:
             diagnostics = tuple(
                 TargetDiagnostic(code="JAUNT_TS_DESIGN", message=error)

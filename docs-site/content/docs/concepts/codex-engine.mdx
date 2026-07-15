@@ -35,6 +35,12 @@ not read `llm.api_key_env` for generation. The `[codex]` keys that pick the
 model, reasoning effort, and sandbox policy live in the
 [configuration reference](/docs/reference/config).
 
+Current Codex CLIs are launched with `--ignore-user-config`, so unrelated user
+hooks, plugins, MCP servers, and tool settings do not enter a Jaunt generation call.
+Jaunt still passes its explicit `[codex]` settings and seeds project skills in the
+temporary workspace. If an older CLI rejects that flag during argument parsing, Jaunt
+retries once without it; upgrading Codex restores hermetic execution.
+
 ## How a generation call works
 
 For each module that needs model-backed generation:

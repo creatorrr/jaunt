@@ -42,6 +42,7 @@ generated_dir = "__generated__"
 auto_skills = false
 worker_timeout_seconds = 120
 worker_startup_timeout_seconds = 45
+worker_heap_mb = 6144
 """,
     )
 
@@ -58,6 +59,7 @@ worker_startup_timeout_seconds = 45
     assert cfg.typescript_target.auto_skills_enabled(True) is False
     assert cfg.typescript_target.worker_timeout_seconds == 120
     assert cfg.typescript_target.worker_startup_timeout_seconds == 45
+    assert cfg.typescript_target.worker_heap_mb == 6144
 
 
 def test_v2_mixed_config_builds_exact_python_compatibility_views(tmp_path: Path) -> None:
@@ -154,6 +156,10 @@ design_user = "prompts/design.md"
         (
             "version = 2\n[target.ts]\nprojects=['x']\nworker_startup_timeout_seconds=+inf\n",
             "worker_startup_timeout_seconds must be finite and positive",
+        ),
+        (
+            "version = 2\n[target.ts]\nprojects=['x']\nworker_heap_mb=128\n",
+            "worker_heap_mb must be at least 256",
         ),
         (
             "version = 2\n[target.ts]\nprojects=['x']\n[contract]\nbattery_dir='tests'\n",

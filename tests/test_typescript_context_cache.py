@@ -9,6 +9,7 @@ import pytest
 import jaunt.skills_npm as skills_npm
 from jaunt.cache import CacheEntry, ResponseCache
 from jaunt.cost import CostTracker
+from jaunt.errors import JauntGenerationError
 from jaunt.generate.base import (
     GenerationRequest,
     GeneratorBackend,
@@ -94,6 +95,7 @@ async def test_invalid_cached_request_is_rejected_and_valid_final_bytes_replace_
 
     assert result.source == "valid"
     assert backend.calls == 1
+    assert cost.api_calls == 1
     assert cost.cache_hits == 0
     assert any(stage == "cache rejected" for stage, _detail in phases)
     assert cache.get(key).source == "valid"  # type: ignore[union-attr]
@@ -110,6 +112,48 @@ async def test_invalid_cached_request_is_rejected_and_valid_final_bytes_replace_
     assert second.source == "valid"
     assert second.attempts == 0
     assert cached_cost.cache_hits == 1
+
+
+@pytest.mark.asyncio
+async def test_request_retries_charge_each_attempt_and_stop_at_budget(
+    tmp_path: Path,
+) -> None:
+    class RetryBackend(_RequestBackend):
+        async def generate_request(self, request: GenerationRequest, **_kwargs: Any) -> Any:
+            self.calls += 1
+            return (
+                "bad" if self.calls == 1 else "valid",
+                TokenUsage(4, 2, self.model_name, self.provider_name),
+            )
+
+    request = _request(tmp_path)
+    backend = RetryBackend()
+    cost = CostTracker()
+    result = await generate_request_cached(
+        backend,
+        request,
+        max_attempts=3,
+        generation_fingerprint="runner-v1",
+        cost_tracker=cost,
+        usage_label="ts:src/value",
+    )
+    assert result.source == "valid"
+    assert backend.calls == 2
+    assert cost.api_calls == 2
+
+    budgeted_backend = RetryBackend()
+    budgeted = CostTracker(max_cost=0.000001)
+    with pytest.raises(JauntGenerationError, match="exceeds budget"):
+        await generate_request_cached(
+            budgeted_backend,
+            request,
+            max_attempts=3,
+            generation_fingerprint="runner-v2",
+            cost_tracker=budgeted,
+            usage_label="ts:src/value",
+        )
+    assert budgeted_backend.calls == 1
+    assert budgeted.api_calls == 1
 
 
 def test_build_request_and_fingerprint_include_effective_context_and_skills(

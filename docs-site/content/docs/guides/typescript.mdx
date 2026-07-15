@@ -209,15 +209,24 @@ The analyzer request deadline defaults to 30 seconds and startup defaults to 10:
 [target.ts]
 worker_timeout_seconds = 60
 worker_startup_timeout_seconds = 20
+worker_heap_mb = 6144 # optional MiB override
 ```
 
 Increase the request deadline when a large project closure is valid but slow. Timeout
 errors include the latest worker phase timings and point to the relevant config key.
+Status and sync validate dependency closures in bounded batches and release compiler
+state between batches. If a single closure still exceeds Node's default heap, set
+`worker_heap_mb` to at least 256; Jaunt translates it to `--max-old-space-size` while
+continuing to strip arbitrary `NODE_OPTIONS`. Heap OOMs are deterministic and are not
+replayed automatically.
+
 Unexpected analyzer errors also name the last active phase. If an implementation
 candidate passes its request validator but a later transaction-level overlay fails,
-Jaunt keeps that accepted candidate in the response cache. A retry with the same
-project identity revalidates the cached source before use and does not call the model
-again.
+Jaunt repairs it immediately within the remaining per-module attempt budget, seeded by
+the rejected source and exact conformance diagnostics. JSON `candidate_outcomes` reports
+the attempt count, retry reasons, and whether the module committed or failed. The
+candidate also remains in the response cache so an interrupted command can resume
+without discarding the paid result.
 
 Starting with `@usejaunt/ts` 0.1.0-alpha.2, sidecars persist a normalized semantic
 environment identity. On a later compatible Jaunt or worker upgrade, Jaunt compares
