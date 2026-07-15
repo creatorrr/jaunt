@@ -143,6 +143,8 @@ export interface ContractModuleIR {
   readonly typeImports: readonly TypeImportIR[];
   /** Canonical imported/context documentation used by the semantic gate. */
   readonly contextDocs: TypeEnvironmentSnapshot["proseRecords"];
+  /** Persisted proof for model-free upgrades; excludes only Jaunt tool metadata. */
+  readonly semanticEnvironmentDigest?: string;
   readonly dependencies: readonly string[];
   readonly structuralDigest: string;
   readonly proseDigest: string;
@@ -1338,6 +1340,8 @@ function buildContractIRInternal(
     typeDeclarations,
     typeImports,
     contextDocs: typeEnvironment?.proseRecords ?? [],
+    semanticEnvironmentDigest:
+      typeEnvironment?.compatibilityDigest ?? digestCanonical([]),
     dependencies,
     structuralDigest,
     proseDigest,

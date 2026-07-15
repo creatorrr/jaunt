@@ -18,3 +18,6 @@
 2026-07-14 23:28Z migrate  ts:src/index — src/__generated__/index.jaunt.json
 2026-07-15 00:20Z build    ts:src/index — TypeScript overlay validated
 2026-07-15 01:43Z migrate  ts:src/index — src/__generated__/index.jaunt.json
+2026-07-15 06:02Z recompose ts:src/index — TypeScript candidate recomposed for compatible toolchain
+2026-07-15 06:24Z refreeze ts:src/index — TypeScript contract equivalent
+2026-07-15 06:54Z recompose ts:src/index — TypeScript candidate recomposed for compatible toolchain

@@ -170,8 +170,8 @@ Authored test intent lives in `*.jaunt-test.ts`. Generated batteries use Vitest 
 import the public facade. Example-tier failures retain normal detail. Derived-tier
 repair feedback contains only an opaque case ID and a normalized failure category.
 Collection, timeout, runner, and protocol failures are infrastructure errors and do
-not trigger an implementation repair. Jaunt caches newly generated candidates across
-those failures, but does not commit batteries that have not passed.
+not trigger an implementation repair. A failed run commits neither batteries nor
+generation-cache entries; rerunning regenerates the uncommitted candidates.
 Every package that owns a configured test project must declare `vitest` directly in
 `devDependencies`; add `fast-check` there too when that package uses `@prop`. A
 hoisted installation alone is not authorization, and Jaunt checks the supported peer
@@ -181,6 +181,26 @@ Leave `[target.ts].vitest_config` empty for pure generated batteries unless they
 application-specific plugins or setup. Pointing Jaunt at a Vite application config can
 change test discovery and collection. If collection fails, fix the runner configuration
 and rerun; the implementation is not regenerated.
+
+The analyzer request deadline defaults to 30 seconds and startup defaults to 10:
+
+```toml
+[target.ts]
+worker_timeout_seconds = 60
+worker_startup_timeout_seconds = 20
+```
+
+Increase the request deadline when a large project closure is valid but slow. Timeout
+errors include the latest worker phase timings and point to the relevant config key.
+
+Starting with `@usejaunt/ts` 0.1.0-alpha.2, sidecars persist a normalized semantic
+environment identity. On a later compatible Jaunt or worker upgrade, Jaunt compares
+that identity and the saved contract through its dependency closure. If only Jaunt
+tool metadata or composition details changed, it recovers the existing candidate,
+runs the current compiler and validation pipeline, recomposes the deterministic public
+boundary, and reheaders affected test batteries without a model call. Older sidecars
+without this proof rebuild once. A changed external declaration, non-tooling lockfile
+entry, or dependency contract remains a normal structural rebuild.
 
 Property intent uses one deterministic line:
 

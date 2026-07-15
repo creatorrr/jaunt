@@ -100,7 +100,8 @@
         },
         "moduleIds": { "$ref": "#/definitions/stringArray" },
         "syncModuleIds": { "$ref": "#/definitions/stringArray" },
-        "restampModuleIds": { "$ref": "#/definitions/stringArray" }
+        "restampModuleIds": { "$ref": "#/definitions/stringArray" },
+        "recomposeModuleIds": { "$ref": "#/definitions/stringArray" }
       }
     },
     "invalidateParams": {
@@ -394,7 +395,7 @@
         "capabilities": {
           "type": "array",
           "minItems": 6,
-          "maxItems": 7,
+          "maxItems": 8,
           "uniqueItems": true,
           "items": {
             "enum": [
@@ -404,7 +405,8 @@
               "orphans",
               "invalidate",
               "contract-projection",
-              "scoped-diagnostics"
+              "scoped-diagnostics",
+              "recompose"
             ]
           }
         }

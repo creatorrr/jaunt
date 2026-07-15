@@ -11,6 +11,7 @@
     },
     "moduleIds": ["ts:src/slug/index"],
     "syncModuleIds": [],
-    "restampModuleIds": []
+    "restampModuleIds": [],
+    "recomposeModuleIds": []
   }
 }

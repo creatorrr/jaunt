@@ -1,9 +1,9 @@
 {
-  "apiDigest": "sha256:a52511dad24073a9fc2e95259368ead606971bd859f5af8ecb222f6ec1d1fd46",
+  "apiDigest": "sha256:b5494ae5d16bbc5df3a21ff0e52fa2d01a155eda59a3c5dcb87978dd01854dca",
   "apiMirrorPath": "packages/core/src/normalize/__generated__/index.api.ts",
   "artifactHashes": {
-    "packages/core/src/normalize/__generated__/index.api.ts": "sha256:a8d2bbd51e22d9fd15fdaeb1f7b67dbc873702cbc41aee5997fa540fa7ac3df1",
-    "packages/core/src/normalize/__generated__/index.ts": "sha256:a8aafd7f814f87f618defa85c99e0f8475aa0126e6fe5e2929c2262b47eb7967",
+    "packages/core/src/normalize/__generated__/index.api.ts": "sha256:f1c955529bd3ee312da33d1d08d3459e37c3f0eeba9a01119eaaa47726425d13",
+    "packages/core/src/normalize/__generated__/index.ts": "sha256:eadd720c7bd9e01c08274a7f73eb2276ed404df813c485e151c6bf9976959c0b",
     "packages/core/src/normalize/index.ts": "sha256:1db00b0df482881a7fe6f67c5d84bf3d48659187a8e4ed17909cf395260f6874"
   },
   "contextDocs": [
@@ -146,12 +146,12 @@
   "facadePath": "packages/core/src/normalize/index.ts",
   "fingerprint": {
     "compilerOptionsHash": "sha256:733b0de60903c3a6ff99040ca855c84b231f4a33ec486b0681a52c9fd9c80560",
-    "generationFingerprint": "sha256:d04f9d1531f6a85240a55bd68523439accd11ccabf4cf4950250527e3c4c31cd",
+    "generationFingerprint": "sha256:3efd14ad7db9256159e2532279f260052a8e4d623d7f6055102d530dca2305dd",
     "ir": "contract-ir/1-draft.2",
     "protocol": "jaunt-ts/1-draft.2",
-    "toolVersion": "1.7.2",
+    "toolVersion": "1.7.3",
     "typescriptVersion": "5.9.3",
-    "workerVersion": "0.1.0-alpha.1"
+    "workerVersion": "0.1.0-alpha.2"
   },
   "implementationPath": "packages/core/src/normalize/__generated__/index.ts",
   "moduleId": "ts:packages/core/src/normalize/index",
@@ -160,9 +160,10 @@
   "project": "packages/core/tsconfig.json",
   "proseDigest": "sha256:fe36c3763b8865671942e43121b369178cedb891ef3436c7263ba68da757b456",
   "schema": "contract-ir/1-draft.2",
+  "semanticEnvironmentDigest": "sha256:038457cd31aebbca3d7dc6ea38590ec29a7e4749af667402998ba09d7659c0ca",
   "specPath": "packages/core/src/normalize/index.jaunt.ts",
   "state": "built",
-  "structuralDigest": "sha256:819f62c175205856ab24edb1bb950ebeb9f8d2aeb1aadeb1f7eba25dbc25e627",
+  "structuralDigest": "sha256:0375dbc30154f77275f307f8bd48ee440b7083c8f4e1cc4b4a919fd7bd85e09c",
   "symbols": [
     {
       "docs": "Normalize spacing in a title.\n\nTrim leading and trailing ASCII whitespace and replace each non-empty run of\nASCII whitespace characters with one literal space. Return an empty string\nwhen the input is empty or contains only ASCII whitespace.\n\n@example normalizeSpacing(\"  Jaunt\\tTS  \") // => \"Jaunt TS\"",

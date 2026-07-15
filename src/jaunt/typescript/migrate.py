@@ -444,6 +444,8 @@ def _scheme_value(sidecar: Mapping[str, Any], name: str) -> object:
 def _built_migration_issue(
     root: Path,
     module: Mapping[str, Any],
+    *,
+    semantic_compatible: bool = False,
 ) -> TypeScriptMigrationDiagnostic | None:
     """Return a no-write rebuild decision when built alpha artifacts are incompatible."""
 
@@ -471,6 +473,17 @@ def _built_migration_issue(
             message=(
                 f"{module_id} has a built implementation but no compatible sidecar; "
                 "run `jaunt build --language ts --force` to rebuild it."
+            ),
+            classification="model-rebuild",
+            module_id=module_id,
+            path=sidecar_path,
+        )
+    if "semanticEnvironmentDigest" in expected and "semanticEnvironmentDigest" not in actual:
+        return TypeScriptMigrationDiagnostic(
+            code="JAUNT_TS_MIGRATE_REBUILD_REQUIRED",
+            message=(
+                f"{module_id} predates persisted TypeScript environment proof; "
+                "run `jaunt build --language ts` to rebuild it once."
             ),
             classification="model-rebuild",
             module_id=module_id,
@@ -527,6 +540,8 @@ def _built_migration_issue(
     digest_fields = ("structuralDigest", "proseDigest", "apiDigest")
     changed = [field for field in digest_fields if actual.get(field) != expected.get(field)]
     if changed:
+        if semantic_compatible:
+            return None
         return TypeScriptMigrationDiagnostic(
             code="JAUNT_TS_MIGRATE_REBUILD_REQUIRED",
             message=(
@@ -573,6 +588,7 @@ async def plan_typescript_migration(
         worker_session,
     )
     from jaunt.typescript.status import classify_modules
+    from jaunt.typescript.upgrade import compatible_semantic_modules
 
     root = root.resolve()
     if config.version != 2 or config.typescript_target is None:
@@ -605,6 +621,7 @@ async def plan_typescript_migration(
     ):
         analysis = await analyze(client, initialized)
         modules = analysis.modules
+        semantic_compatible = compatible_semantic_modules(root, tuple(modules))
         status = classify_modules(root, modules)
         expected_inputs = {
             **_input_hashes(analysis.contracts),
@@ -623,7 +640,11 @@ async def plan_typescript_migration(
         }
         for module in modules:
             module_id = _module_id(module)
-            issue = _built_migration_issue(root, module)
+            issue = _built_migration_issue(
+                root,
+                module,
+                semantic_compatible=module_id in semantic_compatible,
+            )
             invalid_codes = {item.code for item in status.invalid.get(module_id, ())}
             if issue is None and invalid_codes - repairable_invalid:
                 issue = TypeScriptMigrationDiagnostic(
@@ -656,14 +677,20 @@ async def plan_typescript_migration(
                 if _safe_path(root, _module_path(module, "implementationPath")).is_file()
                 else ""
             )
-            restamp = built and (module_id in status.stale or module_id in status.invalid)
+            recompose = built and status.stale.get(module_id) == "toolchain"
+            restamp = (
+                built
+                and not recompose
+                and (module_id in status.stale or module_id in status.invalid)
+            )
             validated = await validate_overlay(
                 client,
                 analysis,
                 {},
                 (module_id,),
                 restamp_module_ids=(module_id,) if restamp else (),
-                sync_module_ids=() if restamp else (module_id,),
+                recompose_module_ids=(module_id,) if recompose else (),
+                sync_module_ids=() if (restamp or recompose) else (module_id,),
             )
             if not validated.valid:
                 rendered = (
@@ -698,9 +725,13 @@ async def plan_typescript_migration(
                 if current == proposed:
                     continue
                 classification = (
-                    "free-restamp"
-                    if restamp and write.kind in {"implementation", "sidecar"}
-                    else "deterministic-rewrite"
+                    "free-recompose"
+                    if recompose and write.kind in {"implementation", "api-mirror", "sidecar"}
+                    else (
+                        "free-restamp"
+                        if restamp and write.kind in {"implementation", "sidecar"}
+                        else "deterministic-rewrite"
+                    )
                 )
                 writes.append(write)
                 actions.append(

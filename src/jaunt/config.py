@@ -9,6 +9,7 @@ from __future__ import annotations
 import difflib
 import glob
 import keyword
+import math
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -186,6 +187,8 @@ _V2_TS_TARGET_KEYS = frozenset(
         "auto_class_tests",
         "fast_check_runs",
         "contract_battery_dir",
+        "worker_timeout_seconds",
+        "worker_startup_timeout_seconds",
     }
 )
 _V2_BUILD_KEYS = frozenset({"jobs", "include_target_tests", "instructions"})
@@ -598,6 +601,14 @@ def _normalize_v2_data(
         fast_check_runs = _as_int(
             ts_tbl.get("fast_check_runs", 50), name="target.ts.fast_check_runs"
         )
+        worker_timeout_seconds = _as_float(
+            ts_tbl.get("worker_timeout_seconds", 30.0),
+            name="target.ts.worker_timeout_seconds",
+        )
+        worker_startup_timeout_seconds = _as_float(
+            ts_tbl.get("worker_startup_timeout_seconds", 10.0),
+            name="target.ts.worker_startup_timeout_seconds",
+        )
         test_runner = _as_str(ts_tbl.get("test_runner", "vitest"), name="target.ts.test_runner")
         if not ts_source_roots:
             raise JauntConfigError("Invalid config: target.ts.source_roots must not be empty.")
@@ -606,6 +617,15 @@ def _normalize_v2_data(
         if fast_check_runs < 1:
             raise JauntConfigError(
                 "Invalid config: target.ts.fast_check_runs must be a positive integer."
+            )
+        if not math.isfinite(worker_timeout_seconds) or worker_timeout_seconds <= 0:
+            raise JauntConfigError(
+                "Invalid config: target.ts.worker_timeout_seconds must be finite and positive."
+            )
+        if not math.isfinite(worker_startup_timeout_seconds) or worker_startup_timeout_seconds <= 0:
+            raise JauntConfigError(
+                "Invalid config: target.ts.worker_startup_timeout_seconds "
+                "must be finite and positive."
             )
         if test_runner != "vitest":
             raise JauntConfigError(
@@ -668,6 +688,8 @@ def _normalize_v2_data(
             ),
             fast_check_runs=fast_check_runs,
             contract_battery_dir=contract_battery_dir,
+            worker_timeout_seconds=worker_timeout_seconds,
+            worker_startup_timeout_seconds=worker_startup_timeout_seconds,
         )
 
     def _prompt_value(table: dict[str, Any], key: str, name: str) -> str:

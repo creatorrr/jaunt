@@ -72,6 +72,7 @@ from jaunt.typescript.protocol import (
 )
 from jaunt.typescript.status import run_check, run_clean, run_status
 from jaunt.typescript.tester import (
+    _all_test_targets_recomposed,
     _assert_no_held_out_leak,
     _HeldOutLeakError,
     _implementation_repair_feedback,
@@ -236,9 +237,26 @@ class FakeWorker:
         self.api = (
             "/** Double a number. */\nexport declare function double(value: number): number;\n"
         )
+        semantic_contract = {
+            "moduleId": "ts:src/math",
+            "specPath": "src/math.jaunt.ts",
+            "facadePath": "src/math.ts",
+            "apiMirrorPath": "src/__generated__/math.api.ts",
+            "implementationPath": "src/__generated__/math.ts",
+            "project": "tsconfig.json",
+            "packageOwner": ".",
+            "symbols": [{"name": "double", "kind": "function"}],
+            "options": {},
+            "typeDeclarations": [],
+            "typeImports": [],
+            "contextDocs": [],
+            "semanticEnvironmentDigest": "sha256:semantic-environment",
+            "dependencies": [],
+        }
         self.sidecar = (
             json.dumps(
                 {
+                    **semantic_contract,
                     "structuralDigest": "sha256:structural",
                     "proseDigest": "sha256:prose",
                     "apiDigest": "sha256:api",
@@ -249,19 +267,9 @@ class FakeWorker:
             + "\n"
         )
         self.module = {
+            **semantic_contract,
             "schema": "contract-ir/1-draft.2",
-            "moduleId": "ts:src/math",
-            "specPath": "src/math.jaunt.ts",
-            "facadePath": "src/math.ts",
-            "apiMirrorPath": "src/__generated__/math.api.ts",
-            "implementationPath": "src/__generated__/math.ts",
             "sidecarPath": "src/__generated__/math.jaunt.json",
-            "project": "tsconfig.json",
-            "packageOwner": ".",
-            "symbols": [{"name": "double", "kind": "function"}],
-            "typeDeclarations": [],
-            "typeImports": [],
-            "dependencies": [],
             "structuralDigest": "sha256:structural",
             "proseDigest": "sha256:prose",
             "apiDigest": "sha256:api",
@@ -333,8 +341,9 @@ class FakeWorker:
             candidates = params.get("candidates", {})
             real = candidates.get("ts:src/math") if isinstance(candidates, dict) else None
             restamp_mode = bool(params.get("restampModuleIds")) and real is None
+            recompose_mode = bool(params.get("recomposeModuleIds")) and real is None
             sync_mode = bool(params.get("syncModuleIds")) and real is None
-            preserve_mode = sync_mode or restamp_mode
+            preserve_mode = sync_mode or restamp_mode or recompose_mode
             existing_path = self.root / "src/__generated__/math.ts"
             existing = (
                 existing_path.read_text() if preserve_mode and existing_path.is_file() else None
@@ -356,7 +365,7 @@ class FakeWorker:
                     "export const double: typeof __JauntApi.double = "
                     "__jaunt_impl_double;\n"
                 )
-            elif implementation_kind == "implementation" and restamp_mode:
+            elif implementation_kind == "implementation" and (restamp_mode or recompose_mode):
                 for key, value in (
                     ("structural", self.module["structuralDigest"]),
                     ("prose", self.module["proseDigest"]),
@@ -366,6 +375,15 @@ class FakeWorker:
                         rf"(?m)^// jaunt:{key}=.*$",
                         f"// jaunt:{key}={value}",
                         str(implementation),
+                    )
+                if recompose_mode and "Object.defineProperty(__jaunt_impl_double" not in str(
+                    implementation
+                ):
+                    implementation = str(implementation).replace(
+                        "export const double:",
+                        'Object.defineProperty(__jaunt_impl_double, "name", '
+                        '{ value: "double", configurable: true });\n'
+                        "export const double:",
                     )
             facade = 'export * from "./__generated__/math.js";\n'
             sidecar_payload = json.loads(str(self.module["sidecar"]))
@@ -385,7 +403,7 @@ class FakeWorker:
                 self._artifact("src/__generated__/math.api.ts", self.api, "api-mirror"),
                 self._artifact("src/__generated__/math.jaunt.json", committed_sidecar, "sidecar"),
             ]
-            if real is not None or existing is None or restamp_mode:
+            if real is not None or existing is None or restamp_mode or recompose_mode:
                 artifacts.append(
                     self._artifact(
                         "src/__generated__/math.ts", str(implementation), implementation_kind
@@ -1299,12 +1317,115 @@ async def test_status_classifies_contract_ir_change_as_structural(tmp_path: Path
     )
     sidecar = json.loads(worker.sidecar)
     sidecar["structuralDigest"] = "sha256:new-structure"
+    sidecar["symbols"] = [{"name": "triple", "kind": "function"}]
     worker.module["structuralDigest"] = "sha256:new-structure"
+    worker.module["symbols"] = sidecar["symbols"]
     worker.module["sidecar"] = json.dumps(sidecar, sort_keys=True) + "\n"
 
     status = await run_status(tmp_path, config, worker_factory=lambda *_: worker)
 
     assert status.stale == {"ts:src/math": "structural"}
+
+
+@pytest.mark.asyncio
+async def test_toolchain_digest_drift_recomposes_without_model(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    worker = FakeWorker(tmp_path)
+    await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    expected = json.loads(worker.sidecar)
+    expected["structuralDigest"] = "sha256:new-digest-scheme"
+    expected["apiDigest"] = "sha256:new-api-digest-scheme"
+    worker.module["structuralDigest"] = expected["structuralDigest"]
+    worker.module["apiDigest"] = expected["apiDigest"]
+    worker.module["sidecar"] = json.dumps(expected, sort_keys=True) + "\n"
+
+    status = await run_status(tmp_path, config, worker_factory=lambda *_: worker)
+    report = await run_build(
+        tmp_path,
+        config,
+        generator=ExplodingGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert status.stale == {"ts:src/math": "toolchain"}
+    assert report.generated == frozenset()
+    assert report.refrozen == frozenset({"ts:src/math"})
+    assert report.metadata["recomposed"] == ("ts:src/math",)
+    validation = [params for method, params in worker.requests if method == "validateOverlay"]
+    assert validation[-1]["recomposeModuleIds"] == ["ts:src/math"]
+    implementation = (tmp_path / "src/__generated__/math.ts").read_text()
+    assert 'Object.defineProperty(__jaunt_impl_double, "name"' in implementation
+
+
+@pytest.mark.asyncio
+async def test_toolchain_digest_drift_without_persisted_environment_requires_rebuild(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    worker = FakeWorker(tmp_path)
+    await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    sidecar_path = tmp_path / "src/__generated__/math.jaunt.json"
+    committed = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    committed.pop("semanticEnvironmentDigest")
+    sidecar_path.write_text(json.dumps(committed, sort_keys=True) + "\n", encoding="utf-8")
+    expected = json.loads(worker.sidecar)
+    expected["structuralDigest"] = "sha256:new-digest-scheme"
+    expected["apiDigest"] = "sha256:new-api-digest-scheme"
+    worker.module["structuralDigest"] = expected["structuralDigest"]
+    worker.module["apiDigest"] = expected["apiDigest"]
+    worker.module["sidecar"] = json.dumps(expected, sort_keys=True) + "\n"
+
+    status = await run_status(tmp_path, config, worker_factory=lambda *_: worker)
+    report = await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert status.stale == {"ts:src/math": "structural"}
+    assert report.generated == frozenset({"ts:src/math"})
+    assert report.metadata.get("recomposed", ()) == ()
+
+
+@pytest.mark.asyncio
+async def test_proofless_legacy_sidecar_rebuilds_when_contract_digests_match(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    worker = FakeWorker(tmp_path)
+    await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    sidecar_path = tmp_path / "src/__generated__/math.jaunt.json"
+    committed = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    committed.pop("semanticEnvironmentDigest")
+    sidecar_path.write_text(json.dumps(committed, sort_keys=True) + "\n", encoding="utf-8")
+
+    status = await run_status(tmp_path, config, worker_factory=lambda *_: worker)
+    report = await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert status.stale == {"ts:src/math": "structural"}
+    assert report.generated == frozenset({"ts:src/math"})
+    assert report.metadata.get("recomposed", ()) == ()
 
 
 @pytest.mark.asyncio
@@ -1322,7 +1443,7 @@ async def test_symbol_qualified_target_rejects_unknown_symbol(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_fingerprint_drift_is_revalidated_and_restamped_without_model(
+async def test_fingerprint_drift_is_revalidated_and_recomposed_without_model(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
@@ -1337,6 +1458,7 @@ async def test_fingerprint_drift_is_revalidated_and_restamped_without_model(
     expected["fingerprint"] = "draft.2"
     worker.module["sidecar"] = json.dumps(expected, sort_keys=True) + "\n"
 
+    status = await run_status(tmp_path, config, worker_factory=lambda *_: worker)
     report = await run_build(
         tmp_path,
         config,
@@ -1344,8 +1466,12 @@ async def test_fingerprint_drift_is_revalidated_and_restamped_without_model(
         worker_factory=lambda *_: worker,
     )
 
+    assert status.stale == {"ts:src/math": "toolchain"}
     assert report.generated == frozenset()
     assert report.refrozen == frozenset({"ts:src/math"})
+    assert report.metadata["recomposed"] == ("ts:src/math",)
+    validation = [params for method, params in worker.requests if method == "validateOverlay"]
+    assert validation[-1]["recomposeModuleIds"] == ["ts:src/math"]
     assert "__jaunt_impl_double" in (tmp_path / "src/__generated__/math.ts").read_text()
 
 
@@ -4705,6 +4831,60 @@ async def test_test_incrementality_refreezes_tooling_only_drift_before_running(
         assert metadata["runner_fingerprint"] != before[path][1]["runner_fingerprint"]
         assert metadata["vitest_fingerprint"] != before[path][1]["vitest_fingerprint"]
         assert metadata["battery_fingerprint"] != before[path][1]["battery_fingerprint"]
+
+
+@pytest.mark.asyncio
+async def test_toolchain_recompose_revalidates_existing_batteries_without_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    paths = frozenset(seeded.generated)
+    bodies = {path: _strip_test_header((tmp_path / path).read_text()) for path in paths}
+    expected = json.loads(worker.sidecar)
+    expected["structuralDigest"] = "sha256:toolchain-structure"
+    expected["apiDigest"] = "sha256:toolchain-api"
+    worker.module["structuralDigest"] = expected["structuralDigest"]
+    worker.module["apiDigest"] = expected["apiDigest"]
+    worker.module["sidecar"] = json.dumps(expected, sort_keys=True) + "\n"
+
+    report = await run_test(
+        tmp_path,
+        config,
+        generator=ExplodingGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 0
+    assert report.generated == frozenset()
+    assert report.refrozen == paths
+    assert report.runner["build"]["recomposed"] == ("ts:src/math",)
+    for path in paths:
+        assert _strip_test_header((tmp_path / path).read_text()) == bodies[path]
+
+
+def test_battery_reheader_requires_every_selected_target_to_recompose() -> None:
+    selected = ("ts:src/math", "ts:src/format")
+
+    assert not _all_test_targets_recomposed(selected, {"ts:src/math"})
+    assert _all_test_targets_recomposed(selected, set(selected))
+    assert not _all_test_targets_recomposed((), set(selected))
 
 
 @pytest.mark.asyncio

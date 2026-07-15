@@ -17,6 +17,8 @@ import type { DiscoveredModule } from "./discovery.js";
 /** Files and digest that define the type environment visible at a spec boundary. */
 export interface TypeEnvironmentSnapshot {
   readonly digest: string;
+  /** Environment identity with only @usejaunt/ts package metadata normalized. */
+  readonly compatibilityDigest: string;
   /** Canonical documentation on the imported public surface. */
   readonly proseDigest: string;
   /** Deterministic imported/context TSDoc records for semantic-gate review. */
@@ -57,6 +59,103 @@ function semanticJson(source: string): unknown {
   } catch {
     return { invalidJson: sha256Bytes(source) };
   }
+}
+
+function normalizeToolingMetadata(value: unknown, key = ""): unknown {
+  if (
+    key === "@usejaunt/ts" ||
+    key === "node_modules/@usejaunt/ts" ||
+    key.endsWith("/node_modules/@usejaunt/ts")
+  ) {
+    return "<jaunt-toolchain>";
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizeToolingMetadata(item));
+  }
+  if (value !== null && typeof value === "object") {
+    const object = value as Record<string, unknown>;
+    if (object.name === "@usejaunt/ts") {
+      return { name: "@usejaunt/ts" };
+    }
+    return Object.fromEntries(
+      Object.entries(object).map(([childKey, item]) => [
+        childKey,
+        normalizeToolingMetadata(item, childKey),
+      ]),
+    );
+  }
+  return value;
+}
+
+function unquotedLockKey(value: string): string {
+  const key = value.trim();
+  if (
+    key.length >= 2 &&
+    ((key.startsWith('"') && key.endsWith('"')) ||
+      (key.startsWith("'") && key.endsWith("'")))
+  ) {
+    return key.slice(1, -1);
+  }
+  return key;
+}
+
+function isToolingLockKey(value: string): boolean {
+  const selectors = value.split(",").map(unquotedLockKey);
+  return (
+    selectors.length > 0 &&
+    selectors.every(
+      (selector) =>
+        selector === "@usejaunt/ts" ||
+        selector.startsWith("@usejaunt/ts@") ||
+        selector.startsWith("/@usejaunt/ts@"),
+    )
+  );
+}
+
+/**
+ * Normalize only @usejaunt/ts entries in text lockfiles. This handles pnpm
+ * YAML, Yarn classic/Berry, and Bun's text lock without treating unrelated
+ * package changes as a compatible toolchain upgrade. Legacy binary bun.lockb
+ * remains intentionally opaque and therefore rebuilds conservatively.
+ */
+function normalizeToolingLockfile(source: string): string {
+  const output: string[] = [];
+  let skippedIndent: number | undefined;
+  for (const original of source.match(/.*(?:\r?\n|$)/g) ?? []) {
+    if (original === "") continue;
+    const newline = original.endsWith("\r\n")
+      ? "\r\n"
+      : original.endsWith("\n")
+        ? "\n"
+        : "";
+    const line = original.slice(0, original.length - newline.length);
+    const indent = line.match(/^[\t ]*/)![0].length;
+    const trimmed = line.trim();
+    if (skippedIndent !== undefined) {
+      if (trimmed === "" || indent > skippedIndent) continue;
+      skippedIndent = undefined;
+    }
+
+    const entry = trimmed.match(/^(.+?)\s*([:=])\s*(.*)$/);
+    if (entry && isToolingLockKey(entry[1]!)) {
+      const marker = `${line.slice(0, indent)}"<jaunt-toolchain>"`;
+      if (entry[2] === ":" && entry[3] === "") {
+        output.push(`${marker}:${newline}`);
+        skippedIndent = indent;
+      } else {
+        output.push(`${marker}${entry[2]} "<jaunt-toolchain>"${newline}`);
+      }
+      continue;
+    }
+
+    output.push(
+      `${line.replace(
+        /(["']@usejaunt\/ts["']\s*[:=]\s*)["'][^"']*["']/g,
+        '$1"<jaunt-toolchain>"',
+      )}${newline}`,
+    );
+  }
+  return output.join("");
 }
 
 interface SourceSpan {
@@ -347,6 +446,7 @@ export function collectTypeEnvironment(
   compilerOptions: ts.CompilerOptions,
 ): TypeEnvironmentSnapshot {
   const records: { id: string; syntax: unknown }[] = [];
+  const compatibleEnvironmentSyntax = new Map<string, unknown>();
   const proseRecords: ImportedDocsRecord[] = [];
   const inputPaths = new Set<string>();
   const visited = new Set<string>();
@@ -477,12 +577,20 @@ export function collectTypeEnvironment(
   for (const path of environmentFiles(root, module.route.packageOwner)) {
     const source = readFileSync(path, "utf8");
     inputPaths.add(path);
+    const id = `environment:${toPosix(relative(root, path))}`;
+    const syntax = path.endsWith(".json")
+      ? semanticJson(source)
+      : { sha256: sha256Bytes(source) };
     records.push({
-      id: `environment:${toPosix(relative(root, path))}`,
-      syntax: path.endsWith(".json")
-        ? semanticJson(source)
-        : { sha256: sha256Bytes(source) },
+      id,
+      syntax,
     });
+    compatibleEnvironmentSyntax.set(
+      id,
+      path.endsWith(".json")
+        ? normalizeToolingMetadata(syntax)
+        : { sha256: sha256Bytes(normalizeToolingLockfile(source)) },
+    );
   }
 
   records.sort((left, right) => {
@@ -497,6 +605,15 @@ export function collectTypeEnvironment(
   );
   return {
     digest: digestCanonical(records),
+    compatibilityDigest: digestCanonical(
+      records.map((record) => ({
+        ...record,
+        syntax: record.id.startsWith("environment:")
+          ? (compatibleEnvironmentSyntax.get(record.id) ??
+            normalizeToolingMetadata(record.syntax))
+          : record.syntax,
+      })),
+    ),
     proseDigest: digestCanonical(sortedProseRecords),
     proseRecords: sortedProseRecords,
     inputPaths: [...inputPaths].sort(),

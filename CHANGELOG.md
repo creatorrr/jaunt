@@ -3,6 +3,25 @@
 All notable changes to jaunt. Generated from conventional commits by
 [git-cliff](https://git-cliff.org); one section per published PyPI release.
 
+## [1.7.3] - 2026-07-14
+
+### Fixes
+
+- Make TypeScript worker request and startup deadlines configurable, and include
+  phase timings plus the relevant config hint when a worker request times out.
+- Revalidate and deterministically recompose existing TypeScript candidates when
+  a later toolchain upgrade changes only Jaunt metadata or composition details.
+  Alpha.2 sidecars persist a normalized environment identity; the proof covers each
+  module's dependency closure, while older sidecars conservatively rebuild once.
+  Matching Vitest batteries are reheadered without model calls.
+- Correct the TypeScript guide: failed infrastructure runs commit neither generated
+  batteries nor generation-cache entries.
+
+### Packages
+
+- Publish `@usejaunt/ts` `0.1.0-alpha.2` with deterministic candidate recomposition
+  and worker phase telemetry.
+
 ## [1.7.2] - 2026-07-14
 
 ### Fixes

@@ -73,6 +73,7 @@ export interface ValidateOverlayParams {
   readonly moduleIds?: readonly string[];
   readonly syncModuleIds?: readonly string[];
   readonly restampModuleIds?: readonly string[];
+  readonly recomposeModuleIds?: readonly string[];
 }
 
 export interface FindOrphansParams {

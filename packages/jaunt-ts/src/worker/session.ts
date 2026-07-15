@@ -40,6 +40,7 @@ import {
   type DiscoveryResult,
 } from "../analyzer/discovery.js";
 import { buildContractIR, renderSidecar } from "../analyzer/ir.js";
+import { decomposeGeneratedImplementation } from "../analyzer/composition.js";
 import { projectContractDeclaration } from "../analyzer/contract_projection.js";
 import { renderApiMirror } from "../analyzer/mirror.js";
 import {
@@ -77,6 +78,14 @@ function packageVersion(): string {
 }
 
 export const WORKER_VERSION = packageVersion();
+
+export interface WorkerPhaseTiming {
+  readonly phase: string;
+  readonly state: "start" | "finish";
+  readonly elapsedMs: number;
+}
+
+export type WorkerPhaseReporter = (timing: WorkerPhaseTiming) => void;
 
 function packageManagerIdentity(root: string, toolOwner: string): string {
   const owners = [...new Set([resolve(root, toolOwner), root])];
@@ -553,6 +562,7 @@ export class AnalyzerSession {
         "invalidate",
         "contract-projection",
         "scoped-diagnostics",
+        "recompose",
       ],
     };
   }
@@ -659,8 +669,31 @@ export class AnalyzerSession {
     );
   }
 
-  validateOverlay(params: ValidateOverlayParams): ValidateOverlayResult {
-    const currentSnapshot = this.currentHashState().snapshot;
+  validateOverlay(
+    params: ValidateOverlayParams,
+    reportPhase?: WorkerPhaseReporter,
+  ): ValidateOverlayResult {
+    const startedAt = performance.now();
+    const timed = <T>(phase: string, operation: () => T): T => {
+      reportPhase?.({
+        phase,
+        state: "start",
+        elapsedMs: performance.now() - startedAt,
+      });
+      try {
+        return operation();
+      } finally {
+        reportPhase?.({
+          phase,
+          state: "finish",
+          elapsedMs: performance.now() - startedAt,
+        });
+      }
+    };
+    const currentSnapshot = timed(
+      "snapshot",
+      () => this.currentHashState().snapshot,
+    );
     if (
       params.sessionId !== this.sessionId ||
       params.expectedEpoch !== this.#epoch ||
@@ -677,19 +710,28 @@ export class AnalyzerSession {
       moduleSelection(params.syncModuleIds) ?? new Set<string>();
     const restampModules =
       moduleSelection(params.restampModuleIds) ?? new Set<string>();
-    const conflicting = Object.keys(params.candidates).filter((moduleId) =>
-      restampModules.has(moduleId),
+    const recomposeModules =
+      moduleSelection(params.recomposeModuleIds) ?? new Set<string>();
+    const modes = [
+      new Set(Object.keys(params.candidates)),
+      syncModules,
+      restampModules,
+      recomposeModules,
+    ];
+    const conflicting = [...new Set(modes.flatMap((mode) => [...mode]))].filter(
+      (moduleId) => modes.filter((mode) => mode.has(moduleId)).length > 1,
     );
     if (conflicting.length > 0) {
       throw new WorkerError(
         "INVALID_REQUEST",
-        `Modules cannot have both candidates and restamp authorization: ${conflicting.sort().join(", ")}`,
+        `Modules cannot request more than one overlay mode: ${conflicting.sort().join(", ")}`,
       );
     }
     const requestedModules = new Set([
       ...Object.keys(params.candidates),
       ...syncModules,
       ...restampModules,
+      ...recomposeModules,
     ]);
     const knownModules = new Set(
       this.discovery.modules.map((module) => module.route.moduleId),
@@ -728,179 +770,215 @@ export class AnalyzerSession {
     const artifacts: ArtifactRecord[] = [];
     const diagnostics: DiagnosticRecord[] = [];
     const changedProjects = new Set<string>();
-    const allIrs = this.discovery.modules.map((module) =>
-      this.contractIr(module),
+    const allIrs = timed("contract-ir", () =>
+      this.discovery.modules.map((module) => this.contractIr(module)),
     );
     const irByModule = new Map(allIrs.map((ir) => [ir.moduleId, ir] as const));
-    for (const module of this.discovery.modules) {
-      if (selected && !selected.has(module.route.moduleId)) continue;
-      const candidate = params.candidates[module.route.moduleId];
-      if (
-        candidate === undefined &&
-        !syncModules.has(module.route.moduleId) &&
-        !restampModules.has(module.route.moduleId)
-      )
+    const candidates: Record<string, string> = { ...params.candidates };
+    const failedRecompositions = new Set<string>();
+    for (const moduleId of recomposeModules) {
+      const ir = irByModule.get(moduleId);
+      if (!ir) continue;
+      const existing = readOptional(resolve(this.root, ir.implementationPath));
+      if (existing === undefined) {
+        diagnostics.push({
+          code: "JAUNT_TS_RECOMPOSE_MISSING",
+          severity: "error",
+          message: "Cannot recompose a missing generated implementation",
+          path: ir.implementationPath,
+        });
+        failedRecompositions.add(moduleId);
         continue;
-      const ir = irByModule.get(module.route.moduleId)!;
-      const project = this.graph.projects.find(
-        (item) => item.id === ir.project,
+      }
+      const decomposed = decomposeGeneratedImplementation(
+        this.compiler,
+        ir,
+        existing,
       );
-      if (!project)
-        throw new WorkerError(
-          "CONFIG_INVALID",
-          `Missing owner project ${ir.project}`,
+      diagnostics.push(...decomposed.diagnostics);
+      if (decomposed.candidateSource === undefined) {
+        failedRecompositions.add(moduleId);
+        continue;
+      }
+      candidates[moduleId] = decomposed.candidateSource;
+    }
+    timed("module-overlays", () => {
+      for (const module of this.discovery.modules) {
+        if (selected && !selected.has(module.route.moduleId)) continue;
+        if (failedRecompositions.has(module.route.moduleId)) continue;
+        const candidate = candidates[module.route.moduleId];
+        if (
+          candidate === undefined &&
+          !syncModules.has(module.route.moduleId) &&
+          !restampModules.has(module.route.moduleId)
+        )
+          continue;
+        const ir = irByModule.get(module.route.moduleId)!;
+        const project = this.graph.projects.find(
+          (item) => item.id === ir.project,
         );
-      if (candidate !== undefined) {
-        const specifiers = candidateModuleSpecifiers(
-          this.compiler,
-          resolve(this.root, ir.implementationPath),
-          candidate,
-        );
-        const virtualPaths = new Set(
-          this.discovery.routes.flatMap((route) =>
-            [
-              route.specPath,
-              route.facadePath,
-              route.apiMirrorPath,
-              route.implementationPath,
-              route.contextPath,
-            ]
-              .filter((path): path is string => path !== undefined)
-              .map((path) => resolve(this.root, path)),
-          ),
-        );
-        const imported = specifiers.flatMap((specifier) => {
-          const resolved = resolveWorkspaceModuleSpecifier(
+        if (!project)
+          throw new WorkerError(
+            "CONFIG_INVALID",
+            `Missing owner project ${ir.project}`,
+          );
+        if (candidate !== undefined) {
+          const specifiers = candidateModuleSpecifiers(
             this.compiler,
             resolve(this.root, ir.implementationPath),
-            specifier,
-            project.parsed.options,
-            virtualPaths,
+            candidate,
           );
-          return resolved === undefined ? [] : [resolved];
-        });
-        const privateSpecs = this.discovery.routes.filter((route) =>
-          imported.includes(resolve(this.root, route.specPath)),
-        );
-        if (privateSpecs.length > 0) {
-          diagnostics.push({
-            code: "JAUNT_TS_SPEC_IMPORT",
-            severity: "error",
-            message: `Candidate imports private Jaunt spec module(s): ${privateSpecs
-              .map((route) => route.moduleId)
-              .sort()
-              .join(", ")}`,
-            path: ir.implementationPath,
-          });
-          continue;
-        }
-        const generatedPrivate = this.discovery.routes.filter((route) =>
-          [route.apiMirrorPath, route.implementationPath]
-            .map((path) => resolve(this.root, path))
-            .some((path) => imported.includes(path)),
-        );
-        if (generatedPrivate.length > 0) {
-          diagnostics.push({
-            code: "JAUNT_TS_GENERATED_PRIVATE_IMPORT",
-            severity: "error",
-            message: `Candidate imports generated-private Jaunt artifact(s): ${generatedPrivate
-              .map((route) => route.moduleId)
-              .sort()
-              .join(", ")}`,
-            path: ir.implementationPath,
-          });
-          continue;
-        }
-        if (
-          imported.includes(
-            resolve(
-              this.root,
-              this.discovery.routes.find(
-                (route) => route.moduleId === ir.moduleId,
-              )?.facadePath ?? ir.facadePath,
+          const virtualPaths = new Set(
+            this.discovery.routes.flatMap((route) =>
+              [
+                route.specPath,
+                route.facadePath,
+                route.apiMirrorPath,
+                route.implementationPath,
+                route.contextPath,
+              ]
+                .filter((path): path is string => path !== undefined)
+                .map((path) => resolve(this.root, path)),
             ),
-          )
-        ) {
-          diagnostics.push({
-            code: "JAUNT_TS_CANDIDATE_SELF_IMPORT",
-            severity: "error",
-            message: `Candidate may not import its own public facade ${ir.moduleId}`,
-            path: ir.implementationPath,
-          });
-          continue;
-        }
-        const foreignImports = this.discovery.routes.filter(
-          (route) =>
-            route.moduleId !== ir.moduleId &&
-            imported.includes(resolve(this.root, route.facadePath)),
-        );
-        const declaredModules = new Set(
-          ir.dependencies.map((dependency) => dependency.split("#", 1)[0]),
-        );
-        const undeclared = foreignImports.filter(
-          (route) => !declaredModules.has(route.moduleId),
-        );
-        if (undeclared.length > 0) {
-          diagnostics.push({
-            code: "JAUNT_TS_UNDECLARED_DEPENDENCY_IMPORT",
-            severity: "error",
-            message: `Candidate imports undeclared Jaunt facade(s): ${undeclared
-              .map((route) => route.moduleId)
-              .sort()
-              .join(", ")}`,
-            path: ir.implementationPath,
-          });
-          continue;
-        }
-      }
-      const preflightModules = this.discovery.modules
-        .filter((other) => other.route.moduleId !== ir.moduleId)
-        .map((other) => irByModule.get(other.route.moduleId)!);
-      const result =
-        candidate === undefined
-          ? validateSyncOverlay(
+          );
+          const imported = specifiers.flatMap((specifier) => {
+            const resolved = resolveWorkspaceModuleSpecifier(
               this.compiler,
-              this.root,
-              project,
-              ir,
-              preflightModules,
-              restampModules.has(module.route.moduleId),
-              params.candidates,
-              this.#overlayPrograms,
-            )
-          : validateModuleOverlay(
-              this.compiler,
-              this.root,
-              project,
-              ir,
-              candidate,
-              preflightModules,
-              params.candidates,
-              this.#overlayPrograms,
+              resolve(this.root, ir.implementationPath),
+              specifier,
+              project.parsed.options,
+              virtualPaths,
             );
-      artifacts.push(...result.artifacts);
-      diagnostics.push(...result.diagnostics);
-      changedProjects.add(ir.project);
-    }
+            return resolved === undefined ? [] : [resolved];
+          });
+          const privateSpecs = this.discovery.routes.filter((route) =>
+            imported.includes(resolve(this.root, route.specPath)),
+          );
+          if (privateSpecs.length > 0) {
+            diagnostics.push({
+              code: "JAUNT_TS_SPEC_IMPORT",
+              severity: "error",
+              message: `Candidate imports private Jaunt spec module(s): ${privateSpecs
+                .map((route) => route.moduleId)
+                .sort()
+                .join(", ")}`,
+              path: ir.implementationPath,
+            });
+            continue;
+          }
+          const generatedPrivate = this.discovery.routes.filter((route) =>
+            [route.apiMirrorPath, route.implementationPath]
+              .map((path) => resolve(this.root, path))
+              .some((path) => imported.includes(path)),
+          );
+          if (generatedPrivate.length > 0) {
+            diagnostics.push({
+              code: "JAUNT_TS_GENERATED_PRIVATE_IMPORT",
+              severity: "error",
+              message: `Candidate imports generated-private Jaunt artifact(s): ${generatedPrivate
+                .map((route) => route.moduleId)
+                .sort()
+                .join(", ")}`,
+              path: ir.implementationPath,
+            });
+            continue;
+          }
+          if (
+            imported.includes(
+              resolve(
+                this.root,
+                this.discovery.routes.find(
+                  (route) => route.moduleId === ir.moduleId,
+                )?.facadePath ?? ir.facadePath,
+              ),
+            )
+          ) {
+            diagnostics.push({
+              code: "JAUNT_TS_CANDIDATE_SELF_IMPORT",
+              severity: "error",
+              message: `Candidate may not import its own public facade ${ir.moduleId}`,
+              path: ir.implementationPath,
+            });
+            continue;
+          }
+          const foreignImports = this.discovery.routes.filter(
+            (route) =>
+              route.moduleId !== ir.moduleId &&
+              imported.includes(resolve(this.root, route.facadePath)),
+          );
+          const declaredModules = new Set(
+            ir.dependencies.map((dependency) => dependency.split("#", 1)[0]),
+          );
+          const undeclared = foreignImports.filter(
+            (route) => !declaredModules.has(route.moduleId),
+          );
+          if (undeclared.length > 0) {
+            diagnostics.push({
+              code: "JAUNT_TS_UNDECLARED_DEPENDENCY_IMPORT",
+              severity: "error",
+              message: `Candidate imports undeclared Jaunt facade(s): ${undeclared
+                .map((route) => route.moduleId)
+                .sort()
+                .join(", ")}`,
+              path: ir.implementationPath,
+            });
+            continue;
+          }
+        }
+        const preflightModules = this.discovery.modules
+          .filter((other) => other.route.moduleId !== ir.moduleId)
+          .map((other) => irByModule.get(other.route.moduleId)!);
+        const result =
+          candidate === undefined
+            ? validateSyncOverlay(
+                this.compiler,
+                this.root,
+                project,
+                ir,
+                preflightModules,
+                restampModules.has(module.route.moduleId),
+                candidates,
+                this.#overlayPrograms,
+              )
+            : validateModuleOverlay(
+                this.compiler,
+                this.root,
+                project,
+                ir,
+                candidate,
+                preflightModules,
+                candidates,
+                this.#overlayPrograms,
+              );
+        artifacts.push(...result.artifacts);
+        diagnostics.push(...result.diagnostics);
+        changedProjects.add(ir.project);
+      }
+    });
     const affectedProjects = affectedProjectIds(
       this.graph.projects,
       changedProjects,
     );
     if (!diagnostics.some((item) => item.severity === "error")) {
       diagnostics.push(
-        ...validateProjectOverlayClosure(
-          this.compiler,
-          this.root,
-          this.graph.projects,
-          allIrs,
-          params.candidates,
-          artifacts,
-          affectedProjects,
-          this.#overlayPrograms,
+        ...timed("project-closure", () =>
+          validateProjectOverlayClosure(
+            this.compiler,
+            this.root,
+            this.graph.projects,
+            allIrs,
+            candidates,
+            artifacts,
+            affectedProjects,
+            this.#overlayPrograms,
+          ),
         ),
       );
     }
-    const endSnapshot = this.currentHashState().snapshot;
+    const endSnapshot = timed(
+      "final-snapshot",
+      () => this.currentHashState().snapshot,
+    );
     if (endSnapshot !== this.#snapshot) {
       throw new WorkerError(
         "STALE_SESSION",
@@ -1081,6 +1159,7 @@ export function parseValidateOverlayParams(
       "moduleIds",
       "syncModuleIds",
       "restampModuleIds",
+      "recomposeModuleIds",
     ]),
     "validateOverlay",
   );
@@ -1113,6 +1192,9 @@ export function parseValidateOverlayParams(
     ...(input.restampModuleIds === undefined
       ? {}
       : { restampModuleIds: stringArray(input, "restampModuleIds") }),
+    ...(input.recomposeModuleIds === undefined
+      ? {}
+      : { recomposeModuleIds: stringArray(input, "recomposeModuleIds") }),
   };
 }
 

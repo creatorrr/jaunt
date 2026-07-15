@@ -1,9 +1,9 @@
 {
-  "apiDigest": "sha256:e86e0a408e9f000d7677a2ca5e6398274c8ac27e8dc1cd89331e4dca4b872932",
+  "apiDigest": "sha256:0179cb11ca65daa739187ed6826428228cea8c88a2bdec9ed78b6f68816422b2",
   "apiMirrorPath": "src/__generated__/index.api.ts",
   "artifactHashes": {
-    "src/__generated__/index.api.ts": "sha256:7ef697e7532178c88654075c1bf58fbd669ca16d30d84ad2f2bde1d2dc34b617",
-    "src/__generated__/index.ts": "sha256:6b303d947490211747ea3c0a92d84e82fb22e28952f636f2ce83f398d3fdff91",
+    "src/__generated__/index.api.ts": "sha256:51f4090f25dcbdf22cb72a0a5132d1e92cf10a10bbd65d74d9ca0f7cea6e0d8c",
+    "src/__generated__/index.ts": "sha256:e56e396b0eda6e316f5a02d06ef1b57e61549f19842a49b2dcc2aabeabe1c76d",
     "src/index.ts": "sha256:1db00b0df482881a7fe6f67c5d84bf3d48659187a8e4ed17909cf395260f6874"
   },
   "contextDocs": [
@@ -146,12 +146,12 @@
   "facadePath": "src/index.ts",
   "fingerprint": {
     "compilerOptionsHash": "sha256:675c129a2f6916705a4b5892acd260ec0dc719838ad83ecc17ac49a3890cbfaf",
-    "generationFingerprint": "sha256:d04f9d1531f6a85240a55bd68523439accd11ccabf4cf4950250527e3c4c31cd",
+    "generationFingerprint": "sha256:3efd14ad7db9256159e2532279f260052a8e4d623d7f6055102d530dca2305dd",
     "ir": "contract-ir/1-draft.2",
     "protocol": "jaunt-ts/1-draft.2",
-    "toolVersion": "1.7.2",
+    "toolVersion": "1.7.3",
     "typescriptVersion": "5.9.3",
-    "workerVersion": "0.1.0-alpha.1"
+    "workerVersion": "0.1.0-alpha.2"
   },
   "implementationPath": "src/__generated__/index.ts",
   "moduleId": "ts:src/index",
@@ -160,9 +160,10 @@
   "project": "tsconfig.json",
   "proseDigest": "sha256:8f49f368d319309f41bb7828c151e17873012884a4a4f6241f0c8a555cac0e43",
   "schema": "contract-ir/1-draft.2",
+  "semanticEnvironmentDigest": "sha256:1145ec947d65f5811186d83e9997d26a4e3cc3181dd9c94e0b0624643e9ce06e",
   "specPath": "src/index.jaunt.ts",
   "state": "built",
-  "structuralDigest": "sha256:d8a1f0a2cc5817e5a16eadb561f837307e5cea57af8a7027252d6aff59556c47",
+  "structuralDigest": "sha256:dd4c0c1232897585485c8778c4cf094ab33af4d253aa7a1109d91490d808753d",
   "symbols": [
     {
       "docs": "Convert a title to a lowercase URL slug.\n\nTrim leading and trailing whitespace, treat every non-empty run of\nnon-alphanumeric ASCII characters as one hyphen, and omit leading/trailing\nhyphens. An input containing no ASCII letters or digits returns an empty\nstring.\n\n@example slugify(\" Hello, Jaunt TS! \") // => \"hello-jaunt-ts\"",
