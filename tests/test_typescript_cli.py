@@ -77,7 +77,7 @@ def test_init_typescript_scaffolds_v2_without_mutating_package_json(tmp_path: Pa
 
     assert payload["language"] == "ts"
     assert payload["package_init_command"] == "npm init -y && npm pkg set type=module"
-    assert payload["install_command"].startswith("npm install -D @usejaunt/ts@next ")
+    assert payload["install_command"].startswith("npm install -D @usejaunt/ts@^0.1.0 ")
     assert not (tmp_path / "package.json").exists()
     assert (tmp_path / "src" / "index.jaunt.ts").is_file()
     assert (tmp_path / "src" / "index.context.ts").is_file()

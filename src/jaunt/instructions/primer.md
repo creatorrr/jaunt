@@ -1,7 +1,7 @@
 # Jaunt — agent primer
 
-Jaunt is a spec-driven code generation framework for Python, with an alpha
-TypeScript target. You write **intent** as typed stubs and contract prose. Jaunt
+Jaunt is a spec-driven code generation framework for Python and TypeScript. You
+write **intent** as typed stubs and contract prose. Jaunt
 generates the **implementation** with the OpenAI Codex CLI (`codex exec`) and
 writes it under `__generated__/`.
 
@@ -84,6 +84,9 @@ TypeScript rules:
   one-way leaf: it cannot value-import its own facade, implementation, or spec.
 - Never edit generated implementations, `.api.ts` mirrors, `.jaunt.json`
   sidecars, or generated Vitest batteries.
+- Inspect `runner.batteries` after `jaunt test --json`. Per-battery attempts and
+  retry reasons distinguish an automatically repaired candidate from an
+  exhausted or cross-battery rejection; do not repeat an unchanged paid run.
 - TSDoc is the behavioral contract. `@jauntPreserve` marks the rare real class
   member copied into generated output. TypeScript has no `@jaunt.sig`; declared
   signatures are always conformance-checked.

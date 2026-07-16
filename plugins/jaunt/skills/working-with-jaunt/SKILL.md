@@ -42,8 +42,8 @@ provenance. Specs are private `*.jaunt.ts[x]` inputs; consumers import the
 ordinary facade. Run `jaunt sync` after adding a spec to render its API mirror
 and typed unbuilt placeholder without a model call. Never edit generated
 implementations, `*.api.ts`, `*.jaunt.json` sidecars, or generated test and
-contract batteries. During the alpha,
-`watch` follows TypeScript project/config/package inputs, and daemon jobs use
+contract batteries. `watch` follows TypeScript project/config/package inputs,
+and daemon jobs use
 qualified `ts:` artifact keys. Review a parked proposal's exact path allowlist
 before landing it; TypeScript jobs may change only the validated implementation,
 API mirror, sidecar, a newly created canonical facade, and Jaunt metadata.
@@ -71,6 +71,10 @@ the build afterward.
 - A final compiler/conformance rejection is already retried inside the module's
   remaining attempt budget with the rejected source and exact diagnostics.
   Read `candidate_outcomes` in build JSON before proposing another paid run.
+- TypeScript test candidates use the same rule. Read `runner.batteries` in test
+  JSON for per-battery attempts, retry reasons, and terminal rejection reasons.
+  A nonzero run may still commit the compatible subset named by
+  `runner.partial_landing`; never patch or discard those generated batteries.
 - Treat `JAUNT_TS_CANDIDATE_SELF_IMPORT`,
   `JAUNT_TS_GENERATED_PRIVATE_IMPORT`, and optionality/nullability TS2322
   failures as spec/prompt or generator issues. Never patch the generated

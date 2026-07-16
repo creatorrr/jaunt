@@ -18,8 +18,8 @@
 
 Jaunt is a CLI for **spec-driven code generation**. You write intent as typed
 contracts and Jaunt writes implementations under `__generated__/` using the OpenAI
-Codex CLI (`codex exec`). Python is stable; the TypeScript target is an alpha behind
-version-2 configuration.
+Codex CLI (`codex exec`). Python and TypeScript are supported targets; TypeScript uses
+version-2 configuration and a project-local analyzer package.
 
 Call `jaunt.magic_module(__name__)` once at the top of a file and every top-level
 stub below it becomes a spec, with no per-symbol decorators:
@@ -97,7 +97,7 @@ def parse_mbox(raw: str) -> list[Email]:
   `build.async_runner`, `@jaunt.test` specs generate pytest batteries, and
   `@jaunt.contract` pins hand-written code with a derived, committed battery.
 
-### TypeScript alpha
+### TypeScript
 
 TypeScript specs are private static inputs. The project-local `@usejaunt/ts` worker
 parses them without executing application code, renders a deterministic API mirror,
@@ -117,7 +117,7 @@ export function slugify(title: string): string {
 ```bash
 uvx jaunt init --language ts
 npm init -y && npm pkg set type=module
-npm install -D @usejaunt/ts@next 'typescript@^5.9' vitest fast-check @types/node
+npm install -D @usejaunt/ts@^0.1.0 'typescript@^5.9' vitest fast-check @types/node
 uvx jaunt sync
 uvx jaunt migrate --language ts       # upgrade preview; plan-only and model-free
 uvx jaunt build --language ts
@@ -353,8 +353,8 @@ wheel or tarball.
 After the version, lockfiles, changelog, and generated artifacts are committed on
 `main`, run `.github/workflows/release.yml` from the Actions UI. Choose `python`,
 `typescript`, or `both`; leave `publish` off for a candidate-only rehearsal, or enable
-it to publish. TypeScript alpha releases use the `next` npm dist-tag (`beta` is also an
-explicit workflow choice).
+it to publish. Stable TypeScript releases use the `latest` npm dist-tag; select `next`
+or `beta` only for a prerelease version.
 
 The equivalent GitHub CLI invocation is:
 
@@ -362,7 +362,7 @@ The equivalent GitHub CLI invocation is:
 gh workflow run release.yml --ref main \
   -f component=both \
   -f publish=true \
-  -f npm_dist_tag=next
+  -f npm_dist_tag=latest
 ```
 
 The repository must have trusted-publisher entries for the `pypi` and `npm` GitHub

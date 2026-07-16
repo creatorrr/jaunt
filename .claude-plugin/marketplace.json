@@ -3,14 +3,14 @@
   "owner": { "name": "Jaunt Contributors" },
   "metadata": {
     "description": "Claude Code plugins for Jaunt's Python and TypeScript spec-driven code generation framework",
-    "version": "1.2.4"
+    "version": "1.2.5"
   },
   "plugins": [
     {
       "name": "jaunt",
       "source": "./jaunt-claude-plugin",
       "description": "Workspace-aware Python and TypeScript Jaunt support: generated-file guards, freshness summaries, build and conversion workflows, doctor, and first-build review.",
-      "version": "1.2.4",
+      "version": "1.2.5",
       "author": { "name": "Jaunt Contributors" },
       "category": "development",
       "keywords": ["jaunt", "spec-driven", "code-generation", "python", "typescript", "llm", "claude-code"]

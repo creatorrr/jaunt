@@ -137,7 +137,7 @@ The owner project must typecheck before the artifacts are committed. Existing cu
 facades are never overwritten. Sync may refresh the deterministic API mirror and its
 sidecar hash bookkeeping, but it never rewrites a built implementation's body or
 advances its provenance to a changed contract. Semantic and fingerprint re-stamps
-belong to `build`; compatible alpha artifact repairs belong to `migrate --language
+belong to `build`; compatible artifact repairs belong to `migrate --language
 ts`. A synchronized placeholder keeps the editor green but remains `unbuilt` in
 `status` and `check`. Full-workspace sync validates dependency-ordered bounded batches
 and commits them together. With `--target`, contract analysis and overlay validation
@@ -575,7 +575,7 @@ analyzes the current project and proposes only deterministic artifact work:
   and sidecar;
 - re-stamp a compatible built implementation when only its tool fingerprint or
   deterministic artifacts are stale;
-- report `model-rebuild` when the contract changed or an alpha protocol, IR, or
+- report `model-rebuild` when the contract changed or a protocol, IR, or
   route is incompatible.
 
 The TypeScript migration records exact input hashes and commits its complete

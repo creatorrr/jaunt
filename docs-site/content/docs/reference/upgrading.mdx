@@ -12,6 +12,35 @@ invalidate built modules. The exception is a correctness repair for artifacts
 whose provenance was previously marked fresh incorrectly; that safety migration
 is called out explicitly below.
 
+## 1.7.9 / `@usejaunt/ts` 0.1.0
+
+`@usejaunt/ts` 0.1.0 is the first release on npm's `latest` channel. Pair it with
+Jaunt 1.7.9 or later:
+
+```bash
+npm install -D @usejaunt/ts@^0.1.0 'typescript@^5.9' vitest fast-check @types/node
+```
+
+The supported host ranges remain Node 20 through 24 and TypeScript 5.8 through
+6.x. An unchanged alpha.7 workspace can reuse its saved semantic-environment
+proof: preview with `jaunt migrate --language ts`, apply deterministic repairs,
+then run `jaunt check --language ts`. No model call is needed when the contract,
+dependencies, and compiler inputs are unchanged.
+
+This pair also fixes alpha.7's test-candidate retry gap. Live candidates now pass
+through the same full-project overlay and dynamic-loader checks as cached
+responses. A rejected attempt consumes the remaining per-battery retry budget and
+the runner's exact diagnostic is included in `batteries[].retry_reasons`. If a
+combined overlay still exposes a cross-battery conflict, Jaunt isolates, runs, and
+commits a compatible subset while leaving the conflicting paths uncommitted and
+returning exit `3`.
+
+The npm package is stable, but the worker boundary still identifies itself as
+`jaunt-ts/1-draft.2`. That protocol is versioned for matching Jaunt Python and npm
+releases; it is not yet a compatibility promise for third-party protocol clients.
+Refresh the companion plugin to Codex 1.1.5 or Claude Code 1.2.5 for matching
+stable-target guidance, then start a new host session.
+
 ## 1.7.8
 
 Pair Jaunt 1.7.8 with `@usejaunt/ts` 0.1.0-alpha.7. Strict TypeScript projects can
@@ -22,9 +51,10 @@ handwritten bodies remain errors. Mixed-workspace `jaunt instructions` output no
 labels its Python freshness snapshot separately and directs agents to
 `jaunt status --language ts` for authoritative TypeScript freshness. TypeScript
 battery generation now honors the test job limit and durably stages validated
-responses after a combined compiler preflight. A later generation failure can resume
-from the valid partial set, while a conflicting set never enters the cache and
-committed battery files remain an all-green transaction.
+responses after a combined compiler preflight. Alpha.7 did not attach the
+project-overlay validator to live model attempts, so compiler and dynamic-loader
+failures could escape the retry loop and reject the complete set at the final gate.
+Upgrade to Jaunt 1.7.9 for the corrected retry and partial-landing behavior.
 
 ## 1.7.7
 

@@ -21,6 +21,7 @@ import tempfile
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
+from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterator
@@ -3210,6 +3211,37 @@ async def _run_test_batches(
     )
 
 
+def _runner_validation_errors(result: Mapping[str, Any]) -> list[str]:
+    """Render protected-runner diagnostics as actionable generator feedback."""
+
+    errors: list[str] = []
+    raw_diagnostics = result.get("diagnostics", [])
+    if isinstance(raw_diagnostics, list):
+        for item in raw_diagnostics:
+            if not isinstance(item, Mapping):
+                continue
+            code = item.get("code")
+            message = item.get("message")
+            if not isinstance(code, str) or not isinstance(message, str):
+                continue
+            detail = f"{code}: {message}"
+            path = item.get("path")
+            if isinstance(path, str) and path:
+                detail += f" ({path})"
+            line = item.get("line")
+            column = item.get("column")
+            if isinstance(line, int) and not isinstance(line, bool):
+                detail += f" at line {line}"
+                if isinstance(column, int) and not isinstance(column, bool):
+                    detail += f", column {column}"
+            errors.append(detail)
+    if errors:
+        return list(dict.fromkeys(errors))
+    if bool(result.get("timedOut", False)):
+        return ["TypeScript test overlay validation timed out"]
+    return ["TypeScript test overlay validation failed without a diagnostic"]
+
+
 async def run_test(
     root: Path,
     config: JauntConfig,
@@ -3341,7 +3373,7 @@ async def run_test(
     overlays: dict[str, str] = {}
     planned_generated: set[str] = set()
     planned_refrozen: set[str] = set()
-    battery_outcomes: dict[str, dict[str, str]] = {}
+    battery_outcomes: dict[str, dict[str, Any]] = {}
     pending_cache_writes: list[tuple[GenerationRequest, Any, str, str, str]] = []
     output_preconditions: dict[str, str] = {}
     repair_targets_by_file: dict[str, tuple[str, ...]] = {}
@@ -3349,6 +3381,30 @@ async def run_test(
     test_owners: dict[str, str] = {}
     files: tuple[str, ...] = ()
     runner: Mapping[str, Any] = {"ok": True, "skipped": True}
+
+    def record_battery_outcome(
+        path: str,
+        tier: str,
+        state: str,
+        *,
+        result: Any | None = None,
+    ) -> None:
+        outcome = {**battery_outcomes.get(path, {}), "tier": tier, "state": state}
+        outcome.setdefault("attempts", 0)
+        outcome.setdefault("retry_count", 0)
+        outcome.setdefault("retry_reasons", ())
+        if result is not None:
+            retry_reasons = tuple(
+                dict.fromkeys(error for attempt in result.attempt_errors for error in attempt)
+            )
+            outcome.update(
+                {
+                    "attempts": result.attempts,
+                    "retry_count": max(0, result.attempts - 1),
+                    "retry_reasons": retry_reasons,
+                }
+            )
+        battery_outcomes[path] = outcome
 
     def stage_validated_batteries() -> None:
         for request, result, fingerprint, path, tier in pending_cache_writes:
@@ -3359,7 +3415,7 @@ async def run_test(
                 result,
                 generation_fingerprint=fingerprint,
             )
-            battery_outcomes[path] = {"tier": tier, "state": "staged"}
+            record_battery_outcome(path, tier, "staged")
             _progress_phase(progress, path, "staged", tier)
         pending_cache_writes.clear()
 
@@ -3483,7 +3539,7 @@ async def run_test(
             )
             if action == "skip":
                 skipped.add(request.target_path)
-                battery_outcomes[request.target_path] = {"tier": tier, "state": "fresh"}
+                record_battery_outcome(request.target_path, tier, "fresh")
                 _progress_phase(progress, request.target_path, "fresh")
                 _progress_advance(progress, request.target_path, ok=True)
                 continue
@@ -3491,7 +3547,7 @@ async def run_test(
                 assert existing_source is not None
                 overlays[request.target_path] = existing_source
                 planned_refrozen.add(request.target_path)
-                battery_outcomes[request.target_path] = {"tier": tier, "state": "refrozen"}
+                record_battery_outcome(request.target_path, tier, "refrozen")
                 _progress_phase(progress, request.target_path, "refrozen")
                 _progress_advance(progress, request.target_path, ok=True)
                 continue
@@ -3552,15 +3608,16 @@ async def run_test(
                 )
                 if bool(checked.get("ok", False)):
                     return []
-                return ["generated TypeScript test failed analyzer overlay typechecking"]
+                return _runner_validation_errors(checked)
 
             cache_fingerprint = str(provenance["battery_fingerprint"])
             cache_for_request = None if force else response_cache
+            validated_request = replace(request, validator=validate_candidate)
             async with semaphore:
                 _progress_phase(progress, request.target_path, "generating", tier)
                 result = await generate_request_cached(
                     backend,
-                    request,
+                    validated_request,
                     max_attempts=max_attempts,
                     generation_fingerprint=cache_fingerprint,
                     response_cache=cache_for_request,
@@ -3569,10 +3626,17 @@ async def run_test(
                     progress=lambda stage, detail, path=request.target_path: _progress_phase(
                         progress, path, stage, detail
                     ),
-                    cached_validator=validate_candidate,
                     store=False,
                 )
-            return (*item, result, cache_fingerprint)
+            return (
+                spec_path,
+                validated_request,
+                provenance,
+                tier,
+                key,
+                result,
+                cache_fingerprint,
+            )
 
         tasks = [asyncio.create_task(generate_one(item)) for item in generation_work]
         try:
@@ -3591,7 +3655,12 @@ async def run_test(
                         TargetDiagnostic(code="JAUNT_TS_TEST_GENERATION", message=error)
                         for error in result.errors or ["The generator returned no test source"]
                     )
-                    battery_outcomes[request.target_path] = {"tier": tier, "state": "failed"}
+                    record_battery_outcome(
+                        request.target_path,
+                        tier,
+                        "failed",
+                        result=result,
+                    )
                     _progress_phase(progress, request.target_path, "failed", tier)
                     _progress_advance(progress, request.target_path, ok=False)
                     continue
@@ -3618,7 +3687,12 @@ async def run_test(
                         )
                     )
                 state = "cached" if result.attempts == 0 else "validated"
-                battery_outcomes[request.target_path] = {"tier": tier, "state": state}
+                record_battery_outcome(
+                    request.target_path,
+                    tier,
+                    state,
+                    result=result,
+                )
                 _progress_phase(progress, request.target_path, state, tier)
                 _progress_advance(progress, request.target_path, ok=True)
         finally:
@@ -3642,8 +3716,88 @@ async def run_test(
             )
         )
 
+        async def isolate_valid_overlays() -> tuple[
+            tuple[str, ...],
+            tuple[str, ...],
+            tuple[str, ...],
+            Mapping[str, Any],
+            Mapping[str, tuple[str, ...]],
+        ]:
+            """Find a deterministic maximal overlay subset that validates together."""
+
+            candidate_paths = tuple(sorted(overlays))
+            baseline_files = tuple(path for path in files if path not in overlays)
+            baseline_result: Mapping[str, Any] = {"ok": True, "skipped": True}
+            if baseline_files:
+                baseline_result = await _run_test_batches(
+                    client,
+                    root,
+                    config,
+                    analysis.workspace,
+                    files=baseline_files,
+                    explicit_owners=test_owners,
+                    overlays={},
+                    redact_derived=not no_redact_derived,
+                    typecheck_only=True,
+                )
+            if not bool(baseline_result.get("ok", False)):
+                reasons = tuple(_runner_validation_errors(baseline_result))
+                return (
+                    (),
+                    candidate_paths,
+                    baseline_files,
+                    {"baseline": baseline_result, "candidates": []},
+                    {path: reasons for path in candidate_paths},
+                )
+
+            accepted: list[str] = []
+            rejected: list[str] = []
+            rejection_reasons: dict[str, tuple[str, ...]] = {}
+            candidate_results: list[dict[str, Any]] = []
+            for path in candidate_paths:
+                trial_paths = (*accepted, path)
+                trial_files = tuple(sorted({*baseline_files, *trial_paths}))
+                checked = await _run_test_batches(
+                    client,
+                    root,
+                    config,
+                    analysis.workspace,
+                    files=trial_files,
+                    explicit_owners=test_owners,
+                    overlays={item: overlays[item] for item in trial_paths},
+                    redact_derived=not no_redact_derived,
+                    typecheck_only=True,
+                )
+                valid = bool(checked.get("ok", False))
+                candidate_results.append({"path": path, "ok": valid})
+                if valid:
+                    accepted.append(path)
+                    continue
+                rejected.append(path)
+                rejection_reasons[path] = tuple(_runner_validation_errors(checked))
+            accepted_files = tuple(sorted({*baseline_files, *accepted}))
+            return (
+                tuple(accepted),
+                tuple(rejected),
+                accepted_files,
+                {"baseline": baseline_result, "candidates": candidate_results},
+                rejection_reasons,
+            )
+
+        def reject_batteries(
+            paths: Sequence[str],
+            reasons: Mapping[str, tuple[str, ...]],
+        ) -> None:
+            tiers = {
+                path: str(battery_outcomes.get(path, {}).get("tier", "example")) for path in paths
+            }
+            for path in paths:
+                record_battery_outcome(path, tiers[path], "rejected")
+                battery_outcomes[path]["rejection_reasons"] = reasons.get(path, ())
+
         if failed:
             stage_preflight: Mapping[str, Any] = {"ok": True, "skipped": True}
+            stage_isolation: Mapping[str, Any] | None = None
             if pending_cache_writes and files:
                 stage_preflight = await _run_test_batches(
                     client,
@@ -3659,8 +3813,19 @@ async def run_test(
             if bool(stage_preflight.get("ok", False)):
                 stage_validated_batteries()
             else:
-                for _request, _result, _fingerprint, path, tier in pending_cache_writes:
-                    battery_outcomes[path] = {"tier": tier, "state": "rejected"}
+                (
+                    accepted_paths,
+                    rejected_paths,
+                    _accepted_files,
+                    stage_isolation,
+                    reasons,
+                ) = await isolate_valid_overlays()
+                accepted = set(accepted_paths)
+                pending_cache_writes[:] = [
+                    item for item in pending_cache_writes if item[3] in accepted
+                ]
+                stage_validated_batteries()
+                reject_batteries(rejected_paths, reasons)
             _progress_finish(progress)
             test_cost = cost.summary_dict()
             merged_cost = (
@@ -3679,6 +3844,7 @@ async def run_test(
                     "test_cost": test_cost,
                     "build": build_metadata,
                     "stage_preflight": stage_preflight,
+                    **({"stage_isolation": stage_isolation} if stage_isolation is not None else {}),
                     "jobs": effective_jobs,
                     "batteries": [
                         {"path": path, **battery_outcomes[path]}
@@ -3712,8 +3878,53 @@ async def run_test(
                 typecheck_only=True,
             )
         if not bool(preflight.get("ok", False)):
-            for _request, _result, _fingerprint, path, tier in pending_cache_writes:
-                battery_outcomes[path] = {"tier": tier, "state": "rejected"}
+            (
+                accepted_paths,
+                rejected_paths,
+                accepted_files,
+                isolation,
+                reasons,
+            ) = await isolate_valid_overlays()
+            accepted = set(accepted_paths)
+            accepted_overlays = {path: overlays[path] for path in accepted_paths}
+            pending_cache_writes[:] = [item for item in pending_cache_writes if item[3] in accepted]
+            stage_validated_batteries()
+            reject_batteries(rejected_paths, reasons)
+
+            partial_runner: Mapping[str, Any] = {"ok": True, "skipped": True}
+            if not no_run and accepted_overlays and accepted_files:
+                partial_runner = await _run_test_batches(
+                    client,
+                    root,
+                    config,
+                    analysis.workspace,
+                    files=accepted_files,
+                    explicit_owners=test_owners,
+                    overlays=accepted_overlays,
+                    redact_derived=not no_redact_derived,
+                )
+            partial_committed = bool(accepted_overlays) and bool(partial_runner.get("ok", False))
+            committed_generated = planned_generated.intersection(accepted)
+            committed_refrozen = planned_refrozen.intersection(accepted)
+            if partial_committed and accepted_overlays:
+                atomic_write_manifest(
+                    root,
+                    tuple(
+                        _Write(
+                            path=path,
+                            content=source,
+                            kind="test",
+                            module_id=f"ts-test:{path}",
+                        )
+                        for path, source in accepted_overlays.items()
+                    ),
+                    expected_inputs={
+                        **_input_hashes(analysis.contracts),
+                        **output_preconditions,
+                    },
+                )
+                generated.update(committed_generated)
+                refrozen.update(committed_refrozen)
             _progress_finish(progress)
             test_cost = cost.summary_dict()
             merged_cost = (
@@ -3740,10 +3951,27 @@ async def run_test(
                     "test_cost": test_cost,
                     "build": build_metadata,
                     "jobs": effective_jobs,
+                    "partial_landing": {
+                        "accepted": accepted_paths,
+                        "rejected": rejected_paths,
+                        "committed": partial_committed,
+                        "isolation": isolation,
+                        "runner": partial_runner,
+                    },
                     "batteries": [
                         {"path": path, **battery_outcomes[path]}
                         for path in sorted(battery_outcomes)
                     ],
+                    **(
+                        {
+                            "cache": {
+                                "hits": response_cache.hits,
+                                "misses": response_cache.misses,
+                            }
+                        }
+                        if response_cache is not None
+                        else {}
+                    ),
                 },
                 exit_code=3,
             )

@@ -16,7 +16,7 @@ Start a new project with:
 ```bash
 uvx jaunt init --language ts
 npm init -y && npm pkg set type=module
-npm install -D @usejaunt/ts@next 'typescript@^5.9' vitest fast-check @types/node
+npm install -D @usejaunt/ts@^0.1.0 'typescript@^5.9' vitest fast-check @types/node
 ```
 
 `jaunt init` does not edit `package.json`. Its human and JSON output includes the
@@ -60,7 +60,7 @@ jaunt migrate --config-v2 --apply
 The migration moves Python-only keys under `[target.py]`, preserves the loaded Python
 configuration exactly, and makes no model call.
 
-When upgrading an existing TypeScript alpha project, preview its artifact migration
+When upgrading an existing TypeScript project, preview its artifact migration
 separately:
 
 ```bash
@@ -72,7 +72,7 @@ In a TypeScript-only version-2 project, `jaunt migrate` selects this path withou
 language flag. The command asks the project-local worker for current routes and
 validated artifact bytes, but never calls Codex. It can repair mirrors, canonical
 facades, placeholders, and sidecars, or freely re-stamp compatible fingerprint drift.
-Contract changes and incompatible alpha protocol, IR, or route records are listed as
+Contract changes and incompatible protocol, IR, or route records are listed as
 `model-rebuild` with the exact module to rebuild.
 
 Migration is plan-only unless `--apply` is present. The apply checks every analyzed
@@ -86,7 +86,7 @@ specs.
 `typescript`. Jaunt does not use a global compiler and does not download one during a
 command.
 
-The first alpha supports TypeScript 5.8 through 6.x. [TypeScript 7.0 does not ship a
+The stable 0.1 line supports TypeScript 5.8 through 6.x. [TypeScript 7.0 does not ship a
 stable programmatic compiler API](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/#running-side-by-side-with-typescript-60),
 so the worker rejects it with install guidance rather than analyzing the project under
 different compiler semantics. TypeScript 7 support will follow its stable tooling API.
@@ -191,12 +191,14 @@ import the public facade. Example-tier failures retain normal detail. Derived-ti
 repair feedback contains only an opaque case ID and a normalized failure category.
 Collection, timeout, runner, and protocol failures are infrastructure errors and do
 not trigger an implementation repair. Example and derived generation honors
-`[test].jobs` or `--jobs`. Completed responses pass a combined compiler preflight
-before entering the cache; a late request failure also preflights and stages its valid
-partial set. A late generation or runner failure commits no battery files, but a rerun
-can reuse staged paid responses after validating them again. Plain progress reports
-each path and tier as it is validated and staged, and JSON includes the effective
-`jobs` value plus a `batteries` outcome for every path.
+`[test].jobs` or `--jobs`. Every live attempt first passes the protected runner's
+full-project overlay and static-loader policy; its exact diagnostics enter the
+remaining retry budget. A late request failure also preflights and stages its valid
+partial set. If separately valid batteries conflict when combined, Jaunt finds a
+deterministic compatible subset, runs it, and commits it only when that subset is
+green. Conflicting paths remain uncommitted and the command exits `3`. Plain progress
+reports each path and tier, while JSON includes `attempts`, `retry_count`,
+`retry_reasons`, and any terminal `rejection_reasons` in each `batteries` outcome.
 Every package that owns a configured test project must declare `vitest` directly in
 `devDependencies`; add `fast-check` there too when that package uses `@prop`. A
 hoisted installation alone is not authorization, and Jaunt checks the supported peer
@@ -340,7 +342,7 @@ runtime imports from the paired context module. It cannot pull arbitrary runtime
 dependencies or private spec modules into generated code.
 
 Module-level runtime constants and authored default objects are not preserved by the
-current alpha. Keep them in the paired context module, or keep the public module as a
+current target. Keep them in the paired context module, or keep the public module as a
 small handwritten wrapper around a generated pure core. Broad `source_roots` globs
 can cover those core modules; targeted contract analysis does not require one literal
 root per wrapper/core pair.
@@ -379,7 +381,7 @@ alias that resolves into a sibling workspace package requires that sibling's
 
 TypeScript npm skills are enabled by `[skills].auto` unless
 `[target.ts].auto_skills` overrides it. Run `jaunt status --json` before a build to
-inspect the planned file count and bytes. The current alpha plans all installed direct
+inspect the planned file count and bytes. The current implementation plans all installed direct
 runtime dependencies; it does not yet trim the plan to imports reachable from one
 selected spec.
 
@@ -395,9 +397,9 @@ model again. A runner- or Vitest-only fingerprint change reheaders the unchanged
 battery after overlay validation and reports it as `refrozen`; contract, API, prompt,
 property, or body drift regenerates it. `jaunt test --force` always regenerates.
 
-## Current alpha limits
+## Current limits
 
-The alpha supports referenced project graphs, cross-spec dependencies, concrete class
+The TypeScript target supports referenced project graphs, cross-spec dependencies, concrete class
 inheritance, and `@jauntPreserve`. Put a preserve tag on the single concrete
 implementation of a non-overloaded method or accessor. Its runtime closure is limited
 to parameters, `this`, local bindings, standard globals, and imports from the paired

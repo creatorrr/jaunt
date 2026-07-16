@@ -4,7 +4,7 @@ description: "Install Jaunt's Codex plugin for workspace-aware build skills, fre
 ---
 
 Jaunt's Codex plugin packages five CLI-backed skills and two hooks. It does not
-run an MCP server or app connector. Version 1.1.4 is distributed from this
+run an MCP server or app connector. Version 1.1.5 is distributed from this
 repository's `.agents/plugins/marketplace.json`.
 
 ## Install
@@ -84,6 +84,11 @@ so the plugin does not recommend an unchanged paid rerun after that budget is
 exhausted. Deterministic worker heap failures point to
 `[target.ts].worker_heap_mb`; the workflow does not replay them or suggest
 `NODE_OPTIONS`.
+
+After TypeScript test generation, the workflow reads `runner.batteries` for
+per-battery attempts, retry reasons, and terminal rejections. A failed combined
+overlay may still commit the compatible subset listed by
+`runner.partial_landing`; the plugin preserves those generated files.
 
 Current Codex CLIs keep Jaunt's paid subprocesses separate from user plugin
 hooks and MCP configuration through `--ignore-user-config`. This prevents the

@@ -5,7 +5,7 @@ expects: edit specs, preview stale or unbuilt work, build through the CLI, and
 review generated output without hand-editing machine-owned files.
 
 It is CLI-backed. There is no MCP server, app connector, or public-directory
-submission in version 1.1.4.
+submission in version 1.1.5.
 
 ## Install
 
@@ -58,6 +58,11 @@ another run. Jaunt already spends the remaining attempt budget on final
 conformance repair; a failed module should not be rerun blindly. Worker heap
 failures point to `[target.ts].worker_heap_mb` and are never replayed
 automatically.
+
+For TypeScript test generation, inspect `runner.batteries` before another paid
+run. It records per-battery retries and final rejection reasons. A failed
+combined overlay can still commit the compatible subset listed under
+`runner.partial_landing`.
 
 ## Hooks
 

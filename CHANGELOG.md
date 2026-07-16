@@ -1,7 +1,40 @@
 # Changelog
 
-All notable changes to jaunt. Generated from conventional commits by
-[git-cliff](https://git-cliff.org); one section per published PyPI release.
+All notable changes to Jaunt and `@usejaunt/ts`. Generated from conventional
+commits by [git-cliff](https://git-cliff.org), with one section per published
+Python or TypeScript release.
+
+## [1.7.9 / @usejaunt/ts 0.1.0] - 2026-07-15
+
+### Fixes
+
+- Validate every live TypeScript test candidate with the protected runner's
+  project overlay and static-loader policy, not just cached responses. Compiler
+  and `JAUNT_TS_TEST_DYNAMIC_LOADER` diagnostics now enter the remaining retry
+  budget, and test JSON reports attempts, retry counts, and exact retry reasons
+  per battery.
+- Isolate a deterministic compatible subset when separately valid batteries
+  conflict in the combined overlay. Jaunt caches and runs that subset, commits it
+  only when the subset is green, rejects the conflicting paths, and still exits
+  `3` for the incomplete run.
+
+### Packages
+
+- Graduate `@usejaunt/ts` from its alpha line to stable `0.1.0` on the npm
+  `latest` dist-tag. The Node 20–24 and TypeScript 5.8–6.x support ranges are
+  unchanged.
+- Make `jaunt init --language ts` install the compatible `@usejaunt/ts@^0.1.0`
+  line instead of the prerelease `next` channel.
+- Publish Codex plugin 1.1.5 and Claude Code plugin 1.2.5 with stable TypeScript
+  target wording.
+
+### Documentation
+
+- Refresh the package README, repository guide, Fumadocs quickstart, limits,
+  upgrade notes, and release instructions for the stable npm channel.
+- Keep the worker protocol explicitly versioned as `jaunt-ts/1-draft.2`; the
+  npm package is stable, but the wire protocol is not yet a public stability
+  promise.
 
 ## [1.7.8] - 2026-07-15
 

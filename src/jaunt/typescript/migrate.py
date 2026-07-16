@@ -447,7 +447,7 @@ def _built_migration_issue(
     *,
     semantic_compatible: bool = False,
 ) -> TypeScriptMigrationDiagnostic | None:
-    """Return a no-write rebuild decision when built alpha artifacts are incompatible."""
+    """Return a no-write rebuild decision when built TypeScript artifacts are incompatible."""
 
     from jaunt.typescript.builder import _module_id, _module_path, _safe_path
 
@@ -494,7 +494,7 @@ def _built_migration_issue(
             return TypeScriptMigrationDiagnostic(
                 code="JAUNT_TS_MIGRATE_ALPHA_SCHEME_INCOMPATIBLE",
                 message=(
-                    f"{module_id} uses incompatible alpha {field} {actual.get(field)!r}; "
+                    f"{module_id} uses incompatible TypeScript {field} {actual.get(field)!r}; "
                     f"current artifacts require {expected.get(field)!r}. Rebuild with "
                     "`jaunt build --language ts --force`."
                 ),
@@ -507,7 +507,7 @@ def _built_migration_issue(
             return TypeScriptMigrationDiagnostic(
                 code="JAUNT_TS_MIGRATE_ALPHA_SCHEME_INCOMPATIBLE",
                 message=(
-                    f"{module_id} uses incompatible alpha {field} "
+                    f"{module_id} uses incompatible TypeScript {field} "
                     f"{_scheme_value(actual, field)!r}; current artifacts require "
                     f"{_scheme_value(expected, field)!r}. Rebuild with "
                     "`jaunt build --language ts --force`."

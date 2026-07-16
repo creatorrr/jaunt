@@ -2,10 +2,9 @@
 
 The TypeScript target for
 [Jaunt](https://github.com/creatorrr/jaunt), a spec-driven code-generation
-framework. This alpha ships the marker API, static analyzer worker, contract IR,
+framework. The package ships the marker API, static analyzer worker, contract IR,
 deterministic API mirrors and unbuilt placeholders, overlay conformance checks,
-orphan discovery, and the isolated Vitest runner used by Jaunt's Python
-orchestrator.
+orphan discovery, and the isolated Vitest runner used by Jaunt's Python orchestrator.
 
 Spec modules are private analysis inputs. Importing one at runtime throws
 `JauntNotBuiltError`; applications import the ordinary facade that Jaunt creates
@@ -36,7 +35,7 @@ Pin a supported compiler when installing; an unversioned `typescript` install ma
 select TypeScript 7:
 
 ```bash
-npm install -D @usejaunt/ts@next 'typescript@^5.9' vitest fast-check @types/node
+npm install -D @usejaunt/ts@^0.1.0 'typescript@^5.9' vitest fast-check @types/node
 ```
 
 Declare `vitest` directly in every package that owns a test project, and declare
@@ -66,6 +65,11 @@ compiler AST, inspect orphans, and shut the worker down. `projectContract` prese
 TSDoc and exact exported signatures while removing executable bodies and initializers;
 malformed or still-executable projections fail closed. Every analysis response includes
 an epoch, snapshot, and per-input hashes so stale writes can be rejected.
+
+The npm package follows the stable `0.1.x` line and is published under the `latest`
+dist-tag. The worker wire protocol remains `jaunt-ts/1-draft.2`; it is an internal,
+versioned boundary between matching Jaunt Python and npm releases, not yet a public
+compatibility promise for third-party clients.
 
 The compatibility matrix exercises NodeNext ESM, NodeNext CommonJS,
 Bundler/Vite-style resolution, and `.tsx` under both TypeScript 5.8 and 6.x. The
@@ -99,9 +103,9 @@ forks never reach the self-hosted runner. When the variable is absent, the job i
 skipped before runner assignment, so repositories without that dedicated machine
 do not accumulate queued jobs.
 
-This is an alpha published under the `next` dist-tag. It supports project-reference
-builds, cross-module generated dependencies, concrete class inheritance, strict
-class adapters, and `@jauntPreserve` bodies. A preserve tag belongs on the one
+The TypeScript target supports project-reference builds, cross-module generated
+dependencies, concrete class inheritance, strict class adapters, and
+`@jauntPreserve` bodies. A preserve tag belongs on the one
 concrete implementation of a non-overloaded method or accessor. Preserved code may
 use parameters, `this`, local bindings, standard globals, and runtime imports from
 the paired context; other runtime imports are rejected.
