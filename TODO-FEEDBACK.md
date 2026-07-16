@@ -103,5 +103,8 @@
 - [x] Wire plain stderr progress through TypeScript build, test, and nested implementation-repair phases.
 - [x] Update both first-party plugin guides to request live progress alongside final JSON.
 - [x] Confirm live module and battery-tier progress in the adopter's narrowed recovery run.
+- [x] Fix mixed `clean --orphans` preflight when the clean parser has no `jobs` attribute.
+- [x] Record the narrowed retry: four batteries staged, four exhausted, with native coverage retained.
+- [ ] Add a default-compatible per-intent tier selection after the stable release.
 - [ ] Decide whether to include bounded imported-type context after preserving or intentionally invalidating the 12 recovered cache entries.
-- [ ] Record the narrowed recovery result and final stable-release scope.
+- [ ] Confirm the final stable-release scope.
