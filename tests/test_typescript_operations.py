@@ -3917,6 +3917,7 @@ async def test_test_command_forwards_build_policy(
 ) -> None:
     config = _config(tmp_path)
     captured: dict[str, Any] = {}
+    progress = object()
 
     async def failed_build(*_args: Any, **kwargs: Any) -> TargetBuildReport:
         captured.update(kwargs)
@@ -3929,12 +3930,15 @@ async def test_test_command_forwards_build_policy(
         build_instructions=("Keep it small.",),
         semantic_gate_enabled=False,
         force=True,
+        progress=progress,
     )
 
     assert report.exit_code == 3
     assert captured["build_instructions"] == ("Keep it small.",)
     assert captured["semantic_gate_enabled"] is False
     assert captured["force"] is True
+    assert captured["progress"] is progress
+    assert captured["finish_progress"] is False
 
 
 @pytest.mark.asyncio
@@ -4020,15 +4024,21 @@ async def test_failed_vitest_run_repairs_once_with_protected_feedback_and_reruns
 
     monkeypatch.setattr("jaunt.typescript.tester.run_build", fake_build)
     monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", batches)
+    progress = object()
     report = await run_test(
         tmp_path,
         config,
         generator=FakeGenerator(),
         worker_factory=lambda *_: worker,
+        progress=progress,
     )
 
     assert report.exit_code == 0
     assert len(build_calls) == 2
+    assert build_calls[0]["progress"] is progress
+    assert build_calls[1]["progress"] is progress
+    assert build_calls[0]["finish_progress"] is False
+    assert build_calls[1]["finish_progress"] is False
     assert build_calls[1]["force"] is True
     assert build_calls[1]["max_attempts"] == 1
     assert build_calls[1]["target_ids"] == ("ts:src/math",)

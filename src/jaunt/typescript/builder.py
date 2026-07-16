@@ -941,6 +941,19 @@ def _progress_set_total(progress: object | None, total: int) -> None:
             pass
 
 
+def _progress_reset(progress: object | None, total: int = 0) -> None:
+    if progress is None:
+        return
+    reset = getattr(progress, "reset", None)
+    if callable(reset):
+        try:
+            reset(total)
+            return
+        except Exception:
+            pass
+    _progress_set_total(progress, total)
+
+
 def _clear_recovered_build_manifests(
     root: Path,
     modules: Sequence[Mapping[str, Any]],
@@ -1363,6 +1376,7 @@ async def run_build_in_session(
     cost_tracker: CostTracker | None = None,
     response_cache: ResponseCache | None = None,
     progress: object | None = None,
+    finish_progress: bool = True,
     jobs: int | None = None,
     max_attempts: int = _DEFAULT_ATTEMPTS,
     semantic_gate_enabled: bool | None = None,
@@ -1494,7 +1508,8 @@ async def run_build_in_session(
 
     if not selected and not refrozen:
         _clear_recovered_build_manifests(root, analysis.modules)
-        _progress_finish(progress)
+        if finish_progress:
+            _progress_finish(progress)
         return TargetBuildReport(
             language="ts",
             skipped=frozenset(skipped),
@@ -1875,7 +1890,8 @@ async def run_build_in_session(
                 "recomposed" if module_id in recomposed else "refrozen",
             )
         _progress_advance(progress, module_id, ok=module_id not in failed)
-    _progress_finish(progress)
+    if finish_progress:
+        _progress_finish(progress)
 
     append_events(
         root,
@@ -1954,6 +1970,7 @@ async def run_build(
     cost_tracker: CostTracker | None = None,
     response_cache: ResponseCache | None = None,
     progress: object | None = None,
+    finish_progress: bool = True,
     worker_factory: WorkerFactory | None = None,
     jobs: int | None = None,
     max_attempts: int = _DEFAULT_ATTEMPTS,
@@ -2034,6 +2051,7 @@ async def run_build(
             cost_tracker=cost_tracker,
             response_cache=response_cache,
             progress=progress,
+            finish_progress=finish_progress,
             jobs=jobs,
             max_attempts=max_attempts,
             semantic_gate_enabled=semantic_gate_enabled,

@@ -26,7 +26,8 @@ Python or TypeScript release.
 - Wire TypeScript build and test progress through standalone and mixed CLI paths.
   Explicit `--progress plain --json` now prints the active module or battery,
   tier, retry phase, and completion count to stderr while stdout remains one JSON
-  object.
+  object. Test-triggered initial builds and held-out implementation repairs keep
+  using the same reporter instead of going silent after battery generation.
 - Retry the known Codex capacity response twice with short backoff, outside the
   candidate attempt budget. If capacity remains exhausted, TypeScript returns a
   per-module or per-battery infrastructure failure and keeps completed battery

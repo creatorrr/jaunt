@@ -17,7 +17,9 @@ tooling that shells out to Jaunt. The payloads below are trimmed from real runs.
 - Progress bars are suppressed. To keep a progress display while parsing JSON,
   use `--progress plain` (progress on stderr, JSON on stdout). TypeScript build
   lines name the active module; TypeScript test lines name the generated battery
-  path and its `example` or `derived` tier.
+  path and its `example` or `derived` tier. If a test command runs an initial
+  implementation build or a held-out implementation repair, those nested phases
+  keep reporting their active module through the same stderr stream.
 - `--json` is available on `build`, `test`, `status`, `check`, `specs`, `jobs`,
   `sync`, `design`, `clean`, `migrate`, `watch`, `instructions`, `init`, `log`,
   `tree`, `cache`, and `skill`.

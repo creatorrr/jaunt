@@ -70,6 +70,17 @@ class ProgressBar:
         if self.mode == "rich":
             self._render("", force=True)
 
+    def reset(self, total: int = 0) -> None:
+        """Begin another phase on the same command-level reporter."""
+
+        self.total = max(0, int(total))
+        self._done = 0
+        self._ok = 0
+        self._fail = 0
+        self._finished = False
+        if self.mode == "rich":
+            self._render("", force=True)
+
     def finish(self) -> None:
         if self._finished:
             return

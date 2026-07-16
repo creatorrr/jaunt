@@ -51,7 +51,7 @@ from jaunt.typescript.builder import (
     _progress_advance,
     _progress_finish,
     _progress_phase,
-    _progress_set_total,
+    _progress_reset,
     _safe_path,
     _sha256,
     _target,
@@ -3337,6 +3337,7 @@ async def run_test(
         return child() if callable(child) else cost_tracker
 
     if not no_build:
+        _progress_reset(progress)
         build_phase_cost = phase_cost_tracker()
         if worker_session_override is None:
             build = await run_build(
@@ -3347,6 +3348,8 @@ async def run_test(
                 generator=generator,
                 cost_tracker=build_phase_cost,
                 response_cache=response_cache,
+                progress=progress,
+                finish_progress=False,
                 worker_factory=worker_factory,
                 jobs=jobs,
                 max_attempts=max_attempts,
@@ -3369,6 +3372,8 @@ async def run_test(
                 generator=generator,
                 cost_tracker=build_phase_cost,
                 response_cache=response_cache,
+                progress=progress,
+                finish_progress=False,
                 jobs=jobs,
                 max_attempts=max_attempts,
                 build_instructions=build_instructions,
@@ -3511,7 +3516,7 @@ async def run_test(
                 prepared_requests.append((test_spec, spec_path, selected_module_ids, request))
 
         planned_files = tuple(request.target_path for *_prefix, request in prepared_requests)
-        _progress_set_total(progress, len(prepared_requests))
+        _progress_reset(progress, len(prepared_requests))
         if planned_files:
             planned_groups = _group_test_files(
                 root,
@@ -4134,6 +4139,7 @@ async def run_test(
             )
             with _isolated_test_repair_workspace(root, files, overlays) as repair_root:
                 repair_phase_cost = phase_cost_tracker()
+                _progress_reset(progress)
                 repair = await run_build(
                     repair_root,
                     config,
@@ -4142,6 +4148,8 @@ async def run_test(
                     generator=generator,
                     cost_tracker=repair_phase_cost,
                     response_cache=ResponseCache(repair_root / ".jaunt" / "cache"),
+                    progress=progress,
+                    finish_progress=False,
                     worker_factory=worker_factory,
                     jobs=jobs,
                     max_attempts=1,
