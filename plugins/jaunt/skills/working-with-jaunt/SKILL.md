@@ -114,7 +114,8 @@ workspace.
 bash <absolute-plugin-root>/scripts/resolve-workspace.sh --run "$PWD" specs --json
 bash <absolute-plugin-root>/scripts/resolve-workspace.sh --run "$PWD" status --json --progress none
 bash <absolute-plugin-root>/scripts/resolve-workspace.sh --run "$PWD" sync --language ts
-bash <absolute-plugin-root>/scripts/resolve-workspace.sh --run "$PWD" build --json
+bash <absolute-plugin-root>/scripts/resolve-workspace.sh --run "$PWD" build --json --progress plain
+bash <absolute-plugin-root>/scripts/resolve-workspace.sh --run "$PWD" test --json --progress plain
 bash <absolute-plugin-root>/scripts/resolve-workspace.sh --run "$PWD" check
 bash <absolute-plugin-root>/scripts/resolve-workspace.sh --run "$PWD" clean --orphans
 bash <absolute-plugin-root>/scripts/resolve-workspace.sh --run "$PWD" watch --test

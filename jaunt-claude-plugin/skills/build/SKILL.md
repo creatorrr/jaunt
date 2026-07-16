@@ -46,10 +46,13 @@ placeholder; it does not call Codex or make `jaunt check` green.
 ## 3. Build
 
 ```bash
-bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" --run "$PWD" build --json
+bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" --run "$PWD" build --json --progress plain
 # or
-bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" --run "$PWD" build --target <qualified-module> --json
+bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" --run "$PWD" build --target <qualified-module> --json --progress plain
 ```
+
+Plain progress names the active module and retry phase on stderr. Keep stdout
+for the final JSON object.
 
 Review `newly_governed` before accepting the result.
 

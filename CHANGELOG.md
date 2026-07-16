@@ -48,6 +48,8 @@ Python or TypeScript release.
 
 - Refresh the package README, repository guide, Fumadocs quickstart, limits,
   upgrade notes, and release instructions for the stable npm channel.
+- Have both first-party plugin guides request plain stderr progress for long
+  JSON build and test commands, while preserving stdout for the final payload.
 - Keep the worker protocol explicitly versioned as `jaunt-ts/1-draft.2`; the
   npm package is stable, but the wire protocol is not yet a public stability
   promise.
