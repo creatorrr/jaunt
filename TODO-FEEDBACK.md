@@ -105,6 +105,8 @@
 - [x] Confirm live module and battery-tier progress in the adopter's narrowed recovery run.
 - [x] Fix mixed `clean --orphans` preflight when the clean parser has no `jobs` attribute.
 - [x] Record the narrowed retry: four batteries staged, four exhausted, with native coverage retained.
+- [x] Evict an identifiable cached battery when the final protected Vitest run rejects its behavior.
+- [x] Confirm the retained 30-tier landing: 28 cache hits, two fresh responses, zero model calls, and a green combined run.
 - [ ] Add a default-compatible per-intent tier selection after the stable release.
-- [ ] Decide whether to include bounded imported-type context after preserving or intentionally invalidating the 12 recovered cache entries.
-- [ ] Confirm the final stable-release scope.
+- [ ] Trial bounded imported-type context and the stronger loader prompt in 1.7.10 / 0.1.1 without invalidating the stable recovery cache.
+- [x] Keep the first stable release to the non-cache-breaking operational fixes.

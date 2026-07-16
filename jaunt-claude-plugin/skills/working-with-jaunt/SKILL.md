@@ -69,10 +69,12 @@ the build afterward.
 - A final compiler/conformance rejection is already retried inside the module's
   remaining attempt budget with the rejected source and exact diagnostics.
   Read `candidate_outcomes` in build JSON before proposing another paid run.
-- TypeScript test candidates use the same rule. Read `runner.batteries` in test
-  JSON for per-battery attempts, retry reasons, and terminal rejection reasons.
-  A nonzero run may still commit the compatible subset named by
-  `runner.partial_landing`; never patch or discard those generated batteries.
+- TypeScript test candidates use the same rule. Read `vitest.batteries` in test
+  JSON for per-battery attempts, retry reasons, and terminal rejection reasons
+  (`targets.ts.vitest.batteries` in a mixed workspace). A nonzero run may still
+  commit the compatible subset named by `vitest.partial_landing` (or
+  `targets.ts.vitest.partial_landing`); never patch or discard those generated
+  batteries.
   For a rejected cache hit, confirm `cache_evicted` before rerunning unchanged.
 - Treat `JAUNT_TS_CANDIDATE_SELF_IMPORT`,
   `JAUNT_TS_GENERATED_PRIVATE_IMPORT`, and optionality/nullability TS2322

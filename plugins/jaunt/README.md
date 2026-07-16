@@ -59,10 +59,11 @@ conformance repair; a failed module should not be rerun blindly. Worker heap
 failures point to `[target.ts].worker_heap_mb` and are never replayed
 automatically.
 
-For TypeScript test generation, inspect `runner.batteries` before another paid
-run. It records per-battery retries and final rejection reasons. A failed
-combined overlay can still commit the compatible subset listed under
-`runner.partial_landing`.
+For TypeScript test generation, inspect `vitest.batteries` before another paid
+run (`targets.ts.vitest.batteries` in a mixed workspace). It records per-battery
+retries and final rejection reasons. A failed combined overlay can still commit
+the compatible subset listed under `vitest.partial_landing` or
+`targets.ts.vitest.partial_landing`.
 
 ## Hooks
 

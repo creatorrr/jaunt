@@ -16,7 +16,7 @@ from typing import Any, cast
 
 import pytest
 
-from jaunt.cache import ResponseCache
+from jaunt.cache import CacheEntry, ResponseCache
 from jaunt.config import JauntConfig, load_config
 from jaunt.cost import CostTracker
 from jaunt.errors import (
@@ -4583,6 +4583,88 @@ async def test_cross_battery_preflight_lands_only_the_compatible_subset(
     assert report.runner["partial_landing"]["committed"] is True
     assert not (tmp_path / "tests/__generated__/math.example.test.ts").exists()
     assert (tmp_path / "tests/__generated__/math.derived.test.ts").is_file()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("category", "expected_entries"), [("assertion", 1), ("runner", 2)])
+async def test_compatible_subset_run_evicts_only_identifiable_behavior_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    category: str,
+    expected_entries: int,
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    cache = ResponseCache(tmp_path / ".test-response-cache")
+    cache.put(
+        "unrelated-key",
+        CacheEntry("unrelated", 1, 1, "unrelated-model", "unrelated-provider", 0.0),
+    )
+
+    async def cross_battery_then_behavior_failure(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        files = tuple(kwargs.get("files", ()))
+        if kwargs.get("typecheck_only"):
+            if len(files) <= 1:
+                return {"ok": True, "mode": "typecheck", "diagnostics": [], "tests": []}
+            return {
+                "ok": False,
+                "mode": "typecheck",
+                "diagnostics": [
+                    {
+                        "code": "TS2451",
+                        "message": "cross-battery declaration conflict",
+                        "severity": "error",
+                    }
+                ],
+                "tests": [],
+            }
+        assert files == ("tests/__generated__/math.derived.test.ts",)
+        return {
+            "ok": False,
+            "mode": "run",
+            "tests": [
+                {
+                    "file": files[0],
+                    "tier": "derived",
+                    "status": "failed",
+                    "category": category,
+                    "message": f"{category} failure",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        "jaunt.typescript.tester._run_test_batches",
+        cross_battery_then_behavior_failure,
+    )
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        jobs=2,
+        generator=FakeGenerator(),
+        response_cache=cache,
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 3
+    assert cache.info()["entries"] == expected_entries
+    assert cache.get("unrelated-key") is not None
+    outcomes = {item["path"]: item for item in report.runner["batteries"]}
+    failed = outcomes["tests/__generated__/math.derived.test.ts"]
+    if category == "assertion":
+        assert failed["state"] == "rejected"
+        assert failed["cache_evicted"] is True
+        assert failed["rejection_reasons"] == (
+            "The compatible-subset Vitest run rejected this battery; "
+            "its cached response was removed.",
+        )
+    else:
+        assert failed["state"] == "staged"
+        assert "cache_evicted" not in failed
+        assert "rejection_reasons" not in failed
+    assert report.runner["partial_landing"]["committed"] is False
+    assert not (tmp_path / "tests/__generated__/math.derived.test.ts").exists()
 
 
 @pytest.mark.asyncio

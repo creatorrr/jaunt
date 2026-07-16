@@ -24,7 +24,7 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, cast
 from urllib.parse import unquote
 
 from jaunt.config import JauntConfig
@@ -2764,15 +2764,19 @@ def _failed_runner_test_paths(result: Mapping[str, Any]) -> tuple[str, ...]:
     def visit(value: object) -> None:
         if not isinstance(value, Mapping):
             return
-        tests = value.get("tests", ())
+        record = cast("Mapping[str, object]", value)
+        tests = record.get("tests", ())
         if isinstance(tests, list):
             for item in tests:
-                if not isinstance(item, Mapping) or item.get("status") != "failed":
+                if not isinstance(item, Mapping):
                     continue
-                path = item.get("file")
+                test_record = cast("Mapping[str, object]", item)
+                if test_record.get("status") != "failed":
+                    continue
+                path = test_record.get("file")
                 if isinstance(path, str) and path:
                     paths.add(path.replace("\\", "/").removeprefix("./"))
-        batches = value.get("batches", {})
+        batches = record.get("batches", {})
         if isinstance(batches, Mapping):
             for batch in batches.values():
                 visit(batch)
@@ -3994,6 +3998,24 @@ async def run_test(
                     explicit_owners=test_owners,
                     overlays=accepted_overlays,
                     redact_derived=not no_redact_derived,
+                )
+            if not bool(partial_runner.get("ok", False)) and _runner_allows_implementation_repair(
+                partial_runner
+            ):
+                failed_partial_paths = tuple(
+                    path
+                    for path in _failed_runner_test_paths(partial_runner)
+                    if path in accepted_overlays
+                )
+                reject_batteries(
+                    failed_partial_paths,
+                    {
+                        path: (
+                            "The compatible-subset Vitest run rejected this battery; "
+                            "its cached response was removed.",
+                        )
+                        for path in failed_partial_paths
+                    },
                 )
             partial_committed = bool(accepted_overlays) and bool(partial_runner.get("ok", False))
             committed_generated = planned_generated.intersection(accepted)
