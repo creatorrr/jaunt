@@ -15,7 +15,9 @@ tooling that shells out to Jaunt. The payloads below are trimmed from real runs.
   writes a machine envelope to stdout: `{"command": ..., "ok": false, "error":
   "..."}`. So a non-zero exit can still leave parseable JSON on stdout.
 - Progress bars are suppressed. To keep a progress display while parsing JSON,
-  use `--progress plain` (progress on stderr, JSON on stdout).
+  use `--progress plain` (progress on stderr, JSON on stdout). TypeScript build
+  lines name the active module; TypeScript test lines name the generated battery
+  path and its `example` or `derived` tier.
 - `--json` is available on `build`, `test`, `status`, `check`, `specs`, `jobs`,
   `sync`, `design`, `clean`, `migrate`, `watch`, `instructions`, `init`, `log`,
   `tree`, `cache`, and `skill`.
@@ -116,7 +118,9 @@ entered model generation:
 `attempts` counts paid candidate calls, including final transaction repair.
 `retry_reasons` is deduplicated in encounter order. `phase` is `committed` or
 `failed`. The top-level `cost.api_calls` charges every attempt separately, and
-the configured build cost ceiling is checked before another retry begins.
+the configured build cost ceiling is checked before another retry begins. Mixed
+workspaces retain this map at the top level; `targets.ts.candidate_outcomes` uses
+language-local keys such as `src/detect/index`.
 
 A version-2 TypeScript test run reports one `runner.batteries` entry per example
 or derived battery:
@@ -149,6 +153,13 @@ committed, and its isolated runner result. A rejected battery also carries
 `cache_evicted` reports whether the rejected bytes were removed. Eviction compares
 the stored source before deletion, so it does not remove a newer replacement. The
 command remains unsuccessful until every requested battery lands.
+
+The known Codex `Selected model is at capacity` response is retried twice with
+short backoff and does not consume a candidate attempt. A successful retry adds
+`infrastructure_retries` and `infrastructure_errors` to that battery outcome. If
+all three infrastructure calls fail, the battery state is
+`infrastructure-failed`, its diagnostic code is `JAUNT_TS_TEST_INFRASTRUCTURE`,
+and the report still includes every peer battery that completed.
 
 ## status
 

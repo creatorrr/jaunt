@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import json
@@ -11,6 +12,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal, TypeAlias, cast
 
+from jaunt.errors import JauntTransientGenerationError
 from jaunt.spec_ref import SpecRef
 from jaunt.validation import validate_generated_source
 
@@ -114,11 +116,39 @@ class GenerationResult:
     usage: TokenUsage | None = None
     advisories: tuple[str, ...] = ()
     attempt_errors: tuple[tuple[str, ...], ...] = ()
+    infrastructure_retries: int = 0
+    infrastructure_errors: tuple[str, ...] = ()
+    infrastructure_exhausted: bool = False
 
 
 GenerationModuleResult: TypeAlias = (
     tuple[str, TokenUsage | None] | tuple[str, TokenUsage | None, tuple[str, ...]]
 )
+
+_MAX_INFRASTRUCTURE_RETRIES = 2
+
+
+async def _call_with_infrastructure_retry(
+    call: Callable[[], Awaitable[GenerationModuleResult]],
+    *,
+    progress: Callable[[str, str], None] | None,
+) -> tuple[GenerationModuleResult | None, tuple[str, ...]]:
+    """Retry explicitly transient provider failures without spending candidate attempts."""
+
+    errors: list[str] = []
+    while True:
+        try:
+            return await call(), tuple(errors)
+        except JauntTransientGenerationError as exc:
+            errors.append(str(exc))
+            if len(errors) > _MAX_INFRASTRUCTURE_RETRIES:
+                return None, tuple(errors)
+            if progress is not None:
+                progress(
+                    "infrastructure-retry",
+                    f"{len(errors)}/{_MAX_INFRASTRUCTURE_RETRIES}: {exc}",
+                )
+            await asyncio.sleep(float(2 ** (len(errors) - 1)))
 
 
 def _generation_advisories(gen: GenerationModuleResult) -> tuple[str, ...]:
@@ -218,12 +248,38 @@ class GeneratorBackend(ABC):
         total_completion = 0
         total_cached_prompt = 0
         attempt_request = request
+        infrastructure_errors: list[str] = []
 
         while attempts < max_attempts:
             attempts += 1
             if progress is not None:
                 progress("attempt", f"{attempts}/{max_attempts}")
-            generated = await self.generate_request(attempt_request, extra_error_context=extra_ctx)
+            generated, transient_errors = await _call_with_infrastructure_retry(
+                lambda current_request=attempt_request, current_context=extra_ctx: (
+                    self.generate_request(
+                        current_request,
+                        extra_error_context=current_context,
+                    )
+                ),
+                progress=progress,
+            )
+            infrastructure_errors.extend(transient_errors)
+            if generated is None:
+                return GenerationResult(
+                    attempts=attempts - 1,
+                    source=last_source,
+                    errors=[transient_errors[-1]],
+                    usage=self._aggregate_usage(
+                        total_prompt,
+                        total_completion,
+                        total_cached_prompt,
+                    ),
+                    advisories=advisories,
+                    attempt_errors=tuple(attempt_errors),
+                    infrastructure_retries=max(0, len(infrastructure_errors) - 1),
+                    infrastructure_errors=tuple(infrastructure_errors),
+                    infrastructure_exhausted=True,
+                )
             last_source = generated[0]
             usage = generated[1]
             advisories = _generation_advisories(generated)
@@ -248,6 +304,8 @@ class GeneratorBackend(ABC):
                     ),
                     advisories=advisories,
                     attempt_errors=tuple(attempt_errors),
+                    infrastructure_retries=len(infrastructure_errors),
+                    infrastructure_errors=tuple(infrastructure_errors),
                 )
             attempt_errors.append(tuple(last_errors))
             if attempts < max_attempts:
@@ -264,6 +322,8 @@ class GeneratorBackend(ABC):
             usage=self._aggregate_usage(total_prompt, total_completion, total_cached_prompt),
             advisories=advisories,
             attempt_errors=tuple(attempt_errors),
+            infrastructure_retries=len(infrastructure_errors),
+            infrastructure_errors=tuple(infrastructure_errors),
         )
 
     def _aggregate_usage(
@@ -298,12 +358,40 @@ class GeneratorBackend(ABC):
         total_prompt = 0
         total_completion = 0
         total_cached_prompt = 0
+        infrastructure_errors: list[str] = []
 
         while attempts < max_attempts:
             attempts += 1
             if progress is not None:
                 progress("attempt", f"{attempts}/{max_attempts}")
-            gen = await self.generate_module(ctx, extra_error_context=extra_ctx)
+            gen, transient_errors = await _call_with_infrastructure_retry(
+                lambda current_context=extra_ctx: self.generate_module(
+                    ctx,
+                    extra_error_context=current_context,
+                ),
+                progress=progress,
+            )
+            infrastructure_errors.extend(transient_errors)
+            if gen is None:
+                return GenerationResult(
+                    attempts=attempts - 1,
+                    source=last_source,
+                    errors=[transient_errors[-1]],
+                    usage=(
+                        TokenUsage(
+                            total_prompt,
+                            total_completion,
+                            self.model_name,
+                            self.provider_name,
+                            cached_prompt_tokens=total_cached_prompt,
+                        )
+                        if total_prompt or total_completion
+                        else None
+                    ),
+                    infrastructure_retries=max(0, len(infrastructure_errors) - 1),
+                    infrastructure_errors=tuple(infrastructure_errors),
+                    infrastructure_exhausted=True,
+                )
             last_source = gen[0]
             usage = gen[1]
             attempt_advisories = _generation_advisories(gen)
@@ -337,6 +425,8 @@ class GeneratorBackend(ABC):
                     errors=[],
                     usage=agg,
                     advisories=attempt_advisories,
+                    infrastructure_retries=len(infrastructure_errors),
+                    infrastructure_errors=tuple(infrastructure_errors),
                 )
 
             if attempts >= max_attempts:
@@ -360,5 +450,10 @@ class GeneratorBackend(ABC):
             else None
         )
         return GenerationResult(
-            attempts=attempts, source=last_source, errors=last_errors, usage=agg
+            attempts=attempts,
+            source=last_source,
+            errors=last_errors,
+            usage=agg,
+            infrastructure_retries=len(infrastructure_errors),
+            infrastructure_errors=tuple(infrastructure_errors),
         )

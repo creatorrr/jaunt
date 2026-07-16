@@ -930,6 +930,17 @@ def _progress_finish(progress: object | None) -> None:
             pass
 
 
+def _progress_set_total(progress: object | None, total: int) -> None:
+    if progress is None:
+        return
+    set_total = getattr(progress, "set_total", None)
+    if callable(set_total):
+        try:
+            set_total(total)
+        except Exception:
+            pass
+
+
 def _clear_recovered_build_manifests(
     root: Path,
     modules: Sequence[Mapping[str, Any]],
@@ -1498,6 +1509,7 @@ async def run_build_in_session(
         )
 
     actionable_ids = selected_ids | refrozen
+    _progress_set_total(progress, len(actionable_ids))
     actionable_modules = [by_id[module_id] for module_id in sorted(actionable_ids)]
     units = _build_units(analysis, actionable_modules)
     failed: dict[str, tuple[TargetDiagnostic, ...]] = {}
@@ -1505,6 +1517,8 @@ async def run_build_in_session(
     candidate_attempts: dict[str, int] = {}
     candidate_retries: dict[str, int] = {}
     candidate_retry_reasons: dict[str, list[str]] = {}
+    candidate_infrastructure_retries: dict[str, int] = {}
+    candidate_infrastructure_errors: dict[str, list[str]] = {}
     pending = set(selected_ids)
     semaphore = asyncio.Semaphore(effective_jobs)
     progress_advanced: set[str] = set()
@@ -1617,9 +1631,18 @@ async def run_build_in_session(
             candidate_retry_reasons[module_id] = [
                 error for attempt in result.attempt_errors for error in attempt
             ]
+            candidate_infrastructure_retries[module_id] = result.infrastructure_retries
+            candidate_infrastructure_errors[module_id] = list(result.infrastructure_errors)
             if result.source is None or result.errors:
                 failed[module_id] = tuple(
-                    TargetDiagnostic(code="JAUNT_TS_GENERATION", message=error)
+                    TargetDiagnostic(
+                        code=(
+                            "JAUNT_TS_GENERATION_INFRASTRUCTURE"
+                            if result.infrastructure_exhausted
+                            else "JAUNT_TS_GENERATION"
+                        ),
+                        message=error,
+                    )
                     for error in result.errors or ["The generator returned no TypeScript source"]
                 )
                 _progress_advance(progress, module_id, ok=False)
@@ -1765,6 +1788,13 @@ async def run_build_in_session(
                 candidate_attempts.get(repairable, 0) + repaired.attempts
             )
             candidate_retries[repairable] = candidate_retries.get(repairable, 0) + 1
+            candidate_infrastructure_retries[repairable] = (
+                candidate_infrastructure_retries.get(repairable, 0)
+                + repaired.infrastructure_retries
+            )
+            candidate_infrastructure_errors.setdefault(repairable, []).extend(
+                repaired.infrastructure_errors
+            )
             candidate_retry_reasons[repairable].extend(
                 error for attempt in repaired.attempt_errors for error in attempt
             )
@@ -1888,6 +1918,19 @@ async def run_build_in_session(
                         dict.fromkeys(candidate_retry_reasons.get(module_id, ()))
                     ),
                     "phase": "committed" if module_id in generated else "failed",
+                    **(
+                        {
+                            "infrastructure_retries": candidate_infrastructure_retries.get(
+                                module_id,
+                                0,
+                            ),
+                            "infrastructure_errors": tuple(
+                                candidate_infrastructure_errors.get(module_id, ())
+                            ),
+                        }
+                        if candidate_infrastructure_errors.get(module_id)
+                        else {}
+                    ),
                 }
                 for module_id in sorted(candidate_attempts)
             },

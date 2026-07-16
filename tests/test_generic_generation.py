@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from jaunt.config import CodexConfig, LLMConfig
-from jaunt.errors import JauntGenerationError
+from jaunt.errors import JauntGenerationError, JauntTransientGenerationError
 from jaunt.generate.base import (
     GenerationRequest,
     GeneratorBackend,
@@ -59,6 +59,72 @@ def test_generic_retry_uses_async_request_validator() -> None:
     assert result.errors == []
     assert seen == ["bad", "good"]
     assert backend.seeds == ["", "bad"]
+
+
+def test_generic_retry_separates_transient_infrastructure_from_candidate_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CapacityBackend(GenericBackend):
+        async def generate_request(self, request: GenerationRequest, **_kwargs):
+            self.calls += 1
+            if self.calls <= 2:
+                raise JauntTransientGenerationError("Selected model is at capacity")
+            return "good", None
+
+    sleeps: list[float] = []
+
+    async def no_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("jaunt.generate.base.asyncio.sleep", no_sleep)
+    request = GenerationRequest(
+        language="ts",
+        kind="test",
+        target_path="tests/generated.test.ts",
+        context_files={},
+        prompt="Generate tests.",
+        cache_payload={},
+        validator=lambda source: [] if source == "good" else ["bad"],
+    )
+    result = asyncio.run(CapacityBackend().generate_request_with_retry(request))
+
+    assert result.attempts == 1
+    assert result.infrastructure_retries == 2
+    assert len(result.infrastructure_errors) == 2
+    assert result.infrastructure_exhausted is False
+    assert sleeps == [1.0, 2.0]
+
+
+def test_generic_retry_returns_structured_result_when_capacity_stays_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CapacityBackend(GenericBackend):
+        async def generate_request(self, request: GenerationRequest, **_kwargs):
+            self.calls += 1
+            raise JauntTransientGenerationError("Selected model is at capacity")
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("jaunt.generate.base.asyncio.sleep", no_sleep)
+    request = GenerationRequest(
+        language="ts",
+        kind="test",
+        target_path="tests/generated.test.ts",
+        context_files={},
+        prompt="Generate tests.",
+        cache_payload={},
+        validator=lambda _source: [],
+    )
+    backend = CapacityBackend()
+    result = asyncio.run(backend.generate_request_with_retry(request))
+
+    assert backend.calls == 3
+    assert result.attempts == 0
+    assert result.infrastructure_retries == 2
+    assert len(result.infrastructure_errors) == 3
+    assert result.infrastructure_exhausted is True
+    assert result.errors == ["Selected model is at capacity"]
 
 
 def test_generic_cache_key_is_language_and_target_namespaced() -> None:

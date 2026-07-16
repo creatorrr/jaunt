@@ -65,6 +65,26 @@ def test_progressbar_zero_total():
     assert "0/0" in output
 
 
+def test_progressbar_total_can_be_discovered_after_analysis():
+    stream = io.StringIO()
+    pb = ProgressBar(
+        label="ts test",
+        total=0,
+        enabled=True,
+        stream=stream,
+        mode="plain",
+        min_interval_s=0,
+    )
+    pb.set_total(2)
+    pb.phase("tests/math.example.test.ts", "generating", "example")
+    pb.advance("tests/math.example.test.ts", ok=True)
+    pb.finish()
+
+    output = stream.getvalue()
+    assert "tests/math.example.test.ts: generating (example)" in output
+    assert "1/2" in output
+
+
 def test_progressbar_broken_stream_disables():
     """ProgressBar should disable itself if the stream raises."""
 

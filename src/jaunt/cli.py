@@ -953,6 +953,13 @@ def _cmd_typescript_build_loaded(args: argparse.Namespace, root: Path, cfg: Jaun
     from jaunt.typescript.cli_bridge import build_payload
 
     json_mode = _is_json_mode(args)
+    progress = _make_progress(
+        args,
+        label="ts build",
+        total=0,
+        json_mode=json_mode,
+        allow_empty=True,
+    )
     try:
         report = asyncio.run(
             run_build(
@@ -970,6 +977,7 @@ def _cmd_typescript_build_loaded(args: argparse.Namespace, root: Path, cfg: Jaun
                 and not bool(getattr(args, "no_repo_map", False)),
                 auto_skills_enabled=_typescript_auto_skills_enabled(args, cfg),
                 builtin_skill_names=_typescript_builtin_skill_names(args, cfg),
+                progress=progress,
             )
         )
         payload = build_payload(report)
@@ -986,6 +994,13 @@ def _cmd_typescript_test_loaded(args: argparse.Namespace, root: Path, cfg: Jaunt
     from jaunt.typescript.tester import run_test
 
     json_mode = _is_json_mode(args)
+    progress = _make_progress(
+        args,
+        label="ts test",
+        total=0,
+        json_mode=json_mode,
+        allow_empty=True,
+    )
     try:
         report = asyncio.run(
             run_test(
@@ -1006,6 +1021,7 @@ def _cmd_typescript_test_loaded(args: argparse.Namespace, root: Path, cfg: Jaunt
                 and not bool(getattr(args, "no_repo_map", False)),
                 auto_skills_enabled=_typescript_auto_skills_enabled(args, cfg),
                 builtin_skill_names=_typescript_builtin_skill_names(args, cfg),
+                progress=progress,
             )
         )
         payload = test_payload(report)
@@ -1810,6 +1826,9 @@ def _mixed_build_payload(
         payload["work_items"] = {
             f"py:{module}": value for module, value in sorted(py_work_items.items())
         }
+    ts_candidate_outcomes = typescript_payload.get("candidate_outcomes")
+    if isinstance(ts_candidate_outcomes, dict):
+        payload["candidate_outcomes"] = ts_candidate_outcomes
     if command == "test":
         if "pytest" in python_payload:
             payload["pytest"] = python_payload["pytest"]
@@ -1859,6 +1878,13 @@ def _cmd_mixed_build(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> 
         return _mixed_preflight_error("build", error, args)
     _prepare_mixed_typescript_skills(mixed_args, root, cfg)
     _prepare_mixed_repo_map(mixed_args, root, cfg)
+    typescript_progress = _make_progress(
+        args,
+        label="ts build",
+        total=0,
+        json_mode=_is_json_mode(args),
+        allow_empty=True,
+    )
 
     async def run_both() -> tuple[object, object]:
         try:
@@ -1889,6 +1915,7 @@ def _cmd_mixed_build(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> 
                             repo_map_block_override=mixed_args._mixed_repo_map_block,
                             auto_skills_enabled=False,
                             builtin_skill_names=mixed_args._mixed_builtin_skill_names,
+                            progress=typescript_progress,
                         ),
                     ),
                     return_exceptions=True,
@@ -1997,6 +2024,13 @@ def _cmd_mixed_test(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> i
         return _mixed_preflight_error("test", error, args)
     _prepare_mixed_typescript_skills(mixed_args, root, cfg)
     _prepare_mixed_repo_map(mixed_args, root, cfg)
+    typescript_progress = _make_progress(
+        args,
+        label="ts test",
+        total=0,
+        json_mode=_is_json_mode(args),
+        allow_empty=True,
+    )
 
     async def run_both() -> tuple[object, object]:
         try:
@@ -2030,6 +2064,7 @@ def _cmd_mixed_test(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> i
                             repo_map_block_override=mixed_args._mixed_repo_map_block,
                             auto_skills_enabled=False,
                             builtin_skill_names=mixed_args._mixed_builtin_skill_names,
+                            progress=typescript_progress,
                         ),
                     ),
                     return_exceptions=True,
@@ -2872,9 +2907,14 @@ def _resolve_progress_mode(
 
 
 def _make_progress(
-    args: argparse.Namespace, *, label: str, total: int, json_mode: bool
+    args: argparse.Namespace,
+    *,
+    label: str,
+    total: int,
+    json_mode: bool,
+    allow_empty: bool = False,
 ) -> ProgressBar | None:
-    if total == 0:
+    if total == 0 and not allow_empty:
         return None
     mode = _resolve_progress_mode(args, json_mode=json_mode)
     if mode is None:

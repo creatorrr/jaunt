@@ -37,6 +37,15 @@ returning exit `3`. Typecheck messages are bounded to 2,000 characters without
 exposing executed derived-test detail. Validator- or subset-rejected cache entries
 are evicted, while a concurrently replaced entry is retained.
 
+Long TypeScript runs now honor explicit plain progress in both TypeScript-only and
+mixed workspaces. `--progress plain --json` prints the active module or battery,
+the battery tier, retry phases, and completion counts to stderr; stdout remains a
+single JSON object. Jaunt also retries the known Codex capacity response twice
+without spending the candidate attempt budget. If capacity stays exhausted, the
+command returns the failed module or battery in its normal structured report and
+keeps outcomes from requests that already finished. Mixed build JSON retains
+TypeScript `candidate_outcomes` at the top level and under `targets.ts`.
+
 The npm package is stable, but the worker boundary still identifies itself as
 `jaunt-ts/1-draft.2`. That protocol is versioned for matching Jaunt Python and npm
 releases; it is not yet a compatibility promise for third-party protocol clients.

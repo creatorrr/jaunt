@@ -6,9 +6,11 @@ from pathlib import Path
 from typing import cast
 
 from jaunt.cli import (
+    _cmd_typescript_test_loaded,
     _cmd_mixed_status,
     _aggregate_cost_payloads,
     _capture_python_json,
+    _mixed_build_payload,
     _mixed_typescript_targets,
     _target_dispatch_mode,
     main,
@@ -245,7 +247,17 @@ def test_typescript_build_payload_is_partitioned_and_structured() -> None:
                 TargetDiagnostic(code="JAUNT_TS_BAD_RETURN", message="wrong return type"),
             )
         },
-        metadata={"recomposed": ("ts:src/reused/index",)},
+        metadata={
+            "recomposed": ("ts:src/reused/index",),
+            "candidate_outcomes": {
+                "ts:src/slug/index": {
+                    "attempts": 2,
+                    "retry_count": 1,
+                    "retry_reasons": ("TS2322",),
+                    "phase": "committed",
+                }
+            },
+        },
         exit_code=3,
     )
 
@@ -257,6 +269,71 @@ def test_typescript_build_payload_is_partitioned_and_structured() -> None:
     assert payload["recomposed"] == ["ts:src/reused/index"]
     assert payload["targets"]["ts"]["recomposed"] == ["src/reused/index"]
     assert payload["failed"]["ts:src/bad/index"][0]["code"] == "JAUNT_TS_BAD_RETURN"
+    assert payload["candidate_outcomes"]["ts:src/slug/index"]["attempts"] == 2
+    assert payload["targets"]["ts"]["candidate_outcomes"]["src/slug/index"]["attempts"] == 2
+
+
+def test_mixed_build_payload_preserves_typescript_candidate_outcomes() -> None:
+    outcomes = {
+        "ts:src/slug/index": {
+            "attempts": 1,
+            "retry_count": 0,
+            "retry_reasons": (),
+            "phase": "committed",
+        }
+    }
+    payload = _mixed_build_payload(
+        "build",
+        {"generated": [], "skipped": [], "refrozen": [], "failed": {}},
+        build_payload(TargetBuildReport(language="ts", metadata={"candidate_outcomes": outcomes})),
+        exit_code=0,
+    )
+
+    assert payload["candidate_outcomes"] == outcomes
+    targets = cast(dict[str, object], payload["targets"])
+    typescript = cast(dict[str, object], targets["ts"])
+    partitioned = cast(dict[str, dict[str, object]], typescript["candidate_outcomes"])
+    assert partitioned["src/slug/index"]["attempts"] == 1
+
+
+def test_typescript_test_explicit_plain_progress_stays_on_stderr_with_json(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tsconfig.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "jaunt.toml").write_text(
+        """version = 2
+[target.ts]
+source_roots = ["src"]
+test_roots = ["tests"]
+projects = ["tsconfig.json"]
+""",
+        encoding="utf-8",
+    )
+    config = load_config(root=tmp_path)
+    observed: dict[str, object] = {}
+
+    async def fake_test(*_args, **kwargs):
+        progress = kwargs["progress"]
+        observed["progress"] = progress
+        progress.set_total(2)
+        progress.phase("tests/math.example.test.ts", "generating", "example")
+        progress.advance("tests/math.example.test.ts", ok=True)
+        progress.finish()
+        return TargetTestReport(language="ts")
+
+    monkeypatch.setattr("jaunt.typescript.tester.run_test", fake_test)
+    args = parse_args(["test", "--language", "ts", "--progress", "plain", "--json"])
+
+    assert _cmd_typescript_test_loaded(args, tmp_path, config) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["ok"] is True
+    assert observed["progress"] is not None
+    assert "[ts test] tests/math.example.test.ts: generating (example)" in captured.err
+    assert "[ts test] 1/2" in captured.err
 
 
 def test_mixed_cost_payloads_sum_language_usage() -> None:

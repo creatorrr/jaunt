@@ -25,5 +25,9 @@ class JauntGenerationError(JauntError):
     """Raised when code generation fails."""
 
 
+class JauntTransientGenerationError(JauntGenerationError):
+    """Raised when generation may succeed unchanged after a short retry."""
+
+
 class JauntDependencyCycleError(JauntError):
     """Raised when a dependency graph contains a cycle."""

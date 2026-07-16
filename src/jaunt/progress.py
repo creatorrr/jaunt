@@ -61,6 +61,15 @@ class ProgressBar:
             return
         self._render(item)
 
+    def set_total(self, total: int) -> None:
+        """Set a total discovered after command analysis has completed."""
+
+        if self._finished:
+            return
+        self.total = max(0, int(total))
+        if self.mode == "rich":
+            self._render("", force=True)
+
     def finish(self) -> None:
         if self._finished:
             return

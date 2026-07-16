@@ -23,6 +23,16 @@ Python or TypeScript release.
 - Evict a cached response when its current validator or combined-subset check
   rejects it. Compare-and-delete keeps a concurrently written replacement, and
   per-battery JSON reports whether a subset-rejected cache entry was removed.
+- Wire TypeScript build and test progress through standalone and mixed CLI paths.
+  Explicit `--progress plain --json` now prints the active module or battery,
+  tier, retry phase, and completion count to stderr while stdout remains one JSON
+  object.
+- Retry the known Codex capacity response twice with short backoff, outside the
+  candidate attempt budget. If capacity remains exhausted, TypeScript returns a
+  per-module or per-battery infrastructure failure and keeps completed battery
+  outcomes and validated cache entries in the same report.
+- Preserve TypeScript `candidate_outcomes` in mixed-workspace build JSON and in
+  the language-local `targets.ts` partition.
 
 ### Packages
 

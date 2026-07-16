@@ -51,6 +51,7 @@ from jaunt.typescript.builder import (
     _progress_advance,
     _progress_finish,
     _progress_phase,
+    _progress_set_total,
     _safe_path,
     _sha256,
     _target,
@@ -3428,6 +3429,13 @@ async def run_test(
                     "retry_reasons": retry_reasons,
                 }
             )
+            if result.infrastructure_errors:
+                outcome.update(
+                    {
+                        "infrastructure_retries": result.infrastructure_retries,
+                        "infrastructure_errors": result.infrastructure_errors,
+                    }
+                )
         battery_outcomes[path] = outcome
 
     def stage_validated_batteries() -> None:
@@ -3503,6 +3511,7 @@ async def run_test(
                 prepared_requests.append((test_spec, spec_path, selected_module_ids, request))
 
         planned_files = tuple(request.target_path for *_prefix, request in prepared_requests)
+        _progress_set_total(progress, len(prepared_requests))
         if planned_files:
             planned_groups = _group_test_files(
                 root,
@@ -3676,13 +3685,20 @@ async def run_test(
                 ) = await completed
                 if result.source is None or result.errors:
                     failed[key] = tuple(
-                        TargetDiagnostic(code="JAUNT_TS_TEST_GENERATION", message=error)
+                        TargetDiagnostic(
+                            code=(
+                                "JAUNT_TS_TEST_INFRASTRUCTURE"
+                                if result.infrastructure_exhausted
+                                else "JAUNT_TS_TEST_GENERATION"
+                            ),
+                            message=error,
+                        )
                         for error in result.errors or ["The generator returned no test source"]
                     )
                     record_battery_outcome(
                         request.target_path,
                         tier,
-                        "failed",
+                        "infrastructure-failed" if result.infrastructure_exhausted else "failed",
                         result=result,
                     )
                     _progress_phase(progress, request.target_path, "failed", tier)

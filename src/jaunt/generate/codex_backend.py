@@ -21,7 +21,7 @@ from pathlib import Path, PurePosixPath
 from typing import cast
 
 from jaunt.config import CodexConfig, LLMConfig, PromptsConfig
-from jaunt.errors import JauntGenerationError
+from jaunt.errors import JauntGenerationError, JauntTransientGenerationError
 from jaunt.generate.base import GenerationRequest, GeneratorBackend, ModuleSpecContext, TokenUsage
 from jaunt.generate.shared import load_prompt
 from jaunt.skill_seed import seed_skills_into_workspace
@@ -254,7 +254,12 @@ async def run_codex_exec(
         elif not parsed.saw_turn_completed:
             failure_message = "no turn.completed event (protocol failure)"
     if failure_message is not None:
-        raise JauntGenerationError(_format_exec_failure(failure_message, stderr))
+        error_type = (
+            JauntTransientGenerationError
+            if _is_transient_exec_error(failure_message)
+            else JauntGenerationError
+        )
+        raise error_type(_format_exec_failure(failure_message, stderr))
 
     return CodexExecResult(
         returncode=returncode,
@@ -361,6 +366,12 @@ def _format_exec_failure(reason: str, stderr: str) -> str:
     if clean_stderr:
         message += f"\nstderr:\n{_truncate_stderr(clean_stderr)}"
     return message
+
+
+def _is_transient_exec_error(message: str) -> bool:
+    """Classify only provider failures known to be safe to retry unchanged."""
+
+    return "selected model is at capacity" in message.casefold()
 
 
 def _truncate_stderr(stderr: str, *, limit: int = 4000) -> str:

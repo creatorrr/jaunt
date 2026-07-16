@@ -19,7 +19,11 @@ import pytest
 from jaunt.cache import ResponseCache
 from jaunt.config import JauntConfig, load_config
 from jaunt.cost import CostTracker
-from jaunt.errors import JauntConfigError, JauntGenerationError
+from jaunt.errors import (
+    JauntConfigError,
+    JauntGenerationError,
+    JauntTransientGenerationError,
+)
 from jaunt.generate.base import (
     GenerationRequest,
     GeneratorBackend,
@@ -4212,6 +4216,22 @@ async def test_test_generation_honors_jobs_and_reports_each_staged_tier(
                 self.active -= 1
 
     generator = ConcurrentGenerator()
+    progress_totals: list[int] = []
+    progress_phases: list[tuple[str, str, str]] = []
+
+    class RecordingProgress:
+        def set_total(self, total: int) -> None:
+            progress_totals.append(total)
+
+        def phase(self, item: str, stage: str, detail: str = "") -> None:
+            progress_phases.append((item, stage, detail))
+
+        def advance(self, _item: str, *, ok: bool) -> None:
+            assert ok is True
+
+        def finish(self) -> None:
+            return None
+
     monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
     report = await run_test(
         tmp_path,
@@ -4219,11 +4239,17 @@ async def test_test_generation_honors_jobs_and_reports_each_staged_tier(
         no_build=True,
         jobs=2,
         generator=generator,
+        progress=RecordingProgress(),
         worker_factory=lambda *_: worker,
     )
 
     assert report.exit_code == 0
     assert generator.max_active == 2
+    assert progress_totals == [2]
+    assert {(item, detail) for item, stage, detail in progress_phases if stage == "generating"} == {
+        ("tests/__generated__/math.derived.test.ts", "derived"),
+        ("tests/__generated__/math.example.test.ts", "example"),
+    }
     assert report.runner["jobs"] == 2
     assert report.runner["batteries"] == [
         {
@@ -4325,6 +4351,71 @@ async def test_test_generation_retries_live_candidate_overlay_failures(
         assert reason_by_tier[tier] == (reason,)
     assert {item["attempts"] for item in report.runner["batteries"]} == {2}
     assert {item["retry_count"] for item in report.runner["batteries"]} == {1}
+
+
+@pytest.mark.asyncio
+async def test_capacity_exhaustion_reports_failed_battery_and_preserves_completed_peer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    cache = ResponseCache(tmp_path / ".test-response-cache")
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "diagnostics": [],
+            "tests": [],
+        }
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    class CapacityGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls: dict[str, int] = {}
+
+        async def generate_request(
+            self,
+            request: GenerationRequest,
+            **kwargs: Any,
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            tier = str(request.cache_payload["tier"])
+            self.calls[tier] = self.calls.get(tier, 0) + 1
+            if tier == "derived":
+                raise JauntTransientGenerationError(
+                    "codex exec failed: error event: Selected model is at capacity. "
+                    "Please try a different model."
+                )
+            return await super().generate_request(request, **kwargs)
+
+    generator = CapacityGenerator()
+    monkeypatch.setattr("jaunt.generate.base.asyncio.sleep", no_sleep)
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        jobs=2,
+        generator=generator,
+        response_cache=cache,
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 3
+    assert generator.calls == {"derived": 3, "example": 1}
+    assert report.failed["tests/math.jaunt-test.ts#derived"][0].code == (
+        "JAUNT_TS_TEST_INFRASTRUCTURE"
+    )
+    outcomes = {item["tier"]: item for item in report.runner["batteries"]}
+    assert outcomes["derived"]["state"] == "infrastructure-failed"
+    assert outcomes["derived"]["attempts"] == 0
+    assert outcomes["derived"]["infrastructure_retries"] == 2
+    assert len(outcomes["derived"]["infrastructure_errors"]) == 3
+    assert outcomes["example"]["state"] == "staged"
+    assert cache.info()["entries"] == 1
 
 
 @pytest.mark.asyncio
