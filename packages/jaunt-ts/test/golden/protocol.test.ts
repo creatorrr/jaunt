@@ -229,6 +229,7 @@ describe("protocol-v1 golden fixtures", () => {
         "contextDocs",
         "semanticEnvironmentDigest",
         "semanticEnvironmentRecords",
+        "toolingProvenanceRecords",
         "dependencies",
         "structuralDigest",
         "proseDigest",

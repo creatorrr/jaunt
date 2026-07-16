@@ -96,6 +96,7 @@ class _MigrationWorker:
                     "digest": "sha256:declaration-v1",
                 }
             ],
+            "toolingProvenanceRecords": [],
             "structuralDigest": "sha256:structural",
             "proseDigest": "sha256:prose",
             "apiDigest": "sha256:api",
@@ -446,6 +447,40 @@ async def test_typescript_migrate_recomposes_environment_drift_and_preserves_bat
     assert proven_previous_target_api_digests(tmp_path, (worker.module,))
     sidecar = json.loads((tmp_path / "src/__generated__/math.jaunt.json").read_text())
     assert sidecar["semanticEnvironmentDigest"] == "sha256:semantic-environment-v2"
+
+
+@pytest.mark.asyncio
+async def test_typescript_migrate_reports_package_manager_as_tooling_provenance(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    worker = _MigrationWorker(tmp_path)
+    _write_built_artifacts(tmp_path, worker)
+    worker.sidecar_value.update(
+        {
+            "toolingProvenanceRecords": [
+                {
+                    "id": "tooling:packageManager:package.json",
+                    "digest": "sha256:pnpm-11.5.0",
+                },
+            ],
+            "structuralDigest": "sha256:package-manager-structure-v2",
+            "apiDigest": "sha256:package-manager-api-v2",
+        }
+    )
+    worker.module.update(worker.sidecar_value)
+    worker.refresh_expected_sidecar()
+
+    plan = await plan_typescript_migration(tmp_path, config, worker_factory=lambda *_: worker)
+
+    assert not plan.requires_rebuild
+    assert any(action.classification == "free-recompose" for action in plan.actions)
+    diagnostic = next(
+        item for item in plan.diagnostics if item.code == "JAUNT_TS_MIGRATE_ENVIRONMENT_RECOMPOSE"
+    )
+    assert diagnostic.data["added"] == ["tooling:packageManager:package.json"]
+    assert diagnostic.data["before_digest"] == diagnostic.data["after_digest"]
+    assert all(method != "generate" for method, _params in worker.requests)
 
 
 @pytest.mark.asyncio

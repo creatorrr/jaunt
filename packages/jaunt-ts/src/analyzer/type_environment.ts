@@ -21,6 +21,8 @@ export interface TypeEnvironmentSnapshot {
   readonly compatibilityDigest: string;
   /** Per-input compatibility records persisted for actionable provenance diffs. */
   readonly compatibilityRecords: readonly SemanticEnvironmentRecord[];
+  /** Tool-only provenance records excluded from semantic compatibility. */
+  readonly toolingRecords: readonly SemanticEnvironmentRecord[];
   /** Canonical documentation on the imported public surface. */
   readonly proseDigest: string;
   /** Deterministic imported/context TSDoc records for semantic-gate review. */
@@ -113,7 +115,11 @@ function semanticJson(source: string): unknown {
   }
 }
 
-function normalizeToolingMetadata(value: unknown, key = ""): unknown {
+function normalizeToolingMetadata(
+  value: unknown,
+  key = "",
+  depth = 0,
+): unknown {
   if (
     key === "@usejaunt/ts" ||
     key === "node_modules/@usejaunt/ts" ||
@@ -122,7 +128,7 @@ function normalizeToolingMetadata(value: unknown, key = ""): unknown {
     return "<jaunt-toolchain>";
   }
   if (Array.isArray(value)) {
-    return value.map((item) => normalizeToolingMetadata(item));
+    return value.map((item) => normalizeToolingMetadata(item, key, depth + 1));
   }
   if (value !== null && typeof value === "object") {
     const object = value as Record<string, unknown>;
@@ -130,13 +136,42 @@ function normalizeToolingMetadata(value: unknown, key = ""): unknown {
       return { name: "@usejaunt/ts" };
     }
     return Object.fromEntries(
-      Object.entries(object).map(([childKey, item]) => [
-        childKey,
-        normalizeToolingMetadata(item, childKey),
-      ]),
+      Object.entries(object)
+        // The root package-manager selector controls installation tooling; it
+        // does not change the declarations visible to a governed module.
+        .filter(([childKey]) => depth !== 0 || childKey !== "packageManager")
+        .map(([childKey, item]) => [
+          childKey,
+          normalizeToolingMetadata(item, childKey, depth + 1),
+        ]),
     );
   }
   return value;
+}
+
+function toolingProvenanceRecords(
+  root: string,
+  path: string,
+  syntax: unknown,
+): readonly SemanticEnvironmentRecord[] {
+  if (
+    basename(path) !== "package.json" ||
+    syntax === null ||
+    typeof syntax !== "object" ||
+    Array.isArray(syntax)
+  ) {
+    return [];
+  }
+  const packageManager = (syntax as Record<string, unknown>).packageManager;
+  if (typeof packageManager !== "string" || packageManager.trim() === "") {
+    return [];
+  }
+  return [
+    {
+      id: `tooling:packageManager:${toPosix(relative(root, path))}`,
+      digest: digestCanonical(packageManager.trim()),
+    },
+  ];
 }
 
 interface SourceSpan {
@@ -429,6 +464,7 @@ export function collectTypeEnvironment(
   const records: { id: string; syntax: unknown }[] = [];
   const compatibleEnvironmentSyntax = new Map<string, unknown>();
   const compatibilityIgnoredIds = new Set<string>();
+  const toolingRecords: SemanticEnvironmentRecord[] = [];
   const proseRecords: ImportedDocsRecord[] = [];
   const inputPaths = new Set<string>();
   const visited = new Set<string>();
@@ -567,6 +603,7 @@ export function collectTypeEnvironment(
       id,
       syntax,
     });
+    toolingRecords.push(...toolingProvenanceRecords(root, path, syntax));
     if (LOCK_FILES.has(basename(path))) {
       compatibilityIgnoredIds.add(id);
       continue;
@@ -596,10 +633,12 @@ export function collectTypeEnvironment(
   const compatibilityRecords = groupSemanticEnvironmentRecords(
     rawCompatibilityRecords,
   );
+  const groupedToolingRecords = groupSemanticEnvironmentRecords(toolingRecords);
   return {
     digest: digestCanonical(records),
     compatibilityDigest: digestCanonical(compatibilityRecords),
     compatibilityRecords,
+    toolingRecords: groupedToolingRecords,
     proseDigest: digestCanonical(sortedProseRecords),
     proseRecords: sortedProseRecords,
     inputPaths: [...inputPaths].sort(),

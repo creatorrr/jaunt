@@ -21,7 +21,7 @@ CLAUDE_PLUGIN = REPO / "jaunt-claude-plugin"
 def test_manifest_and_marketplace_shape() -> None:
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text())
     assert manifest["name"] == "jaunt"
-    assert manifest["version"] == "1.1.5"
+    assert manifest["version"] == "1.1.6"
     assert "TypeScript" in manifest["description"]
     assert manifest["skills"] == "./skills/"
     assert "hooks" not in manifest
@@ -363,6 +363,43 @@ echo '{"command":"status","ok":true,"fresh":[],"stale":[],"orphans":[]}'
     )
 
     assert "- .: 0 fresh" in result.stdout
+
+
+def test_session_status_does_not_scan_child_workspaces_below_active_root(
+    tmp_path: Path,
+) -> None:
+    if shutil.which("git") is None:  # pragma: no cover
+        pytest.skip("git unavailable")
+    repo = tmp_path / "repo"
+    child = repo / "examples" / "child"
+    child.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "jaunt.toml").write_text("version = 1\n")
+    (child / "jaunt.toml").write_text("version = 1\n")
+    calls = tmp_path / "calls.log"
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    _write_executable(
+        bin_dir / "jaunt",
+        f'''if [ "$1" = "--version" ]; then echo "jaunt 1.7.9"; exit 0; fi
+printf '%s\n' "$PWD" >> "{calls}"
+echo '{{"command":"status","ok":true,"fresh":[],"stale":[],"orphans":[]}}'
+''',
+    )
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin"}
+
+    result = subprocess.run(
+        ["bash", str(PLUGIN / "scripts" / "session-status.sh")],
+        input=json.dumps({"cwd": str(repo)}),
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+
+    assert result.stdout.count("- .: 0 fresh") == 1
+    assert "examples/child" not in result.stdout
+    assert calls.read_text().splitlines() == [str(repo)]
 
 
 def test_session_status_preserves_deeply_nested_active_workspace(tmp_path: Path) -> None:

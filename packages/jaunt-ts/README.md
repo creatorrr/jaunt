@@ -95,6 +95,11 @@ lockfile entries do not define compatibility; resolved declaration inputs do.
 Migration diagnostics list added, removed, and changed records when both
 sidecars have that evidence.
 
+The root `package.json#packageManager` selector is tooling provenance. It is
+retained as `tooling:packageManager:<path>` for exact status and migration
+diagnostics, but it does not alter semantic compatibility when the installed
+declaration closure is unchanged.
+
 The compatibility matrix exercises NodeNext ESM, NodeNext CommonJS,
 Bundler/Vite-style resolution, and `.tsx` under both TypeScript 5.8 and 6.x. The
 generated program uses the owning project's module and JSX settings; it does not

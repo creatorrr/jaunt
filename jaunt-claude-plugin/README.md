@@ -4,7 +4,7 @@ This plugin packages Jaunt's workspace-aware Python and TypeScript authoring
 loop for Claude Code: generated-file guards, session freshness, build and
 conversion skills, a read-only doctor, and a first-build reviewer.
 
-Version 1.2.5 understands version-2 TypeScript targets as well as Python
+Version 1.2.6 understands version-2 TypeScript targets as well as Python
 workspace routing. One root `jaunt.toml` may cover several Python and
 JavaScript packages; ownership follows the nearest `pyproject.toml` or
 `package.json` for the target.
@@ -63,8 +63,9 @@ retries and final rejection reasons. A failed combined overlay can still commit
 the compatible subset listed under `vitest.partial_landing` or
 `targets.ts.vitest.partial_landing`.
 
-The SessionStart hook injects a bounded freshness summary, including TypeScript
-unbuilt, invalid, and diagnostic state. The PreToolUse hook
+The SessionStart hook reports the nearest active Jaunt workspace, including
+TypeScript unbuilt, invalid, and diagnostic state. If no parent `jaunt.toml`
+exists, it falls back to bounded descendant discovery. The PreToolUse hook
 keeps Claude's approval-style guard for each target's generated directory and
 existing provenance-headed `.pyi` files. TypeScript API mirrors,
 implementations, and sidecars point back to their private `*.jaunt.ts[x]`

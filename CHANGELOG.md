@@ -19,6 +19,10 @@ Python or TypeScript release.
   package- and workspace-scoped digests so status and migration JSON can
   identify added, removed, and changed declaration records without embedding
   hundreds of individual library files.
+- Treat the root `package.json#packageManager` selector as tooling provenance,
+  not part of the model-facing semantic contract. It still triggers structural
+  inspection, is reported as an exact tooling record, and qualifies for a
+  compiler-validated model-free recomposition when declarations are unchanged.
 - Preserve the validated old-to-new API reuse proof when migration recomposes an
   implementation. A later `jaunt test --language ts --no-build` can reheader
   compatible batteries without paid regeneration; the artifact transaction
@@ -75,8 +79,12 @@ Python or TypeScript release.
   unchanged.
 - Make `jaunt init --language ts` install the compatible `@usejaunt/ts@^0.1.0`
   line instead of the prerelease `next` channel.
-- Publish Codex plugin 1.1.5 and Claude Code plugin 1.2.5 with stable TypeScript
+- Publish Codex plugin 1.1.6 and Claude Code plugin 1.2.6 with stable TypeScript
   target wording.
+- Limit SessionStart freshness to the nearest active Jaunt workspace when one
+  exists. Nested examples and independently runnable child workspaces no longer
+  flood a root session; bounded descendant discovery remains available when the
+  session has no parent `jaunt.toml`.
 
 ### Documentation
 

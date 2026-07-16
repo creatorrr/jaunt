@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# SessionStart hook: inject a bounded freshness summary for each Jaunt
-# workspace found below the session cwd. Fail open on every environment error.
+# SessionStart hook: inject freshness for the active Jaunt workspace, or a
+# bounded descendant summary when no parent workspace exists. Fail open on
+# every environment error.
 set -u
 
 payload=$(cat 2>/dev/null || true)
@@ -190,12 +191,18 @@ print(f"TS: {unbuilt_count} unbuilt, {invalid_count} invalid, {len(diagnostics)}
 ' 2>/dev/null
 }
 
-configs=$(find "$root" -maxdepth 5 -name jaunt.toml \
-  -not -path '*/.venv/*' -not -path '*/node_modules/*' \
-  -not -path '*/.jaunt/*' -not -path '*/.git/*' \
-  -not -path "$root/.claude/worktrees/*" \
-  -not -path "$root/.codex/worktrees/*" 2>/dev/null | sort)
-if [ -n "$configs" ]; then
+if [ -n "$workspace_root" ]; then
+  # A parent config owns the active session. Do not recurse into examples or
+  # independently runnable child workspaces beneath it.
+  configs="$workspace_root/jaunt.toml"
+else
+  configs=$(find "$root" -maxdepth 5 -name jaunt.toml \
+    -not -path '*/.venv/*' -not -path '*/node_modules/*' \
+    -not -path '*/.jaunt/*' -not -path '*/.git/*' \
+    -not -path "$root/.claude/worktrees/*" \
+    -not -path "$root/.codex/worktrees/*" 2>/dev/null | sort)
+fi
+if [ -n "$configs" ] && [ -z "$workspace_root" ]; then
   bounded_configs=""
   while IFS= read -r cfg; do
     cfg_root=$(git -C "$(dirname "$cfg")" rev-parse --show-toplevel 2>/dev/null || true)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,7 @@ from jaunt.generate.base import (
 )
 from jaunt.generate.request_cache import generate_request_cached
 from jaunt.skills_npm import ensure_npm_skills, plan_npm_skills
-from jaunt.typescript.builder import _build_request, _generation_fingerprint
+from jaunt.typescript.builder import _build_request, _generation_fingerprint, _model_contract
 from jaunt.typescript.contracts import _contract_generation_fingerprint
 
 
@@ -203,6 +204,20 @@ projects = ["tsconfig.json"]
         "moduleId": "ts:src/value",
         "implementationPath": "src/__generated__/value.ts",
         "symbols": [{"name": "value"}],
+        "toolingProvenanceRecords": [
+            {"id": "tooling:packageManager:package.json", "digest": "sha256:pnpm"}
+        ],
+        "sidecar": json.dumps(
+            {
+                "moduleId": "ts:src/value",
+                "toolingProvenanceRecords": [
+                    {
+                        "id": "tooling:packageManager:package.json",
+                        "digest": "sha256:pnpm",
+                    }
+                ],
+            }
+        ),
         "specSource": "export declare function value(): number;",
         "apiSource": "export declare function value(): number;",
     }
@@ -219,6 +234,7 @@ projects = ["tsconfig.json"]
     assert request.builtin_skill_names == ()
     assert "_context/repository-map.md" in request.context_files
     assert "_context/project-overview.md" in request.context_files
+    assert "toolingProvenanceRecords" not in request.context_files["_context/contract.json"]
     enabled = _generation_fingerprint(
         config,
         root=tmp_path,
@@ -234,6 +250,39 @@ projects = ["tsconfig.json"]
         project_overview_enabled=False,
     )
     assert enabled != disabled
+
+
+@pytest.mark.parametrize(
+    "sidecar",
+    [
+        "{malformed toolingProvenanceRecords",
+        json.dumps(["toolingProvenanceRecords"]),
+        json.dumps(
+            {
+                "moduleId": "ts:src/value",
+                "toolingProvenanceRecords": [
+                    {
+                        "id": "tooling:packageManager:package.json",
+                        "digest": "sha256:pnpm",
+                    }
+                ],
+            }
+        ),
+    ],
+)
+def test_model_contract_fails_closed_for_tooling_sidecar_provenance(sidecar: str) -> None:
+    rendered = json.dumps(
+        _model_contract(
+            {
+                "moduleId": "ts:src/value",
+                "toolingProvenanceRecords": [],
+                "sidecar": sidecar,
+            }
+        ),
+        sort_keys=True,
+    )
+
+    assert "toolingProvenanceRecords" not in rendered
 
 
 def test_npm_skill_names_disambiguate_scoped_collision_and_write_atomically(

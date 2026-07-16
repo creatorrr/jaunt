@@ -248,6 +248,10 @@ declarations and project metadata rather than every entry in a package-manager
 lockfile; the full lockfile still participates in ordinary structural change
 detection.
 
+The root manifest's `packageManager` selector is tracked separately as tooling
+provenance. Its exact path appears in environment-change JSON, but changing the
+selector alone does not alter the model-facing compatibility digest.
+
 Automatic builds stay conservative when the semantic environment changes. For an
 existing candidate, run `jaunt migrate --language ts --json` first. If the saved
 contract is otherwise identical and the implementation passes the current compiler,

@@ -760,6 +760,18 @@
             }
           }
         },
+        "toolingProvenanceRecords": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "digest"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string", "pattern": "^tooling:" },
+              "digest": { "$ref": "#/definitions/digest" }
+            }
+          }
+        },
         "dependencies": {
           "type": "array",
           "items": { "type": "string" },
@@ -792,6 +804,7 @@
           "contextDocs",
           "semanticEnvironmentDigest",
           "semanticEnvironmentRecords",
+          "toolingProvenanceRecords",
           "dependencies",
           "structuralDigest",
           "proseDigest",
@@ -828,6 +841,7 @@
           "contextDocs",
           "semanticEnvironmentDigest",
           "semanticEnvironmentRecords",
+          "toolingProvenanceRecords",
           "dependencies",
           "structuralDigest",
           "proseDigest",

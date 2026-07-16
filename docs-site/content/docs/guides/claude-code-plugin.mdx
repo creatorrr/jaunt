@@ -3,7 +3,7 @@ title: Claude Code Plugin
 description: "Install Jaunt's Claude Code plugin for workspace-aware build skills, freshness context, and generated-file approval guards."
 ---
 
-Version 1.2.5 supports version-2 TypeScript targets in the Claude Code
+Version 1.2.6 supports version-2 TypeScript targets in the Claude Code
 plugin. It packages the same CLI-backed Python and TypeScript authoring loop as
 the Codex plugin, while keeping Claude's approval-style PreToolUse decision and
 first-build reviewer agent.
@@ -94,10 +94,11 @@ overlay may still commit the compatible subset listed by
 
 ## Hooks
 
-The shared SessionStart script reads payload `cwd`. It uses the nearest parent
-`jaunt.toml` when one owns the session; otherwise it scans below the session
-directory without crossing the active Git worktree. Nested Git repositories and
-`.claude/worktrees` or `.codex/worktrees` checkouts are excluded. Each discovered
+The shared SessionStart script reads payload `cwd`. When a parent `jaunt.toml`
+owns the session, it reports only that active workspace and does not recurse
+into nested examples. Otherwise it scans below the session directory without
+crossing the active Git worktree. Nested Git repositories and
+`.claude/worktrees` or `.codex/worktrees` checkouts are excluded. Each selected
 workspace contributes a bounded freshness/orphan summary, including TypeScript
 unbuilt, invalid, and diagnostic counts.
 Because `jaunt status` imports discovered spec modules, enable SessionStart only

@@ -46,6 +46,7 @@ from jaunt.typescript.builder import (
     _default_backend,
     _input_hashes,
     _module_id,
+    _model_contract,
     _path_hash,
     _prompt_text,
     _progress_advance,
@@ -1226,11 +1227,11 @@ def _test_request(
     context: dict[str, str] = {
         "_context/test-spec.ts": test_spec_source,
         "_context/contract.json": json.dumps(
-            selected[0]
+            _model_contract(selected[0])
             if len(selected) == 1
             else {
                 "targets": [
-                    {**dict(module), "facadeSpecifier": specifier}
+                    {**_model_contract(module), "facadeSpecifier": specifier}
                     for module, (_, specifier) in zip(selected, facade_specifiers, strict=True)
                 ]
             },

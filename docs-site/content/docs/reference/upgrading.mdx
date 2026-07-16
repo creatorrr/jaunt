@@ -46,6 +46,11 @@ lockfile entries no longer define compatibility. Resolved declaration files and
 project metadata do, and status/migration JSON reports their added, removed, and
 changed records when the previous sidecar has the same evidence.
 
+The root `package.json#packageManager` field is tooling provenance rather than
+semantic contract. Adding or changing it still makes the structural record
+visible, under an exact `tooling:packageManager:<path>` identifier, but it does
+not invalidate the resolved declaration compatibility digest.
+
 This pair also fixes alpha.7's test-candidate retry gap. Live candidates now pass
 through the same full-project overlay and dynamic-loader checks as cached
 responses. A rejected attempt consumes the remaining per-battery retry budget and
@@ -74,7 +79,7 @@ long validation run.
 The npm package is stable, but the worker boundary still identifies itself as
 `jaunt-ts/1-draft.3`. That protocol is versioned for matching Jaunt Python and npm
 releases; it is not yet a compatibility promise for third-party protocol clients.
-Refresh the companion plugin to Codex 1.1.5 or Claude Code 1.2.5 for matching
+Refresh the companion plugin to Codex 1.1.6 or Claude Code 1.2.6 for matching
 stable-target guidance, then start a new host session.
 
 ## 1.7.8

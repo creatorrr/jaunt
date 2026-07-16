@@ -124,3 +124,10 @@
 - [x] Confirm the adopter dry run plans 19 `free-recompose` modules, zero rebuilds, and zero model calls.
 - [ ] Add compact `jaunt test` JSON or a report-file mode in 1.7.10 / 0.1.1.
 - [x] Add regressions and run the full repository validation suite.
+
+## Cycle 15 — 2026-07-16
+
+- [x] Classify `package.json#packageManager` as tooling provenance, not semantic contract.
+- [x] Report the exact package-manager provenance record in status and migration JSON.
+- [x] Cover package-manager-only drift with analyzer and model-free migration regressions.
+- [x] Limit SessionStart freshness to the nearest active workspace instead of nested examples.

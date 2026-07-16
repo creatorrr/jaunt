@@ -3716,6 +3716,23 @@ def test_generated_example_test_has_provenance_tier_and_runtime_facade_import(
                 "facadePath": "src/tokens/index.ts",
                 "moduleId": "ts:src/tokens/index",
                 "symbols": [{"name": "token", "kind": "function"}],
+                "toolingProvenanceRecords": [
+                    {
+                        "id": "tooling:packageManager:package.json",
+                        "digest": "sha256:pnpm",
+                    }
+                ],
+                "sidecar": json.dumps(
+                    {
+                        "moduleId": "ts:src/tokens/index",
+                        "toolingProvenanceRecords": [
+                            {
+                                "id": "tooling:packageManager:package.json",
+                                "digest": "sha256:pnpm",
+                            }
+                        ],
+                    }
+                ),
                 "specSource": "export function token(): string;",
                 "apiSource": "export declare function token(): string;",
             }
@@ -3725,6 +3742,7 @@ def test_generated_example_test_has_provenance_tier_and_runtime_facade_import(
     assert request.target_path == "tests/__generated__/tokens.example.test.ts"
     assert "../../src/tokens/index.js" in request.prompt
     assert "src/tokens/index.ts" not in request.prompt
+    assert "toolingProvenanceRecords" not in request.context_files["_context/contract.json"]
 
     rendered = _with_test_header(
         'import { token } from "../../src/tokens/index.js";\n',

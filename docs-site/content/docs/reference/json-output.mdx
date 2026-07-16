@@ -196,7 +196,7 @@ diagnostics:
   "ok": true,
   "fresh": [],
   "stale": ["ts:src/slug/index"],
-  "stale_changes": {"ts:src/slug/index": "structural"},
+  "stale_changes": {"ts:src/slug/index": "toolchain"},
   "unbuilt": ["ts:src/new/index"],
   "invalid": {
     "ts:src/bad/index": [
@@ -207,7 +207,7 @@ diagnostics:
   "targets": {
     "ts": {
       "fresh": [],
-      "stale": {"src/slug/index": "structural"},
+      "stale": {"src/slug/index": "toolchain"},
       "unbuilt": ["src/new/index"],
       "invalid": {
         "src/bad/index": [
@@ -217,13 +217,13 @@ diagnostics:
       "orphans": [],
       "semantic_environment_changes": {
         "src/slug/index": {
-          "before_digest": "old…",
-          "after_digest": "new…",
+          "before_digest": "same…",
+          "after_digest": "same…",
           "before_records_available": true,
           "after_records_available": true,
           "added": [],
           "removed": [],
-          "changed": ["package:example"]
+          "changed": ["tooling:packageManager:package.json"]
         }
       }
     }
@@ -232,9 +232,12 @@ diagnostics:
 ```
 
 `semantic_environment_changes` appears when the persisted and current
-environment identities differ. Mixed workspaces place it under `targets.ts`.
-Older sidecars may have only the aggregate digest; in that case the availability
-flags and record counts explain why no exact path diff is possible.
+environment identities or tool-only provenance records differ. Tooling records,
+such as `tooling:packageManager:<path>`, are reported here but are excluded from
+the model-facing compatibility digest and generation context. Mixed workspaces
+place the object under `targets.ts`. Older sidecars may have only the aggregate
+digest; in that case the availability flags and record counts explain why no
+exact path diff is possible.
 
 ## check
 

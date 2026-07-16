@@ -761,11 +761,11 @@ async def plan_typescript_migration(
                 )
                 continue
             built = module_id in built_module_ids
-            stale_reason = status.stale.get(module_id)
-            environment_recompose = stale_reason == "structural" and (
-                module_id in potential_recompose_module_ids
-            )
             recompose = module_id in potential_recompose_module_ids
+            environment_changes = status.metadata.get("semantic_environment_changes", {})
+            environment_recompose = recompose and (
+                isinstance(environment_changes, Mapping) and module_id in environment_changes
+            )
             restamp = (
                 built
                 and not recompose
@@ -843,13 +843,12 @@ async def plan_typescript_migration(
             if recompose:
                 recomposed_module_ids.add(module_id)
             if environment_recompose:
-                changes = status.metadata.get("semantic_environment_changes", {})
-                detail = changes.get(module_id, {}) if isinstance(changes, Mapping) else {}
+                detail = environment_changes.get(module_id, {})
                 diagnostics.append(
                     TypeScriptMigrationDiagnostic(
                         code="JAUNT_TS_MIGRATE_ENVIRONMENT_RECOMPOSE",
                         message=(
-                            f"{module_id} changed only at the persisted semantic-environment "
+                            f"{module_id} changed only at the persisted environment-provenance "
                             "boundary; the existing implementation passed current worker, "
                             "compiler, policy, API, and consumer validation and can be "
                             "recomposed without a model call."

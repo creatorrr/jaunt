@@ -4,7 +4,7 @@ description: "Install Jaunt's Codex plugin for workspace-aware build skills, fre
 ---
 
 Jaunt's Codex plugin packages five CLI-backed skills and two hooks. It does not
-run an MCP server or app connector. Version 1.1.5 is distributed from this
+run an MCP server or app connector. Version 1.1.6 is distributed from this
 repository's `.agents/plugins/marketplace.json`.
 
 ## Install
@@ -105,11 +105,12 @@ hermetic path.
 
 ## Hooks
 
-The SessionStart hook reads `cwd` from its JSON payload. It uses the nearest
-parent `jaunt.toml` when one owns the session; otherwise it scans below the
-session directory without crossing the active Git worktree. Nested Git
+The SessionStart hook reads `cwd` from its JSON payload. When a parent
+`jaunt.toml` owns the session, it reports only that active workspace and does
+not recurse into nested examples. Otherwise it scans below the session
+directory without crossing the active Git worktree. Nested Git
 repositories and `.claude/worktrees` or `.codex/worktrees` checkouts are
-excluded. Each discovered workspace contributes a one-line freshness and orphan
+excluded. Each selected workspace contributes a one-line freshness and orphan
 summary. TypeScript summaries include unbuilt, invalid, and diagnostic state.
 `jaunt status` imports discovered spec modules, so trust the SessionStart hook
 only in workspaces whose Python code you trust.

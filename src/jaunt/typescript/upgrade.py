@@ -162,8 +162,17 @@ def semantic_environment_diff(
             result[str(record["id"])] = str(record["digest"])
         return result
 
-    before = records(actual.get("semanticEnvironmentRecords"))
-    after = records(expected.get("semanticEnvironmentRecords"))
+    def environment_records(sidecar: Mapping[str, Any]) -> dict[str, str] | None:
+        semantic = records(sidecar.get("semanticEnvironmentRecords"))
+        if semantic is None:
+            return None
+        tooling = records(sidecar.get("toolingProvenanceRecords", []))
+        if tooling is None:
+            return None
+        return {**semantic, **tooling}
+
+    before = environment_records(actual)
+    after = environment_records(expected)
     payload: dict[str, Any] = {
         "before_digest": actual.get("semanticEnvironmentDigest"),
         "after_digest": expected.get("semanticEnvironmentDigest"),

@@ -694,6 +694,29 @@ def _module_id(module: Mapping[str, Any]) -> str:
     return value
 
 
+def _model_contract(module: Mapping[str, Any]) -> dict[str, Any]:
+    """Return analyzer contract data without tool-only provenance records."""
+
+    contract = {
+        str(key): value for key, value in module.items() if key != "toolingProvenanceRecords"
+    }
+    sidecar = contract.get("sidecar")
+    if isinstance(sidecar, str):
+        try:
+            sidecar_payload = json.loads(sidecar)
+        except json.JSONDecodeError:
+            contract.pop("sidecar", None)
+        else:
+            if isinstance(sidecar_payload, dict):
+                sidecar_payload.pop("toolingProvenanceRecords", None)
+                contract["sidecar"] = (
+                    json.dumps(sidecar_payload, sort_keys=True, indent=2, default=str) + "\n"
+                )
+            else:
+                contract.pop("sidecar", None)
+    return contract
+
+
 def _module_path(module: Mapping[str, Any], key: str) -> str:
     value = module.get(key)
     if not isinstance(value, str) or not value:
@@ -1182,7 +1205,10 @@ def _build_request(
             f"- {instruction}" for instruction in build_instructions
         )
     context: dict[str, str] = {
-        "_context/contract.json": json.dumps(module, sort_keys=True, indent=2, default=str) + "\n",
+        "_context/contract.json": json.dumps(
+            _model_contract(module), sort_keys=True, indent=2, default=str
+        )
+        + "\n",
         "_context/spec.ts": str(module.get("specSource", "")),
         "_context/api.ts": str(module.get("apiSource", "")),
     }

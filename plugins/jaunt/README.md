@@ -5,7 +5,7 @@ expects: edit specs, preview stale or unbuilt work, build through the CLI, and
 review generated output without hand-editing machine-owned files.
 
 It is CLI-backed. There is no MCP server, app connector, or public-directory
-submission in version 1.1.5.
+submission in version 1.1.6.
 
 ## Install
 
@@ -73,9 +73,10 @@ the compatible subset listed under `vitest.partial_landing` or
 
 ## Hooks
 
-The SessionStart hook reads the session `cwd` and injects a bounded freshness
-summary for each discovered Jaunt workspace, including TypeScript unbuilt,
-invalid, and diagnostic counts. Doctor also checks Node, npm, the project-local
+The SessionStart hook reads the session `cwd` and reports the nearest active
+Jaunt workspace, including TypeScript unbuilt, invalid, and diagnostic counts.
+If no parent `jaunt.toml` exists, it falls back to bounded descendant discovery.
+Doctor also checks Node, npm, the project-local
 `@usejaunt/ts` worker, and the supported compiler range without a model call.
 
 The PreToolUse hook inspects `apply_patch` paths. It denies direct edits to

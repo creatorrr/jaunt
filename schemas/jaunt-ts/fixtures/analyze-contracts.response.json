@@ -169,6 +169,7 @@
         ],
         "semanticEnvironmentDigest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
         "semanticEnvironmentRecords": [],
+        "toolingProvenanceRecords": [],
         "dependencies": ["ts:src/base/index#Base"],
         "structuralDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
         "proseDigest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",

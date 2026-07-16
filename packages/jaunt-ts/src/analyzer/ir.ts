@@ -147,6 +147,8 @@ export interface ContractModuleIR {
   readonly semanticEnvironmentDigest?: string;
   /** Per-input compatibility records used to explain semantic-environment drift. */
   readonly semanticEnvironmentRecords?: TypeEnvironmentSnapshot["compatibilityRecords"];
+  /** Tool-only provenance retained for diagnostics and excluded from model context. */
+  readonly toolingProvenanceRecords?: TypeEnvironmentSnapshot["toolingRecords"];
   readonly dependencies: readonly string[];
   readonly structuralDigest: string;
   readonly proseDigest: string;
@@ -1345,6 +1347,7 @@ function buildContractIRInternal(
     semanticEnvironmentDigest:
       typeEnvironment?.compatibilityDigest ?? digestCanonical([]),
     semanticEnvironmentRecords: typeEnvironment?.compatibilityRecords ?? [],
+    toolingProvenanceRecords: typeEnvironment?.toolingRecords ?? [],
     dependencies,
     structuralDigest,
     proseDigest,

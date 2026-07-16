@@ -252,10 +252,10 @@ def classify_modules(
         actual_api_digest = _digest(actual_sidecar, "apiDigest")
         expected_environment = _digest(expected_sidecar, "semanticEnvironmentDigest")
         actual_environment = _digest(actual_sidecar, "semanticEnvironmentDigest")
-        if expected_environment != actual_environment:
-            environment_changes[module_id] = semantic_environment_diff(
-                actual_sidecar, expected_sidecar
-            )
+        environment_change = semantic_environment_diff(actual_sidecar, expected_sidecar)
+        record_change = any(environment_change.get(key) for key in ("added", "removed", "changed"))
+        if expected_environment != actual_environment or record_change:
+            environment_changes[module_id] = environment_change
         stale_reason: str | None = None
         compatible_toolchain_drift = module_id in compatible_toolchain_modules
         if expected_environment is not None and actual_environment is None:
