@@ -3,6 +3,28 @@
 All notable changes to jaunt. Generated from conventional commits by
 [git-cliff](https://git-cliff.org); one section per published PyPI release.
 
+## [1.7.8] - 2026-07-15
+
+### Fixes
+
+- Accept unused parameters only in canonical TypeScript `jaunt.magic()` marker
+  stubs, including dependency-closure specs compiled during targeted sync. Strict
+  projects keep `noUnusedParameters` enabled without hiding the same diagnostic in
+  preserved or otherwise handwritten code.
+- Label the embedded `jaunt instructions` freshness snapshot by target. Mixed
+  workspaces no longer present Python-only counts as whole-workspace freshness and
+  point to TypeScript status for the authoritative TypeScript result.
+- Run TypeScript example and derived battery generation with the configured test
+  job limit. Completed responses are staged in the cache after a combined compiler
+  preflight, including the valid partial set before returning a late request failure,
+  so retries avoid repeating successful paid calls without retaining a conflicting
+  battery set. Artifact files still land only after the complete set passes.
+
+### Packages
+
+- Publish `@usejaunt/ts` `0.1.0-alpha.7` with narrow marker-stub parameter handling
+  and parallel resumable battery generation.
+
 ## [1.7.7] - 2026-07-15
 
 ### Fixes

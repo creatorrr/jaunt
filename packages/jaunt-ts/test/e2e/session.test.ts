@@ -109,12 +109,13 @@ export const runtimeOnly = (value: string): string => value.trim();
     roots.push(workspace.root);
     writeFileSync(
       resolve(workspace.root, "src/slug/index.jaunt.ts"),
-      `import * as jaunt from "@usejaunt/ts/spec";
-jaunt.magicModule();
+      `import { magic as fill, magicModule as govern } from "@usejaunt/ts";
+import { Store } from "../store/index.jaunt.js";
+govern({ deps: [Store] });
 export interface SlugOptions { readonly trim?: boolean; }
 /** Normalize a title. */
 export function slugify(title: string, options?: SlugOptions): string {
-  return jaunt.magic();
+  return fill();
 }
 `,
     );
@@ -177,6 +178,40 @@ export function slugify(title: string, options?: SlugOptions): string {
     expect(placeholders.diagnostics).not.toContainEqual(
       expect.objectContaining({ code: "TS6192" }),
     );
+    const scopedPlaceholders = session.validateOverlay({
+      sessionId: metadata.sessionId,
+      expectedEpoch: metadata.epoch,
+      expectedSnapshot: metadata.snapshot,
+      candidates: {},
+      moduleIds: contracts.map((contract) => contract.moduleId),
+      syncModuleIds: contracts.map((contract) => contract.moduleId),
+      scopeToModuleIds: true,
+      baselineUnselected: true,
+    });
+    expect(
+      scopedPlaceholders.valid,
+      JSON.stringify(scopedPlaceholders.diagnostics),
+    ).toBe(true);
+    expect(scopedPlaceholders.diagnostics).not.toContainEqual(
+      expect.objectContaining({ code: "TS6133" }),
+    );
+    const dependencyClosure = session.validateOverlay({
+      sessionId: metadata.sessionId,
+      expectedEpoch: metadata.epoch,
+      expectedSnapshot: metadata.snapshot,
+      candidates: {},
+      moduleIds: [slug.moduleId, store.moduleId],
+      syncModuleIds: [slug.moduleId],
+      scopeToModuleIds: true,
+      baselineUnselected: true,
+    });
+    expect(
+      dependencyClosure.valid,
+      JSON.stringify(dependencyClosure.diagnostics),
+    ).toBe(true);
+    expect(dependencyClosure.diagnostics).not.toContainEqual(
+      expect.objectContaining({ code: "TS6133" }),
+    );
     const result = session.validateOverlay({
       sessionId: metadata.sessionId,
       expectedEpoch: metadata.epoch,
@@ -196,6 +231,99 @@ export function slugify(title: string, options?: SlugOptions): string {
     expect(result.valid, JSON.stringify(result.diagnostics)).toBe(true);
     expect(result.diagnostics).not.toContainEqual(
       expect.objectContaining({ code: "TS6133" }),
+    );
+  });
+
+  test("strict unused checks retain handwritten context parameter diagnostics", async () => {
+    const workspace = createFixtureWorkspace({ withClass: true });
+    roots.push(workspace.root);
+    writeFileSync(
+      resolve(workspace.root, "src/slug/index.jaunt.ts"),
+      `import * as jaunt from "@usejaunt/ts/spec";
+import { Store } from "../store/index.jaunt.js";
+jaunt.magicModule({ deps: [Store] });
+/** Normalize a title. */
+export function slugify(title: string): string { return jaunt.magic(); }
+`,
+    );
+    writeFileSync(
+      resolve(workspace.root, "src/store/index.jaunt.ts"),
+      `import * as jaunt from "@usejaunt/ts/spec";
+jaunt.magicModule();
+/** A strict store fixture. */
+export class Store {
+  constructor(prefix?: string) { jaunt.magic(); }
+  /** Keep this body. @jauntPreserve */
+  handwritten(unused: string): string { return "fixed"; }
+  /** Generate this body. */
+  generated(value: string): string { return jaunt.magic(); }
+}
+`,
+    );
+    writeFileSync(
+      resolve(workspace.root, "tsconfig.json"),
+      `${JSON.stringify(
+        {
+          compilerOptions: {
+            target: "ES2022",
+            module: "NodeNext",
+            moduleResolution: "NodeNext",
+            strict: true,
+            noEmit: true,
+            noUnusedParameters: true,
+            types: [],
+          },
+          include: ["src/**/*.ts"],
+          exclude: ["src/**/*.jaunt.ts", "src/**/__generated__/**"],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    const session = await AnalyzerSession.create({
+      root: workspace.root,
+      projects: ["tsconfig.json"],
+      testProjects: [],
+      sourceRoots: ["src"],
+      testRoots: ["tests"],
+      generatedDir: "__generated__",
+      toolOwner: ".",
+      compilerModulePath: workspace.compilerModulePath,
+      clientVersion: "test",
+      toolVersion: "test",
+    });
+    const contracts = session.analyzeContracts().modules;
+    const slug = contracts.find(
+      (contract) => contract.moduleId === "ts:src/slug/index",
+    )!;
+    const store = contracts.find(
+      (contract) => contract.moduleId === "ts:src/store/index",
+    )!;
+    const metadata = session.metadata();
+    const result = session.validateOverlay({
+      sessionId: metadata.sessionId,
+      expectedEpoch: metadata.epoch,
+      expectedSnapshot: metadata.snapshot,
+      candidates: {},
+      moduleIds: [slug.moduleId, store.moduleId],
+      syncModuleIds: [slug.moduleId],
+      scopeToModuleIds: true,
+      baselineUnselected: true,
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: "TS6133",
+        message: expect.stringContaining("'unused'"),
+        path: "src/store/index.jaunt.ts",
+      }),
+    );
+    expect(result.diagnostics).not.toContainEqual(
+      expect.objectContaining({
+        code: "TS6133",
+        message: expect.stringMatching(/'(prefix|title|value)'/u),
+      }),
     );
   });
 

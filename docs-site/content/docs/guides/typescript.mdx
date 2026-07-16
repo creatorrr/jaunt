@@ -153,6 +153,9 @@ typed throwing placeholder for a missing implementation. The editor can then typ
 the module, while `status` and `check` still report it as unbuilt. The placeholder
 consumes its temporary parameters and runtime imports, so `noUnusedLocals` and
 `noUnusedParameters` can stay enabled while sibling modules are still unbuilt.
+The same narrow allowance applies to canonical `jaunt.magic()` marker parameters
+when a dependency spec is compiled during sync; unused parameters in preserved or
+other handwritten bodies still fail normally.
 
 Full-workspace analysis and sync use bounded internal batches. Sync orders those
 batches by Jaunt dependencies, validates every batch first, then commits one artifact
@@ -187,8 +190,13 @@ Authored test intent lives in `*.jaunt-test.ts`. Generated batteries use Vitest 
 import the public facade. Example-tier failures retain normal detail. Derived-tier
 repair feedback contains only an opaque case ID and a normalized failure category.
 Collection, timeout, runner, and protocol failures are infrastructure errors and do
-not trigger an implementation repair. A failed run commits neither batteries nor
-generation-cache entries; rerunning regenerates the uncommitted candidates.
+not trigger an implementation repair. Example and derived generation honors
+`[test].jobs` or `--jobs`. Completed responses pass a combined compiler preflight
+before entering the cache; a late request failure also preflights and stages its valid
+partial set. A late generation or runner failure commits no battery files, but a rerun
+can reuse staged paid responses after validating them again. Plain progress reports
+each path and tier as it is validated and staged, and JSON includes the effective
+`jobs` value plus a `batteries` outcome for every path.
 Every package that owns a configured test project must declare `vitest` directly in
 `devDependencies`; add `fast-check` there too when that package uses `@prop`. A
 hoisted installation alone is not authorization, and Jaunt checks the supported peer

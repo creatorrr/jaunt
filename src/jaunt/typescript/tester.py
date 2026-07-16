@@ -3249,6 +3249,9 @@ async def run_test(
     repair_cost: Mapping[str, Any] = {}
     repair_metadata: Mapping[str, Any] | None = None
     in_memory_api_reuse_proof: dict[str, dict[str, str]] = {}
+    effective_jobs = config.test.jobs if jobs is None else jobs
+    if effective_jobs < 1:
+        raise JauntConfigError("TypeScript test jobs must be >= 1")
     effective_builtin_skills = (
         tuple(builtin_skill_names)
         if builtin_skill_names is not None
@@ -3338,13 +3341,27 @@ async def run_test(
     overlays: dict[str, str] = {}
     planned_generated: set[str] = set()
     planned_refrozen: set[str] = set()
-    pending_cache_writes: list[tuple[GenerationRequest, Any, str]] = []
+    battery_outcomes: dict[str, dict[str, str]] = {}
+    pending_cache_writes: list[tuple[GenerationRequest, Any, str, str, str]] = []
     output_preconditions: dict[str, str] = {}
     repair_targets_by_file: dict[str, tuple[str, ...]] = {}
     modules: dict[str, Mapping[str, Any]] = {}
     test_owners: dict[str, str] = {}
     files: tuple[str, ...] = ()
     runner: Mapping[str, Any] = {"ok": True, "skipped": True}
+
+    def stage_validated_batteries() -> None:
+        for request, result, fingerprint, path, tier in pending_cache_writes:
+            store_generation_result(
+                response_cache,
+                backend,
+                request,
+                result,
+                generation_fingerprint=fingerprint,
+            )
+            battery_outcomes[path] = {"tier": tier, "state": "staged"}
+            _progress_phase(progress, path, "staged", tier)
+        pending_cache_writes.clear()
 
     @asynccontextmanager
     async def operation_worker() -> AsyncIterator[tuple[Any, Any]]:
@@ -3428,19 +3445,28 @@ async def run_test(
                 ),
             )
 
-        for _test_spec, spec_path, _selected_module_ids, request in prepared_requests:
+        generation_work: list[
+            tuple[
+                str,
+                GenerationRequest,
+                Mapping[str, Any],
+                str,
+                str,
+            ]
+        ] = []
+        for test_spec, spec_path, _selected_module_ids, request in prepared_requests:
             tier = str(request.cache_payload.get("tier", "example"))
             provenance = _test_provenance(
                 root,
                 config,
-                _test_spec,
+                test_spec,
                 modules,
                 client,
                 initialized,
                 tier=tier,
                 builtin_skill_names=effective_builtin_skills,
             )
-            selected_modules = _selected_test_modules(_test_spec, modules)
+            selected_modules = _selected_test_modules(test_spec, modules)
             action, existing_source = _existing_test_battery_action(
                 root,
                 request,
@@ -3457,6 +3483,7 @@ async def run_test(
             )
             if action == "skip":
                 skipped.add(request.target_path)
+                battery_outcomes[request.target_path] = {"tier": tier, "state": "fresh"}
                 _progress_phase(progress, request.target_path, "fresh")
                 _progress_advance(progress, request.target_path, ok=True)
                 continue
@@ -3464,10 +3491,33 @@ async def run_test(
                 assert existing_source is not None
                 overlays[request.target_path] = existing_source
                 planned_refrozen.add(request.target_path)
+                battery_outcomes[request.target_path] = {"tier": tier, "state": "refrozen"}
                 _progress_phase(progress, request.target_path, "refrozen")
                 _progress_advance(progress, request.target_path, ok=True)
                 continue
             key = f"{spec_path}#{tier}"
+            generation_work.append((spec_path, request, provenance, tier, key))
+
+        semaphore = asyncio.Semaphore(effective_jobs)
+
+        async def generate_one(
+            item: tuple[
+                str,
+                GenerationRequest,
+                Mapping[str, Any],
+                str,
+                str,
+            ],
+        ) -> tuple[
+            str,
+            GenerationRequest,
+            Mapping[str, Any],
+            str,
+            str,
+            Any,
+            str,
+        ]:
+            spec_path, request, provenance, tier, key = item
 
             base_validator = request.validator
 
@@ -3504,47 +3554,113 @@ async def run_test(
                     return []
                 return ["generated TypeScript test failed analyzer overlay typechecking"]
 
-            _progress_phase(progress, request.target_path, "generating")
             cache_fingerprint = str(provenance["battery_fingerprint"])
             cache_for_request = None if force else response_cache
-            result = await generate_request_cached(
-                backend,
-                request,
-                max_attempts=max_attempts,
-                generation_fingerprint=cache_fingerprint,
-                response_cache=cache_for_request,
-                cost_tracker=cost,
-                usage_label=key,
-                progress=lambda stage, detail, path=request.target_path: _progress_phase(
-                    progress, path, stage, detail
-                ),
-                cached_validator=validate_candidate,
-                store=False,
-            )
-            if result.source is None or result.errors:
-                failed[key] = tuple(
-                    TargetDiagnostic(code="JAUNT_TS_TEST_GENERATION", message=error)
-                    for error in result.errors or ["The generator returned no test source"]
+            async with semaphore:
+                _progress_phase(progress, request.target_path, "generating", tier)
+                result = await generate_request_cached(
+                    backend,
+                    request,
+                    max_attempts=max_attempts,
+                    generation_fingerprint=cache_fingerprint,
+                    response_cache=cache_for_request,
+                    cost_tracker=cost,
+                    usage_label=key,
+                    progress=lambda stage, detail, path=request.target_path: _progress_phase(
+                        progress, path, stage, detail
+                    ),
+                    cached_validator=validate_candidate,
+                    store=False,
                 )
-                _progress_advance(progress, request.target_path, ok=False)
-                continue
-            property_block = request.cache_payload.get("propertyBlock", "")
-            rendered_source = attach_property_block(
-                result.source,
-                property_block if isinstance(property_block, str) else "",
+            return (*item, result, cache_fingerprint)
+
+        tasks = [asyncio.create_task(generate_one(item)) for item in generation_work]
+        try:
+            for completed in asyncio.as_completed(tasks):
+                (
+                    spec_path,
+                    request,
+                    provenance,
+                    tier,
+                    key,
+                    result,
+                    cache_fingerprint,
+                ) = await completed
+                if result.source is None or result.errors:
+                    failed[key] = tuple(
+                        TargetDiagnostic(code="JAUNT_TS_TEST_GENERATION", message=error)
+                        for error in result.errors or ["The generator returned no test source"]
+                    )
+                    battery_outcomes[request.target_path] = {"tier": tier, "state": "failed"}
+                    _progress_phase(progress, request.target_path, "failed", tier)
+                    _progress_advance(progress, request.target_path, ok=False)
+                    continue
+                property_block = request.cache_payload.get("propertyBlock", "")
+                rendered_source = attach_property_block(
+                    result.source,
+                    property_block if isinstance(property_block, str) else "",
+                )
+                overlays[request.target_path] = _with_test_header(
+                    rendered_source,
+                    tier=tier,
+                    source_path=spec_path,
+                    provenance=provenance,
+                )
+                planned_generated.add(request.target_path)
+                if result.attempts > 0:
+                    pending_cache_writes.append(
+                        (
+                            request,
+                            result,
+                            cache_fingerprint,
+                            request.target_path,
+                            tier,
+                        )
+                    )
+                state = "cached" if result.attempts == 0 else "validated"
+                battery_outcomes[request.target_path] = {"tier": tier, "state": state}
+                _progress_phase(progress, request.target_path, state, tier)
+                _progress_advance(progress, request.target_path, ok=True)
+        finally:
+            unfinished = [task for task in tasks if not task.done()]
+            for task in unfinished:
+                task.cancel()
+            if unfinished:
+                await asyncio.gather(*unfinished, return_exceptions=True)
+
+        files = tuple(
+            sorted(
+                set(
+                    _selected_generated_test_files(
+                        root,
+                        config,
+                        test_specs,
+                        target_ids=target_ids,
+                    )
+                )
+                | set(overlays)
             )
-            overlays[request.target_path] = _with_test_header(
-                rendered_source,
-                tier=tier,
-                source_path=spec_path,
-                provenance=provenance,
-            )
-            planned_generated.add(request.target_path)
-            if result.attempts > 0:
-                pending_cache_writes.append((request, result, cache_fingerprint))
-            _progress_advance(progress, request.target_path, ok=True)
+        )
 
         if failed:
+            stage_preflight: Mapping[str, Any] = {"ok": True, "skipped": True}
+            if pending_cache_writes and files:
+                stage_preflight = await _run_test_batches(
+                    client,
+                    root,
+                    config,
+                    analysis.workspace,
+                    files=files,
+                    explicit_owners=test_owners,
+                    overlays=overlays,
+                    redact_derived=not no_redact_derived,
+                    typecheck_only=True,
+                )
+            if bool(stage_preflight.get("ok", False)):
+                stage_validated_batteries()
+            else:
+                for _request, _result, _fingerprint, path, tier in pending_cache_writes:
+                    battery_outcomes[path] = {"tier": tier, "state": "rejected"}
             _progress_finish(progress)
             test_cost = cost.summary_dict()
             merged_cost = (
@@ -3562,6 +3678,12 @@ async def run_test(
                     "cost": merged_cost,
                     "test_cost": test_cost,
                     "build": build_metadata,
+                    "stage_preflight": stage_preflight,
+                    "jobs": effective_jobs,
+                    "batteries": [
+                        {"path": path, **battery_outcomes[path]}
+                        for path in sorted(battery_outcomes)
+                    ],
                     **(
                         {
                             "cache": {
@@ -3576,19 +3698,6 @@ async def run_test(
                 exit_code=3,
             )
 
-        files = tuple(
-            sorted(
-                set(
-                    _selected_generated_test_files(
-                        root,
-                        config,
-                        test_specs,
-                        target_ids=target_ids,
-                    )
-                )
-                | set(overlays)
-            )
-        )
         preflight: Mapping[str, Any] = {"ok": True}
         if files:
             preflight = await _run_test_batches(
@@ -3603,6 +3712,8 @@ async def run_test(
                 typecheck_only=True,
             )
         if not bool(preflight.get("ok", False)):
+            for _request, _result, _fingerprint, path, tier in pending_cache_writes:
+                battery_outcomes[path] = {"tier": tier, "state": "rejected"}
             _progress_finish(progress)
             test_cost = cost.summary_dict()
             merged_cost = (
@@ -3628,9 +3739,15 @@ async def run_test(
                     "cost": merged_cost,
                     "test_cost": test_cost,
                     "build": build_metadata,
+                    "jobs": effective_jobs,
+                    "batteries": [
+                        {"path": path, **battery_outcomes[path]}
+                        for path in sorted(battery_outcomes)
+                    ],
                 },
                 exit_code=3,
             )
+        stage_validated_batteries()
         runner = (
             {"ok": True, "skipped": True}
             if no_run or not files
@@ -3647,7 +3764,6 @@ async def run_test(
         )
 
     files_committed = False
-    cache_committed = False
     repair_writes: tuple[_Write, ...] = ()
     repair_output_preconditions: dict[str, str] = {}
 
@@ -3685,23 +3801,8 @@ async def run_test(
         refrozen.update(planned_refrozen)
         files_committed = True
 
-    def commit_test_cache() -> None:
-        nonlocal cache_committed
-        if cache_committed:
-            return
-        for cache_request, cache_result, cache_fingerprint in pending_cache_writes:
-            store_generation_result(
-                response_cache,
-                backend,
-                cache_request,
-                cache_result,
-                generation_fingerprint=cache_fingerprint,
-            )
-        cache_committed = True
-
     def commit_test_outputs() -> None:
         commit_test_files()
-        commit_test_cache()
 
     initial_runner = runner
     repair_exit_code = 0
@@ -3844,7 +3945,6 @@ async def run_test(
                         with _preserve_managed_files(root, commit_paths) as transaction:
                             commit_test_files()
                             transaction.commit()
-                        commit_test_cache()
 
     exit_code = repair_exit_code or (0 if bool(runner.get("ok", False)) else 4)
     if exit_code:
@@ -3863,6 +3963,10 @@ async def run_test(
         "cost": merged_cost,
         "test_cost": test_cost,
         "build": build_metadata,
+        "jobs": effective_jobs,
+        "batteries": [
+            {"path": path, **battery_outcomes[path]} for path in sorted(battery_outcomes)
+        ],
         **(
             {"cache": {"hits": response_cache.hits, "misses": response_cache.misses}}
             if response_cache is not None

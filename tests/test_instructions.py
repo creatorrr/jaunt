@@ -177,6 +177,67 @@ tool_owner = "."
     rendered = instructions.render(project=section)
     assert "@usejaunt/ts 0.1.0-alpha.0" in rendered
     assert "package manager `pnpm@10.1.0`" in rendered
+    assert "TypeScript build freshness" in rendered
+    assert "run `jaunt status --language ts`" in rendered
+
+
+def test_mixed_project_labels_python_freshness_separately(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "jaunt.toml",
+        """version = 2
+[target.py]
+source_roots = ["src"]
+test_roots = ["tests"]
+[target.ts]
+source_roots = ["src"]
+test_roots = ["tests"]
+projects = ["tsconfig.json"]
+tool_owner = "."
+""",
+    )
+    _write(tmp_path / "src" / "instructions_scope_pkg" / "__init__.py", "")
+    _write(
+        tmp_path / "src" / "instructions_scope_pkg" / "specs.py",
+        "import jaunt\n@jaunt.magic()\ndef pending(value: str) -> str: ...\n",
+    )
+    (tmp_path / "tests").mkdir()
+    _write(tmp_path / "tsconfig.json", "{}\n")
+
+    section = instructions.project_section(tmp_path, load_config(root=tmp_path))
+    assert section["freshness"]["scope"] == "py"
+    rendered = instructions.render(project=section)
+    assert "Python build freshness" in rendered
+    assert "TypeScript build freshness" in rendered
+    assert "authoritative result" in rendered
+
+
+def test_mixed_project_reports_unavailable_python_freshness(tmp_path: Path, monkeypatch) -> None:
+    _write(
+        tmp_path / "jaunt.toml",
+        """version = 2
+[target.py]
+source_roots = ["src"]
+test_roots = ["tests"]
+[target.ts]
+source_roots = ["src"]
+test_roots = ["tests"]
+projects = ["tsconfig.json"]
+tool_owner = "."
+""",
+    )
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    _write(tmp_path / "tsconfig.json", "{}\n")
+
+    def boom(**_kwargs):
+        raise RuntimeError("probe exploded")
+
+    monkeypatch.setattr(status_core, "compute_magic_status", boom)
+    section = instructions.project_section(tmp_path, load_config(root=tmp_path))
+    rendered = instructions.render(project=section)
+    assert "Python build freshness:** unavailable here" in rendered
+    assert "run `jaunt status --language py`" in rendered
+    assert "run `jaunt status --language ts`" in rendered
 
 
 # --------------------------------------------------------------------------- #

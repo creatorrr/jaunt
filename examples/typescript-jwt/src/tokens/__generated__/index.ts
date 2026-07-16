@@ -1,9 +1,9 @@
 // ⛓️ jaunt:generated — generated; do not edit.
 // jaunt:state=built
 // jaunt:module=ts:src/tokens/index
-// jaunt:structural=sha256:0532c7518f2b61d29e180198678dce4cb692bebf2a3eec22961bbfa7ccded757
+// jaunt:structural=sha256:da8f2f71e61e0cfb119681ddde73df08246611b8b3467286cbd3da5264e6af74
 // jaunt:prose=sha256:616b419f63caf931be25251541e08d964b503d846e7f0c727d8dbc6468bcce3c
-// jaunt:api=sha256:d59bf98b21bf7b951f00eae822249a4ae16915d927b5c9d210455b8e18dccf02
+// jaunt:api=sha256:32a8a54964add08cb75485626d10d4674780d020153513ba827be19047468026
 import type * as __JauntApi from "./index.api.js";
 import { createHmac, timingSafeEqual } from "node:crypto";
 

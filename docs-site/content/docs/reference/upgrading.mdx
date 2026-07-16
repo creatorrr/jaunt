@@ -12,6 +12,20 @@ invalidate built modules. The exception is a correctness repair for artifacts
 whose provenance was previously marked fresh incorrectly; that safety migration
 is called out explicitly below.
 
+## 1.7.8
+
+Pair Jaunt 1.7.8 with `@usejaunt/ts` 0.1.0-alpha.7. Strict TypeScript projects can
+keep `noUnusedParameters` enabled during full or targeted sync. Jaunt ignores
+TS6133 only for parameters in canonical `jaunt.magic()` marker bodies, including
+dependency-closure specs; unused parameters in `@jauntPreserve` and other
+handwritten bodies remain errors. Mixed-workspace `jaunt instructions` output now
+labels its Python freshness snapshot separately and directs agents to
+`jaunt status --language ts` for authoritative TypeScript freshness. TypeScript
+battery generation now honors the test job limit and durably stages validated
+responses after a combined compiler preflight. A later generation failure can resume
+from the valid partial set, while a conflicting set never enters the cache and
+committed battery files remain an all-green transaction.
+
 ## 1.7.7
 
 Pair Jaunt 1.7.7 with `@usejaunt/ts` 0.1.0-alpha.6. This hotfix preserves the
