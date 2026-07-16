@@ -211,6 +211,35 @@ tool_owner = "."
     assert "authoritative result" in rendered
 
 
+def test_mixed_project_reports_unavailable_python_freshness(tmp_path: Path, monkeypatch) -> None:
+    _write(
+        tmp_path / "jaunt.toml",
+        """version = 2
+[target.py]
+source_roots = ["src"]
+test_roots = ["tests"]
+[target.ts]
+source_roots = ["src"]
+test_roots = ["tests"]
+projects = ["tsconfig.json"]
+tool_owner = "."
+""",
+    )
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    _write(tmp_path / "tsconfig.json", "{}\n")
+
+    def boom(**_kwargs):
+        raise RuntimeError("probe exploded")
+
+    monkeypatch.setattr(status_core, "compute_magic_status", boom)
+    section = instructions.project_section(tmp_path, load_config(root=tmp_path))
+    rendered = instructions.render(project=section)
+    assert "Python build freshness:** unavailable here" in rendered
+    assert "run `jaunt status --language py`" in rendered
+    assert "run `jaunt status --language ts`" in rendered
+
+
 # --------------------------------------------------------------------------- #
 # CLI wiring
 # --------------------------------------------------------------------------- #

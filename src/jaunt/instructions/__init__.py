@@ -189,6 +189,7 @@ def _project_block(project: dict | None, note: str | None) -> str:
             )
 
     fresh = project["freshness"]
+    python_target = targets.get("py") if isinstance(targets, dict) else None
     typescript_target = targets.get("ts") if isinstance(targets, dict) else None
     freshness_label = (
         "Python build freshness"
@@ -196,7 +197,11 @@ def _project_block(project: dict | None, note: str | None) -> str:
         else "Build freshness"
     )
     if fresh is None:
-        if not isinstance(typescript_target, dict):
+        if isinstance(python_target, dict):
+            lines.append(
+                "- **Python build freshness:** unavailable here — run `jaunt status --language py`."
+            )
+        elif not isinstance(typescript_target, dict):
             lines.append("- **Build freshness:** unavailable here — run `jaunt status`.")
     elif fresh["total"] == 0:
         lines.append(f"- **{freshness_label}:** no `@jaunt.magic` specs discovered yet.")
