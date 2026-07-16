@@ -145,8 +145,10 @@ The protected full-project overlay validates both live attempts and cache hits.
 When the combined overlay still fails, `runner.partial_landing` lists the
 compatible `accepted` paths, `rejected` paths, whether the accepted subset was
 committed, and its isolated runner result. A rejected battery also carries
-`rejection_reasons`. The command remains unsuccessful until every requested
-battery lands.
+`rejection_reasons`. If that battery came from the response cache,
+`cache_evicted` reports whether the rejected bytes were removed. Eviction compares
+the stored source before deletion, so it does not remove a newer replacement. The
+command remains unsuccessful until every requested battery lands.
 
 ## status
 

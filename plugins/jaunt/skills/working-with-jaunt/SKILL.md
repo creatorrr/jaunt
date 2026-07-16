@@ -75,6 +75,7 @@ the build afterward.
   JSON for per-battery attempts, retry reasons, and terminal rejection reasons.
   A nonzero run may still commit the compatible subset named by
   `runner.partial_landing`; never patch or discard those generated batteries.
+  For a rejected cache hit, confirm `cache_evicted` before rerunning unchanged.
 - Treat `JAUNT_TS_CANDIDATE_SELF_IMPORT`,
   `JAUNT_TS_GENERATED_PRIVATE_IMPORT`, and optionality/nullability TS2322
   failures as spec/prompt or generator issues. Never patch the generated

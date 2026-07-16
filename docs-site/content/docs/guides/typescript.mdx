@@ -193,12 +193,15 @@ Collection, timeout, runner, and protocol failures are infrastructure errors and
 not trigger an implementation repair. Example and derived generation honors
 `[test].jobs` or `--jobs`. Every live attempt first passes the protected runner's
 full-project overlay and static-loader policy; its exact diagnostics enter the
-remaining retry budget. A late request failure also preflights and stages its valid
-partial set. If separately valid batteries conflict when combined, Jaunt finds a
-deterministic compatible subset, runs it, and commits it only when that subset is
-green. Conflicting paths remain uncommitted and the command exits `3`. Plain progress
-reports each path and tier, while JSON includes `attempts`, `retry_count`,
-`retry_reasons`, and any terminal `rejection_reasons` in each `batteries` outcome.
+remaining retry budget. Typecheck-only messages are bounded to 2,000 characters;
+executed derived failures still expose only an opaque case ID and category. A late
+request failure also preflights and stages its valid partial set. If separately valid
+batteries conflict when combined, Jaunt finds a deterministic compatible subset, runs
+it, and commits it only when that subset is green. Conflicting paths remain
+uncommitted and the command exits `3`. A rejected cached candidate is removed before
+the next run. Plain progress reports each path and tier, while JSON includes
+`attempts`, `retry_count`, `retry_reasons`, any terminal `rejection_reasons`, and
+`cache_evicted` when a cached response was rejected.
 Every package that owns a configured test project must declare `vitest` directly in
 `devDependencies`; add `fast-check` there too when that package uses `@prop`. A
 hoisted installation alone is not authorization, and Jaunt checks the supported peer

@@ -240,3 +240,40 @@ class ResponseCache:
         count = sum(1 for _ in self._cache_dir.rglob("*.json"))
         shutil.rmtree(self._cache_dir, ignore_errors=True)
         return count
+
+
+def discard_cache_entry(
+    cache: ResponseCache,
+    key: str,
+    *,
+    expected_source: str | None = None,
+) -> bool:
+    """Discard one cached response without deleting a newer replacement."""
+
+    if not cache._enabled:
+        return False
+
+    memo_removed = False
+    memoized = cache._memo.get(key)
+    if memoized is not None and (expected_source is None or memoized.source == expected_source):
+        cache._memo.pop(key, None)
+        memo_removed = True
+
+    path = cache._entry_path(key)
+    if not path.exists():
+        return memo_removed
+    if expected_source is not None:
+        try:
+            persisted = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            persisted = None
+        if isinstance(persisted, dict) and persisted.get("source") != expected_source:
+            return memo_removed
+    try:
+        path.unlink()
+        return True
+    except FileNotFoundError:
+        return True
+    except OSError:
+        logger.debug("Cache discard failed for key %s", key[:12])
+        return False

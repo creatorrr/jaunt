@@ -13,10 +13,16 @@ Python or TypeScript release.
   and `JAUNT_TS_TEST_DYNAMIC_LOADER` diagnostics now enter the remaining retry
   budget, and test JSON reports attempts, retry counts, and exact retry reasons
   per battery.
+- Preserve compiler and policy messages for non-executing typecheck retries,
+  bounded to 2,000 characters by the Python protection layer. Executed derived
+  test failures keep their opaque case/category boundary.
 - Isolate a deterministic compatible subset when separately valid batteries
   conflict in the combined overlay. Jaunt caches and runs that subset, commits it
   only when the subset is green, rejects the conflicting paths, and still exits
   `3` for the incomplete run.
+- Evict a cached response when its current validator or combined-subset check
+  rejects it. Compare-and-delete keeps a concurrently written replacement, and
+  per-battery JSON reports whether a subset-rejected cache entry was removed.
 
 ### Packages
 

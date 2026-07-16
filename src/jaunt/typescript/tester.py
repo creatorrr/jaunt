@@ -32,7 +32,11 @@ from jaunt.cache import ResponseCache
 from jaunt.cost import CostTracker
 from jaunt.errors import JauntConfigError
 from jaunt.generate.base import GenerationRequest, GeneratorBackend
-from jaunt.generate.request_cache import generate_request_cached, store_generation_result
+from jaunt.generate.request_cache import (
+    discard_cached_generation,
+    generate_request_cached,
+    store_generation_result,
+)
 from jaunt.journal import JournalEvent, append_events
 from jaunt.skill_seed import skills_fingerprint
 from jaunt.targets.base import TargetBuildReport, TargetDiagnostic, TargetTestReport
@@ -1852,6 +1856,15 @@ _RUNNER_CATEGORIES = {
 _IMPLEMENTATION_REPAIR_CATEGORIES = {"assertion", "type", "runtime"}
 _RUNNER_DIAGNOSTIC_CODE = re.compile(r"(?:TS\d+|JAUNT_TS_[A-Z0-9_]+)")
 _OPAQUE_CASE_ID = re.compile(r"[0-9a-f]{16}")
+_MAX_PROTECTED_DIAGNOSTIC_MESSAGE_CHARS = 2_000
+_DIAGNOSTIC_TRUNCATION_MARKER = "\n[jaunt: diagnostic truncated]"
+
+
+def _bounded_runner_diagnostic_message(message: str) -> str:
+    if len(message) <= _MAX_PROTECTED_DIAGNOSTIC_MESSAGE_CHARS:
+        return message
+    limit = _MAX_PROTECTED_DIAGNOSTIC_MESSAGE_CHARS - len(_DIAGNOSTIC_TRUNCATION_MARKER)
+    return message[:limit] + _DIAGNOSTIC_TRUNCATION_MARKER
 
 
 def _safe_runner_case_id(value: object) -> bool:
@@ -2071,6 +2084,8 @@ def _runner_surfaces(result: Mapping[str, Any]) -> tuple[list[object], list[obje
             continue
         if key == "diagnostics" and isinstance(value, list):
             public_keys = {"code", "severity", "path", "line", "column"}
+            if result.get("mode") == "typecheck":
+                public_keys.add("message")
             for item in value:
                 if not isinstance(item, Mapping):
                     sensitive.append(item)
@@ -2149,15 +2164,20 @@ def _redact_runner_result(result: Mapping[str, Any], *, enabled: bool) -> dict[s
             copy[key] = result[key]
     diagnostics = result.get("diagnostics")
     if isinstance(diagnostics, list):
-        copy["diagnostics"] = [
-            {
+        protected_diagnostics: list[dict[str, Any]] = []
+        for diagnostic in diagnostics:
+            if not isinstance(diagnostic, Mapping):
+                continue
+            protected = {
                 key: diagnostic[key]
                 for key in ("code", "severity", "path", "line", "column")
                 if key in diagnostic
             }
-            for diagnostic in diagnostics
-            if isinstance(diagnostic, Mapping)
-        ]
+            message = diagnostic.get("message")
+            if result.get("mode") == "typecheck" and isinstance(message, str):
+                protected["message"] = _bounded_runner_diagnostic_message(message)
+            protected_diagnostics.append(protected)
+        copy["diagnostics"] = protected_diagnostics
     failures = result.get("failures")
     if isinstance(failures, list):
         copy["failures"] = [
@@ -2871,7 +2891,10 @@ async def _run_test_runner(
         "files": list(files),
         "overlays": dict(overlays or {}),
         "timeoutMs": int(timeout * 1000),
-        "redactDerived": redact_derived,
+        # Typecheck mode executes no test code and carries no assertion output.
+        # Request the compiler/policy messages, then apply the bounded Python
+        # projection below so generation retries receive actionable feedback.
+        "redactDerived": False if typecheck_only else redact_derived,
         "mode": "typecheck" if typecheck_only else "run",
         "declarationEmit": declaration_emit,
         "normalEmit": normal_emit,
@@ -3375,6 +3398,7 @@ async def run_test(
     planned_refrozen: set[str] = set()
     battery_outcomes: dict[str, dict[str, Any]] = {}
     pending_cache_writes: list[tuple[GenerationRequest, Any, str, str, str]] = []
+    cached_battery_responses: dict[str, tuple[GenerationRequest, str, str]] = {}
     output_preconditions: dict[str, str] = {}
     repair_targets_by_file: dict[str, tuple[str, ...]] = {}
     modules: dict[str, Mapping[str, Any]] = {}
@@ -3693,6 +3717,12 @@ async def run_test(
                     state,
                     result=result,
                 )
+                if result.attempts == 0:
+                    cached_battery_responses[request.target_path] = (
+                        request,
+                        cache_fingerprint,
+                        result.source,
+                    )
                 _progress_phase(progress, request.target_path, state, tier)
                 _progress_advance(progress, request.target_path, ok=True)
         finally:
@@ -3794,6 +3824,16 @@ async def run_test(
             for path in paths:
                 record_battery_outcome(path, tiers[path], "rejected")
                 battery_outcomes[path]["rejection_reasons"] = reasons.get(path, ())
+                cached = cached_battery_responses.pop(path, None)
+                if cached is not None:
+                    request, fingerprint, source = cached
+                    battery_outcomes[path]["cache_evicted"] = discard_cached_generation(
+                        response_cache,
+                        backend,
+                        request,
+                        generation_fingerprint=fingerprint,
+                        expected_source=source,
+                    )
 
         if failed:
             stage_preflight: Mapping[str, Any] = {"ok": True, "skipped": True}

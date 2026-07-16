@@ -33,7 +33,9 @@ responses. A rejected attempt consumes the remaining per-battery retry budget an
 the runner's exact diagnostic is included in `batteries[].retry_reasons`. If a
 combined overlay still exposes a cross-battery conflict, Jaunt isolates, runs, and
 commits a compatible subset while leaving the conflicting paths uncommitted and
-returning exit `3`.
+returning exit `3`. Typecheck messages are bounded to 2,000 characters without
+exposing executed derived-test detail. Validator- or subset-rejected cache entries
+are evicted, while a concurrently replaced entry is retained.
 
 The npm package is stable, but the worker boundary still identifies itself as
 `jaunt-ts/1-draft.2`. That protocol is versioned for matching Jaunt Python and npm

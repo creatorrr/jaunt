@@ -115,6 +115,35 @@ async def test_invalid_cached_request_is_rejected_and_valid_final_bytes_replace_
 
 
 @pytest.mark.asyncio
+async def test_invalid_cached_request_is_evicted_when_replacement_generation_fails(
+    tmp_path: Path,
+) -> None:
+    request = _request(tmp_path)
+    backend = _RequestBackend("bad")
+    cache = ResponseCache(tmp_path / "cache")
+    fingerprint = "runner-v1"
+    key = generation_request_cache_key(
+        request,
+        model=backend.model_name,
+        provider=backend.provider_name,
+        generation_fingerprint=fingerprint,
+    )
+    cache.put(key, CacheEntry("bad", 1, 1, "old", "old", 0.0))
+
+    result = await generate_request_cached(
+        backend,
+        request,
+        max_attempts=1,
+        generation_fingerprint=fingerprint,
+        response_cache=cache,
+    )
+
+    assert result.errors == ["invalid overlay"]
+    assert cache.info()["entries"] == 0
+    assert ResponseCache(tmp_path / "cache").get(key) is None
+
+
+@pytest.mark.asyncio
 async def test_request_retries_charge_each_attempt_and_stop_at_budget(
     tmp_path: Path,
 ) -> None:

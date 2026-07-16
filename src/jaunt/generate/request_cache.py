@@ -6,7 +6,7 @@ import inspect
 import time
 from collections.abc import Awaitable, Callable
 
-from jaunt.cache import CacheEntry, ResponseCache
+from jaunt.cache import CacheEntry, ResponseCache, discard_cache_entry
 from jaunt.cost import CostTracker
 from jaunt.generate.base import (
     GenerationRequest,
@@ -62,6 +62,31 @@ def store_generation_result(
     )
 
 
+def discard_cached_generation(
+    response_cache: ResponseCache | None,
+    backend: GeneratorBackend,
+    request: GenerationRequest,
+    *,
+    generation_fingerprint: str,
+    expected_source: str,
+) -> bool:
+    """Evict one rejected generation response if its bytes are still current."""
+
+    if response_cache is None:
+        return False
+    cache_key = generation_request_cache_key(
+        request,
+        model=backend.model_name,
+        provider=backend.provider_name,
+        generation_fingerprint=generation_fingerprint,
+    )
+    return discard_cache_entry(
+        response_cache,
+        cache_key,
+        expected_source=expected_source,
+    )
+
+
 async def generate_request_cached(
     backend: GeneratorBackend,
     request: GenerationRequest,
@@ -111,6 +136,11 @@ async def generate_request_cached(
                     errors=[],
                     usage=None,
                 )
+            discard_cache_entry(
+                response_cache,
+                cache_key,
+                expected_source=cached.source,
+            )
             if progress is not None:
                 progress("cache rejected", errors[0] if errors else "validation failed")
 
@@ -149,6 +179,7 @@ async def generate_request_cached(
 __all__ = [
     "CacheValidator",
     "RequestProgress",
+    "discard_cached_generation",
     "generate_request_cached",
     "store_generation_result",
 ]

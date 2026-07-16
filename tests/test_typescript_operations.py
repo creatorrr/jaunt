@@ -3145,6 +3145,56 @@ def test_derived_runner_results_are_allowlist_redacted() -> None:
     assert result["tests"] == [{"caseId": "0123456789abcdef", "category": "assertion"}]
 
 
+def test_typecheck_redaction_preserves_only_bounded_diagnostic_messages() -> None:
+    diagnostic = {
+        "code": "TS2532",
+        "severity": "error",
+        "path": "tests/__generated__/brief.derived.test.ts",
+        "line": 12,
+        "column": 9,
+        "message": "Object is possibly 'undefined'.",
+    }
+    protected = _redact_runner_result(
+        {
+            "ok": False,
+            "mode": "typecheck",
+            "diagnostics": [diagnostic],
+            "tests": [],
+            "captured": {"stdout": "", "stderr": ""},
+        },
+        enabled=True,
+    )
+
+    assert protected["diagnostics"] == [diagnostic]
+
+    long_message = "X" * 2_500
+    bounded = _redact_runner_result(
+        {
+            "ok": False,
+            "mode": "typecheck",
+            "diagnostics": [{**diagnostic, "message": long_message}],
+            "tests": [],
+            "captured": {"stdout": "", "stderr": ""},
+        },
+        enabled=True,
+    )
+    message = bounded["diagnostics"][0]["message"]
+    assert len(message) == 2_000
+    assert message.endswith("[jaunt: diagnostic truncated]")
+
+    run_mode = _redact_runner_result(
+        {
+            "ok": False,
+            "mode": "run",
+            "diagnostics": [diagnostic],
+            "tests": [],
+            "captured": {"stdout": "", "stderr": ""},
+        },
+        enabled=True,
+    )
+    assert "message" not in run_mode["diagnostics"][0]
+
+
 @pytest.mark.parametrize(
     ("forbidden_key", "forbidden_value"),
     [
@@ -3477,6 +3527,64 @@ def test_example_tier_requires_complete_generated_provenance() -> None:
         for source in forged
     )
     assert _is_reviewable_example_battery("tests/__generated__/math.example.test.ts", valid)
+
+
+@pytest.mark.asyncio
+async def test_protected_typecheck_runner_returns_bounded_exact_diagnostics(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    package_root = tmp_path / "tooling"
+    runner = package_root / "dist/test/runner.js"
+    runner.parent.mkdir(parents=True)
+    runner.write_text(
+        "import json, sys\n"
+        "payload = json.loads(sys.stdin.read())\n"
+        "message = (\"Object is possibly 'undefined'.\" "
+        "if payload['redactDerived'] is False else 'Protected TypeScript diagnostic')\n"
+        "result = {\n"
+        "  'ok': False,\n"
+        "  'mode': 'typecheck',\n"
+        "  'diagnostics': [{\n"
+        "    'code': 'TS2532', 'severity': 'error', 'message': message,\n"
+        "    'path': 'tests/generated.derived.test.ts', 'line': 4, 'column': 7,\n"
+        "  }],\n"
+        "  'tests': [],\n"
+        "  'captured': {'stdout': '', 'stderr': ''},\n"
+        "}\n"
+        "sys.stdout.write(json.dumps(result))\n",
+        encoding="utf-8",
+    )
+    compiler = tmp_path / "typescript.js"
+    compiler.write_text("", encoding="utf-8")
+    client = SimpleNamespace(
+        installation=SimpleNamespace(
+            node=sys.executable,
+            package_root=package_root,
+            compiler_module_path=compiler,
+        )
+    )
+
+    protected = await _run_test_runner(
+        client,
+        tmp_path,
+        config,
+        files=("tests/generated.derived.test.ts",),
+        redact_derived=True,
+        typecheck_only=True,
+        timeout=2,
+    )
+
+    assert protected["diagnostics"] == [
+        {
+            "code": "TS2532",
+            "severity": "error",
+            "message": "Object is possibly 'undefined'.",
+            "path": "tests/generated.derived.test.ts",
+            "line": 4,
+            "column": 7,
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -4149,19 +4257,23 @@ async def test_test_generation_retries_live_candidate_overlay_failures(
         if kwargs.get("typecheck_only") and any(
             "__DYNAMIC_LOADER__" in source for source in overlays.values()
         ):
-            return {
-                "ok": False,
-                "mode": "typecheck",
-                "diagnostics": [
-                    {
-                        "code": "JAUNT_TS_TEST_DYNAMIC_LOADER",
-                        "message": "generated tests must use static imports",
-                        "severity": "error",
-                        "path": next(iter(overlays)),
-                    }
-                ],
-                "tests": [],
-            }
+            return _redact_runner_result(
+                {
+                    "ok": False,
+                    "mode": "typecheck",
+                    "diagnostics": [
+                        {
+                            "code": "JAUNT_TS_TEST_DYNAMIC_LOADER",
+                            "message": "generated tests must use static imports",
+                            "severity": "error",
+                            "path": next(iter(overlays)),
+                        }
+                    ],
+                    "tests": [],
+                    "captured": {"stdout": "", "stderr": ""},
+                },
+                enabled=True,
+            )
         return {
             "ok": True,
             "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
@@ -4293,6 +4405,29 @@ async def test_cross_battery_preflight_lands_only_the_compatible_subset(
     worker = _TestSpecWorker(tmp_path)
     cache = ResponseCache(tmp_path / ".test-response-cache")
 
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "diagnostics": [],
+            "tests": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        jobs=2,
+        generator=FakeGenerator(),
+        response_cache=cache,
+        worker_factory=lambda *_: worker,
+    )
+    assert seeded.exit_code == 0
+    assert cache.info()["entries"] == 2
+    for tier in ("example", "derived"):
+        (tmp_path / f"tests/__generated__/math.{tier}.test.ts").unlink()
+
     async def cross_battery_failure(*_args: Any, **kwargs: Any) -> dict[str, Any]:
         files = tuple(kwargs.get("files", ()))
         if len(files) <= 1:
@@ -4324,7 +4459,7 @@ async def test_cross_battery_preflight_lands_only_the_compatible_subset(
         config,
         no_build=True,
         jobs=2,
-        generator=FakeGenerator(),
+        generator=ExplodingGenerator(),
         response_cache=cache,
         worker_factory=lambda *_: worker,
     )
@@ -4332,8 +4467,9 @@ async def test_cross_battery_preflight_lands_only_the_compatible_subset(
     assert report.exit_code == 3
     assert cache.info()["entries"] == 1
     outcomes = {item["path"]: item for item in report.runner["batteries"]}
-    assert outcomes["tests/__generated__/math.derived.test.ts"]["state"] == "staged"
+    assert outcomes["tests/__generated__/math.derived.test.ts"]["state"] == "cached"
     assert outcomes["tests/__generated__/math.example.test.ts"]["state"] == "rejected"
+    assert outcomes["tests/__generated__/math.example.test.ts"]["cache_evicted"] is True
     assert outcomes["tests/__generated__/math.example.test.ts"]["rejection_reasons"] == (
         "TS2451: cross-battery declaration conflict",
     )
