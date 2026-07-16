@@ -88,3 +88,20 @@
 - [x] Document TypeScript candidate outcomes, retry accounting, and the 1.7.6 upgrade path.
 - [x] Refresh both plugin skill bundles with conformance, OOM, and hermetic-generation guidance.
 - [x] Cut Jaunt 1.7.6 / @usejaunt/ts alpha.5, run full validation, and obtain an independent Codex review.
+
+## Cycle 12 — 2026-07-15
+
+- [x] Preserve valid battery responses after a late peer failure and generate them with configured concurrency.
+- [x] Validate every live and cached battery candidate with exact compiler and static-loader diagnostics.
+- [x] Preserve a green compatible subset, evict rejected cache entries, and report each retry outcome.
+- [x] Keep bounded typecheck diagnostics through the derived-output redaction boundary.
+
+## Cycle 13 — 2026-07-15
+
+- [x] Preserve mixed-workspace TypeScript `candidate_outcomes`.
+- [x] Retry transient model-capacity failures without consuming the candidate budget or dropping partial reports.
+- [x] Wire plain stderr progress through TypeScript build, test, and nested implementation-repair phases.
+- [x] Update both first-party plugin guides to request live progress alongside final JSON.
+- [x] Confirm live module and battery-tier progress in the adopter's narrowed recovery run.
+- [ ] Decide whether to include bounded imported-type context after preserving or intentionally invalidating the 12 recovered cache entries.
+- [ ] Record the narrowed recovery result and final stable-release scope.
