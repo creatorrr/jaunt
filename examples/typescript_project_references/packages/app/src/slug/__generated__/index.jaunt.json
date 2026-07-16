@@ -157,9 +157,9 @@
   "facadePath": "packages/app/src/slug/index.ts",
   "fingerprint": {
     "compilerOptionsHash": "sha256:22dff1df026f3de9770281305f24eaeca1459083c36584842d4be246c15e0423",
-    "generationFingerprint": "sha256:41d53f8bf20232d0ab10faafa65d7c275bfb45c32f128a9d6ded8be4bdcc7777",
-    "ir": "contract-ir/1-draft.2",
-    "protocol": "jaunt-ts/1-draft.2",
+    "generationFingerprint": "sha256:c224278278145a0cba16c9a95ea9e588de5bb3cdf87bf12ff0ac54caaab217ef",
+    "ir": "contract-ir/1-draft.3",
+    "protocol": "jaunt-ts/1-draft.3",
     "toolVersion": "1.7.9",
     "typescriptVersion": "5.9.3",
     "workerVersion": "0.1.0"
@@ -170,8 +170,34 @@
   "packageOwner": "packages/app",
   "project": "packages/app/tsconfig.json",
   "proseDigest": "sha256:e9fa557be73e969f3cb26837fff759c7cccd3f8a5ca90099486dae5df986e4ee",
-  "schema": "contract-ir/1-draft.2",
-  "semanticEnvironmentDigest": "sha256:b357afc60c2822d15b465d4892ebd43a733fe516fb3c6ad961b8819379a2fadc",
+  "schema": "contract-ir/1-draft.3",
+  "semanticEnvironmentDigest": "sha256:c5bd2fe28e5242a16bd06291a5567a522376d953d20dd8ec2f0697f5bbb9e7fc",
+  "semanticEnvironmentRecords": [
+    {
+      "digest": "sha256:902d170f88eb669ac3f428a62b2a914929deb9871c81804d22cd546026071cef",
+      "id": "environment:package.json"
+    },
+    {
+      "digest": "sha256:f50a6687744f3fd1b5fb25bf5153f3c1732f4681be108576c141479423dcbe5e",
+      "id": "environment:packages/app/package.json"
+    },
+    {
+      "digest": "sha256:8010d0efb81c07aacf6bc4f13368b3ec2683a916c6b0f18d240bc399b0f8a658",
+      "id": "package:@types/node"
+    },
+    {
+      "digest": "sha256:bb90fc38d601699e39eb0200cef8d91cd8f4af3c3f9a0370af98d7f337571c51",
+      "id": "package:undici-types"
+    },
+    {
+      "digest": "sha256:f2e6760f5ea9d105b1ae0cbf7309fc5aa92b75a18b2018a608bdc49a99957aeb",
+      "id": "unresolved-modules"
+    },
+    {
+      "digest": "sha256:174a7f4906eef4497d0b50ae7542395a1fe34fd8d0b1511b891a7fcd921932e2",
+      "id": "workspace:packages/core/src/normalize/index.jaunt.ts"
+    }
+  ],
   "specPath": "packages/app/src/slug/index.jaunt.ts",
   "state": "built",
   "structuralDigest": "sha256:cb66e910d604ca980572706bb20e63cf24abc777336d395bab54ca392d08d317",

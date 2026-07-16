@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://usejaunt.dev/schemas/jaunt-ts/protocol-v1-draft.2.json",
-  "title": "Jaunt TypeScript worker protocol v1 draft 2",
+  "$id": "https://usejaunt.dev/schemas/jaunt-ts/protocol-v1-draft.3.json",
+  "title": "Jaunt TypeScript worker protocol v1 draft 3",
   "oneOf": [
     { "$ref": "#/definitions/request" },
     { "$ref": "#/definitions/success" },
@@ -103,7 +103,8 @@
         "restampModuleIds": { "$ref": "#/definitions/stringArray" },
         "recomposeModuleIds": { "$ref": "#/definitions/stringArray" },
         "scopeToModuleIds": { "type": "boolean" },
-        "baselineUnselected": { "type": "boolean" }
+        "baselineUnselected": { "type": "boolean" },
+        "releasePrograms": { "type": "boolean" }
       }
     },
     "invalidateParams": {
@@ -196,7 +197,7 @@
         }
       ],
       "properties": {
-        "protocol": { "const": "jaunt-ts/1-draft.2" },
+        "protocol": { "const": "jaunt-ts/1-draft.3" },
         "id": { "type": "string", "minLength": 1, "maxLength": 128 },
         "method": {
           "enum": [
@@ -391,13 +392,13 @@
       },
       "properties": {
         "workerVersion": { "type": "string" },
-        "protocol": { "const": "jaunt-ts/1-draft.2" },
+        "protocol": { "const": "jaunt-ts/1-draft.3" },
         "typescriptVersion": { "type": "string" },
         "packageManager": { "type": "string" },
         "capabilities": {
           "type": "array",
           "minItems": 6,
-          "maxItems": 11,
+          "maxItems": 12,
           "uniqueItems": true,
           "items": {
             "enum": [
@@ -411,7 +412,8 @@
               "scoped-analysis",
               "scoped-validation",
               "recompose",
-              "baseline-unselected"
+              "baseline-unselected",
+              "release-programs"
             ]
           }
         }
@@ -480,7 +482,7 @@
         "modules": {
           "type": "array",
           "items": {
-            "$ref": "https://usejaunt.dev/schemas/jaunt-ts/contract-ir-v1-draft.2.json#/definitions/contractAnalysisRecord"
+            "$ref": "https://usejaunt.dev/schemas/jaunt-ts/contract-ir-v1-draft.3.json#/definitions/contractAnalysisRecord"
           }
         }
       }
@@ -609,7 +611,7 @@
       "required": ["protocol", "id", "ok", "result"],
       "additionalProperties": false,
       "properties": {
-        "protocol": { "const": "jaunt-ts/1-draft.2" },
+        "protocol": { "const": "jaunt-ts/1-draft.3" },
         "id": { "type": "string", "minLength": 1, "maxLength": 128 },
         "ok": { "const": true },
         "result": { "$ref": "#/definitions/successResult" }
@@ -620,7 +622,7 @@
       "required": ["protocol", "id", "ok", "error"],
       "additionalProperties": false,
       "properties": {
-        "protocol": { "const": "jaunt-ts/1-draft.2" },
+        "protocol": { "const": "jaunt-ts/1-draft.3" },
         "id": { "type": "string" },
         "ok": { "const": false },
         "error": { "$ref": "#/definitions/error" }

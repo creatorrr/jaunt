@@ -387,7 +387,7 @@ export function slugify(title: string, options: SlugOptions): string {
   );
   const lockEdit = await freshnessDigests(workspace);
   expect(lockEdit.structural).not.toBe(declarationEdit.structural);
-  expect(lockEdit.environment).not.toBe(declarationEdit.environment);
+  expect(lockEdit.environment).toBe(declarationEdit.environment);
 });
 
 test("compatibility identity normalizes only Jaunt tool package metadata", async () => {
@@ -470,7 +470,7 @@ packages:
 `,
   },
 ])(
-  "$name lockfiles preserve non-tool changes in the compatibility identity",
+  "$name lockfiles defer compatibility identity to the resolved declaration closure",
   async ({ path, lock }) => {
     const workspace = createFixtureWorkspace();
     roots.push(workspace.root);
@@ -497,7 +497,7 @@ packages:
     write(workspace.root, path, lock("0.1.0-alpha.2", "1.1.0"));
     const dependencyUpgrade = await freshnessDigests(workspace);
     expect(dependencyUpgrade.structural).not.toBe(toolUpgrade.structural);
-    expect(dependencyUpgrade.environment).not.toBe(toolUpgrade.environment);
+    expect(dependencyUpgrade.environment).toBe(toolUpgrade.environment);
   },
 );
 

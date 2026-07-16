@@ -68,6 +68,7 @@ from jaunt.typescript.design import (
     _validate_declaration,
     run_design,
 )
+from jaunt.typescript.migrate import apply_typescript_migration, plan_typescript_migration
 from jaunt.typescript.protocol import (
     InitializeParams,
     InitializeResult,
@@ -271,7 +272,7 @@ class FakeWorker:
         )
         self.module = {
             **semantic_contract,
-            "schema": "contract-ir/1-draft.2",
+            "schema": "contract-ir/1-draft.3",
             "sidecarPath": "src/__generated__/math.jaunt.json",
             "structuralDigest": "sha256:structural",
             "proseDigest": "sha256:prose",
@@ -624,7 +625,7 @@ def _scheduled_module(
     stem = f"{owner}/src/{name}" if owner != "." else f"src/{name}"
     module_id = f"ts:{stem}"
     return {
-        "schema": "contract-ir/1-draft.2",
+        "schema": "contract-ir/1-draft.3",
         "moduleId": module_id,
         "specPath": f"{stem}.jaunt.ts",
         "facadePath": f"{stem}.ts",
@@ -5875,6 +5876,60 @@ async def test_separate_build_preserves_battery_reuse_proof_for_later_test(
     )
     assert next_report.generated == frozenset()
     assert next_report.refrozen == paths
+
+
+@pytest.mark.asyncio
+async def test_migration_preserves_battery_reuse_proof_for_no_build_test(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    paths = frozenset(seeded.generated)
+    bodies = {path: _strip_test_header((tmp_path / path).read_text()) for path in paths}
+    expected = json.loads(str(worker.module["sidecar"]))
+    expected["semanticEnvironmentDigest"] = "sha256:environment-v2"
+    expected["structuralDigest"] = "sha256:environment-structure-v2"
+    expected["apiDigest"] = "sha256:environment-api-v2"
+    worker.module.update(expected)
+    worker.module["sidecar"] = json.dumps(expected, sort_keys=True) + "\n"
+
+    plan = await plan_typescript_migration(
+        tmp_path,
+        config,
+        worker_factory=lambda *_: worker,
+    )
+    assert not plan.requires_rebuild
+    apply_typescript_migration(plan)
+
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=ExplodingGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 0
+    assert report.generated == frozenset()
+    assert report.refrozen == paths
+    for path in paths:
+        assert _strip_test_header((tmp_path / path).read_text()) == bodies[path]
 
 
 @pytest.mark.asyncio

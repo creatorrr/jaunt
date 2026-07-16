@@ -22,10 +22,29 @@ npm install -D @usejaunt/ts@^0.1.0 'typescript@^5.9' vitest fast-check @types/no
 ```
 
 The supported host ranges remain Node 20 through 24 and TypeScript 5.8 through
-6.x. An unchanged alpha.7 workspace can reuse its saved semantic-environment
-proof: preview with `jaunt migrate --language ts`, apply deterministic repairs,
-then run `jaunt check --language ts`. No model call is needed when the contract,
-dependencies, and compiler inputs are unchanged.
+6.x. An unchanged alpha.7 workspace can reuse its implementation even when the
+older sidecar's aggregate semantic-environment digest no longer matches. Preview
+the recovery first:
+
+```bash
+jaunt migrate --language ts --json
+jaunt migrate --language ts --apply
+jaunt test --language ts --no-build
+jaunt check --language ts
+```
+
+Apply only when every affected module is `free-recompose` and
+`requires_rebuild` is empty. The migration validates the saved implementation
+against the current compiler, static policy, public API, and consumer closure,
+then carries the old-to-new API proof into the separate battery command. It
+makes no model calls. Contract changes, changed symbol/options/dependency
+payloads, and compiler-overlay failures remain rebuilds.
+
+New sidecars store package- and workspace-scoped semantic-environment digests.
+Whole lockfiles still trigger ordinary structural analysis, but unrelated
+lockfile entries no longer define compatibility. Resolved declaration files and
+project metadata do, and status/migration JSON reports their added, removed, and
+changed records when the previous sidecar has the same evidence.
 
 This pair also fixes alpha.7's test-candidate retry gap. Live candidates now pass
 through the same full-project overlay and dynamic-loader checks as cached
@@ -46,8 +65,14 @@ command returns the failed module or battery in its normal structured report and
 keeps outcomes from requests that already finished. Mixed build JSON retains
 TypeScript `candidate_outcomes` at the top level and under `targets.ts`.
 
+`jaunt doctor --json` now identifies the running Jaunt entrypoint and module,
+Python executable, distribution or editable source, nearest `uv.lock`, and the
+lock's Jaunt requirement. It warns when the active version differs from the
+lock, which catches a broad `uv sync` replacing an editable checkout before a
+long validation run.
+
 The npm package is stable, but the worker boundary still identifies itself as
-`jaunt-ts/1-draft.2`. That protocol is versioned for matching Jaunt Python and npm
+`jaunt-ts/1-draft.3`. That protocol is versioned for matching Jaunt Python and npm
 releases; it is not yet a compatibility promise for third-party protocol clients.
 Refresh the companion plugin to Codex 1.1.5 or Claude Code 1.2.5 for matching
 stable-target guidance, then start a new host session.

@@ -1,5 +1,5 @@
 {
-  "protocol": "jaunt-ts/1-draft.2",
+  "protocol": "jaunt-ts/1-draft.3",
   "id": "contracts-1",
   "ok": true,
   "result": {
@@ -9,7 +9,7 @@
     "inputHashes": {},
     "modules": [
       {
-        "schema": "contract-ir/1-draft.2",
+        "schema": "contract-ir/1-draft.3",
         "moduleId": "ts:src/format/index",
         "specPath": "src/format/index.jaunt.ts",
         "facadePath": "src/format/index.ts",
@@ -168,6 +168,7 @@
           }
         ],
         "semanticEnvironmentDigest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        "semanticEnvironmentRecords": [],
         "dependencies": ["ts:src/base/index#Base"],
         "structuralDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
         "proseDigest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
@@ -178,8 +179,8 @@
           "typescriptVersion": "6.0.2",
           "compilerOptionsHash": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
           "generationFingerprint": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
-          "protocol": "jaunt-ts/1-draft.2",
-          "ir": "contract-ir/1-draft.2"
+          "protocol": "jaunt-ts/1-draft.3",
+          "ir": "contract-ir/1-draft.3"
         },
         "routes": {
           "specPath": "src/format/index.jaunt.ts",

@@ -118,6 +118,7 @@ def test_python_models_consume_shared_initialize_fixture() -> None:
         "orphans",
         "invalidate",
         "contract-projection",
+        "release-programs",
     )
 
     request = json.loads((fixture_root / "initialize.request.json").read_text(encoding="utf-8"))
@@ -256,8 +257,10 @@ def test_validate_overlay_params_serialize_deterministic_sync_ids() -> None:
         restamp_module_ids=("ts:src/restamp",),
         scope_to_module_ids=True,
         baseline_unselected=True,
+        release_programs=True,
     )
     assert params.to_wire()["syncModuleIds"] == ["ts:src/token"]
     assert params.to_wire()["restampModuleIds"] == ["ts:src/restamp"]
     assert params.to_wire()["scopeToModuleIds"] is True
     assert params.to_wire()["baselineUnselected"] is True
+    assert params.to_wire()["releasePrograms"] is True

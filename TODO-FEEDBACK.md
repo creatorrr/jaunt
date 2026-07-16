@@ -110,3 +110,17 @@
 - [ ] Add a default-compatible per-intent tier selection after the stable release.
 - [ ] Trial bounded imported-type context and the stronger loader prompt in 1.7.10 / 0.1.1 without invalidating the stable recovery cache.
 - [x] Keep the first stable release to the non-cache-breaking operational fixes.
+
+## Cycle 14 — 2026-07-15
+
+- [x] Scope TypeScript compatibility to resolved declaration inputs instead of whole lockfiles.
+- [x] Persist per-record semantic-environment digests and report exact drift when available.
+- [x] Add an explicit worker-validated, model-free migration path for environment-only drift.
+- [x] Validate the complete recomposition set atomically and block apply while rebuilds remain.
+- [x] Carry API reuse proof through migration so compatible batteries can reheader for free.
+- [x] Release compiler programs on success and failure and prove the 19-module adopter plan stays bounded.
+- [x] Bump the strict worker/IR draft for the new fields while keeping draft-2 artifacts migratable.
+- [x] Report active Jaunt executable, module, editable source, and nearest lock provenance in doctor JSON.
+- [x] Confirm the adopter dry run plans 19 `free-recompose` modules, zero rebuilds, and zero model calls.
+- [ ] Add compact `jaunt test` JSON or a report-file mode in 1.7.10 / 0.1.1.
+- [x] Add regressions and run the full repository validation suite.

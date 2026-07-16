@@ -12,8 +12,8 @@ import type {
 import type { ContractModuleIR } from "../analyzer/ir.js";
 import { WorkerError, type ProtocolErrorPayload } from "./errors.js";
 
-export const PROTOCOL_VERSION = "jaunt-ts/1-draft.2" as const;
-export const CONTRACT_IR_VERSION = "contract-ir/1-draft.2" as const;
+export const PROTOCOL_VERSION = "jaunt-ts/1-draft.3" as const;
+export const CONTRACT_IR_VERSION = "contract-ir/1-draft.3" as const;
 
 export type WorkerMethod =
   | "initialize"
@@ -76,6 +76,7 @@ export interface ValidateOverlayParams {
   readonly recomposeModuleIds?: readonly string[];
   readonly scopeToModuleIds?: boolean;
   readonly baselineUnselected?: boolean;
+  readonly releasePrograms?: boolean;
 }
 
 export interface FindOrphansParams {

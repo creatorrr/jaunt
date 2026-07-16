@@ -40,10 +40,16 @@ skills and hooks.
 - `/jaunt:build`: previews likely model calls, builds, reports actual cost,
   and runs the gates.
 - `/jaunt:doctor`: checks Python and TypeScript health, Node/npm, the worker,
-  compiler support, authentication, orphans, and Claude hook duplication without
-  building. Nested Claude and Codex managed worktrees are skipped.
+  compiler support, authentication, orphans, active Jaunt/lock provenance, and
+  Claude hook duplication without building. Nested Claude and Codex managed
+  worktrees are skipped.
 - `/jaunt:convert`: explicit-only Python/TypeScript-to-Jaunt conversion.
 - `first-build-reviewer`: read-only review for contract-silence divergence.
+
+For TypeScript provenance drift, the working skill previews
+`jaunt migrate --language ts --json` before any paid build. A plan containing
+only `free-recompose` actions with an empty `requires_rebuild` list can be
+applied and checked without model calls.
 
 For TypeScript builds, the workflow reads `candidate_outcomes` before suggesting
 another run. Jaunt already spends the remaining attempt budget on final

@@ -43,7 +43,8 @@ trust the bundled SessionStart and PreToolUse hooks.
 - `$jaunt:build`: preview likely model work, build, report actual cost, and
   run the deterministic gates.
 - `$jaunt:doctor`: read-only environment, authentication, freshness, orphan,
-  and Codex-hook checks. Nested Claude and Codex managed worktrees are skipped.
+  Codex-hook, and active Jaunt/lock provenance checks. Nested Claude and Codex
+  managed worktrees are skipped.
 - `$jaunt:convert`: explicit-only conversion of handwritten Python or
   TypeScript to Jaunt.
 - `$jaunt:first-build-reviewer`: explicit or delegated read-only review for
@@ -52,6 +53,11 @@ trust the bundled SessionStart and PreToolUse hooks.
 The build workflow delegates a first build to one read-only explorer subagent
 when that capability is available. It runs the same checklist in the main
 thread otherwise.
+
+For TypeScript provenance drift, the working skill previews
+`jaunt migrate --language ts --json` before any paid build. A plan containing
+only `free-recompose` actions with an empty `requires_rebuild` list can be
+applied and checked without model calls.
 
 For TypeScript builds, the workflow reads `candidate_outcomes` before suggesting
 another run. Jaunt already spends the remaining attempt budget on final

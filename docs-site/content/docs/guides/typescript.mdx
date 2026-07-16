@@ -242,13 +242,19 @@ candidate also remains in the response cache so an interrupted command can resum
 without discarding the paid result.
 
 Starting with `@usejaunt/ts` 0.1.0-alpha.2, sidecars persist a normalized semantic
-environment identity. On a later compatible Jaunt or worker upgrade, Jaunt compares
-that identity and the saved contract through its dependency closure. If only Jaunt
-tool metadata or composition details changed, it recovers the existing candidate,
-runs the current compiler and validation pipeline, recomposes the deterministic public
-boundary, and reheaders affected test batteries without a model call. Older sidecars
-without this proof rebuild once. A changed external declaration, non-tooling lockfile
-entry, or dependency contract remains a normal structural rebuild.
+environment identity. Stable 0.1.0 sidecars also retain package- and
+workspace-scoped compatibility digests. Compatibility follows resolved
+declarations and project metadata rather than every entry in a package-manager
+lockfile; the full lockfile still participates in ordinary structural change
+detection.
+
+Automatic builds stay conservative when the semantic environment changes. For an
+existing candidate, run `jaunt migrate --language ts --json` first. If the saved
+contract is otherwise identical and the implementation passes the current compiler,
+static policy, public API, and consumer closure, the plan reports `free-recompose`.
+Apply it, then run `jaunt test --language ts --no-build` and `jaunt check --language
+ts`. This path makes no model calls. A changed contract/dependency payload or failed
+validation remains `model-rebuild` or `manual-intervention` and writes nothing.
 
 The reuse proof also survives the normal two-command workflow: run `jaunt build`, then
 run `jaunt test`. Jaunt stores the exact validated old-to-new API transition under

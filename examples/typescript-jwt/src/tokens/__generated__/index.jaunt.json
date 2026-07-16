@@ -142,9 +142,9 @@
   "facadePath": "src/tokens/index.ts",
   "fingerprint": {
     "compilerOptionsHash": "sha256:b9ea51a23f8558ef7cc2b60bf6e4f944cebcd9735dfe803ab6d8dcab9a13a61a",
-    "generationFingerprint": "sha256:41d53f8bf20232d0ab10faafa65d7c275bfb45c32f128a9d6ded8be4bdcc7777",
-    "ir": "contract-ir/1-draft.2",
-    "protocol": "jaunt-ts/1-draft.2",
+    "generationFingerprint": "sha256:c224278278145a0cba16c9a95ea9e588de5bb3cdf87bf12ff0ac54caaab217ef",
+    "ir": "contract-ir/1-draft.3",
+    "protocol": "jaunt-ts/1-draft.3",
     "toolVersion": "1.7.9",
     "typescriptVersion": "5.9.3",
     "workerVersion": "0.1.0"
@@ -155,8 +155,26 @@
   "packageOwner": ".",
   "project": "tsconfig.json",
   "proseDigest": "sha256:616b419f63caf931be25251541e08d964b503d846e7f0c727d8dbc6468bcce3c",
-  "schema": "contract-ir/1-draft.2",
-  "semanticEnvironmentDigest": "sha256:7554f74599dafd10d1665daf1b9cc2b2f081527c3ab6ade6056bf179a282fe8f",
+  "schema": "contract-ir/1-draft.3",
+  "semanticEnvironmentDigest": "sha256:b5b1c66dd2a8869ef079102612ecae9cc80ea3436ffac6e3bc8e3afd03649859",
+  "semanticEnvironmentRecords": [
+    {
+      "digest": "sha256:e01d8d54c49a73ea803c40a22c4525fec123fa6d5e670bd162724e42f5a5a1eb",
+      "id": "environment:package.json"
+    },
+    {
+      "digest": "sha256:3d594e2095230c42693309fb52241477f3a12170bc6523cf8a955acd24b00445",
+      "id": "package:@types/node"
+    },
+    {
+      "digest": "sha256:bc9664c7a166750b58bce8a0809c421d0add3d94b1ae61992e2fc249fc60a7db",
+      "id": "package:undici-types"
+    },
+    {
+      "digest": "sha256:15f27bc6ac559266db9890537c63551ec209820307125fbb09409267c30de3c7",
+      "id": "unresolved-modules"
+    }
+  ],
   "specPath": "src/tokens/index.jaunt.ts",
   "state": "built",
   "structuralDigest": "sha256:d1c386d5904408d9aaeea55dd80fc9e5793a33bb5c0d8d054d4c899a1526091b",

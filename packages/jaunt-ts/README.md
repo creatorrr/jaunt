@@ -58,7 +58,7 @@ Exports:
 - `@usejaunt/ts/schema/protocol-v1` and `contract-ir-v1` — the pinned draft schemas.
 
 The protocol is deliberately strict: each request carries
-`"protocol":"jaunt-ts/1-draft.2"`, a string ID, a method, and an object of params.
+`"protocol":"jaunt-ts/1-draft.3"`, a string ID, a method, and an object of params.
 Initialize first, then analyze the workspace or contracts, validate a candidate
 overlay or deterministic sync, project committed contract declarations through the
 compiler AST, inspect orphans, and shut the worker down. `projectContract` preserves
@@ -67,9 +67,33 @@ malformed or still-executable projections fail closed. Every analysis response i
 an epoch, snapshot, and per-input hashes so stale writes can be rejected.
 
 The npm package follows the stable `0.1.x` line and is published under the `latest`
-dist-tag. The worker wire protocol remains `jaunt-ts/1-draft.2`; it is an internal,
+dist-tag. The worker wire protocol remains `jaunt-ts/1-draft.3`; it is an internal,
 versioned boundary between matching Jaunt Python and npm releases, not yet a public
 compatibility promise for third-party clients.
+
+## Model-free upgrade recovery
+
+The Python CLI can preserve an existing implementation when only its persisted
+TypeScript environment identity changed:
+
+```bash
+jaunt migrate --language ts --json
+jaunt migrate --language ts --apply
+jaunt test --language ts --no-build
+jaunt check --language ts
+```
+
+Review the dry run first. A safe recovery reports `free-recompose` for the
+affected modules and leaves `requires_rebuild` empty. The worker validates each
+candidate with the current compiler, resolved declarations, static policy,
+public API, and consumer closure before Jaunt writes the transaction. Contract
+or dependency changes and failed validation are never restamped.
+
+Sidecars store package- and workspace-scoped semantic-environment digests. Whole
+lockfiles still participate in ordinary structural freshness, but unrelated
+lockfile entries do not define compatibility; resolved declaration inputs do.
+Migration diagnostics list added, removed, and changed records when both
+sidecars have that evidence.
 
 The compatibility matrix exercises NodeNext ESM, NodeNext CommonJS,
 Bundler/Vite-style resolution, and `.tsx` under both TypeScript 5.8 and 6.x. The

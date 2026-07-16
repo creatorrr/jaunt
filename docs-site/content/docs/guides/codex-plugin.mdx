@@ -45,7 +45,9 @@ reporting a failed lifecycle event.
   reports actual cost, and runs the gates.
 - `$jaunt:doctor` checks Python and TypeScript workspace health, including the
   Node/npm/worker/compiler setup, without building. It ignores nested Claude
-  and Codex managed worktrees and checks only Codex hook configuration.
+  and Codex managed worktrees and checks only Codex hook configuration. Its
+  JSON includes the running Jaunt paths, editable source, and nearest lock
+  requirement.
 - `$jaunt:convert` converts Python or TypeScript only when explicitly invoked.
 - `$jaunt:first-build-reviewer` runs when explicitly invoked or delegated by
   the build workflow.
@@ -77,6 +79,11 @@ The plugin reports Jaunt's current reasons without fixed price estimates:
 | `stub` | deterministic `.pyi` re-emission when implementation inputs are unchanged |
 
 The build skill reports the actual cost after the command completes.
+
+If TypeScript status reports semantic-environment drift, the working skill runs
+the model-free migration preview before recommending a build. It applies only a
+plan made entirely of `free-recompose` actions with no `requires_rebuild`
+modules, then runs the no-build battery check and Jaunt freshness gate.
 
 For TypeScript, the build skill also reads per-module `candidate_outcomes`.
 Jaunt performs final conformance repair inside the advertised attempt budget,

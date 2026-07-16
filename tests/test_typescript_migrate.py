@@ -15,6 +15,7 @@ from jaunt.errors import JauntConfigError, JauntGenerationError
 from jaunt.typescript.builder import _Write
 from jaunt.typescript.migrate import (
     TypeScriptMigrationAction,
+    TypeScriptMigrationDiagnostic,
     TypeScriptMigrationPlan,
     _legacy_layout_plan,
     apply_typescript_migration,
@@ -26,6 +27,7 @@ from jaunt.typescript.protocol import (
     PROTOCOL_VERSION,
     WorkspaceStamp,
 )
+from jaunt.typescript.reuse import proven_previous_target_api_digests
 from jaunt.typescript.worker import REQUIRED_WORKER_CAPABILITIES
 
 
@@ -73,7 +75,7 @@ class _MigrationWorker:
             "export function double(): never { throw new Error('unbuilt'); }\n"
         )
         self.sidecar_value: dict[str, Any] = {
-            "schema": "contract-ir/1-draft.2",
+            "schema": "contract-ir/1-draft.3",
             "moduleId": "ts:src/math",
             "specPath": "src/math.jaunt.ts",
             "facadePath": "src/math.ts",
@@ -88,13 +90,19 @@ class _MigrationWorker:
             "typeImports": [],
             "contextDocs": [],
             "semanticEnvironmentDigest": "sha256:semantic-environment",
+            "semanticEnvironmentRecords": [
+                {
+                    "id": "package:@fixture/contracts",
+                    "digest": "sha256:declaration-v1",
+                }
+            ],
             "structuralDigest": "sha256:structural",
             "proseDigest": "sha256:prose",
             "apiDigest": "sha256:api",
             "fingerprint": {
                 "toolVersion": "current",
-                "protocol": "jaunt-ts/1-draft.2",
-                "ir": "contract-ir/1-draft.2",
+                "protocol": "jaunt-ts/1-draft.3",
+                "ir": "contract-ir/1-draft.3",
             },
         }
         self.module: dict[str, Any] = {
@@ -234,7 +242,7 @@ def _write_built_artifacts(
     root: Path,
     worker: _MigrationWorker,
     *,
-    schema: str = "contract-ir/1-draft.2",
+    schema: str = "contract-ir/1-draft.3",
     tool_version: str = "current",
 ) -> None:
     generated = root / "src/__generated__"
@@ -375,6 +383,97 @@ async def test_typescript_migrate_recomposes_digest_scheme_upgrade_without_model
 
 
 @pytest.mark.asyncio
+async def test_typescript_migrate_recomposes_known_draft_upgrade_without_model(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    worker = _MigrationWorker(tmp_path)
+    _write_built_artifacts(tmp_path, worker)
+    sidecar_path = tmp_path / "src/__generated__/math.jaunt.json"
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    sidecar["schema"] = "contract-ir/1-draft.2"
+    sidecar["fingerprint"]["protocol"] = "jaunt-ts/1-draft.2"
+    sidecar["fingerprint"]["ir"] = "contract-ir/1-draft.2"
+    sidecar_path.write_text(json.dumps(sidecar, sort_keys=True) + "\n", encoding="utf-8")
+
+    plan = await plan_typescript_migration(tmp_path, config, worker_factory=lambda *_: worker)
+
+    assert not plan.requires_rebuild
+    assert any(action.classification == "free-recompose" for action in plan.actions)
+    apply_typescript_migration(plan)
+    migrated = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    assert migrated["schema"] == "contract-ir/1-draft.3"
+    assert migrated["fingerprint"]["protocol"] == "jaunt-ts/1-draft.3"
+
+
+@pytest.mark.asyncio
+async def test_typescript_migrate_recomposes_environment_drift_and_preserves_batteries(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    worker = _MigrationWorker(tmp_path)
+    _write_built_artifacts(tmp_path, worker)
+    worker.sidecar_value.update(
+        {
+            "semanticEnvironmentDigest": "sha256:semantic-environment-v2",
+            "semanticEnvironmentRecords": [
+                {
+                    "id": "package:@fixture/contracts",
+                    "digest": "sha256:declaration-v2",
+                }
+            ],
+            "structuralDigest": "sha256:environment-structure-v2",
+            "apiDigest": "sha256:environment-api-v2",
+        }
+    )
+    worker.module.update(worker.sidecar_value)
+    worker.refresh_expected_sidecar()
+
+    plan = await plan_typescript_migration(tmp_path, config, worker_factory=lambda *_: worker)
+
+    assert not plan.requires_rebuild
+    assert any(action.classification == "free-recompose" for action in plan.actions)
+    diagnostic = next(
+        item for item in plan.diagnostics if item.code == "JAUNT_TS_MIGRATE_ENVIRONMENT_RECOMPOSE"
+    )
+    assert diagnostic.data["changed"] == ["package:@fixture/contracts"]
+    validation = [params for method, params in worker.requests if method == "validateOverlay"]
+    assert validation[-1]["recomposeModuleIds"] == ["ts:src/math"]
+    assert all(method != "generate" for method, _params in worker.requests)
+
+    apply_typescript_migration(plan)
+
+    assert proven_previous_target_api_digests(tmp_path, (worker.module,))
+    sidecar = json.loads((tmp_path / "src/__generated__/math.jaunt.json").read_text())
+    assert sidecar["semanticEnvironmentDigest"] == "sha256:semantic-environment-v2"
+
+
+@pytest.mark.asyncio
+async def test_typescript_migrate_environment_drift_does_not_hide_contract_change(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    worker = _MigrationWorker(tmp_path)
+    _write_built_artifacts(tmp_path, worker)
+    worker.sidecar_value.update(
+        {
+            "semanticEnvironmentDigest": "sha256:semantic-environment-v2",
+            "structuralDigest": "sha256:changed-contract",
+            "apiDigest": "sha256:changed-api",
+            "symbols": [{"name": "double", "kind": "function", "async": True}],
+        }
+    )
+    worker.module.update(worker.sidecar_value)
+    worker.refresh_expected_sidecar()
+
+    plan = await plan_typescript_migration(tmp_path, config, worker_factory=lambda *_: worker)
+
+    assert plan.requires_rebuild == ("ts:src/math",)
+    assert all(action.classification != "free-recompose" for action in plan.actions)
+    assert all(method != "validateOverlay" for method, _params in worker.requests)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("relative", "kind"),
     [
@@ -433,7 +532,8 @@ async def test_typescript_migrate_requires_rebuild_for_incompatible_alpha_scheme
     assert plan.actions[0].classification == "model-rebuild"
     assert plan.diagnostics[0].code == "JAUNT_TS_MIGRATE_ALPHA_SCHEME_INCOMPATIBLE"
     assert plan.writes == ()
-    assert apply_typescript_migration(plan) == ()
+    with pytest.raises(JauntConfigError, match="requires model rebuilds"):
+        apply_typescript_migration(plan)
     assert sidecar_path.read_bytes() == before
 
 
@@ -615,3 +715,54 @@ def test_typescript_migrate_apply_obeys_dirty_guard_and_force(
     assert applied["applied_paths"] == [write.path]
     assert ".jaunt-vitest-cache/" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
     assert (tmp_path / write.path).read_text() == "export {};\n"
+
+
+def test_typescript_migrate_apply_refuses_partial_plan_with_model_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _config(tmp_path)
+    write = _Write("src/math.ts", "export {};\n", "facade", "ts:src/math")
+    diagnostic = TypeScriptMigrationDiagnostic(
+        code="JAUNT_TS_MIGRATE_REBUILD_REQUIRED",
+        message="contract changed",
+        classification="model-rebuild",
+        module_id="ts:src/other",
+    )
+    plan = TypeScriptMigrationPlan(
+        root=tmp_path,
+        actions=(
+            TypeScriptMigrationAction(
+                module_id="ts:src/math",
+                path=write.path,
+                kind=write.kind,
+                classification="deterministic-rewrite",
+                description="repair facade",
+            ),
+        ),
+        diagnostics=(diagnostic,),
+        expected_inputs={write.path: "<missing>"},
+        writes=(write,),
+        plan_digest="sha256:plan",
+    )
+
+    async def fake_plan(_root: Path, _config: JauntConfig) -> TypeScriptMigrationPlan:
+        return plan
+
+    monkeypatch.setattr("jaunt.typescript.migrate.plan_typescript_migration", fake_plan)
+    command = [
+        "migrate",
+        "--language",
+        "ts",
+        "--root",
+        str(tmp_path),
+        "--apply",
+        "--force",
+        "--json",
+    ]
+
+    assert main(command) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["requires_rebuild"] == ["ts:src/other"]
+    assert "requires model rebuilds" in payload["error"]
+    assert not (tmp_path / write.path).exists()

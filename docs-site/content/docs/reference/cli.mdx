@@ -226,6 +226,28 @@ carries legacy `raise RuntimeError("spec stub")` bodies, status hints
 `jaunt migrate`. Orphaned artifacts (a generated file whose spec is gone) list
 in their own section, reported under `"orphans"` in `--json`.
 
+When TypeScript status reports structural drift together with
+`semantic_environment_changes`, preview `jaunt migrate --language ts --json`
+before approving a build. The explicit migration can validate and recompose an
+unchanged implementation for free; normal `build` stays conservative.
+
+### `jaunt doctor`
+
+Run read-only environment and workspace checks. Doctor does not build, mutate
+artifacts, or call a model.
+
+```bash
+jaunt doctor --json
+```
+
+Alongside status and toolchain results, `environment.jaunt` reports the running
+version, resolved entrypoint, loaded CLI module, Python executable,
+distribution root or editable `direct_url`, nearest `uv.lock`, and its locked
+Jaunt requirement. A running/locked mismatch is a finding because the next
+`uv sync` may replace the active install. `distribution_matches_module` is true
+only when that metadata resolves to the loaded CLI module; otherwise doctor
+reports every candidate and tells you to trust the explicit `module` path.
+
 ### `jaunt clean`
 
 Remove target-owned generated artifacts under the configured roots. Python removes
@@ -575,6 +597,8 @@ analyzes the current project and proposes only deterministic artifact work:
   and sidecar;
 - re-stamp a compatible built implementation when only its tool fingerprint or
   deterministic artifacts are stale;
+- recompose an environment-only structural change after the saved candidate
+  passes current compiler, policy, API, and consumer validation;
 - report `model-rebuild` when the contract changed or a protocol, IR, or
   route is incompatible.
 
@@ -583,6 +607,12 @@ write set through the recoverable artifact transaction. An apply refuses a stale
 plan or dirty worktree unless `--force` is present. Preview-era private specs,
 facades, or loader layouts that do not map unambiguously to the current route are
 reported as `manual-intervention`; Jaunt does not rename or rewrite them.
+
+For provenance recovery, run the JSON dry plan first and verify that each
+affected action is `free-recompose` and `requires_rebuild` is empty. After the
+apply, run `jaunt test --language ts --no-build` and `jaunt check --language ts`.
+Migration records the validated API transition so compatible batteries can be
+reheadered without a model call. A failed overlay writes nothing.
 
 | Flag | Effect |
 |------|--------|

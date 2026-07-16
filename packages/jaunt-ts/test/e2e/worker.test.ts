@@ -24,7 +24,7 @@ test("symlink-installed JSONL worker handshakes and uses protocol-only stdout", 
   );
   const requests = [
     {
-      protocol: "jaunt-ts/1-draft.2",
+      protocol: "jaunt-ts/1-draft.3",
       id: "1",
       method: "initialize",
       params: {
@@ -41,13 +41,13 @@ test("symlink-installed JSONL worker handshakes and uses protocol-only stdout", 
       },
     },
     {
-      protocol: "jaunt-ts/1-draft.2",
+      protocol: "jaunt-ts/1-draft.3",
       id: "2",
       method: "analyzeWorkspace",
       params: {},
     },
     {
-      protocol: "jaunt-ts/1-draft.2",
+      protocol: "jaunt-ts/1-draft.3",
       id: "3",
       method: "projectContract",
       params: {
@@ -59,7 +59,7 @@ test("symlink-installed JSONL worker handshakes and uses protocol-only stdout", 
         fileName: "src/value.ts",
       },
     },
-    { protocol: "jaunt-ts/1-draft.2", id: "4", method: "shutdown", params: {} },
+    { protocol: "jaunt-ts/1-draft.3", id: "4", method: "shutdown", params: {} },
   ];
   child.stdin.end(
     `${requests.map((request) => JSON.stringify(request)).join("\n")}\n`,
@@ -139,7 +139,7 @@ export function slugify(title: string): string {
   child.stdin.end(
     `${[
       {
-        protocol: "jaunt-ts/1-draft.2",
+        protocol: "jaunt-ts/1-draft.3",
         id: "1",
         method: "initialize",
         params: {
@@ -156,13 +156,13 @@ export function slugify(title: string): string {
         },
       },
       {
-        protocol: "jaunt-ts/1-draft.2",
+        protocol: "jaunt-ts/1-draft.3",
         id: "2",
         method: "analyzeContracts",
         params: {},
       },
       {
-        protocol: "jaunt-ts/1-draft.2",
+        protocol: "jaunt-ts/1-draft.3",
         id: "3",
         method: "shutdown",
         params: {},

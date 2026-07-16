@@ -496,6 +496,7 @@ async def validate_overlay(
     recompose_module_ids: Sequence[str] = (),
     scoped_validation: bool = False,
     baseline_unselected: bool = False,
+    release_programs: bool = False,
 ) -> ValidateOverlayResult:
     wire = _stamp_params(analysis, candidates, module_ids).to_wire()
     if sync_module_ids:
@@ -508,6 +509,8 @@ async def validate_overlay(
         wire["scopeToModuleIds"] = True
     if baseline_unselected:
         wire["baselineUnselected"] = True
+    if release_programs:
+        wire["releasePrograms"] = True
     raw = await client.request(
         "validateOverlay",
         wire,

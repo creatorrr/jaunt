@@ -8,6 +8,32 @@ Python or TypeScript release.
 
 ### Fixes
 
+- Recover TypeScript implementations whose saved semantic-environment identity
+  changed without changing their authored contract. `jaunt migrate --language
+  ts` now validates the existing candidate against the current worker,
+  compiler, static policy, public API, and consumer closure, then reports a
+  model-free `free-recompose` action. Contract, symbol, option, dependency, and
+  failed-overlay changes still require a rebuild.
+- Scope semantic-environment compatibility to the resolved declaration closure
+  instead of hashing an entire package-manager lockfile. New sidecars retain
+  package- and workspace-scoped digests so status and migration JSON can
+  identify added, removed, and changed declaration records without embedding
+  hundreds of individual library files.
+- Preserve the validated old-to-new API reuse proof when migration recomposes an
+  implementation. A later `jaunt test --language ts --no-build` can reheader
+  compatible batteries without paid regeneration; the artifact transaction
+  remains atomic and green-gated.
+- Validate the complete multi-module recomposition set before committing its
+  atomic transaction. Migration also validates mutually imported unbuilt
+  placeholders together and refuses `--apply` while any module still requires
+  a rebuild.
+- Release worker compiler programs between migration modules and on thrown
+  validation failures, keeping broad model-free recovery bounded on large
+  workspaces.
+- Report the running Jaunt version, entrypoint, module, Python executable,
+  distribution/editable source, nearest `uv.lock`, and locked Jaunt requirement
+  from `jaunt doctor --json`. A running/locked version mismatch gets an explicit
+  warning before `uv sync` can replace the active checkout.
 - Validate every live TypeScript test candidate with the protected runner's
   project overlay and static-loader policy, not just cached responses. Compiler
   and `JAUNT_TS_TEST_DYNAMIC_LOADER` diagnostics now enter the remaining retry
@@ -56,11 +82,16 @@ Python or TypeScript release.
 
 - Refresh the package README, repository guide, Fumadocs quickstart, limits,
   upgrade notes, and release instructions for the stable npm channel.
+- Document the dry-run/apply/check recovery sequence for environment-only
+  TypeScript provenance drift in the CLI, upgrade guide, package README, and
+  both first-party plugins.
 - Have both first-party plugin guides request plain stderr progress for long
   JSON build and test commands, while preserving stdout for the final payload.
-- Keep the worker protocol explicitly versioned as `jaunt-ts/1-draft.2`; the
-  npm package is stable, but the wire protocol is not yet a public stability
-  promise.
+- Bump the matching worker protocol and contract IR to draft 3 for
+  per-environment records and explicit compiler-program release. Migration
+  recognizes the draft-2 to draft-3 artifact transition as model-free when the
+  saved contract passes current validation. The npm package is stable, but the
+  wire protocol is not yet a public stability promise.
 
 ## [1.7.8] - 2026-07-15
 

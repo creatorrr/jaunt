@@ -214,11 +214,27 @@ diagnostics:
           {"code": "JAUNT_TS_INVALID", "message": "artifact hash does not match", "severity": "error"}
         ]
       },
-      "orphans": []
+      "orphans": [],
+      "semantic_environment_changes": {
+        "src/slug/index": {
+          "before_digest": "old…",
+          "after_digest": "new…",
+          "before_records_available": true,
+          "after_records_available": true,
+          "added": [],
+          "removed": [],
+          "changed": ["package:example"]
+        }
+      }
     }
   }
 }
 ```
+
+`semantic_environment_changes` appears when the persisted and current
+environment identities differ. Mixed workspaces place it under `targets.ts`.
+Older sidecars may have only the aggregate digest; in that case the availability
+flags and record counts explain why no exact path diff is possible.
 
 ## check
 
@@ -415,13 +431,29 @@ input-bound digest and any work that cannot be completed mechanically:
       "description": "[deterministic-rewrite] repair API mirror: src/slug/__generated__/index.api.ts"
     }
   ],
-  "diagnostics": [],
+  "diagnostics": [
+    {
+      "code": "JAUNT_TS_MIGRATE_ENVIRONMENT_RECOMPOSE",
+      "classification": "free-recompose",
+      "severity": "info",
+      "module_id": "ts:src/slug/index",
+      "data": {
+        "before_digest": "old…",
+        "after_digest": "new…",
+        "before_records_available": false,
+        "after_records_available": true,
+        "after_record_count": 7
+      }
+    }
+  ],
   "requires_rebuild": []
 }
 ```
 
 Possible TypeScript classifications are `deterministic-rewrite`,
-`free-restamp`, `model-rebuild`, and `manual-intervention`. A dry-run with a
+`free-restamp`, `free-recompose`, `model-rebuild`, and `manual-intervention`.
+`free-recompose` means the existing implementation passed the current worker,
+compiler, static policy, API, and consumer validation without a model call. A dry-run with a
 manual item still has `ok: true` because the analysis succeeded; an attempted
 apply returns `ok: false`, writes nothing, and includes an `error`. Successful
 applies also include `applied_paths`.

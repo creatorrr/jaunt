@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
-PROTOCOL_VERSION = "jaunt-ts/1-draft.2"
+PROTOCOL_VERSION = "jaunt-ts/1-draft.3"
 
 
 class ProtocolValidationError(ValueError):
@@ -393,6 +393,7 @@ class ValidateOverlayParams:
     recompose_module_ids: tuple[str, ...] = ()
     scope_to_module_ids: bool = False
     baseline_unselected: bool = False
+    release_programs: bool = False
 
     def to_wire(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -413,6 +414,8 @@ class ValidateOverlayParams:
             result["scopeToModuleIds"] = True
         if self.baseline_unselected:
             result["baselineUnselected"] = True
+        if self.release_programs:
+            result["releasePrograms"] = True
         return result
 
 

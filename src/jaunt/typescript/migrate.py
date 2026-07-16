@@ -11,7 +11,7 @@ import stat
 import tempfile
 import tomllib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,10 @@ from jaunt.config import JauntConfig, load_config
 from jaunt.errors import JauntConfigError
 
 _ARTIFACT_MIGRATION_ID = "typescript-artifacts-v1"
+_COMPATIBLE_SCHEME_UPGRADES = {
+    ("contract-ir/1-draft.2", "contract-ir/1-draft.3"),
+    ("jaunt-ts/1-draft.2", "jaunt-ts/1-draft.3"),
+}
 _PRIVATE_SPEC_RE = re.compile(r"\.jaunt\.(?:ts|tsx)$")
 
 _BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -87,6 +91,7 @@ class TypeScriptMigrationDiagnostic:
     module_id: str | None = None
     path: str | None = None
     severity: str = "warning"
+    data: Mapping[str, Any] = dataclass_field(default_factory=dict)
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -96,6 +101,7 @@ class TypeScriptMigrationDiagnostic:
             "severity": self.severity,
             **({"module_id": self.module_id} if self.module_id else {}),
             **({"path": self.path} if self.path else {}),
+            **({"data": dict(self.data)} if self.data else {}),
         }
 
 
@@ -109,6 +115,13 @@ class TypeScriptMigrationPlan:
     expected_inputs: Mapping[str, str]
     writes: tuple[Any, ...]
     plan_digest: str
+    api_records_before: Mapping[str, Mapping[str, str]] = dataclass_field(
+        default_factory=dict, repr=False
+    )
+    reuse_modules: tuple[Mapping[str, Any], ...] = dataclass_field(
+        default_factory=tuple, repr=False
+    )
+    reused_module_ids: frozenset[str] = frozenset()
 
     @property
     def blocked(self) -> bool:
@@ -490,7 +503,10 @@ def _built_migration_issue(
             path=sidecar_path,
         )
     for field in ("schema",):
-        if actual.get(field) != expected.get(field):
+        before = actual.get(field)
+        after = expected.get(field)
+        compatible_upgrade = semantic_compatible and (before, after) in _COMPATIBLE_SCHEME_UPGRADES
+        if before != after and not compatible_upgrade:
             return TypeScriptMigrationDiagnostic(
                 code="JAUNT_TS_MIGRATE_ALPHA_SCHEME_INCOMPATIBLE",
                 message=(
@@ -503,7 +519,10 @@ def _built_migration_issue(
                 path=sidecar_path,
             )
     for field in ("protocol", "ir"):
-        if _scheme_value(actual, field) != _scheme_value(expected, field):
+        before = _scheme_value(actual, field)
+        after = _scheme_value(expected, field)
+        compatible_upgrade = semantic_compatible and (before, after) in _COMPATIBLE_SCHEME_UPGRADES
+        if before != after and not compatible_upgrade:
             return TypeScriptMigrationDiagnostic(
                 code="JAUNT_TS_MIGRATE_ALPHA_SCHEME_INCOMPATIBLE",
                 message=(
@@ -566,6 +585,45 @@ def _action_description(kind: str, path: str, classification: str) -> str:
     return f"[{classification}] {verb}: {path}"
 
 
+def _recomposition_components(
+    modules: Sequence[Mapping[str, Any]], module_ids: frozenset[str]
+) -> tuple[tuple[str, ...], ...]:
+    """Group recompositions that must share one compiler overlay."""
+
+    adjacency = {module_id: set() for module_id in module_ids}
+    for module in modules:
+        module_id = module.get("moduleId")
+        if not isinstance(module_id, str) or module_id not in module_ids:
+            continue
+        dependencies = module.get("dependencies", ())
+        if not isinstance(dependencies, Sequence) or isinstance(dependencies, (str, bytes)):
+            continue
+        for dependency in dependencies:
+            if not isinstance(dependency, str):
+                continue
+            dependency_id = dependency.split("#", 1)[0]
+            if dependency_id not in module_ids or dependency_id == module_id:
+                continue
+            adjacency[module_id].add(dependency_id)
+            adjacency[dependency_id].add(module_id)
+
+    components: list[tuple[str, ...]] = []
+    pending = set(module_ids)
+    while pending:
+        seed = min(pending)
+        component: set[str] = set()
+        frontier = [seed]
+        while frontier:
+            current = frontier.pop()
+            if current in component:
+                continue
+            component.add(current)
+            frontier.extend(sorted(adjacency[current] - component, reverse=True))
+        pending.difference_update(component)
+        components.append(tuple(sorted(component)))
+    return tuple(components)
+
+
 async def plan_typescript_migration(
     root: Path,
     config: JauntConfig,
@@ -587,6 +645,7 @@ async def plan_typescript_migration(
         validate_overlay,
         worker_session,
     )
+    from jaunt.typescript.reuse import capture_target_api_records
     from jaunt.typescript.status import classify_modules
     from jaunt.typescript.upgrade import compatible_semantic_modules
 
@@ -621,8 +680,39 @@ async def plan_typescript_migration(
     ):
         analysis = await analyze(client, initialized)
         modules = analysis.modules
-        semantic_compatible = compatible_semantic_modules(root, tuple(modules))
+        semantic_compatible = compatible_semantic_modules(
+            root, tuple(modules), allow_environment_drift=True
+        )
         status = classify_modules(root, modules)
+        api_records_before = capture_target_api_records(root, modules)
+        recomposed_module_ids: set[str] = set()
+        built_module_ids = frozenset(
+            _module_id(module)
+            for module in modules
+            if "// jaunt:state=built"
+            in (
+                _safe_path(root, _module_path(module, "implementationPath")).read_text(
+                    encoding="utf-8"
+                )
+                if _safe_path(root, _module_path(module, "implementationPath")).is_file()
+                else ""
+            )
+        )
+        unbuilt_module_ids = tuple(
+            _module_id(module) for module in modules if _module_id(module) not in built_module_ids
+        )
+        unbuilt_validation: Any | None = None
+        potential_recompose_module_ids = frozenset(
+            module_id
+            for module_id in built_module_ids
+            if status.stale.get(module_id) == "toolchain"
+            or (status.stale.get(module_id) == "structural" and module_id in semantic_compatible)
+        )
+        recompose_components = _recomposition_components(modules, potential_recompose_module_ids)
+        recompose_component_by_module = {
+            module_id: component for component in recompose_components for module_id in component
+        }
+        recomposition_validations: dict[tuple[str, ...], Any] = {}
         expected_inputs = {
             **_input_hashes(analysis.contracts),
             **_artifact_preconditions(root, modules),
@@ -670,28 +760,59 @@ async def plan_typescript_migration(
                     )
                 )
                 continue
-            built = "// jaunt:state=built" in (
-                _safe_path(root, _module_path(module, "implementationPath")).read_text(
-                    encoding="utf-8"
-                )
-                if _safe_path(root, _module_path(module, "implementationPath")).is_file()
-                else ""
+            built = module_id in built_module_ids
+            stale_reason = status.stale.get(module_id)
+            environment_recompose = stale_reason == "structural" and (
+                module_id in potential_recompose_module_ids
             )
-            recompose = built and status.stale.get(module_id) == "toolchain"
+            recompose = module_id in potential_recompose_module_ids
             restamp = (
                 built
                 and not recompose
                 and (module_id in status.stale or module_id in status.invalid)
             )
-            validated = await validate_overlay(
-                client,
-                analysis,
-                {},
-                (module_id,),
-                restamp_module_ids=(module_id,) if restamp else (),
-                recompose_module_ids=(module_id,) if recompose else (),
-                sync_module_ids=() if (restamp or recompose) else (module_id,),
-            )
+            if built:
+                if recompose:
+                    component = recompose_component_by_module[module_id]
+                    if component not in recomposition_validations:
+                        recomposition_validations[component] = await validate_overlay(
+                            client,
+                            analysis,
+                            {},
+                            component,
+                            recompose_module_ids=component,
+                            scoped_validation=True,
+                            baseline_unselected=True,
+                            release_programs=True,
+                        )
+                    validated = recomposition_validations[component]
+                else:
+                    validated = await validate_overlay(
+                        client,
+                        analysis,
+                        {},
+                        (module_id,),
+                        restamp_module_ids=(module_id,) if restamp else (),
+                        scoped_validation=True,
+                        baseline_unselected=True,
+                        release_programs=True,
+                    )
+            else:
+                # Validate all unbuilt placeholders together. Ordinary consumers
+                # can import several new facades, so validating one placeholder
+                # against an otherwise empty disk baseline produces false TS2307s.
+                if unbuilt_validation is None:
+                    unbuilt_validation = await validate_overlay(
+                        client,
+                        analysis,
+                        {},
+                        unbuilt_module_ids,
+                        sync_module_ids=unbuilt_module_ids,
+                        scoped_validation=True,
+                        baseline_unselected=True,
+                        release_programs=True,
+                    )
+                validated = unbuilt_validation
             if not validated.valid:
                 rendered = (
                     "; ".join(f"{item.code}: {item.message}" for item in validated.diagnostics)
@@ -719,7 +840,30 @@ async def plan_typescript_migration(
                     )
                 )
                 continue
+            if recompose:
+                recomposed_module_ids.add(module_id)
+            if environment_recompose:
+                changes = status.metadata.get("semantic_environment_changes", {})
+                detail = changes.get(module_id, {}) if isinstance(changes, Mapping) else {}
+                diagnostics.append(
+                    TypeScriptMigrationDiagnostic(
+                        code="JAUNT_TS_MIGRATE_ENVIRONMENT_RECOMPOSE",
+                        message=(
+                            f"{module_id} changed only at the persisted semantic-environment "
+                            "boundary; the existing implementation passed current worker, "
+                            "compiler, policy, API, and consumer validation and can be "
+                            "recomposed without a model call."
+                        ),
+                        classification="free-recompose",
+                        module_id=module_id,
+                        path=_module_path(module, "implementationPath"),
+                        severity="info",
+                        data=dict(detail) if isinstance(detail, Mapping) else {},
+                    )
+                )
             for write in _artifact_writes(validated):
+                if getattr(write, "module_id", None) != module_id:
+                    continue
                 current = _path_hash(_safe_path(root, write.path))
                 proposed = _sha256((write.content or "").encode("utf-8"))
                 if current == proposed:
@@ -745,6 +889,56 @@ async def plan_typescript_migration(
                 )
                 expected_inputs.setdefault(write.path, current or MISSING_INPUT)
 
+        source_changing_ids = frozenset(
+            str(getattr(write, "module_id", ""))
+            for write in writes
+            if getattr(write, "module_id", None) in recomposed_module_ids
+            and getattr(write, "kind", "")
+            in {"implementation", "api-mirror", "facade", "placeholder"}
+        )
+        if len(source_changing_ids) > 1 and not any(
+            source_changing_ids <= set(component) for component in recompose_components
+        ):
+            combined_ids = tuple(sorted(source_changing_ids))
+            combined = await validate_overlay(
+                client,
+                analysis,
+                {},
+                combined_ids,
+                recompose_module_ids=combined_ids,
+                scoped_validation=True,
+                baseline_unselected=True,
+                release_programs=True,
+            )
+            if not combined.valid:
+                rendered = (
+                    "; ".join(f"{item.code}: {item.message}" for item in combined.diagnostics)
+                    or "combined worker validation failed"
+                )
+                writes = [
+                    write
+                    for write in writes
+                    if getattr(write, "module_id", None) not in source_changing_ids
+                ]
+                actions = [
+                    action for action in actions if action.module_id not in source_changing_ids
+                ]
+                for module_id in sorted(source_changing_ids):
+                    diagnostics.append(
+                        TypeScriptMigrationDiagnostic(
+                            code="JAUNT_TS_MIGRATE_COMBINED_VALIDATION_FAILED",
+                            message=(
+                                f"{module_id} passed its dependency-group validation but the "
+                                f"complete source-changing overlay failed: {rendered}. "
+                                "No artifacts were changed."
+                            ),
+                            classification="manual-intervention",
+                            module_id=module_id,
+                            severity="error",
+                        )
+                    )
+                recomposed_module_ids.difference_update(source_changing_ids)
+
     actions.sort(key=lambda item: (item.module_id, item.path, item.classification))
     diagnostics.sort(key=lambda item: (item.module_id or "", item.path or "", item.code))
     writes.sort(
@@ -765,6 +959,7 @@ async def plan_typescript_migration(
                 }
                 for write in writes
             ],
+            "reused_module_ids": sorted(recomposed_module_ids),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -776,6 +971,9 @@ async def plan_typescript_migration(
         expected_inputs=dict(sorted(expected_inputs.items())),
         writes=tuple(writes),
         plan_digest=_sha256(payload.encode("utf-8")),
+        api_records_before=api_records_before,
+        reuse_modules=tuple(modules),
+        reused_module_ids=frozenset(recomposed_module_ids),
     )
 
 
@@ -784,10 +982,15 @@ def apply_typescript_migration(plan: TypeScriptMigrationPlan) -> tuple[str, ...]
 
     from jaunt.journal import JournalEvent, append_events
     from jaunt.typescript.builder import _Write, atomic_write_manifest
+    from jaunt.typescript.reuse import update_target_api_reuse_proof
 
     if plan.blocked:
         raise JauntConfigError(
             "TypeScript migration requires manual intervention; no artifacts were written"
+        )
+    if plan.requires_rebuild:
+        raise JauntConfigError(
+            "TypeScript migration still requires model rebuilds; no artifacts were written"
         )
     writes = tuple(write for write in plan.writes if isinstance(write, _Write))
     if len(writes) != len(plan.writes):
@@ -802,5 +1005,12 @@ def apply_typescript_migration(plan: TypeScriptMigrationPlan) -> tuple[str, ...]
     append_events(
         plan.root,
         [JournalEvent("migrate", write.module_id, write.path) for write in applied],
+    )
+    update_target_api_reuse_proof(
+        plan.root,
+        before=plan.api_records_before,
+        modules=plan.reuse_modules,
+        reused_module_ids=set(plan.reused_module_ids),
+        touched_module_ids=set(plan.reused_module_ids),
     )
     return tuple(write.path for write in applied)

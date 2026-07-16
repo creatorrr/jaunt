@@ -1,5 +1,5 @@
 {
-  "protocol": "jaunt-ts/1-draft.2",
+  "protocol": "jaunt-ts/1-draft.3",
   "id": "contract-1",
   "method": "projectContract",
   "deadlineMs": 30000,

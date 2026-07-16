@@ -68,6 +68,14 @@ the build afterward.
 - `sync` and `status` validate bounded dependency batches. Strict mirrors keep
   only imports used by the public declaration surface; never add consumer-side
   lint exceptions for Jaunt placeholders or mirrors.
+- When `status --json` reports structural drift plus
+  `semantic_environment_changes`, run `migrate --language ts --json` before a
+  paid build. Apply only when every affected module is `free-recompose` and
+  `requires_rebuild` is empty, then run `test --language ts --no-build` and
+  `check --language ts`. This explicit route validates the saved implementation
+  with the current compiler, policy, API, and consumer closure; it makes no
+  model calls. Never describe `model-rebuild` or `manual-intervention` as safe
+  to restamp.
 - A final compiler/conformance rejection is already retried inside the module's
   remaining attempt budget with the rejected source and exact diagnostics.
   Read `candidate_outcomes` in build JSON before proposing another paid run.
@@ -116,6 +124,7 @@ workspace.
 bash <absolute-plugin-root>/scripts/resolve-workspace.sh --run "$PWD" specs --json
 bash <absolute-plugin-root>/scripts/resolve-workspace.sh --run "$PWD" status --json --progress none
 bash <absolute-plugin-root>/scripts/resolve-workspace.sh --run "$PWD" sync --language ts
+bash <absolute-plugin-root>/scripts/resolve-workspace.sh --run "$PWD" migrate --language ts --json
 bash <absolute-plugin-root>/scripts/resolve-workspace.sh --run "$PWD" build --json --progress plain
 bash <absolute-plugin-root>/scripts/resolve-workspace.sh --run "$PWD" test --json --progress plain
 bash <absolute-plugin-root>/scripts/resolve-workspace.sh --run "$PWD" check

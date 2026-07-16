@@ -56,7 +56,9 @@ fingerprint, or artifact change.
   run the Python or TypeScript native gates.
 - `/jaunt:doctor`: authentication, Node/npm/worker/compiler readiness,
   workspace health, current stale or unbuilt state, diagnostics, orphans, and
-  duplicate Claude guards. It ignores nested Claude and Codex managed worktrees.
+  duplicate Claude guards. It ignores nested Claude and Codex managed worktrees
+  and reports the running Jaunt paths, editable source, and nearest lock
+  requirement.
 - `/jaunt:convert`: explicit-only Python or TypeScript conversion, with
   characterization tests before the first model call.
 - `first-build-reviewer`: read-only contract-silence review after a module's
@@ -70,6 +72,11 @@ conformance repair happens inside the advertised attempt budget, so the plugin
 does not recommend an unchanged paid rerun after that budget is exhausted.
 Deterministic worker heap failures point to `[target.ts].worker_heap_mb` and are
 not replayed.
+
+If status reports semantic-environment drift, the working skill runs the
+model-free migration preview before recommending a build. It applies only a
+plan made entirely of `free-recompose` actions with no `requires_rebuild`
+modules, then runs the no-build battery check and Jaunt freshness gate.
 
 After TypeScript test generation, the workflow reads `runner.batteries` for
 per-battery attempts, retry reasons, and terminal rejections. A failed combined
