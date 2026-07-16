@@ -1627,7 +1627,12 @@ def _mixed_python_preflight(command: str, args: argparse.Namespace) -> None:
     # preflight. Clean/reconcile parsers do not own every status-only flag, so
     # populate their neutral defaults instead of leaking argparse shape into
     # the status implementation.
-    for name, value in (("force", False), ("no_infer_deps", False), ("target", [])):
+    for name, value in (
+        ("force", False),
+        ("jobs", None),
+        ("no_infer_deps", False),
+        ("target", []),
+    ):
         if not hasattr(status_args, name):
             setattr(status_args, name, value)
     code, payload = _capture_python_json(cmd_status, status_args)

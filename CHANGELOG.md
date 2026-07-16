@@ -34,6 +34,9 @@ Python or TypeScript release.
   outcomes and validated cache entries in the same report.
 - Preserve TypeScript `candidate_outcomes` in mixed-workspace build JSON and in
   the language-local `targets.ts` partition.
+- Keep mixed-workspace `clean --orphans` Python preflight independent of the
+  clean parser's argument shape. Workspaces with Python specs no longer crash
+  because the status-only `jobs` default is absent.
 
 ### Packages
 
