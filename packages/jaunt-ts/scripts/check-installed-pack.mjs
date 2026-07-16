@@ -57,7 +57,7 @@ function run(command, args, cwd) {
 async function request(child, lines, id, method, params = {}) {
   child.stdin.write(
     `${JSON.stringify({
-      protocol: "jaunt-ts/1-draft.2",
+      protocol: "jaunt-ts/1-draft.3",
       id,
       method,
       params,
@@ -286,7 +286,7 @@ export function slugify(value: string): string { return jaunt.magic(); }
     clientVersion: "pack-smoke",
     toolVersion: "0.1.0-alpha.0",
   });
-  assert.equal(initialized.protocol, "jaunt-ts/1-draft.2");
+  assert.equal(initialized.protocol, "jaunt-ts/1-draft.3");
   assert.equal(
     initialized.workerVersion,
     installedPackage.version,

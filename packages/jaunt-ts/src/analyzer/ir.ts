@@ -143,8 +143,12 @@ export interface ContractModuleIR {
   readonly typeImports: readonly TypeImportIR[];
   /** Canonical imported/context documentation used by the semantic gate. */
   readonly contextDocs: TypeEnvironmentSnapshot["proseRecords"];
-  /** Persisted proof for model-free upgrades; excludes only Jaunt tool metadata. */
+  /** Persisted proof for model-free upgrades over the resolved declaration closure. */
   readonly semanticEnvironmentDigest?: string;
+  /** Per-input compatibility records used to explain semantic-environment drift. */
+  readonly semanticEnvironmentRecords?: TypeEnvironmentSnapshot["compatibilityRecords"];
+  /** Tool-only provenance retained for diagnostics and excluded from model context. */
+  readonly toolingProvenanceRecords?: TypeEnvironmentSnapshot["toolingRecords"];
   readonly dependencies: readonly string[];
   readonly structuralDigest: string;
   readonly proseDigest: string;
@@ -1342,6 +1346,8 @@ function buildContractIRInternal(
     contextDocs: typeEnvironment?.proseRecords ?? [],
     semanticEnvironmentDigest:
       typeEnvironment?.compatibilityDigest ?? digestCanonical([]),
+    semanticEnvironmentRecords: typeEnvironment?.compatibilityRecords ?? [],
+    toolingProvenanceRecords: typeEnvironment?.toolingRecords ?? [],
     dependencies,
     structuralDigest,
     proseDigest,

@@ -154,7 +154,7 @@ describe("protocol-v1 golden fixtures", () => {
     );
     expect(() =>
       parseRequest({ ...value, protocol: "jaunt-ts/1-draft.1" }),
-    ).toThrow(/Expected protocol jaunt-ts\/1-draft\.2/u);
+    ).toThrow(/Expected protocol jaunt-ts\/1-draft\.3/u);
   });
 
   test("every worker method's live success matches the shared protocol schema", async () => {
@@ -228,6 +228,8 @@ describe("protocol-v1 golden fixtures", () => {
         "typeImports",
         "contextDocs",
         "semanticEnvironmentDigest",
+        "semanticEnvironmentRecords",
+        "toolingProvenanceRecords",
         "dependencies",
         "structuralDigest",
         "proseDigest",

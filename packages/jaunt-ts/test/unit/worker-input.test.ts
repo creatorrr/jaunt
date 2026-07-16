@@ -11,7 +11,7 @@ test("worker bounds an oversized input line and continues at the next frame", as
   const running = runWorker(input, output, 256);
   input.end(
     `${"x".repeat(1_024)}\n${JSON.stringify({
-      protocol: "jaunt-ts/1-draft.2",
+      protocol: "jaunt-ts/1-draft.3",
       id: "shutdown",
       method: "shutdown",
       params: {},

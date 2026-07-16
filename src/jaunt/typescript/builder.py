@@ -496,6 +496,7 @@ async def validate_overlay(
     recompose_module_ids: Sequence[str] = (),
     scoped_validation: bool = False,
     baseline_unselected: bool = False,
+    release_programs: bool = False,
 ) -> ValidateOverlayResult:
     wire = _stamp_params(analysis, candidates, module_ids).to_wire()
     if sync_module_ids:
@@ -508,6 +509,8 @@ async def validate_overlay(
         wire["scopeToModuleIds"] = True
     if baseline_unselected:
         wire["baselineUnselected"] = True
+    if release_programs:
+        wire["releasePrograms"] = True
     raw = await client.request(
         "validateOverlay",
         wire,
@@ -689,6 +692,29 @@ def _module_id(module: Mapping[str, Any]) -> str:
     if not isinstance(value, str) or not value.startswith("ts:"):
         raise JauntConfigError("TypeScript worker returned a module without a stable ts: ID")
     return value
+
+
+def _model_contract(module: Mapping[str, Any]) -> dict[str, Any]:
+    """Return analyzer contract data without tool-only provenance records."""
+
+    contract = {
+        str(key): value for key, value in module.items() if key != "toolingProvenanceRecords"
+    }
+    sidecar = contract.get("sidecar")
+    if isinstance(sidecar, str):
+        try:
+            sidecar_payload = json.loads(sidecar)
+        except json.JSONDecodeError:
+            contract.pop("sidecar", None)
+        else:
+            if isinstance(sidecar_payload, dict):
+                sidecar_payload.pop("toolingProvenanceRecords", None)
+                contract["sidecar"] = (
+                    json.dumps(sidecar_payload, sort_keys=True, indent=2, default=str) + "\n"
+                )
+            else:
+                contract.pop("sidecar", None)
+    return contract
 
 
 def _module_path(module: Mapping[str, Any], key: str) -> str:
@@ -930,6 +956,30 @@ def _progress_finish(progress: object | None) -> None:
             pass
 
 
+def _progress_set_total(progress: object | None, total: int) -> None:
+    if progress is None:
+        return
+    set_total = getattr(progress, "set_total", None)
+    if callable(set_total):
+        try:
+            set_total(total)
+        except Exception:
+            pass
+
+
+def _progress_reset(progress: object | None, total: int = 0) -> None:
+    if progress is None:
+        return
+    reset = getattr(progress, "reset", None)
+    if callable(reset):
+        try:
+            reset(total)
+            return
+        except Exception:
+            pass
+    _progress_set_total(progress, total)
+
+
 def _clear_recovered_build_manifests(
     root: Path,
     modules: Sequence[Mapping[str, Any]],
@@ -1155,7 +1205,10 @@ def _build_request(
             f"- {instruction}" for instruction in build_instructions
         )
     context: dict[str, str] = {
-        "_context/contract.json": json.dumps(module, sort_keys=True, indent=2, default=str) + "\n",
+        "_context/contract.json": json.dumps(
+            _model_contract(module), sort_keys=True, indent=2, default=str
+        )
+        + "\n",
         "_context/spec.ts": str(module.get("specSource", "")),
         "_context/api.ts": str(module.get("apiSource", "")),
     }
@@ -1352,6 +1405,7 @@ async def run_build_in_session(
     cost_tracker: CostTracker | None = None,
     response_cache: ResponseCache | None = None,
     progress: object | None = None,
+    finish_progress: bool = True,
     jobs: int | None = None,
     max_attempts: int = _DEFAULT_ATTEMPTS,
     semantic_gate_enabled: bool | None = None,
@@ -1483,7 +1537,8 @@ async def run_build_in_session(
 
     if not selected and not refrozen:
         _clear_recovered_build_manifests(root, analysis.modules)
-        _progress_finish(progress)
+        if finish_progress:
+            _progress_finish(progress)
         return TargetBuildReport(
             language="ts",
             skipped=frozenset(skipped),
@@ -1498,6 +1553,7 @@ async def run_build_in_session(
         )
 
     actionable_ids = selected_ids | refrozen
+    _progress_set_total(progress, len(actionable_ids))
     actionable_modules = [by_id[module_id] for module_id in sorted(actionable_ids)]
     units = _build_units(analysis, actionable_modules)
     failed: dict[str, tuple[TargetDiagnostic, ...]] = {}
@@ -1505,6 +1561,8 @@ async def run_build_in_session(
     candidate_attempts: dict[str, int] = {}
     candidate_retries: dict[str, int] = {}
     candidate_retry_reasons: dict[str, list[str]] = {}
+    candidate_infrastructure_retries: dict[str, int] = {}
+    candidate_infrastructure_errors: dict[str, list[str]] = {}
     pending = set(selected_ids)
     semaphore = asyncio.Semaphore(effective_jobs)
     progress_advanced: set[str] = set()
@@ -1617,9 +1675,18 @@ async def run_build_in_session(
             candidate_retry_reasons[module_id] = [
                 error for attempt in result.attempt_errors for error in attempt
             ]
+            candidate_infrastructure_retries[module_id] = result.infrastructure_retries
+            candidate_infrastructure_errors[module_id] = list(result.infrastructure_errors)
             if result.source is None or result.errors:
                 failed[module_id] = tuple(
-                    TargetDiagnostic(code="JAUNT_TS_GENERATION", message=error)
+                    TargetDiagnostic(
+                        code=(
+                            "JAUNT_TS_GENERATION_INFRASTRUCTURE"
+                            if result.infrastructure_exhausted
+                            else "JAUNT_TS_GENERATION"
+                        ),
+                        message=error,
+                    )
                     for error in result.errors or ["The generator returned no TypeScript source"]
                 )
                 _progress_advance(progress, module_id, ok=False)
@@ -1765,6 +1832,13 @@ async def run_build_in_session(
                 candidate_attempts.get(repairable, 0) + repaired.attempts
             )
             candidate_retries[repairable] = candidate_retries.get(repairable, 0) + 1
+            candidate_infrastructure_retries[repairable] = (
+                candidate_infrastructure_retries.get(repairable, 0)
+                + repaired.infrastructure_retries
+            )
+            candidate_infrastructure_errors.setdefault(repairable, []).extend(
+                repaired.infrastructure_errors
+            )
             candidate_retry_reasons[repairable].extend(
                 error for attempt in repaired.attempt_errors for error in attempt
             )
@@ -1845,7 +1919,8 @@ async def run_build_in_session(
                 "recomposed" if module_id in recomposed else "refrozen",
             )
         _progress_advance(progress, module_id, ok=module_id not in failed)
-    _progress_finish(progress)
+    if finish_progress:
+        _progress_finish(progress)
 
     append_events(
         root,
@@ -1888,6 +1963,19 @@ async def run_build_in_session(
                         dict.fromkeys(candidate_retry_reasons.get(module_id, ()))
                     ),
                     "phase": "committed" if module_id in generated else "failed",
+                    **(
+                        {
+                            "infrastructure_retries": candidate_infrastructure_retries.get(
+                                module_id,
+                                0,
+                            ),
+                            "infrastructure_errors": tuple(
+                                candidate_infrastructure_errors.get(module_id, ())
+                            ),
+                        }
+                        if candidate_infrastructure_errors.get(module_id)
+                        else {}
+                    ),
                 }
                 for module_id in sorted(candidate_attempts)
             },
@@ -1911,6 +1999,7 @@ async def run_build(
     cost_tracker: CostTracker | None = None,
     response_cache: ResponseCache | None = None,
     progress: object | None = None,
+    finish_progress: bool = True,
     worker_factory: WorkerFactory | None = None,
     jobs: int | None = None,
     max_attempts: int = _DEFAULT_ATTEMPTS,
@@ -1991,6 +2080,7 @@ async def run_build(
             cost_tracker=cost_tracker,
             response_cache=response_cache,
             progress=progress,
+            finish_progress=finish_progress,
             jobs=jobs,
             max_attempts=max_attempts,
             semantic_gate_enabled=semantic_gate_enabled,

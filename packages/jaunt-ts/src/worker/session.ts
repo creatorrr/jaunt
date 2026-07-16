@@ -675,6 +675,7 @@ export class AnalyzerSession {
         "scoped-validation",
         "recompose",
         "baseline-unselected",
+        "release-programs",
       ],
     };
   }
@@ -813,6 +814,17 @@ export class AnalyzerSession {
     // the sum of both closures instead of the current closure alone.
     if (params.scopeToModuleIds && params.baselineUnselected)
       this.#overlayPrograms.clear();
+    try {
+      return this.validateOverlayTransaction(params, reportPhase);
+    } finally {
+      if (params.releasePrograms) this.#overlayPrograms.clear();
+    }
+  }
+
+  private validateOverlayTransaction(
+    params: ValidateOverlayParams,
+    reportPhase?: WorkerPhaseReporter,
+  ): ValidateOverlayResult {
     const startedAt = performance.now();
     const timed = <T>(phase: string, operation: () => T): T => {
       reportPhase?.({
@@ -1187,7 +1199,7 @@ export class AnalyzerSession {
       );
     }
     const valid = !diagnostics.some((item) => item.severity === "error");
-    return {
+    const result = {
       ...this.metadata(),
       valid,
       artifacts: valid ? artifacts : [],
@@ -1196,6 +1208,7 @@ export class AnalyzerSession {
       ),
       affectedProjects,
     };
+    return result;
   }
 
   private contractIr(
@@ -1363,6 +1376,7 @@ export function parseValidateOverlayParams(
       "recomposeModuleIds",
       "scopeToModuleIds",
       "baselineUnselected",
+      "releasePrograms",
     ]),
     "validateOverlay",
   );
@@ -1399,6 +1413,15 @@ export function parseValidateOverlayParams(
       "baselineUnselected must be a boolean",
     );
   }
+  if (
+    input.releasePrograms !== undefined &&
+    typeof input.releasePrograms !== "boolean"
+  ) {
+    throw new WorkerError(
+      "INVALID_REQUEST",
+      "releasePrograms must be a boolean",
+    );
+  }
   return {
     sessionId: stringField(input, "sessionId"),
     expectedEpoch: input.expectedEpoch as number,
@@ -1422,6 +1445,9 @@ export function parseValidateOverlayParams(
     ...(input.baselineUnselected === undefined
       ? {}
       : { baselineUnselected: input.baselineUnselected as boolean }),
+    ...(input.releasePrograms === undefined
+      ? {}
+      : { releasePrograms: input.releasePrograms as boolean }),
   };
 }
 

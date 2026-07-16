@@ -92,7 +92,7 @@ schemas/jaunt-ts/   # Shared draft protocol and contract-IR schemas/fixtures
 
 ## Key Concepts
 
-- **TypeScript target (alpha)**: Version-2 config can add `[target.ts]`. Private
+- **TypeScript target**: Version-2 config can add `[target.ts]`. Private
   `*.jaunt.ts[x]` specs are parsed without execution by the project-local
   `@usejaunt/ts` worker. `jaunt sync` renders deterministic API mirrors and typed
   unbuilt placeholders; model-backed builds write only after compiler-overlay and
@@ -343,7 +343,7 @@ jaunt migrate                 # Plan mechanical spec-source migrations (legacy s
 jaunt migrate --apply         # Write the planned changes (refuses on a dirty git tree unless --force)
 jaunt migrate --apply --allow-newly-governed  # Also rewrite legacy bodies that would newly govern an ungoverned symbol
 jaunt migrate --language ts   # Plan worker-validated mirror/facade/placeholder repairs or free re-stamps; no model call
-jaunt migrate --language ts --apply  # Atomically apply the TS plan; incompatible alpha artifacts request a rebuild
+jaunt migrate --language ts --apply  # Atomically apply the TS plan; incompatible artifacts request a rebuild
 
 jaunt status                  # Show which modules are stale, including upstream API fallout
 jaunt status --json           # Machine-readable status

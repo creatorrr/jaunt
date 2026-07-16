@@ -174,6 +174,45 @@ def test_doctor_treats_successful_not_authenticated_probe_as_failure(
                 del sys.modules[name]
 
 
+def test_doctor_reports_active_paths_and_locked_version(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from jaunt.registry import clear_registries
+
+    _make_spec_project(tmp_path, pkg="doctor_provenance_pkg")
+    (tmp_path / "uv.lock").write_text(
+        'version = 1\n\n[[package]]\nname = "jaunt"\nversion = "1.7.8"\n'
+        'source = { registry = "https://pypi.org/simple" }\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        jaunt.cli,
+        "_doctor_command_probe",
+        lambda argv: {"available": True, "detail": f"{argv[0]} test"},
+    )
+    monkeypatch.setattr(jaunt.cli, "__version__", "1.7.9")
+    before_modules = set(sys.modules)
+    orig_path = list(sys.path)
+    try:
+        rc = jaunt.cli.main(["doctor", "--json", "--root", str(tmp_path)])
+        payload = json.loads(capsys.readouterr().out)
+
+        assert rc == 0
+        provenance = payload["environment"]["jaunt"]
+        assert provenance["version"] == "1.7.9"
+        assert provenance["locked_requirement"] == "jaunt==1.7.8"
+        assert provenance["lock_path"] == str(tmp_path / "uv.lock")
+        assert Path(provenance["module"]).name == "cli.py"
+        assert "entrypoint" in provenance
+        assert any("uv sync may replace" in finding for finding in payload["findings"])
+    finally:
+        clear_registries()
+        sys.path[:] = orig_path
+        for name in list(sys.modules):
+            if name not in before_modules:
+                del sys.modules[name]
+
+
 def _write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")

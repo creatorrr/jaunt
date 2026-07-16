@@ -103,6 +103,12 @@ def build_payload(report: TargetBuildReport, *, command: str = "build") -> dict[
     if report.metadata:
         payload.update(dict(report.metadata))
         payload["recomposed"] = recomposed
+        candidate_outcomes = report.metadata.get("candidate_outcomes")
+        if isinstance(candidate_outcomes, Mapping):
+            target["candidate_outcomes"] = {
+                local_id(str(module_id)): value
+                for module_id, value in sorted(candidate_outcomes.items())
+            }
     return payload
 
 

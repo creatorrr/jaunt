@@ -40,8 +40,8 @@ provenance. Specs are private `*.jaunt.ts[x]` inputs; consumers import the
 ordinary facade. Run `jaunt sync` after adding a spec to render its API mirror
 and typed unbuilt placeholder without a model call. Never edit generated
 implementations, `*.api.ts`, `*.jaunt.json` sidecars, or generated test and
-contract batteries. During the alpha,
-`watch` follows TypeScript project/config/package inputs, and daemon jobs use
+contract batteries. `watch` follows TypeScript project/config/package inputs,
+and daemon jobs use
 qualified `ts:` artifact keys. Review a parked proposal's exact path allowlist
 before landing it; TypeScript jobs may change only the validated implementation,
 API mirror, sidecar, a newly created canonical facade, and Jaunt metadata.
@@ -66,9 +66,24 @@ the build afterward.
 - `sync` and `status` validate bounded dependency batches. Strict mirrors keep
   only imports used by the public declaration surface; never add consumer-side
   lint exceptions for Jaunt placeholders or mirrors.
+- When `status --json` reports structural drift plus
+  `semantic_environment_changes`, run `migrate --language ts --json` before a
+  paid build. Apply only when every affected module is `free-recompose` and
+  `requires_rebuild` is empty, then run `test --language ts --no-build` and
+  `check --language ts`. This explicit route validates the saved implementation
+  with the current compiler, policy, API, and consumer closure; it makes no
+  model calls. Never describe `model-rebuild` or `manual-intervention` as safe
+  to restamp.
 - A final compiler/conformance rejection is already retried inside the module's
   remaining attempt budget with the rejected source and exact diagnostics.
   Read `candidate_outcomes` in build JSON before proposing another paid run.
+- TypeScript test candidates use the same rule. Read `vitest.batteries` in test
+  JSON for per-battery attempts, retry reasons, and terminal rejection reasons
+  (`targets.ts.vitest.batteries` in a mixed workspace). A nonzero run may still
+  commit the compatible subset named by `vitest.partial_landing` (or
+  `targets.ts.vitest.partial_landing`); never patch or discard those generated
+  batteries.
+  For a rejected cache hit, confirm `cache_evicted` before rerunning unchanged.
 - Treat `JAUNT_TS_CANDIDATE_SELF_IMPORT`,
   `JAUNT_TS_GENERATED_PRIVATE_IMPORT`, and optionality/nullability TS2322
   failures as spec/prompt or generator issues. Never patch the generated
@@ -107,7 +122,9 @@ workspace.
 bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" --run "$PWD" specs --json
 bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" --run "$PWD" status --json --progress none
 bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" --run "$PWD" sync --language ts
-bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" --run "$PWD" build --json
+bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" --run "$PWD" migrate --language ts --json
+bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" --run "$PWD" build --json --progress plain
+bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" --run "$PWD" test --json --progress plain
 bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" --run "$PWD" check
 bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" --run "$PWD" clean --orphans
 bash "${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}/scripts/resolve-workspace.sh" --run "$PWD" watch --test

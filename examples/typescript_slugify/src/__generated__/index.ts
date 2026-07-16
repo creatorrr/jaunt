@@ -1,9 +1,9 @@
 // ⛓️ jaunt:generated — generated; do not edit.
 // jaunt:state=built
 // jaunt:module=ts:src/index
-// jaunt:structural=sha256:cd6e82f7c269ff5b6a06c9518b0b378a0ab273f8f0371997d82bbfce267cf6e4
+// jaunt:structural=sha256:959e05d8e494836699867b37e6069c706c11ccf539bcfbcd9968425e8fc5ce4a
 // jaunt:prose=sha256:8f49f368d319309f41bb7828c151e17873012884a4a4f6241f0c8a555cac0e43
-// jaunt:api=sha256:b219688ca20499ed7326f4e83ce6a5da06900819e838794651e66cd20714b1b0
+// jaunt:api=sha256:eb1e4f514bb8cc3dcfce2e18347005cc8e89ea740c4983d4d6e93c0231a39c60
 import type * as __JauntApi from "./index.api.js";
 const __jaunt_impl_slugify = (title: string): string =>
   title

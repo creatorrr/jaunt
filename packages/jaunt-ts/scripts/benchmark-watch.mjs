@@ -31,7 +31,7 @@ const require = createRequire(import.meta.url);
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_GRAPH_FILES = 1000;
 const REQUEST_TIMEOUT_MS = 30_000;
-const PROTOCOL = "jaunt-ts/1-draft.2";
+const PROTOCOL = "jaunt-ts/1-draft.3";
 
 function parsePositiveInteger(raw, option) {
   const value = Number.parseInt(raw, 10);

@@ -2,7 +2,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
-import { stablePathId } from "../../src/analyzer/type_environment.js";
+import {
+  groupSemanticEnvironmentRecords,
+  stablePathId,
+} from "../../src/analyzer/type_environment.js";
 
 const roots: string[] = [];
 
@@ -35,5 +38,23 @@ describe("type-environment path identity", () => {
     expect(stablePathId(root, join(root, "packages", "core", "index.ts"))).toBe(
       "workspace:packages/core/index.ts",
     );
+  });
+
+  test("groups declaration files by package and deduplicates unresolved imports", () => {
+    expect(
+      groupSemanticEnvironmentRecords([
+        { id: "package:@types/node/assert.d.ts", digest: "sha256:assert" },
+        { id: "package:@types/node/fs.d.ts", digest: "sha256:fs" },
+        { id: "package:vite/client.d.ts", digest: "sha256:vite" },
+        { id: "unresolved-module:node:fs", digest: "sha256:missing" },
+        { id: "unresolved-module:node:fs", digest: "sha256:missing" },
+        { id: "workspace:src/types.ts", digest: "sha256:workspace" },
+      ]).map((record) => record.id),
+    ).toEqual([
+      "package:@types/node",
+      "package:vite",
+      "unresolved-modules",
+      "workspace:src/types.ts",
+    ]);
   });
 });

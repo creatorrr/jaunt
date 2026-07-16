@@ -41,7 +41,7 @@ marked deterministic derive without a model or API key.
 | `contract_async/`      | Async functions and fixtures under contract mode                            |
 | `contract_properties/` | Hypothesis `properties` case kind: conservation, round-trips, bounds — and a bug examples can't catch (deterministic) |
 
-### TypeScript alpha
+### TypeScript
 
 | Directory                        | Description |
 | -------------------------------- | ----------- |

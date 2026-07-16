@@ -35,7 +35,7 @@ from jaunt.typescript.builder import (
     validate_overlay,
     worker_session,
 )
-from jaunt.typescript.upgrade import compatible_semantic_modules
+from jaunt.typescript.upgrade import compatible_semantic_modules, semantic_environment_diff
 
 _PLACEHOLDER_MARKERS = ("state=unbuilt", 'state = "unbuilt"', "state: unbuilt")
 _STATUS_BATCH_SIZE = 4
@@ -140,6 +140,7 @@ def classify_modules(
     invalid: dict[str, tuple[TargetDiagnostic, ...]] = {}
     digests: dict[str, str] = {}
     compatible_toolchain_modules = compatible_semantic_modules(root, tuple(modules))
+    environment_changes: dict[str, Mapping[str, Any]] = {}
 
     for module in modules:
         module_id = _module_id(module)
@@ -251,6 +252,10 @@ def classify_modules(
         actual_api_digest = _digest(actual_sidecar, "apiDigest")
         expected_environment = _digest(expected_sidecar, "semanticEnvironmentDigest")
         actual_environment = _digest(actual_sidecar, "semanticEnvironmentDigest")
+        environment_change = semantic_environment_diff(actual_sidecar, expected_sidecar)
+        record_change = any(environment_change.get(key) for key in ("added", "removed", "changed"))
+        if expected_environment != actual_environment or record_change:
+            environment_changes[module_id] = environment_change
         stale_reason: str | None = None
         compatible_toolchain_drift = module_id in compatible_toolchain_modules
         if expected_environment is not None and actual_environment is None:
@@ -327,6 +332,9 @@ def classify_modules(
                 path=manifest.relative_to(root).as_posix(),
             )
         )
+    status_metadata = dict(metadata or {})
+    if environment_changes:
+        status_metadata["semantic_environment_changes"] = dict(sorted(environment_changes.items()))
     return TargetStatus(
         language="ts",
         root=root,
@@ -337,7 +345,7 @@ def classify_modules(
         digests=digests,
         orphans=tuple(orphans),
         diagnostics=tuple(transaction_diagnostics),
-        metadata=dict(metadata or {}),
+        metadata=status_metadata,
     )
 
 
@@ -521,6 +529,7 @@ async def run_status(
                     sync_module_ids=batch,
                     scoped_validation=True,
                     baseline_unselected=True,
+                    release_programs=True,
                 )
                 for raw in validated.diagnostics:
                     diagnostic = _diagnostic(raw)

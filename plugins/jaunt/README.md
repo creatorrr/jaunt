@@ -5,7 +5,7 @@ expects: edit specs, preview stale or unbuilt work, build through the CLI, and
 review generated output without hand-editing machine-owned files.
 
 It is CLI-backed. There is no MCP server, app connector, or public-directory
-submission in version 1.1.4.
+submission in version 1.1.6.
 
 ## Install
 
@@ -43,7 +43,8 @@ trust the bundled SessionStart and PreToolUse hooks.
 - `$jaunt:build`: preview likely model work, build, report actual cost, and
   run the deterministic gates.
 - `$jaunt:doctor`: read-only environment, authentication, freshness, orphan,
-  and Codex-hook checks. Nested Claude and Codex managed worktrees are skipped.
+  Codex-hook, and active Jaunt/lock provenance checks. Nested Claude and Codex
+  managed worktrees are skipped.
 - `$jaunt:convert`: explicit-only conversion of handwritten Python or
   TypeScript to Jaunt.
 - `$jaunt:first-build-reviewer`: explicit or delegated read-only review for
@@ -53,17 +54,29 @@ The build workflow delegates a first build to one read-only explorer subagent
 when that capability is available. It runs the same checklist in the main
 thread otherwise.
 
+For TypeScript provenance drift, the working skill previews
+`jaunt migrate --language ts --json` before any paid build. A plan containing
+only `free-recompose` actions with an empty `requires_rebuild` list can be
+applied and checked without model calls.
+
 For TypeScript builds, the workflow reads `candidate_outcomes` before suggesting
 another run. Jaunt already spends the remaining attempt budget on final
 conformance repair; a failed module should not be rerun blindly. Worker heap
 failures point to `[target.ts].worker_heap_mb` and are never replayed
 automatically.
 
+For TypeScript test generation, inspect `vitest.batteries` before another paid
+run (`targets.ts.vitest.batteries` in a mixed workspace). It records per-battery
+retries and final rejection reasons. A failed combined overlay can still commit
+the compatible subset listed under `vitest.partial_landing` or
+`targets.ts.vitest.partial_landing`.
+
 ## Hooks
 
-The SessionStart hook reads the session `cwd` and injects a bounded freshness
-summary for each discovered Jaunt workspace, including TypeScript unbuilt,
-invalid, and diagnostic counts. Doctor also checks Node, npm, the project-local
+The SessionStart hook reads the session `cwd` and reports the nearest active
+Jaunt workspace, including TypeScript unbuilt, invalid, and diagnostic counts.
+If no parent `jaunt.toml` exists, it falls back to bounded descendant discovery.
+Doctor also checks Node, npm, the project-local
 `@usejaunt/ts` worker, and the supported compiler range without a model call.
 
 The PreToolUse hook inspects `apply_patch` paths. It denies direct edits to

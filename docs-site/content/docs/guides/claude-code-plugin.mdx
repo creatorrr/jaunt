@@ -3,7 +3,7 @@ title: Claude Code Plugin
 description: "Install Jaunt's Claude Code plugin for workspace-aware build skills, freshness context, and generated-file approval guards."
 ---
 
-Version 1.2.4 supports version-2 TypeScript targets in the Claude Code
+Version 1.2.6 supports version-2 TypeScript targets in the Claude Code
 plugin. It packages the same CLI-backed Python and TypeScript authoring loop as
 the Codex plugin, while keeping Claude's approval-style PreToolUse decision and
 first-build reviewer agent.
@@ -56,7 +56,9 @@ fingerprint, or artifact change.
   run the Python or TypeScript native gates.
 - `/jaunt:doctor`: authentication, Node/npm/worker/compiler readiness,
   workspace health, current stale or unbuilt state, diagnostics, orphans, and
-  duplicate Claude guards. It ignores nested Claude and Codex managed worktrees.
+  duplicate Claude guards. It ignores nested Claude and Codex managed worktrees
+  and reports the running Jaunt paths, editable source, and nearest lock
+  requirement.
 - `/jaunt:convert`: explicit-only Python or TypeScript conversion, with
   characterization tests before the first model call.
 - `first-build-reviewer`: read-only contract-silence review after a module's
@@ -71,6 +73,16 @@ does not recommend an unchanged paid rerun after that budget is exhausted.
 Deterministic worker heap failures point to `[target.ts].worker_heap_mb` and are
 not replayed.
 
+If status reports semantic-environment drift, the working skill runs the
+model-free migration preview before recommending a build. It applies only a
+plan made entirely of `free-recompose` actions with no `requires_rebuild`
+modules, then runs the no-build battery check and Jaunt freshness gate.
+
+After TypeScript test generation, the workflow reads `runner.batteries` for
+per-battery attempts, retry reasons, and terminal rejections. A failed combined
+overlay may still commit the compatible subset listed by
+`runner.partial_landing`; the plugin preserves those generated files.
+
 ## Freshness reasons
 
 | reason | next action |
@@ -82,10 +94,11 @@ not replayed.
 
 ## Hooks
 
-The shared SessionStart script reads payload `cwd`. It uses the nearest parent
-`jaunt.toml` when one owns the session; otherwise it scans below the session
-directory without crossing the active Git worktree. Nested Git repositories and
-`.claude/worktrees` or `.codex/worktrees` checkouts are excluded. Each discovered
+The shared SessionStart script reads payload `cwd`. When a parent `jaunt.toml`
+owns the session, it reports only that active workspace and does not recurse
+into nested examples. Otherwise it scans below the session directory without
+crossing the active Git worktree. Nested Git repositories and
+`.claude/worktrees` or `.codex/worktrees` checkouts are excluded. Each selected
 workspace contributes a bounded freshness/orphan summary, including TypeScript
 unbuilt, invalid, and diagnostic counts.
 Because `jaunt status` imports discovered spec modules, enable SessionStart only

@@ -1,9 +1,9 @@
 {
-  "apiDigest": "sha256:32a8a54964add08cb75485626d10d4674780d020153513ba827be19047468026",
+  "apiDigest": "sha256:ed58497e8bd0247bf71b42ce39e8f04cecf5466c66a086e157648450b75f7ae8",
   "apiMirrorPath": "src/tokens/__generated__/index.api.ts",
   "artifactHashes": {
-    "src/tokens/__generated__/index.api.ts": "sha256:4b84ae549dbe174207df481c9335a0cb7feba23fb6b8d11798eb6c8254bd6345",
-    "src/tokens/__generated__/index.ts": "sha256:486413c1df21e4a7c3de997676647cac0a504a2edae11f524085a8e83cd26f80",
+    "src/tokens/__generated__/index.api.ts": "sha256:d3b0fa448746116b9cfe9ed45359f2acd4d4b187d1b75bce4f41449ce68070c2",
+    "src/tokens/__generated__/index.ts": "sha256:b5bb2890c77c49239086f86e3a799f3d4d80e46b9421a60738ac69ae064f39b5",
     "src/tokens/index.ts": "sha256:a557dfccc4f76ec1b590833f5dd02d7ccb5c8d3d8aa40b85d6a5149d6f22a5c6"
   },
   "contextDocs": [
@@ -142,12 +142,12 @@
   "facadePath": "src/tokens/index.ts",
   "fingerprint": {
     "compilerOptionsHash": "sha256:b9ea51a23f8558ef7cc2b60bf6e4f944cebcd9735dfe803ab6d8dcab9a13a61a",
-    "generationFingerprint": "sha256:8b2d7bdeeebffa132d4a079d6752848805032ca8f1eda1dfe10adf458a41f283",
-    "ir": "contract-ir/1-draft.2",
-    "protocol": "jaunt-ts/1-draft.2",
-    "toolVersion": "1.7.8",
+    "generationFingerprint": "sha256:c224278278145a0cba16c9a95ea9e588de5bb3cdf87bf12ff0ac54caaab217ef",
+    "ir": "contract-ir/1-draft.3",
+    "protocol": "jaunt-ts/1-draft.3",
+    "toolVersion": "1.7.9",
     "typescriptVersion": "5.9.3",
-    "workerVersion": "0.1.0-alpha.7"
+    "workerVersion": "0.1.0"
   },
   "implementationPath": "src/tokens/__generated__/index.ts",
   "moduleId": "ts:src/tokens/index",
@@ -155,11 +155,29 @@
   "packageOwner": ".",
   "project": "tsconfig.json",
   "proseDigest": "sha256:616b419f63caf931be25251541e08d964b503d846e7f0c727d8dbc6468bcce3c",
-  "schema": "contract-ir/1-draft.2",
-  "semanticEnvironmentDigest": "sha256:7554f74599dafd10d1665daf1b9cc2b2f081527c3ab6ade6056bf179a282fe8f",
+  "schema": "contract-ir/1-draft.3",
+  "semanticEnvironmentDigest": "sha256:b5b1c66dd2a8869ef079102612ecae9cc80ea3436ffac6e3bc8e3afd03649859",
+  "semanticEnvironmentRecords": [
+    {
+      "digest": "sha256:e01d8d54c49a73ea803c40a22c4525fec123fa6d5e670bd162724e42f5a5a1eb",
+      "id": "environment:package.json"
+    },
+    {
+      "digest": "sha256:3d594e2095230c42693309fb52241477f3a12170bc6523cf8a955acd24b00445",
+      "id": "package:@types/node"
+    },
+    {
+      "digest": "sha256:bc9664c7a166750b58bce8a0809c421d0add3d94b1ae61992e2fc249fc60a7db",
+      "id": "package:undici-types"
+    },
+    {
+      "digest": "sha256:15f27bc6ac559266db9890537c63551ec209820307125fbb09409267c30de3c7",
+      "id": "unresolved-modules"
+    }
+  ],
   "specPath": "src/tokens/index.jaunt.ts",
   "state": "built",
-  "structuralDigest": "sha256:da8f2f71e61e0cfb119681ddde73df08246611b8b3467286cbd3da5264e6af74",
+  "structuralDigest": "sha256:d1c386d5904408d9aaeea55dd80fc9e5793a33bb5c0d8d054d4c899a1526091b",
   "symbols": [
     {
       "docs": "Create an HS256-signed JWT.\n\nStructure: base64url(header) + \".\" + base64url(payload) + \".\" +\nbase64url(signature), where base64url omits \"=\" padding.\n- Header is exactly `{\"alg\":\"HS256\",\"typ\":\"JWT\"}`.\n- Payload is `{\"sub\":userId,\"iat\":now,\"exp\":now+ttl}` with integer unix\n  seconds; default ttl is 3600 seconds, and a non-integer `ttlSeconds` is\n  truncated to whole seconds so iat/exp stay integers.\n- Sign with HMAC-SHA256 using `secret` as the key.\n- Allow any ttl, including negative, so tests can mint expired tokens.\n\n@throws RangeError if `userId` is empty.",

@@ -7,11 +7,10 @@ This tutorial builds the starter `greet` function that `jaunt init` creates. The
 private spec is parsed without being executed. Application code imports an ordinary
 TypeScript facade, and the emitted JavaScript has no Jaunt runtime dependency.
 
-<Callout type="warning">
-  The TypeScript target is alpha. It requires Jaunt 1.7 or later and installs its
-  project-local worker separately as `@usejaunt/ts@next`. Alpha artifact formats can
-  change; the [upgrade notes](/docs/reference/upgrading#170) explain the deterministic
-  migration path.
+<Callout type="info">
+  The stable npm line requires Jaunt 1.7.9 or later and installs its project-local
+  worker as `@usejaunt/ts@^0.1.0`. The worker protocol remains a versioned internal
+  draft; preview upgrades with `jaunt migrate --language ts` before applying them.
 </Callout>
 
 ## 1. Check the prerequisites
@@ -34,7 +33,7 @@ cd jaunt-ts-quickstart
 uvx jaunt init --language ts
 npm init -y
 npm pkg set type=module
-npm install -D @usejaunt/ts@next 'typescript@^5.9' vitest fast-check @types/node
+npm install -D @usejaunt/ts@^0.1.0 'typescript@^5.9' vitest fast-check @types/node
 codex login
 ```
 
@@ -164,13 +163,12 @@ artifacts. Keep `.jaunt/` ignored.
 In a mixed Python and TypeScript workspace, use version 2 with both `[target.py]` and
 `[target.ts]`. Plain commands cover both targets; `--language py` and `--language ts`
 narrow a run. See the [TypeScript target guide](/docs/guides/typescript#mixed-python-and-typescript-workspaces)
-for project references, pnpm workspaces, classes, contract mode, and current alpha
-limits.
+for project references, pnpm workspaces, classes, contract mode, and current limits.
 
 ## Where to next
 
 <Cards>
-  <Card title="TypeScript target guide" href="/docs/guides/typescript" description="The full authoring model, workspace routing, classes, contracts, security boundary, and alpha limits." />
+  <Card title="TypeScript target guide" href="/docs/guides/typescript" description="The full authoring model, workspace routing, classes, contracts, security boundary, and current limits." />
   <Card title="Configuration" href="/docs/reference/config#version-2-language-targets" description="Every target.ts setting and the version-2 Python/TypeScript layout." />
   <Card title="Gate it in CI" href="/docs/guides/ci#typescript-targets" description="Install the project-local toolchain and run the model-free check in GitHub Actions." />
   <Card title="Runnable examples" href="https://github.com/creatorrr/jaunt/tree/main/examples/typescript_slugify" description="Start with slugify, then move to project references or the full JWT example." />

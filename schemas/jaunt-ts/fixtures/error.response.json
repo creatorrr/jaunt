@@ -1,5 +1,5 @@
 {
-  "protocol": "jaunt-ts/1-draft.2",
+  "protocol": "jaunt-ts/1-draft.3",
   "id": "bad-1",
   "ok": false,
   "error": {

@@ -1,3 +1,4 @@
 .jaunt/
 packages/*/dist/
 *.tsbuildinfo
+.jaunt-vitest-cache/

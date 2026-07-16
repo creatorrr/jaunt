@@ -19,9 +19,10 @@ on:
         description: npm candidate dist-tag
         type: choice
         options:
+          - latest
           - next
           - beta
-        default: next
+        default: latest
 
 concurrency:
   group: coordinated-release

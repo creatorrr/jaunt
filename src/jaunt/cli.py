@@ -953,6 +953,13 @@ def _cmd_typescript_build_loaded(args: argparse.Namespace, root: Path, cfg: Jaun
     from jaunt.typescript.cli_bridge import build_payload
 
     json_mode = _is_json_mode(args)
+    progress = _make_progress(
+        args,
+        label="ts build",
+        total=0,
+        json_mode=json_mode,
+        allow_empty=True,
+    )
     try:
         report = asyncio.run(
             run_build(
@@ -970,6 +977,7 @@ def _cmd_typescript_build_loaded(args: argparse.Namespace, root: Path, cfg: Jaun
                 and not bool(getattr(args, "no_repo_map", False)),
                 auto_skills_enabled=_typescript_auto_skills_enabled(args, cfg),
                 builtin_skill_names=_typescript_builtin_skill_names(args, cfg),
+                progress=progress,
             )
         )
         payload = build_payload(report)
@@ -986,6 +994,13 @@ def _cmd_typescript_test_loaded(args: argparse.Namespace, root: Path, cfg: Jaunt
     from jaunt.typescript.tester import run_test
 
     json_mode = _is_json_mode(args)
+    progress = _make_progress(
+        args,
+        label="ts test",
+        total=0,
+        json_mode=json_mode,
+        allow_empty=True,
+    )
     try:
         report = asyncio.run(
             run_test(
@@ -1006,6 +1021,7 @@ def _cmd_typescript_test_loaded(args: argparse.Namespace, root: Path, cfg: Jaunt
                 and not bool(getattr(args, "no_repo_map", False)),
                 auto_skills_enabled=_typescript_auto_skills_enabled(args, cfg),
                 builtin_skill_names=_typescript_builtin_skill_names(args, cfg),
+                progress=progress,
             )
         )
         payload = test_payload(report)
@@ -1611,7 +1627,12 @@ def _mixed_python_preflight(command: str, args: argparse.Namespace) -> None:
     # preflight. Clean/reconcile parsers do not own every status-only flag, so
     # populate their neutral defaults instead of leaking argparse shape into
     # the status implementation.
-    for name, value in (("force", False), ("no_infer_deps", False), ("target", [])):
+    for name, value in (
+        ("force", False),
+        ("jobs", None),
+        ("no_infer_deps", False),
+        ("target", []),
+    ):
         if not hasattr(status_args, name):
             setattr(status_args, name, value)
     code, payload = _capture_python_json(cmd_status, status_args)
@@ -1810,6 +1831,9 @@ def _mixed_build_payload(
         payload["work_items"] = {
             f"py:{module}": value for module, value in sorted(py_work_items.items())
         }
+    ts_candidate_outcomes = typescript_payload.get("candidate_outcomes")
+    if isinstance(ts_candidate_outcomes, dict):
+        payload["candidate_outcomes"] = ts_candidate_outcomes
     if command == "test":
         if "pytest" in python_payload:
             payload["pytest"] = python_payload["pytest"]
@@ -1859,6 +1883,13 @@ def _cmd_mixed_build(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> 
         return _mixed_preflight_error("build", error, args)
     _prepare_mixed_typescript_skills(mixed_args, root, cfg)
     _prepare_mixed_repo_map(mixed_args, root, cfg)
+    typescript_progress = _make_progress(
+        args,
+        label="ts build",
+        total=0,
+        json_mode=_is_json_mode(args),
+        allow_empty=True,
+    )
 
     async def run_both() -> tuple[object, object]:
         try:
@@ -1889,6 +1920,7 @@ def _cmd_mixed_build(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> 
                             repo_map_block_override=mixed_args._mixed_repo_map_block,
                             auto_skills_enabled=False,
                             builtin_skill_names=mixed_args._mixed_builtin_skill_names,
+                            progress=typescript_progress,
                         ),
                     ),
                     return_exceptions=True,
@@ -1997,6 +2029,13 @@ def _cmd_mixed_test(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> i
         return _mixed_preflight_error("test", error, args)
     _prepare_mixed_typescript_skills(mixed_args, root, cfg)
     _prepare_mixed_repo_map(mixed_args, root, cfg)
+    typescript_progress = _make_progress(
+        args,
+        label="ts test",
+        total=0,
+        json_mode=_is_json_mode(args),
+        allow_empty=True,
+    )
 
     async def run_both() -> tuple[object, object]:
         try:
@@ -2030,6 +2069,7 @@ def _cmd_mixed_test(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> i
                             repo_map_block_override=mixed_args._mixed_repo_map_block,
                             auto_skills_enabled=False,
                             builtin_skill_names=mixed_args._mixed_builtin_skill_names,
+                            progress=typescript_progress,
                         ),
                     ),
                     return_exceptions=True,
@@ -2872,9 +2912,14 @@ def _resolve_progress_mode(
 
 
 def _make_progress(
-    args: argparse.Namespace, *, label: str, total: int, json_mode: bool
+    args: argparse.Namespace,
+    *,
+    label: str,
+    total: int,
+    json_mode: bool,
+    allow_empty: bool = False,
 ) -> ProgressBar | None:
-    if total == 0:
+    if total == 0 and not allow_empty:
         return None
     mode = _resolve_progress_mode(args, json_mode=json_mode)
     if mode is None:
@@ -4079,11 +4124,11 @@ def _cmd_init_typescript(*, root: Path, toml_path: Path, json_mode: bool) -> int
 
     if (root / "pnpm-lock.yaml").exists():
         install_command = (
-            "pnpm add -D @usejaunt/ts@next 'typescript@^5.9' vitest fast-check @types/node"
+            "pnpm add -D @usejaunt/ts@^0.1.0 'typescript@^5.9' vitest fast-check @types/node"
         )
     else:
         install_command = (
-            "npm install -D @usejaunt/ts@next 'typescript@^5.9' vitest fast-check @types/node"
+            "npm install -D @usejaunt/ts@^0.1.0 'typescript@^5.9' vitest fast-check @types/node"
         )
     if json_mode:
         _emit_json(
@@ -4922,6 +4967,15 @@ def _cmd_typescript_migrate_loaded(args: argparse.Namespace, root: Path, cfg: Ja
                 for diagnostic in plan.diagnostics:
                     if diagnostic.classification == "manual-intervention":
                         _eprint(f"- {diagnostic.code}: {diagnostic.message}")
+            return EXIT_CONFIG_OR_DISCOVERY
+        if plan.requires_rebuild:
+            error = "TypeScript migration still requires model rebuilds; no artifacts were written"
+            if json_mode:
+                _emit_json({**payload, "ok": False, "applied": False, "error": error})
+            else:
+                _eprint(f"error: {error}")
+                for module_id in plan.requires_rebuild:
+                    _eprint(f"- {module_id}")
             return EXIT_CONFIG_OR_DISCOVERY
         if plan.writes and not bool(getattr(args, "force", False)) and _is_dirty_worktree(root):
             error = "dirty working tree"
@@ -6232,6 +6286,119 @@ def _doctor_command_probe(argv: list[str]) -> dict[str, object]:
     }
 
 
+def _doctor_jaunt_provenance(args: argparse.Namespace) -> dict[str, object]:
+    """Report the running Jaunt paths and nearest uv lock without mutating either."""
+
+    import importlib.metadata
+    import tomllib
+    from urllib.parse import unquote, urlparse
+
+    start = Path(str(getattr(args, "root", None) or Path.cwd())).resolve()
+    lock_path = next(
+        (
+            candidate
+            for directory in (start, *start.parents)
+            if (candidate := directory / "uv.lock").is_file()
+        ),
+        None,
+    )
+    locked_version: str | None = None
+    locked_source: object = None
+    if lock_path is not None:
+        try:
+            lock = tomllib.loads(lock_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+            lock = {}
+        packages = lock.get("package", []) if isinstance(lock, dict) else []
+        if isinstance(packages, list):
+            match = next(
+                (
+                    item
+                    for item in packages
+                    if isinstance(item, dict) and item.get("name") == "jaunt"
+                ),
+                None,
+            )
+            if isinstance(match, dict):
+                version = match.get("version")
+                locked_version = str(version) if isinstance(version, str) else None
+                locked_source = match.get("source")
+
+    module_path = Path(__file__).resolve()
+    distribution_candidates: list[dict[str, object]] = []
+    try:
+        distributions = tuple(importlib.metadata.distributions(name="jaunt"))
+    except (OSError, ValueError):
+        distributions = ()
+    for distribution in distributions:
+        try:
+            distribution_root = str(Path(str(distribution.locate_file(""))).resolve())
+            direct_url: object = None
+            direct_url_source = distribution.read_text("direct_url.json")
+            if direct_url_source:
+                direct_url = json.loads(direct_url_source)
+            owned_paths = {
+                Path(str(distribution.locate_file(relative))).resolve()
+                for relative in ("jaunt/cli.py", "src/jaunt/cli.py")
+            }
+            if isinstance(direct_url, dict) and isinstance(direct_url.get("url"), str):
+                parsed = urlparse(str(direct_url["url"]))
+                if parsed.scheme == "file":
+                    source_root = Path(unquote(parsed.path)).resolve()
+                    owned_paths.update(
+                        {
+                            (source_root / "jaunt/cli.py").resolve(),
+                            (source_root / "src/jaunt/cli.py").resolve(),
+                        }
+                    )
+            distribution_candidates.append(
+                {
+                    "distribution_root": distribution_root,
+                    **({"direct_url": direct_url} if direct_url is not None else {}),
+                    "matches_loaded_module": module_path in owned_paths,
+                }
+            )
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+    matching_distributions = [
+        candidate
+        for candidate in distribution_candidates
+        if candidate.get("matches_loaded_module") is True
+    ]
+    selected_distribution = (
+        matching_distributions[0]
+        if len(matching_distributions) == 1
+        else (distribution_candidates[0] if len(distribution_candidates) == 1 else {})
+    )
+    distribution_matches_module = len(matching_distributions) == 1
+
+    entrypoint = Path(sys.argv[0]).expanduser()
+    resolved_entrypoint = str(entrypoint.resolve()) if entrypoint.exists() else str(entrypoint)
+    locked_requirement = f"jaunt=={locked_version}" if locked_version else None
+    detail = (
+        f"jaunt {__version__}; entrypoint={resolved_entrypoint}; "
+        f"module={module_path}; lock={locked_requirement or 'not found'}"
+    )
+    return {
+        "available": True,
+        "detail": detail,
+        "version": __version__,
+        "entrypoint": resolved_entrypoint,
+        "module": str(module_path),
+        "python": str(Path(sys.executable).resolve()),
+        "distribution_matches_module": distribution_matches_module,
+        **selected_distribution,
+        **(
+            {"distribution_candidates": distribution_candidates}
+            if not distribution_matches_module and distribution_candidates
+            else {}
+        ),
+        **({"lock_path": str(lock_path)} if lock_path is not None else {}),
+        **({"locked_requirement": locked_requirement} if locked_requirement else {}),
+        **({"locked_source": locked_source} if locked_source is not None else {}),
+    }
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Run native, read-only health checks without building or calling a model."""
     import contextlib
@@ -6267,8 +6434,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "not authenticated" in auth_detail or "not logged in" in auth_detail
     ):
         codex_auth = {**codex_auth, "available": False}
+    jaunt_provenance = _doctor_jaunt_provenance(args)
     environment: dict[str, object] = {
-        "jaunt": {"available": True, "detail": f"jaunt {__version__}"},
+        "jaunt": jaunt_provenance,
         "python": {"available": True, "detail": sys.version.split()[0]},
         "ruff": _doctor_command_probe(["ruff", "--version"]),
         "codex": codex,
@@ -6281,6 +6449,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         findings.append("Codex CLI unavailable; builds require codex")
     elif not bool(codex_auth.get("available")):
         findings.append("Codex is not authenticated; run codex login")
+    locked_requirement = jaunt_provenance.get("locked_requirement")
+    if isinstance(locked_requirement, str) and locked_requirement != f"jaunt=={__version__}":
+        findings.append(
+            f"Running jaunt=={__version__} differs from {locked_requirement} in uv.lock; "
+            "uv sync may replace the active install"
+        )
+    if jaunt_provenance.get("distribution_matches_module") is not True:
+        findings.append(
+            "Jaunt distribution metadata does not uniquely own the loaded CLI module; "
+            "use environment.jaunt.module as the active source"
+        )
     stale = status_payload.get("stale", []) if isinstance(status_payload, dict) else []
     if isinstance(stale, list) and stale:
         findings.append(f"{len(stale)} stale Jaunt module(s)")

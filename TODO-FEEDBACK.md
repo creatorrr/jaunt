@@ -88,3 +88,46 @@
 - [x] Document TypeScript candidate outcomes, retry accounting, and the 1.7.6 upgrade path.
 - [x] Refresh both plugin skill bundles with conformance, OOM, and hermetic-generation guidance.
 - [x] Cut Jaunt 1.7.6 / @usejaunt/ts alpha.5, run full validation, and obtain an independent Codex review.
+
+## Cycle 12 — 2026-07-15
+
+- [x] Preserve valid battery responses after a late peer failure and generate them with configured concurrency.
+- [x] Validate every live and cached battery candidate with exact compiler and static-loader diagnostics.
+- [x] Preserve a green compatible subset, evict rejected cache entries, and report each retry outcome.
+- [x] Keep bounded typecheck diagnostics through the derived-output redaction boundary.
+
+## Cycle 13 — 2026-07-15
+
+- [x] Preserve mixed-workspace TypeScript `candidate_outcomes`.
+- [x] Retry transient model-capacity failures without consuming the candidate budget or dropping partial reports.
+- [x] Wire plain stderr progress through TypeScript build, test, and nested implementation-repair phases.
+- [x] Update both first-party plugin guides to request live progress alongside final JSON.
+- [x] Confirm live module and battery-tier progress in the adopter's narrowed recovery run.
+- [x] Fix mixed `clean --orphans` preflight when the clean parser has no `jobs` attribute.
+- [x] Record the narrowed retry: four batteries staged, four exhausted, with native coverage retained.
+- [x] Evict an identifiable cached battery when the final protected Vitest run rejects its behavior.
+- [x] Confirm the retained 30-tier landing: 28 cache hits, two fresh responses, zero model calls, and a green combined run.
+- [ ] Add a default-compatible per-intent tier selection after the stable release.
+- [ ] Trial bounded imported-type context and the stronger loader prompt in 1.7.10 / 0.1.1 without invalidating the stable recovery cache.
+- [x] Keep the first stable release to the non-cache-breaking operational fixes.
+
+## Cycle 14 — 2026-07-15
+
+- [x] Scope TypeScript compatibility to resolved declaration inputs instead of whole lockfiles.
+- [x] Persist per-record semantic-environment digests and report exact drift when available.
+- [x] Add an explicit worker-validated, model-free migration path for environment-only drift.
+- [x] Validate the complete recomposition set atomically and block apply while rebuilds remain.
+- [x] Carry API reuse proof through migration so compatible batteries can reheader for free.
+- [x] Release compiler programs on success and failure and prove the 19-module adopter plan stays bounded.
+- [x] Bump the strict worker/IR draft for the new fields while keeping draft-2 artifacts migratable.
+- [x] Report active Jaunt executable, module, editable source, and nearest lock provenance in doctor JSON.
+- [x] Confirm the adopter dry run plans 19 `free-recompose` modules, zero rebuilds, and zero model calls.
+- [ ] Add compact `jaunt test` JSON or a report-file mode in 1.7.10 / 0.1.1.
+- [x] Add regressions and run the full repository validation suite.
+
+## Cycle 15 — 2026-07-16
+
+- [x] Classify `package.json#packageManager` as tooling provenance, not semantic contract.
+- [x] Report the exact package-manager provenance record in status and migration JSON.
+- [x] Cover package-manager-only drift with analyzer and model-free migration regressions.
+- [x] Limit SessionStart freshness to the nearest active workspace instead of nested examples.

@@ -18,6 +18,8 @@ The report is read-only and makes no model calls. It checks:
 
 - Codex availability and authentication.
 - Jaunt, Python, Node, and npm availability.
+- The running Jaunt entrypoint, loaded module, Python executable, editable or
+  installed distribution source, nearest `uv.lock`, and locked Jaunt version.
 - Every workspace's stale reasons, orphans, and TypeScript unbuilt, invalid,
   and diagnostic state, excluding nested Claude and Codex managed worktrees.
 - Project-local `@usejaunt/ts` worker and supported TypeScript compiler setup.
@@ -26,6 +28,11 @@ The report is read-only and makes no model calls. It checks:
 Use `clean --orphans` through the workspace runner for orphaned artifacts. For stale modules,
 follow the build skill's taxonomy and preview likely model calls before
 building. Run `codex login` when authentication is missing.
+Treat a running/locked Jaunt mismatch as actionable: a later `uv sync` can
+replace the active source checkout. Do not infer the active implementation from
+the lockfile alone; use `environment.jaunt.module` and `direct_url`. If
+`distribution_matches_module` is false, report the metadata ambiguity instead
+of attributing the loaded module to the first installed distribution.
 
 Keep TypeScript resource failures distinct. A request timeout points to
 `worker_timeout_seconds`; a startup timeout points to

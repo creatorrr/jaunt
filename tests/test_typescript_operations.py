@@ -16,10 +16,14 @@ from typing import Any, cast
 
 import pytest
 
-from jaunt.cache import ResponseCache
+from jaunt.cache import CacheEntry, ResponseCache
 from jaunt.config import JauntConfig, load_config
 from jaunt.cost import CostTracker
-from jaunt.errors import JauntConfigError, JauntGenerationError
+from jaunt.errors import (
+    JauntConfigError,
+    JauntGenerationError,
+    JauntTransientGenerationError,
+)
 from jaunt.generate.base import (
     GenerationRequest,
     GeneratorBackend,
@@ -64,6 +68,7 @@ from jaunt.typescript.design import (
     _validate_declaration,
     run_design,
 )
+from jaunt.typescript.migrate import apply_typescript_migration, plan_typescript_migration
 from jaunt.typescript.protocol import (
     InitializeParams,
     InitializeResult,
@@ -267,7 +272,7 @@ class FakeWorker:
         )
         self.module = {
             **semantic_contract,
-            "schema": "contract-ir/1-draft.2",
+            "schema": "contract-ir/1-draft.3",
             "sidecarPath": "src/__generated__/math.jaunt.json",
             "structuralDigest": "sha256:structural",
             "proseDigest": "sha256:prose",
@@ -620,7 +625,7 @@ def _scheduled_module(
     stem = f"{owner}/src/{name}" if owner != "." else f"src/{name}"
     module_id = f"ts:{stem}"
     return {
-        "schema": "contract-ir/1-draft.2",
+        "schema": "contract-ir/1-draft.3",
         "moduleId": module_id,
         "specPath": f"{stem}.jaunt.ts",
         "facadePath": f"{stem}.ts",
@@ -3145,6 +3150,56 @@ def test_derived_runner_results_are_allowlist_redacted() -> None:
     assert result["tests"] == [{"caseId": "0123456789abcdef", "category": "assertion"}]
 
 
+def test_typecheck_redaction_preserves_only_bounded_diagnostic_messages() -> None:
+    diagnostic = {
+        "code": "TS2532",
+        "severity": "error",
+        "path": "tests/__generated__/brief.derived.test.ts",
+        "line": 12,
+        "column": 9,
+        "message": "Object is possibly 'undefined'.",
+    }
+    protected = _redact_runner_result(
+        {
+            "ok": False,
+            "mode": "typecheck",
+            "diagnostics": [diagnostic],
+            "tests": [],
+            "captured": {"stdout": "", "stderr": ""},
+        },
+        enabled=True,
+    )
+
+    assert protected["diagnostics"] == [diagnostic]
+
+    long_message = "X" * 2_500
+    bounded = _redact_runner_result(
+        {
+            "ok": False,
+            "mode": "typecheck",
+            "diagnostics": [{**diagnostic, "message": long_message}],
+            "tests": [],
+            "captured": {"stdout": "", "stderr": ""},
+        },
+        enabled=True,
+    )
+    message = bounded["diagnostics"][0]["message"]
+    assert len(message) == 2_000
+    assert message.endswith("[jaunt: diagnostic truncated]")
+
+    run_mode = _redact_runner_result(
+        {
+            "ok": False,
+            "mode": "run",
+            "diagnostics": [diagnostic],
+            "tests": [],
+            "captured": {"stdout": "", "stderr": ""},
+        },
+        enabled=True,
+    )
+    assert "message" not in run_mode["diagnostics"][0]
+
+
 @pytest.mark.parametrize(
     ("forbidden_key", "forbidden_value"),
     [
@@ -3480,6 +3535,64 @@ def test_example_tier_requires_complete_generated_provenance() -> None:
 
 
 @pytest.mark.asyncio
+async def test_protected_typecheck_runner_returns_bounded_exact_diagnostics(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    package_root = tmp_path / "tooling"
+    runner = package_root / "dist/test/runner.js"
+    runner.parent.mkdir(parents=True)
+    runner.write_text(
+        "import json, sys\n"
+        "payload = json.loads(sys.stdin.read())\n"
+        "message = (\"Object is possibly 'undefined'.\" "
+        "if payload['redactDerived'] is False else 'Protected TypeScript diagnostic')\n"
+        "result = {\n"
+        "  'ok': False,\n"
+        "  'mode': 'typecheck',\n"
+        "  'diagnostics': [{\n"
+        "    'code': 'TS2532', 'severity': 'error', 'message': message,\n"
+        "    'path': 'tests/generated.derived.test.ts', 'line': 4, 'column': 7,\n"
+        "  }],\n"
+        "  'tests': [],\n"
+        "  'captured': {'stdout': '', 'stderr': ''},\n"
+        "}\n"
+        "sys.stdout.write(json.dumps(result))\n",
+        encoding="utf-8",
+    )
+    compiler = tmp_path / "typescript.js"
+    compiler.write_text("", encoding="utf-8")
+    client = SimpleNamespace(
+        installation=SimpleNamespace(
+            node=sys.executable,
+            package_root=package_root,
+            compiler_module_path=compiler,
+        )
+    )
+
+    protected = await _run_test_runner(
+        client,
+        tmp_path,
+        config,
+        files=("tests/generated.derived.test.ts",),
+        redact_derived=True,
+        typecheck_only=True,
+        timeout=2,
+    )
+
+    assert protected["diagnostics"] == [
+        {
+            "code": "TS2532",
+            "severity": "error",
+            "message": "Object is possibly 'undefined'.",
+            "path": "tests/generated.derived.test.ts",
+            "line": 4,
+            "column": 7,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["malformed", "crash", "valid-incomplete"])
 async def test_runner_protocol_failure_never_exposes_child_output(
     tmp_path: Path,
@@ -3603,6 +3716,23 @@ def test_generated_example_test_has_provenance_tier_and_runtime_facade_import(
                 "facadePath": "src/tokens/index.ts",
                 "moduleId": "ts:src/tokens/index",
                 "symbols": [{"name": "token", "kind": "function"}],
+                "toolingProvenanceRecords": [
+                    {
+                        "id": "tooling:packageManager:package.json",
+                        "digest": "sha256:pnpm",
+                    }
+                ],
+                "sidecar": json.dumps(
+                    {
+                        "moduleId": "ts:src/tokens/index",
+                        "toolingProvenanceRecords": [
+                            {
+                                "id": "tooling:packageManager:package.json",
+                                "digest": "sha256:pnpm",
+                            }
+                        ],
+                    }
+                ),
                 "specSource": "export function token(): string;",
                 "apiSource": "export declare function token(): string;",
             }
@@ -3612,6 +3742,7 @@ def test_generated_example_test_has_provenance_tier_and_runtime_facade_import(
     assert request.target_path == "tests/__generated__/tokens.example.test.ts"
     assert "../../src/tokens/index.js" in request.prompt
     assert "src/tokens/index.ts" not in request.prompt
+    assert "toolingProvenanceRecords" not in request.context_files["_context/contract.json"]
 
     rendered = _with_test_header(
         'import { token } from "../../src/tokens/index.js";\n',
@@ -3805,6 +3936,7 @@ async def test_test_command_forwards_build_policy(
 ) -> None:
     config = _config(tmp_path)
     captured: dict[str, Any] = {}
+    progress = object()
 
     async def failed_build(*_args: Any, **kwargs: Any) -> TargetBuildReport:
         captured.update(kwargs)
@@ -3817,12 +3949,15 @@ async def test_test_command_forwards_build_policy(
         build_instructions=("Keep it small.",),
         semantic_gate_enabled=False,
         force=True,
+        progress=progress,
     )
 
     assert report.exit_code == 3
     assert captured["build_instructions"] == ("Keep it small.",)
     assert captured["semantic_gate_enabled"] is False
     assert captured["force"] is True
+    assert captured["progress"] is progress
+    assert captured["finish_progress"] is False
 
 
 @pytest.mark.asyncio
@@ -3908,15 +4043,21 @@ async def test_failed_vitest_run_repairs_once_with_protected_feedback_and_reruns
 
     monkeypatch.setattr("jaunt.typescript.tester.run_build", fake_build)
     monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", batches)
+    progress = object()
     report = await run_test(
         tmp_path,
         config,
         generator=FakeGenerator(),
         worker_factory=lambda *_: worker,
+        progress=progress,
     )
 
     assert report.exit_code == 0
     assert len(build_calls) == 2
+    assert build_calls[0]["progress"] is progress
+    assert build_calls[1]["progress"] is progress
+    assert build_calls[0]["finish_progress"] is False
+    assert build_calls[1]["finish_progress"] is False
     assert build_calls[1]["force"] is True
     assert build_calls[1]["max_attempts"] == 1
     assert build_calls[1]["target_ids"] == ("ts:src/math",)
@@ -4104,6 +4245,22 @@ async def test_test_generation_honors_jobs_and_reports_each_staged_tier(
                 self.active -= 1
 
     generator = ConcurrentGenerator()
+    progress_totals: list[int] = []
+    progress_phases: list[tuple[str, str, str]] = []
+
+    class RecordingProgress:
+        def set_total(self, total: int) -> None:
+            progress_totals.append(total)
+
+        def phase(self, item: str, stage: str, detail: str = "") -> None:
+            progress_phases.append((item, stage, detail))
+
+        def advance(self, _item: str, *, ok: bool) -> None:
+            assert ok is True
+
+        def finish(self) -> None:
+            return None
+
     monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
     report = await run_test(
         tmp_path,
@@ -4111,24 +4268,183 @@ async def test_test_generation_honors_jobs_and_reports_each_staged_tier(
         no_build=True,
         jobs=2,
         generator=generator,
+        progress=RecordingProgress(),
         worker_factory=lambda *_: worker,
     )
 
     assert report.exit_code == 0
     assert generator.max_active == 2
+    assert progress_totals == [2]
+    assert {(item, detail) for item, stage, detail in progress_phases if stage == "generating"} == {
+        ("tests/__generated__/math.derived.test.ts", "derived"),
+        ("tests/__generated__/math.example.test.ts", "example"),
+    }
     assert report.runner["jobs"] == 2
     assert report.runner["batteries"] == [
         {
             "path": "tests/__generated__/math.derived.test.ts",
             "tier": "derived",
             "state": "staged",
+            "attempts": 1,
+            "retry_count": 0,
+            "retry_reasons": (),
         },
         {
             "path": "tests/__generated__/math.example.test.ts",
             "tier": "example",
             "state": "staged",
+            "attempts": 1,
+            "retry_count": 0,
+            "retry_reasons": (),
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_test_generation_retries_live_candidate_overlay_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+
+    async def candidate_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        overlays = kwargs.get("overlays", {})
+        if kwargs.get("typecheck_only") and any(
+            "__DYNAMIC_LOADER__" in source for source in overlays.values()
+        ):
+            return _redact_runner_result(
+                {
+                    "ok": False,
+                    "mode": "typecheck",
+                    "diagnostics": [
+                        {
+                            "code": "JAUNT_TS_TEST_DYNAMIC_LOADER",
+                            "message": "generated tests must use static imports",
+                            "severity": "error",
+                            "path": next(iter(overlays)),
+                        }
+                    ],
+                    "tests": [],
+                    "captured": {"stdout": "", "stderr": ""},
+                },
+                enabled=True,
+            )
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "diagnostics": [],
+            "tests": [],
+        }
+
+    class RepairingGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls: dict[str, int] = {}
+            self.feedback: dict[str, list[list[str] | None]] = {}
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            tier = str(request.cache_payload["tier"])
+            self.calls[tier] = self.calls.get(tier, 0) + 1
+            raw_feedback = kwargs.get("extra_error_context")
+            self.feedback.setdefault(tier, []).append(
+                raw_feedback if isinstance(raw_feedback, list) else None
+            )
+            if self.calls[tier] == 1:
+                return (
+                    "const __DYNAMIC_LOADER__ = true;\n",
+                    TokenUsage(20, 10, "fake-ts", "fake"),
+                    (),
+                )
+            return await super().generate_request(request, **kwargs)
+
+    generator = RepairingGenerator()
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", candidate_batches)
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        jobs=2,
+        max_attempts=2,
+        generator=generator,
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 0
+    assert generator.calls == {"derived": 2, "example": 2}
+    reason_by_tier = {item["tier"]: item["retry_reasons"] for item in report.runner["batteries"]}
+    for tier in ("derived", "example"):
+        path = f"tests/__generated__/math.{tier}.test.ts"
+        reason = f"JAUNT_TS_TEST_DYNAMIC_LOADER: generated tests must use static imports ({path})"
+        assert generator.feedback[tier][1] == [f"previous output errors: {reason}"]
+        assert reason_by_tier[tier] == (reason,)
+    assert {item["attempts"] for item in report.runner["batteries"]} == {2}
+    assert {item["retry_count"] for item in report.runner["batteries"]} == {1}
+
+
+@pytest.mark.asyncio
+async def test_capacity_exhaustion_reports_failed_battery_and_preserves_completed_peer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    cache = ResponseCache(tmp_path / ".test-response-cache")
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "diagnostics": [],
+            "tests": [],
+        }
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    class CapacityGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls: dict[str, int] = {}
+
+        async def generate_request(
+            self,
+            request: GenerationRequest,
+            **kwargs: Any,
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            tier = str(request.cache_payload["tier"])
+            self.calls[tier] = self.calls.get(tier, 0) + 1
+            if tier == "derived":
+                raise JauntTransientGenerationError(
+                    "codex exec failed: error event: Selected model is at capacity. "
+                    "Please try a different model."
+                )
+            return await super().generate_request(request, **kwargs)
+
+    generator = CapacityGenerator()
+    monkeypatch.setattr("jaunt.generate.base.asyncio.sleep", no_sleep)
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        jobs=2,
+        generator=generator,
+        response_cache=cache,
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 3
+    assert generator.calls == {"derived": 3, "example": 1}
+    assert report.failed["tests/math.jaunt-test.ts#derived"][0].code == (
+        "JAUNT_TS_TEST_INFRASTRUCTURE"
+    )
+    outcomes = {item["tier"]: item for item in report.runner["batteries"]}
+    assert outcomes["derived"]["state"] == "infrastructure-failed"
+    assert outcomes["derived"]["attempts"] == 0
+    assert outcomes["derived"]["infrastructure_retries"] == 2
+    assert len(outcomes["derived"]["infrastructure_errors"]) == 3
+    assert outcomes["example"]["state"] == "staged"
+    assert cache.info()["entries"] == 1
 
 
 @pytest.mark.asyncio
@@ -4202,17 +4518,45 @@ async def test_late_generation_failure_resumes_from_staged_battery(
 
 
 @pytest.mark.asyncio
-async def test_cross_battery_preflight_rejects_candidates_before_cache_staging(
+async def test_cross_battery_preflight_lands_only_the_compatible_subset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = _config(tmp_path)
     worker = _TestSpecWorker(tmp_path)
     cache = ResponseCache(tmp_path / ".test-response-cache")
 
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "diagnostics": [],
+            "tests": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        jobs=2,
+        generator=FakeGenerator(),
+        response_cache=cache,
+        worker_factory=lambda *_: worker,
+    )
+    assert seeded.exit_code == 0
+    assert cache.info()["entries"] == 2
+    for tier in ("example", "derived"):
+        (tmp_path / f"tests/__generated__/math.{tier}.test.ts").unlink()
+
     async def cross_battery_failure(*_args: Any, **kwargs: Any) -> dict[str, Any]:
         files = tuple(kwargs.get("files", ()))
-        if kwargs.get("typecheck_only") and len(files) == 1:
-            return {"ok": True, "mode": "typecheck", "tests": []}
+        if len(files) <= 1:
+            return {
+                "ok": True,
+                "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+                "diagnostics": [],
+                "tests": [],
+            }
         return {
             "ok": False,
             "mode": "typecheck",
@@ -4235,15 +4579,110 @@ async def test_cross_battery_preflight_rejects_candidates_before_cache_staging(
         config,
         no_build=True,
         jobs=2,
+        generator=ExplodingGenerator(),
+        response_cache=cache,
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 3
+    assert cache.info()["entries"] == 1
+    outcomes = {item["path"]: item for item in report.runner["batteries"]}
+    assert outcomes["tests/__generated__/math.derived.test.ts"]["state"] == "cached"
+    assert outcomes["tests/__generated__/math.example.test.ts"]["state"] == "rejected"
+    assert outcomes["tests/__generated__/math.example.test.ts"]["cache_evicted"] is True
+    assert outcomes["tests/__generated__/math.example.test.ts"]["rejection_reasons"] == (
+        "TS2451: cross-battery declaration conflict",
+    )
+    assert report.runner["partial_landing"]["accepted"] == (
+        "tests/__generated__/math.derived.test.ts",
+    )
+    assert report.runner["partial_landing"]["rejected"] == (
+        "tests/__generated__/math.example.test.ts",
+    )
+    assert report.runner["partial_landing"]["committed"] is True
+    assert not (tmp_path / "tests/__generated__/math.example.test.ts").exists()
+    assert (tmp_path / "tests/__generated__/math.derived.test.ts").is_file()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("category", "expected_entries"), [("assertion", 1), ("runner", 2)])
+async def test_compatible_subset_run_evicts_only_identifiable_behavior_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    category: str,
+    expected_entries: int,
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    cache = ResponseCache(tmp_path / ".test-response-cache")
+    cache.put(
+        "unrelated-key",
+        CacheEntry("unrelated", 1, 1, "unrelated-model", "unrelated-provider", 0.0),
+    )
+
+    async def cross_battery_then_behavior_failure(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        files = tuple(kwargs.get("files", ()))
+        if kwargs.get("typecheck_only"):
+            if len(files) <= 1:
+                return {"ok": True, "mode": "typecheck", "diagnostics": [], "tests": []}
+            return {
+                "ok": False,
+                "mode": "typecheck",
+                "diagnostics": [
+                    {
+                        "code": "TS2451",
+                        "message": "cross-battery declaration conflict",
+                        "severity": "error",
+                    }
+                ],
+                "tests": [],
+            }
+        assert files == ("tests/__generated__/math.derived.test.ts",)
+        return {
+            "ok": False,
+            "mode": "run",
+            "tests": [
+                {
+                    "file": files[0],
+                    "tier": "derived",
+                    "status": "failed",
+                    "category": category,
+                    "message": f"{category} failure",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        "jaunt.typescript.tester._run_test_batches",
+        cross_battery_then_behavior_failure,
+    )
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        jobs=2,
         generator=FakeGenerator(),
         response_cache=cache,
         worker_factory=lambda *_: worker,
     )
 
     assert report.exit_code == 3
-    assert cache.info()["entries"] == 0
-    assert {item["state"] for item in report.runner["batteries"]} == {"rejected"}
-    assert not (tmp_path / "tests/__generated__/math.example.test.ts").exists()
+    assert cache.info()["entries"] == expected_entries
+    assert cache.get("unrelated-key") is not None
+    outcomes = {item["path"]: item for item in report.runner["batteries"]}
+    failed = outcomes["tests/__generated__/math.derived.test.ts"]
+    if category == "assertion":
+        assert failed["state"] == "rejected"
+        assert failed["cache_evicted"] is True
+        assert failed["rejection_reasons"] == (
+            "The compatible-subset Vitest run rejected this battery; "
+            "its cached response was removed.",
+        )
+    else:
+        assert failed["state"] == "staged"
+        assert "cache_evicted" not in failed
+        assert "rejection_reasons" not in failed
+    assert report.runner["partial_landing"]["committed"] is False
     assert not (tmp_path / "tests/__generated__/math.derived.test.ts").exists()
 
 
@@ -4531,6 +4970,17 @@ async def test_test_modes_never_enter_implementation_repair(
     assert len(build_calls) == expected_build_calls
     assert all("ephemeral_prompt" not in call for call in build_calls)
     assert "repair" not in report.runner
+    if no_build:
+        outcomes = {item["path"]: item for item in report.runner["batteries"]}
+        rejected = outcomes["tests/__generated__/math.derived.test.ts"]
+        assert rejected["state"] == "rejected"
+        assert rejected["cache_evicted"] is True
+        assert rejected["rejection_reasons"] == (
+            "The final protected Vitest run rejected this battery; "
+            "its cached response was removed.",
+        )
+        assert outcomes["tests/__generated__/math.example.test.ts"]["state"] == "staged"
+        assert ResponseCache(tmp_path / ".jaunt" / "cache").info()["entries"] == 1
 
 
 @pytest.mark.asyncio
@@ -4696,15 +5146,24 @@ model = "gpt-5.6-sol"
 
     assert report.exit_code == 0
     assert a_output.is_file() and b_output.is_file()
-    assert [call[1] for call in calls[:2]] == [
+    candidate_calls = calls[:4]
+    assert all(call[0] for call in candidate_calls)
+    candidate_owners = [call[1] for call in candidate_calls]
+    assert candidate_owners.count("packages/a/tsconfig.test.json") == 2
+    assert candidate_owners.count("packages/b/tsconfig.test.json") == 2
+    assert all(len(call[2]) == 1 for call in candidate_calls)
+    preflight_calls = calls[4:6]
+    assert [call[1] for call in preflight_calls] == [
         "packages/a/tsconfig.test.json",
         "packages/b/tsconfig.test.json",
     ]
-    assert {call[1] for call in calls[2:]} == {
+    assert all(call[0] for call in preflight_calls)
+    runner_calls = calls[6:]
+    assert {call[1] for call in runner_calls} == {
         "packages/a/tsconfig.test.json",
         "packages/b/tsconfig.test.json",
     }
-    assert {call[5] for call in calls[2:]} == {"example", "derived"}
+    assert {call[5] for call in runner_calls} == {"example", "derived"}
     assert all(
         call[4]
         == (
@@ -4714,7 +5173,7 @@ model = "gpt-5.6-sol"
         for call in calls
     )
     assert all(not call[3] for call in calls)
-    assert contract_battery.relative_to(tmp_path).as_posix() in calls[0][2]
+    assert contract_battery.relative_to(tmp_path).as_posix() in preflight_calls[0][2]
     assert set(report.runner["batches"]) == {
         "packages/a/tsconfig.test.json",
         "packages/b/tsconfig.test.json",
@@ -5435,6 +5894,60 @@ async def test_separate_build_preserves_battery_reuse_proof_for_later_test(
     )
     assert next_report.generated == frozenset()
     assert next_report.refrozen == paths
+
+
+@pytest.mark.asyncio
+async def test_migration_preserves_battery_reuse_proof_for_no_build_test(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    paths = frozenset(seeded.generated)
+    bodies = {path: _strip_test_header((tmp_path / path).read_text()) for path in paths}
+    expected = json.loads(str(worker.module["sidecar"]))
+    expected["semanticEnvironmentDigest"] = "sha256:environment-v2"
+    expected["structuralDigest"] = "sha256:environment-structure-v2"
+    expected["apiDigest"] = "sha256:environment-api-v2"
+    worker.module.update(expected)
+    worker.module["sidecar"] = json.dumps(expected, sort_keys=True) + "\n"
+
+    plan = await plan_typescript_migration(
+        tmp_path,
+        config,
+        worker_factory=lambda *_: worker,
+    )
+    assert not plan.requires_rebuild
+    apply_typescript_migration(plan)
+
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=ExplodingGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 0
+    assert report.generated == frozenset()
+    assert report.refrozen == paths
+    for path in paths:
+        assert _strip_test_header((tmp_path / path).read_text()) == bodies[path]
 
 
 @pytest.mark.asyncio

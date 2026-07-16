@@ -17,13 +17,58 @@ import type { DiscoveredModule } from "./discovery.js";
 /** Files and digest that define the type environment visible at a spec boundary. */
 export interface TypeEnvironmentSnapshot {
   readonly digest: string;
-  /** Environment identity with only @usejaunt/ts package metadata normalized. */
+  /** Environment identity scoped to resolved declarations and project metadata. */
   readonly compatibilityDigest: string;
+  /** Per-input compatibility records persisted for actionable provenance diffs. */
+  readonly compatibilityRecords: readonly SemanticEnvironmentRecord[];
+  /** Tool-only provenance records excluded from semantic compatibility. */
+  readonly toolingRecords: readonly SemanticEnvironmentRecord[];
   /** Canonical documentation on the imported public surface. */
   readonly proseDigest: string;
   /** Deterministic imported/context TSDoc records for semantic-gate review. */
   readonly proseRecords: readonly ImportedDocsRecord[];
   readonly inputPaths: readonly string[];
+}
+
+export interface SemanticEnvironmentRecord {
+  readonly id: string;
+  readonly digest: string;
+}
+
+function compatibilityGroupId(id: string): string {
+  if (id.startsWith("package:")) {
+    const path = id.slice("package:".length);
+    const parts = path.split("/");
+    const packageName = path.startsWith("@")
+      ? parts.slice(0, 2).join("/")
+      : (parts[0] ?? path);
+    return `package:${packageName}`;
+  }
+  if (id.startsWith("unresolved-module:")) return "unresolved-modules";
+  if (id.startsWith("unresolved-type:")) return "unresolved-types";
+  return id;
+}
+
+export function groupSemanticEnvironmentRecords(
+  records: readonly { readonly id: string; readonly digest: string }[],
+): readonly SemanticEnvironmentRecord[] {
+  const grouped = new Map<string, Map<string, string>>();
+  for (const record of records) {
+    const groupId = compatibilityGroupId(record.id);
+    const members = grouped.get(groupId) ?? new Map<string, string>();
+    members.set(record.id, record.digest);
+    grouped.set(groupId, members);
+  }
+  return [...grouped]
+    .map(([id, members]) => ({
+      id,
+      digest: digestCanonical(
+        [...members]
+          .map(([memberId, digest]) => ({ id: memberId, digest }))
+          .sort((left, right) => left.id.localeCompare(right.id)),
+      ),
+    }))
+    .sort((left, right) => left.id.localeCompare(right.id));
 }
 
 const ENVIRONMENT_FILES = [
@@ -35,6 +80,15 @@ const ENVIRONMENT_FILES = [
   "bun.lock",
   "bun.lockb",
 ] as const;
+
+const LOCK_FILES = new Set<string>([
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+  "bun.lock",
+  "bun.lockb",
+]);
 
 function isWithin(root: string, path: string): boolean {
   const value = relative(resolve(root), resolve(path));
@@ -61,7 +115,11 @@ function semanticJson(source: string): unknown {
   }
 }
 
-function normalizeToolingMetadata(value: unknown, key = ""): unknown {
+function normalizeToolingMetadata(
+  value: unknown,
+  key = "",
+  depth = 0,
+): unknown {
   if (
     key === "@usejaunt/ts" ||
     key === "node_modules/@usejaunt/ts" ||
@@ -70,7 +128,7 @@ function normalizeToolingMetadata(value: unknown, key = ""): unknown {
     return "<jaunt-toolchain>";
   }
   if (Array.isArray(value)) {
-    return value.map((item) => normalizeToolingMetadata(item));
+    return value.map((item) => normalizeToolingMetadata(item, key, depth + 1));
   }
   if (value !== null && typeof value === "object") {
     const object = value as Record<string, unknown>;
@@ -78,84 +136,42 @@ function normalizeToolingMetadata(value: unknown, key = ""): unknown {
       return { name: "@usejaunt/ts" };
     }
     return Object.fromEntries(
-      Object.entries(object).map(([childKey, item]) => [
-        childKey,
-        normalizeToolingMetadata(item, childKey),
-      ]),
+      Object.entries(object)
+        // The root package-manager selector controls installation tooling; it
+        // does not change the declarations visible to a governed module.
+        .filter(([childKey]) => depth !== 0 || childKey !== "packageManager")
+        .map(([childKey, item]) => [
+          childKey,
+          normalizeToolingMetadata(item, childKey, depth + 1),
+        ]),
     );
   }
   return value;
 }
 
-function unquotedLockKey(value: string): string {
-  const key = value.trim();
+function toolingProvenanceRecords(
+  root: string,
+  path: string,
+  syntax: unknown,
+): readonly SemanticEnvironmentRecord[] {
   if (
-    key.length >= 2 &&
-    ((key.startsWith('"') && key.endsWith('"')) ||
-      (key.startsWith("'") && key.endsWith("'")))
+    basename(path) !== "package.json" ||
+    syntax === null ||
+    typeof syntax !== "object" ||
+    Array.isArray(syntax)
   ) {
-    return key.slice(1, -1);
+    return [];
   }
-  return key;
-}
-
-function isToolingLockKey(value: string): boolean {
-  const selectors = value.split(",").map(unquotedLockKey);
-  return (
-    selectors.length > 0 &&
-    selectors.every(
-      (selector) =>
-        selector === "@usejaunt/ts" ||
-        selector.startsWith("@usejaunt/ts@") ||
-        selector.startsWith("/@usejaunt/ts@"),
-    )
-  );
-}
-
-/**
- * Normalize only @usejaunt/ts entries in text lockfiles. This handles pnpm
- * YAML, Yarn classic/Berry, and Bun's text lock without treating unrelated
- * package changes as a compatible toolchain upgrade. Legacy binary bun.lockb
- * remains intentionally opaque and therefore rebuilds conservatively.
- */
-function normalizeToolingLockfile(source: string): string {
-  const output: string[] = [];
-  let skippedIndent: number | undefined;
-  for (const original of source.match(/.*(?:\r?\n|$)/g) ?? []) {
-    if (original === "") continue;
-    const newline = original.endsWith("\r\n")
-      ? "\r\n"
-      : original.endsWith("\n")
-        ? "\n"
-        : "";
-    const line = original.slice(0, original.length - newline.length);
-    const indent = line.match(/^[\t ]*/)![0].length;
-    const trimmed = line.trim();
-    if (skippedIndent !== undefined) {
-      if (trimmed === "" || indent > skippedIndent) continue;
-      skippedIndent = undefined;
-    }
-
-    const entry = trimmed.match(/^(.+?)\s*([:=])\s*(.*)$/);
-    if (entry && isToolingLockKey(entry[1]!)) {
-      const marker = `${line.slice(0, indent)}"<jaunt-toolchain>"`;
-      if (entry[2] === ":" && entry[3] === "") {
-        output.push(`${marker}:${newline}`);
-        skippedIndent = indent;
-      } else {
-        output.push(`${marker}${entry[2]} "<jaunt-toolchain>"${newline}`);
-      }
-      continue;
-    }
-
-    output.push(
-      `${line.replace(
-        /(["']@usejaunt\/ts["']\s*[:=]\s*)["'][^"']*["']/g,
-        '$1"<jaunt-toolchain>"',
-      )}${newline}`,
-    );
+  const packageManager = (syntax as Record<string, unknown>).packageManager;
+  if (typeof packageManager !== "string" || packageManager.trim() === "") {
+    return [];
   }
-  return output.join("");
+  return [
+    {
+      id: `tooling:packageManager:${toPosix(relative(root, path))}`,
+      digest: digestCanonical(packageManager.trim()),
+    },
+  ];
 }
 
 interface SourceSpan {
@@ -447,6 +463,8 @@ export function collectTypeEnvironment(
 ): TypeEnvironmentSnapshot {
   const records: { id: string; syntax: unknown }[] = [];
   const compatibleEnvironmentSyntax = new Map<string, unknown>();
+  const compatibilityIgnoredIds = new Set<string>();
+  const toolingRecords: SemanticEnvironmentRecord[] = [];
   const proseRecords: ImportedDocsRecord[] = [];
   const inputPaths = new Set<string>();
   const visited = new Set<string>();
@@ -585,12 +603,12 @@ export function collectTypeEnvironment(
       id,
       syntax,
     });
-    compatibleEnvironmentSyntax.set(
-      id,
-      path.endsWith(".json")
-        ? normalizeToolingMetadata(syntax)
-        : { sha256: sha256Bytes(normalizeToolingLockfile(source)) },
-    );
+    toolingRecords.push(...toolingProvenanceRecords(root, path, syntax));
+    if (LOCK_FILES.has(basename(path))) {
+      compatibilityIgnoredIds.add(id);
+      continue;
+    }
+    compatibleEnvironmentSyntax.set(id, normalizeToolingMetadata(syntax));
   }
 
   records.sort((left, right) => {
@@ -603,17 +621,24 @@ export function collectTypeEnvironment(
   const sortedProseRecords = proseRecords.sort((left, right) =>
     left.id.localeCompare(right.id),
   );
+  const rawCompatibilityRecords = records
+    .filter((record) => !compatibilityIgnoredIds.has(record.id))
+    .map((record) => {
+      const syntax = record.id.startsWith("environment:")
+        ? (compatibleEnvironmentSyntax.get(record.id) ??
+          normalizeToolingMetadata(record.syntax))
+        : record.syntax;
+      return { id: record.id, digest: digestCanonical(syntax) };
+    });
+  const compatibilityRecords = groupSemanticEnvironmentRecords(
+    rawCompatibilityRecords,
+  );
+  const groupedToolingRecords = groupSemanticEnvironmentRecords(toolingRecords);
   return {
     digest: digestCanonical(records),
-    compatibilityDigest: digestCanonical(
-      records.map((record) => ({
-        ...record,
-        syntax: record.id.startsWith("environment:")
-          ? (compatibleEnvironmentSyntax.get(record.id) ??
-            normalizeToolingMetadata(record.syntax))
-          : record.syntax,
-      })),
-    ),
+    compatibilityDigest: digestCanonical(compatibilityRecords),
+    compatibilityRecords,
+    toolingRecords: groupedToolingRecords,
     proseDigest: digestCanonical(sortedProseRecords),
     proseRecords: sortedProseRecords,
     inputPaths: [...inputPaths].sort(),

@@ -117,7 +117,12 @@ def test_mixed_build_runs_languages_concurrently_and_preserves_exit_precedence(
 
 def test_mixed_clean_preflight_supplies_status_only_defaults(tmp_path: Path) -> None:
     _mixed_config(tmp_path)
+    (tmp_path / "src" / "example.py").write_text(
+        "import jaunt\n\n@jaunt.magic\ndef answer() -> int: ...\n",
+        encoding="utf-8",
+    )
     args = parse_args(["clean", "--root", str(tmp_path), "--orphans", "--dry-run", "--json"])
+    assert not hasattr(args, "jobs")
 
     _mixed_python_preflight("clean", args)
 

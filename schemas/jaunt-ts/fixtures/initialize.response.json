@@ -1,10 +1,10 @@
 {
-  "protocol": "jaunt-ts/1-draft.2",
+  "protocol": "jaunt-ts/1-draft.3",
   "id": "init-1",
   "ok": true,
   "result": {
     "workerVersion": "0.1.0-alpha.0",
-    "protocol": "jaunt-ts/1-draft.2",
+    "protocol": "jaunt-ts/1-draft.3",
     "typescriptVersion": "6.0.2",
     "packageManager": "npm@11",
     "capabilities": [
@@ -13,7 +13,8 @@
       "sync",
       "orphans",
       "invalidate",
-      "contract-projection"
+      "contract-projection",
+      "release-programs"
     ],
     "sessionId": "session-1",
     "epoch": 0,

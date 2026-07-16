@@ -50,10 +50,13 @@ placeholder; it does not call Codex or make `jaunt check` green.
 ## 3. Build
 
 ```bash
-bash <absolute-plugin-root>/scripts/resolve-workspace.sh --run "$PWD" build --json
+bash <absolute-plugin-root>/scripts/resolve-workspace.sh --run "$PWD" build --json --progress plain
 # or
-bash <absolute-plugin-root>/scripts/resolve-workspace.sh --run "$PWD" build --target <qualified-module> --json
+bash <absolute-plugin-root>/scripts/resolve-workspace.sh --run "$PWD" build --target <qualified-module> --json --progress plain
 ```
+
+Plain progress names the active module and retry phase on stderr. Keep stdout
+for the final JSON object.
 
 Review `newly_governed` before accepting the result.
 

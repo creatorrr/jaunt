@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import shutil
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,7 @@ from jaunt.typescript.contracts import (
 )
 from jaunt.typescript.migrate import apply_typescript_migration, plan_typescript_migration
 from jaunt.typescript.design import run_design
+from jaunt.typescript.protocol import ProtocolDiagnostic
 from jaunt.typescript.status import run_check, run_status
 from jaunt.typescript.tester import run_test
 
@@ -582,6 +585,71 @@ async def test_real_worker_migration_repairs_unbuilt_artifacts_without_model(
     again = await plan_typescript_migration(tmp_path, config)
     assert again.actions == ()
     assert again.writes == ()
+
+
+@pytest.mark.asyncio
+async def test_real_worker_migration_validates_recomposed_modules_together(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _copy_tooling(tmp_path)
+    _write_project(tmp_path)
+    config = load_config(root=tmp_path)
+    await run_sync(tmp_path, config)
+    built = await run_build(tmp_path, config, generator=_SlugGenerator())
+    assert built.exit_code == 0
+    (tmp_path / "package-lock.json").write_text(
+        '{"lockfileVersion":3,"packages":{"":{"name":"fixture"}}}\n',
+        encoding="utf-8",
+    )
+
+    from jaunt.typescript import builder
+
+    real_validate = builder.validate_overlay
+    recomposition_sets: list[tuple[str, ...]] = []
+
+    async def reject_combined(*args: Any, **kwargs: Any):
+        result = await real_validate(*args, **kwargs)
+        module_ids = tuple(kwargs.get("recompose_module_ids", ()))
+        if module_ids:
+            recomposition_sets.append(module_ids)
+        if len(module_ids) == 1:
+            artifacts = []
+            for artifact in result.artifacts:
+                if artifact.kind == "implementation":
+                    content = artifact.content + "\n// force a source-changing migration test\n"
+                    artifact = replace(
+                        artifact,
+                        content=content,
+                        sha256=("sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()),
+                    )
+                artifacts.append(artifact)
+            result = replace(result, artifacts=tuple(artifacts))
+        if len(module_ids) > 1:
+            return replace(
+                result,
+                valid=False,
+                artifacts=(),
+                diagnostics=(
+                    ProtocolDiagnostic(
+                        code="TS9999",
+                        message="combined overlay rejected",
+                        severity="error",
+                    ),
+                ),
+            )
+        return result
+
+    monkeypatch.setattr(builder, "validate_overlay", reject_combined)
+
+    plan = await plan_typescript_migration(tmp_path, config)
+
+    assert any(len(module_ids) == 2 for module_ids in recomposition_sets)
+    assert plan.blocked
+    assert plan.writes == ()
+    assert {
+        diagnostic.code for diagnostic in plan.diagnostics if diagnostic.severity == "error"
+    } == {"JAUNT_TS_MIGRATE_COMBINED_VALIDATION_FAILED"}
+    assert all("combined overlay rejected" in diagnostic.message for diagnostic in plan.diagnostics)
 
 
 @pytest.mark.asyncio

@@ -4,7 +4,7 @@ This plugin packages Jaunt's workspace-aware Python and TypeScript authoring
 loop for Claude Code: generated-file guards, session freshness, build and
 conversion skills, a read-only doctor, and a first-build reviewer.
 
-Version 1.2.4 understands version-2 TypeScript targets as well as Python
+Version 1.2.6 understands version-2 TypeScript targets as well as Python
 workspace routing. One root `jaunt.toml` may cover several Python and
 JavaScript packages; ownership follows the nearest `pyproject.toml` or
 `package.json` for the target.
@@ -40,10 +40,16 @@ skills and hooks.
 - `/jaunt:build`: previews likely model calls, builds, reports actual cost,
   and runs the gates.
 - `/jaunt:doctor`: checks Python and TypeScript health, Node/npm, the worker,
-  compiler support, authentication, orphans, and Claude hook duplication without
-  building. Nested Claude and Codex managed worktrees are skipped.
+  compiler support, authentication, orphans, active Jaunt/lock provenance, and
+  Claude hook duplication without building. Nested Claude and Codex managed
+  worktrees are skipped.
 - `/jaunt:convert`: explicit-only Python/TypeScript-to-Jaunt conversion.
 - `first-build-reviewer`: read-only review for contract-silence divergence.
+
+For TypeScript provenance drift, the working skill previews
+`jaunt migrate --language ts --json` before any paid build. A plan containing
+only `free-recompose` actions with an empty `requires_rebuild` list can be
+applied and checked without model calls.
 
 For TypeScript builds, the workflow reads `candidate_outcomes` before suggesting
 another run. Jaunt already spends the remaining attempt budget on final
@@ -51,8 +57,15 @@ conformance repair; a failed module should not be rerun blindly. Worker heap
 failures point to `[target.ts].worker_heap_mb` and are never replayed
 automatically.
 
-The SessionStart hook injects a bounded freshness summary, including TypeScript
-unbuilt, invalid, and diagnostic state. The PreToolUse hook
+For TypeScript test generation, inspect `vitest.batteries` before another paid
+run (`targets.ts.vitest.batteries` in a mixed workspace). It records per-battery
+retries and final rejection reasons. A failed combined overlay can still commit
+the compatible subset listed under `vitest.partial_landing` or
+`targets.ts.vitest.partial_landing`.
+
+The SessionStart hook reports the nearest active Jaunt workspace, including
+TypeScript unbuilt, invalid, and diagnostic state. If no parent `jaunt.toml`
+exists, it falls back to bounded descendant discovery. The PreToolUse hook
 keeps Claude's approval-style guard for each target's generated directory and
 existing provenance-headed `.pyi` files. TypeScript API mirrors,
 implementations, and sidecars point back to their private `*.jaunt.ts[x]`

@@ -48,12 +48,14 @@ test("overlay parsing keeps sync and authorized restamp selections distinct", ()
       restampModuleIds: ["ts:src/built/index"],
       scopeToModuleIds: true,
       baselineUnselected: true,
+      releasePrograms: true,
     }),
   ).toMatchObject({
     syncModuleIds: ["ts:src/new/index"],
     restampModuleIds: ["ts:src/built/index"],
     scopeToModuleIds: true,
     baselineUnselected: true,
+    releasePrograms: true,
   });
 });
 
@@ -78,6 +80,15 @@ test("scoped overlay validation requires a boolean", () => {
       baselineUnselected: "yes",
     }),
   ).toThrow(/baselineUnselected must be a boolean/u);
+  expect(() =>
+    parseValidateOverlayParams({
+      sessionId: "session-1",
+      expectedEpoch: 0,
+      expectedSnapshot: "sha256:snapshot",
+      candidates: {},
+      releasePrograms: "yes",
+    }),
+  ).toThrow(/releasePrograms must be a boolean/u);
 });
 
 test("every method parser rejects fields outside its pinned draft shape", () => {

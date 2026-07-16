@@ -846,6 +846,28 @@ export const invalid: number = new Store().get("missing");
         .overlayProgramState()
         .some((state) => state.reusedSourceFiles > 0),
     ).toBe(true);
+    expect(() =>
+      session.validateOverlay({
+        sessionId: metadata.sessionId,
+        expectedEpoch: metadata.epoch,
+        expectedSnapshot: "sha256:stale",
+        candidates: {},
+        releasePrograms: true,
+      }),
+    ).toThrow("Workspace changed after analysis");
+    expect(session.overlayProgramState()).toEqual([]);
+    const released = session.validateOverlay({
+      sessionId: metadata.sessionId,
+      expectedEpoch: metadata.epoch,
+      expectedSnapshot: metadata.snapshot,
+      candidates: {
+        [contract.moduleId]:
+          'const __jaunt_impl_slugify = (title: string): string => title.trim().toLowerCase().replace(/\\s+/g, "-");',
+      },
+      releasePrograms: true,
+    });
+    expect(released.valid, JSON.stringify(released.diagnostics)).toBe(true);
+    expect(session.overlayProgramState()).toEqual([]);
     commit(workspace.root, valid.artifacts);
 
     const refreshed = session.invalidate({

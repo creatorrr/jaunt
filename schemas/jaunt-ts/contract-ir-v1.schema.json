@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://usejaunt.dev/schemas/jaunt-ts/contract-ir-v1-draft.2.json",
-  "title": "Jaunt TypeScript contract IR v1 draft 2",
+  "$id": "https://usejaunt.dev/schemas/jaunt-ts/contract-ir-v1-draft.3.json",
+  "title": "Jaunt TypeScript contract IR v1 draft 3",
   "type": "object",
   "$ref": "#/definitions/contractModuleIR",
   "definitions": {
@@ -668,8 +668,8 @@
         "typescriptVersion": { "type": "string", "minLength": 1 },
         "compilerOptionsHash": { "$ref": "#/definitions/digest" },
         "generationFingerprint": { "type": "string", "minLength": 1 },
-        "protocol": { "const": "jaunt-ts/1-draft.2" },
-        "ir": { "const": "contract-ir/1-draft.2" }
+        "protocol": { "const": "jaunt-ts/1-draft.3" },
+        "ir": { "const": "contract-ir/1-draft.3" }
       }
     },
     "moduleRoute": {
@@ -714,13 +714,14 @@
         "typeImports",
         "contextDocs",
         "semanticEnvironmentDigest",
+        "semanticEnvironmentRecords",
         "dependencies",
         "structuralDigest",
         "proseDigest",
         "apiDigest"
       ],
       "properties": {
-        "schema": { "const": "contract-ir/1-draft.2" },
+        "schema": { "const": "contract-ir/1-draft.3" },
         "moduleId": { "type": "string", "pattern": "^ts:" },
         "specPath": { "type": "string" },
         "facadePath": { "type": "string" },
@@ -747,6 +748,30 @@
           "items": { "$ref": "#/definitions/contextDocs" }
         },
         "semanticEnvironmentDigest": { "$ref": "#/definitions/digest" },
+        "semanticEnvironmentRecords": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "digest"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string" },
+              "digest": { "$ref": "#/definitions/digest" }
+            }
+          }
+        },
+        "toolingProvenanceRecords": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "digest"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string", "pattern": "^tooling:" },
+              "digest": { "$ref": "#/definitions/digest" }
+            }
+          }
+        },
         "dependencies": {
           "type": "array",
           "items": { "type": "string" },
@@ -778,6 +803,8 @@
           "typeImports",
           "contextDocs",
           "semanticEnvironmentDigest",
+          "semanticEnvironmentRecords",
+          "toolingProvenanceRecords",
           "dependencies",
           "structuralDigest",
           "proseDigest",
@@ -813,6 +840,8 @@
           "typeImports",
           "contextDocs",
           "semanticEnvironmentDigest",
+          "semanticEnvironmentRecords",
+          "toolingProvenanceRecords",
           "dependencies",
           "structuralDigest",
           "proseDigest",

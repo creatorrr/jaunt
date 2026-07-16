@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from jaunt.cache import CacheEntry, ResponseCache, cache_key_from_context
+from jaunt.cache import CacheEntry, ResponseCache, cache_key_from_context, discard_cache_entry
 from jaunt.generate.base import ModuleSpecContext
 
 
@@ -112,6 +112,25 @@ def test_cache_clear(tmp_path: Path) -> None:
 def test_cache_clear_empty(tmp_path: Path) -> None:
     rc = ResponseCache(tmp_path / "cache")
     assert rc.clear_all() == 0
+
+
+def test_discard_cache_entry_removes_matching_bytes_but_keeps_a_newer_replacement(
+    tmp_path: Path,
+) -> None:
+    cache = ResponseCache(tmp_path / "cache")
+    cache.put("abc123", _make_entry(source="old"))
+
+    assert discard_cache_entry(cache, "abc123", expected_source="old") is True
+    assert cache.info()["entries"] == 0
+    assert cache.get("abc123") is None
+
+    cache.put("abc123", _make_entry(source="old"))
+    concurrent = ResponseCache(tmp_path / "cache")
+    concurrent.put("abc123", _make_entry(source="new"))
+    assert discard_cache_entry(cache, "abc123", expected_source="old") is True
+    retained = ResponseCache(tmp_path / "cache").get("abc123")
+    assert retained is not None
+    assert retained.source == "new"
 
 
 def test_cache_key_deterministic() -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 
 _SEMANTIC_CONTRACT_FIELDS = (
@@ -38,7 +38,9 @@ _REQUIRED_SEMANTIC_CONTRACT_FIELDS = (
 )
 
 
-def semantic_contract_payload(sidecar: Mapping[str, Any]) -> dict[str, Any]:
+def semantic_contract_payload(
+    sidecar: Mapping[str, Any], *, allow_environment_drift: bool = False
+) -> dict[str, Any]:
     """Return the model-facing contract fields independent of digest schemes.
 
     TypeScript worker releases may change how structural and API digests are
@@ -47,11 +49,18 @@ def semantic_contract_payload(sidecar: Mapping[str, Any]) -> dict[str, Any]:
     previous candidate for deterministic recomposition.
     """
 
-    return {field: sidecar.get(field) for field in _SEMANTIC_CONTRACT_FIELDS}
+    return {
+        field: sidecar.get(field)
+        for field in _SEMANTIC_CONTRACT_FIELDS
+        if not (allow_environment_drift and field == "semanticEnvironmentDigest")
+    }
 
 
 def has_compatible_semantic_contract(
-    actual: Mapping[str, Any], expected: Mapping[str, Any]
+    actual: Mapping[str, Any],
+    expected: Mapping[str, Any],
+    *,
+    allow_environment_drift: bool = False,
 ) -> bool:
     """Whether two sidecars describe the same model-facing contract."""
 
@@ -61,11 +70,16 @@ def has_compatible_semantic_contract(
         field not in actual or field not in expected for field in _REQUIRED_SEMANTIC_CONTRACT_FIELDS
     ):
         return False
-    return semantic_contract_payload(actual) == semantic_contract_payload(expected)
+    return semantic_contract_payload(
+        actual, allow_environment_drift=allow_environment_drift
+    ) == semantic_contract_payload(expected, allow_environment_drift=allow_environment_drift)
 
 
 def compatible_semantic_modules(
-    root: Path, modules: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...]
+    root: Path,
+    modules: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
+    *,
+    allow_environment_drift: bool = False,
 ) -> frozenset[str]:
     """Return modules whose saved contracts match through their dependency closure."""
 
@@ -101,7 +115,9 @@ def compatible_semantic_modules(
         except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
             continue
         if not isinstance(actual, Mapping) or not has_compatible_semantic_contract(
-            actual, expected
+            actual,
+            expected,
+            allow_environment_drift=allow_environment_drift,
         ):
             continue
         self_compatible.add(module_id)
@@ -126,3 +142,58 @@ def compatible_semantic_modules(
         compatible.update(ready)
         pending.difference_update(ready)
     return frozenset(compatible)
+
+
+def semantic_environment_diff(
+    actual: Mapping[str, Any], expected: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Explain a persisted semantic-environment change at record granularity."""
+
+    def records(value: object) -> dict[str, str] | None:
+        if not isinstance(value, list):
+            return None
+        result: dict[str, str] = {}
+        for item in value:
+            if not isinstance(item, Mapping):
+                return None
+            record = cast("Mapping[str, object]", item)
+            if not isinstance(record.get("id"), str) or not isinstance(record.get("digest"), str):
+                return None
+            result[str(record["id"])] = str(record["digest"])
+        return result
+
+    def environment_records(sidecar: Mapping[str, Any]) -> dict[str, str] | None:
+        semantic = records(sidecar.get("semanticEnvironmentRecords"))
+        if semantic is None:
+            return None
+        tooling = records(sidecar.get("toolingProvenanceRecords", []))
+        if tooling is None:
+            return None
+        return {**semantic, **tooling}
+
+    before = environment_records(actual)
+    after = environment_records(expected)
+    payload: dict[str, Any] = {
+        "before_digest": actual.get("semanticEnvironmentDigest"),
+        "after_digest": expected.get("semanticEnvironmentDigest"),
+        "before_records_available": before is not None,
+        "after_records_available": after is not None,
+    }
+    if before is None or after is None:
+        if before is not None:
+            payload["before_record_count"] = len(before)
+        if after is not None:
+            payload["after_record_count"] = len(after)
+        return payload
+    payload.update(
+        {
+            "added": sorted(after.keys() - before.keys()),
+            "removed": sorted(before.keys() - after.keys()),
+            "changed": sorted(
+                record_id
+                for record_id in before.keys() & after.keys()
+                if before[record_id] != after[record_id]
+            ),
+        }
+    )
+    return payload

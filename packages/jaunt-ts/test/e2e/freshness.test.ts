@@ -27,12 +27,7 @@ function write(root: string, path: string, source: string): void {
   writeFileSync(target, source);
 }
 
-async function freshnessDigests(workspace: FixtureWorkspace): Promise<{
-  structural: string;
-  prose: string;
-  api: string;
-  environment: string;
-}> {
+async function freshnessModule(workspace: FixtureWorkspace) {
   const session = await AnalyzerSession.create({
     root: workspace.root,
     projects: ["tsconfig.json"],
@@ -45,7 +40,16 @@ async function freshnessDigests(workspace: FixtureWorkspace): Promise<{
     clientVersion: "test",
     toolVersion: "test",
   });
-  const contract = session.analyzeContracts().modules[0]!;
+  return session.analyzeContracts().modules[0]!;
+}
+
+async function freshnessDigests(workspace: FixtureWorkspace): Promise<{
+  structural: string;
+  prose: string;
+  api: string;
+  environment: string;
+}> {
+  const contract = await freshnessModule(workspace);
   return {
     structural: contract.structuralDigest,
     prose: contract.proseDigest,
@@ -387,7 +391,7 @@ export function slugify(title: string, options: SlugOptions): string {
   );
   const lockEdit = await freshnessDigests(workspace);
   expect(lockEdit.structural).not.toBe(declarationEdit.structural);
-  expect(lockEdit.environment).not.toBe(declarationEdit.environment);
+  expect(lockEdit.environment).toBe(declarationEdit.environment);
 });
 
 test("compatibility identity normalizes only Jaunt tool package metadata", async () => {
@@ -421,6 +425,78 @@ test("compatibility identity normalizes only Jaunt tool package metadata", async
 
   expect(after.structural).not.toBe(before.structural);
   expect(after.environment).toBe(before.environment);
+});
+
+test("packageManager is tooling provenance rather than semantic compatibility", async () => {
+  const workspace = createFixtureWorkspace();
+  roots.push(workspace.root);
+  const manifest = (packageManager?: string) =>
+    `${JSON.stringify({
+      name: "fixture",
+      private: true,
+      type: "module",
+      ...(packageManager ? { packageManager } : {}),
+      devDependencies: {
+        "@usejaunt/ts": "0.1.0",
+        typescript: "6.0.2",
+      },
+    })}\n`;
+  write(workspace.root, "package.json", manifest());
+  const before = await freshnessModule(workspace);
+
+  write(workspace.root, "package.json", manifest("pnpm@11.5.0"));
+  const added = await freshnessModule(workspace);
+  expect(added.structuralDigest).not.toBe(before.structuralDigest);
+  expect(added.semanticEnvironmentDigest).toBe(
+    before.semanticEnvironmentDigest,
+  );
+  expect(added.toolingProvenanceRecords).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        id: "tooling:packageManager:package.json",
+      }),
+    ]),
+  );
+
+  write(workspace.root, "package.json", manifest("npm@11.5.1"));
+  const changed = await freshnessModule(workspace);
+  expect(changed.structuralDigest).not.toBe(added.structuralDigest);
+  expect(changed.semanticEnvironmentDigest).toBe(
+    added.semanticEnvironmentDigest,
+  );
+  expect(changed.toolingProvenanceRecords).not.toEqual(
+    added.toolingProvenanceRecords,
+  );
+});
+
+test("packageManager normalization is limited to the root manifest field", async () => {
+  const workspace = createFixtureWorkspace();
+  roots.push(workspace.root);
+  write(
+    workspace.root,
+    "package.json",
+    `${JSON.stringify({
+      name: "fixture",
+      private: true,
+      type: "module",
+      metadata: [{ packageManager: "semantic-nested-value" }],
+    })}\n`,
+  );
+  const before = await freshnessModule(workspace);
+  write(
+    workspace.root,
+    "package.json",
+    `${JSON.stringify({
+      name: "fixture",
+      private: true,
+      type: "module",
+      metadata: [{ packageManager: "changed-semantic-nested-value" }],
+    })}\n`,
+  );
+  const after = await freshnessModule(workspace);
+  expect(after.semanticEnvironmentDigest).not.toBe(
+    before.semanticEnvironmentDigest,
+  );
 });
 
 test.each([
@@ -470,7 +546,7 @@ packages:
 `,
   },
 ])(
-  "$name lockfiles preserve non-tool changes in the compatibility identity",
+  "$name lockfiles defer compatibility identity to the resolved declaration closure",
   async ({ path, lock }) => {
     const workspace = createFixtureWorkspace();
     roots.push(workspace.root);
@@ -497,7 +573,7 @@ packages:
     write(workspace.root, path, lock("0.1.0-alpha.2", "1.1.0"));
     const dependencyUpgrade = await freshnessDigests(workspace);
     expect(dependencyUpgrade.structural).not.toBe(toolUpgrade.structural);
-    expect(dependencyUpgrade.environment).not.toBe(toolUpgrade.environment);
+    expect(dependencyUpgrade.environment).toBe(toolUpgrade.environment);
   },
 );
 
