@@ -189,19 +189,31 @@ def _project_block(project: dict | None, note: str | None) -> str:
             )
 
     fresh = project["freshness"]
+    typescript_target = targets.get("ts") if isinstance(targets, dict) else None
+    freshness_label = (
+        "Python build freshness"
+        if isinstance(fresh, dict) and fresh.get("scope") == "py"
+        else "Build freshness"
+    )
     if fresh is None:
-        lines.append("- **Build freshness:** unavailable here — run `jaunt status`.")
+        if not isinstance(typescript_target, dict):
+            lines.append("- **Build freshness:** unavailable here — run `jaunt status`.")
     elif fresh["total"] == 0:
-        lines.append("- **Build freshness:** no `@jaunt.magic` specs discovered yet.")
+        lines.append(f"- **{freshness_label}:** no `@jaunt.magic` specs discovered yet.")
     else:
         suffix = " — run `jaunt build`" if fresh["stale"] else ""
         lines.append(
-            f"- **Build freshness:** {fresh['fresh']} fresh, {fresh['stale']} stale{suffix}."
+            f"- **{freshness_label}:** {fresh['fresh']} fresh, {fresh['stale']} stale{suffix}."
         )
         if fresh["stale_modules"]:
             shown = ", ".join(f"`{m}`" for m in fresh["stale_modules"])
             more = "" if fresh["stale"] <= len(fresh["stale_modules"]) else ", …"
             lines.append(f"  - stale: {shown}{more}")
+    if isinstance(typescript_target, dict):
+        lines.append(
+            "- **TypeScript build freshness:** not probed by `jaunt instructions` — "
+            "run `jaunt status --language ts` for the authoritative result."
+        )
     return "\n".join(lines)
 
 
@@ -274,6 +286,7 @@ def _freshness(root: Path, cfg: JauntConfig) -> dict | None:
     except Exception:  # noqa: BLE001 - never let the probe break the primer
         return None
     return {
+        **({"scope": "py"} if cfg.version == 2 else {}),
         "total": status.total,
         "fresh": len(status.fresh),
         "stale": len(status.stale),

@@ -29,6 +29,7 @@ import type { ArtifactRecord, DiagnosticRecord } from "./types.js";
 import { resolvePackageImportResolution } from "./dependencies.js";
 import type { PackageImportResolution } from "./provenance.js";
 import { reusableSourceFile } from "./source_file_reuse.js";
+import { markerBindingsFor } from "./discovery.js";
 
 export interface OverlayValidation {
   readonly valid: boolean;
@@ -47,6 +48,81 @@ interface OverlayProgramEntry {
   readonly sources: ReadonlyMap<string, string>;
   readonly generation: number;
   readonly reusedSourceFiles: number;
+}
+
+function markerStubParameterStarts(
+  compiler: typeof import("@typescript/typescript6"),
+  sourceFile: ts.SourceFile,
+): ReadonlySet<number> {
+  const bindings = markerBindingsFor(compiler, sourceFile);
+  const markerCall = (
+    node: ts.Expression,
+    name: "magic" | "magicModule",
+  ): boolean => {
+    if (!compiler.isCallExpression(node)) return false;
+    if (compiler.isIdentifier(node.expression))
+      return bindings[name].has(node.expression.text);
+    return (
+      compiler.isPropertyAccessExpression(node.expression) &&
+      compiler.isIdentifier(node.expression.expression) &&
+      bindings.namespaces.has(node.expression.expression.text) &&
+      node.expression.name.text === name
+    );
+  };
+  const governedModule = sourceFile.statements.some(
+    (statement) =>
+      compiler.isExpressionStatement(statement) &&
+      markerCall(statement.expression, "magicModule"),
+  );
+  if (!governedModule) return new Set();
+  const starts = new Set<number>();
+  const visit = (node: ts.Node): void => {
+    if (
+      (compiler.isFunctionDeclaration(node) ||
+        compiler.isMethodDeclaration(node) ||
+        compiler.isConstructorDeclaration(node) ||
+        compiler.isGetAccessorDeclaration(node) ||
+        compiler.isSetAccessorDeclaration(node)) &&
+      node.body?.statements.length === 1
+    ) {
+      const statement = node.body.statements[0]!;
+      const expression = compiler.isReturnStatement(statement)
+        ? statement.expression
+        : compiler.isExpressionStatement(statement)
+          ? statement.expression
+          : undefined;
+      if (expression && markerCall(expression, "magic")) {
+        for (const parameter of node.parameters) {
+          if (compiler.isIdentifier(parameter.name))
+            starts.add(parameter.name.getStart(sourceFile));
+        }
+      }
+    }
+    compiler.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return starts;
+}
+
+function isGovernedStubParameterDiagnostic(
+  compiler: typeof import("@typescript/typescript6"),
+  diagnostic: ts.Diagnostic,
+  cache: Map<string, ReadonlySet<number>>,
+): boolean {
+  if (
+    diagnostic.code !== 6133 ||
+    diagnostic.file === undefined ||
+    diagnostic.start === undefined ||
+    !/\.jaunt\.tsx?$/.test(diagnostic.file.fileName)
+  )
+    return false;
+  const path = resolve(diagnostic.file.fileName);
+  let starts = cache.get(path);
+  if (!starts) {
+    starts = markerStubParameterStarts(compiler, diagnostic.file);
+    cache.set(path, starts);
+  }
+  return starts.has(diagnostic.start);
 }
 
 /** Reuses compiler structure between fresh, immutable candidate overlays. */
@@ -267,6 +343,7 @@ function validateSources(
     ...extraRoots,
   ]);
   const specPath = resolve(root, ir.specPath);
+  const governedParameterStarts = new Map<string, ReadonlySet<number>>();
   const native = compiler
     .getPreEmitDiagnostics(nativeProgram)
     .filter((diagnostic) => {
@@ -280,10 +357,10 @@ function validateSources(
           diagnostic.file &&
           resolve(diagnostic.file.fileName) === specPath
         ) &&
-        !(
-          diagnostic.code === 6133 &&
-          diagnostic.file &&
-          resolve(diagnostic.file.fileName) === specPath
+        !isGovernedStubParameterDiagnostic(
+          compiler,
+          diagnostic,
+          governedParameterStarts,
         ) &&
         !(
           (diagnostic.code === 6059 ||
@@ -1206,6 +1283,7 @@ export function validateProjectOverlayClosure(
   scopedRoots = false,
   consumerRoots: readonly string[] = [],
 ): readonly DiagnosticRecord[] {
+  const governedParameterStarts = new Map<string, ReadonlySet<number>>();
   const overlay = new Map<string, string>();
   for (const module of modules) {
     overlay.set(
@@ -1306,6 +1384,14 @@ export function validateProjectOverlayClosure(
         .getPreEmitDiagnostics(program)
         .filter((diagnostic) => {
           if (
+            isGovernedStubParameterDiagnostic(
+              compiler,
+              diagnostic,
+              governedParameterStarts,
+            )
+          )
+            return false;
+          if (
             (diagnostic.code !== 6059 &&
               diagnostic.code !== 6305 &&
               diagnostic.code !== 6307) ||
@@ -1365,6 +1451,7 @@ export function validateApiMirrorEquivalence(
     noImplicitAny: true,
     exactOptionalPropertyTypes: true,
   };
+  const governedParameterStarts = new Map<string, ReadonlySet<number>>();
   const program = programCache
     ? programCache.create(
         `${project.id}:mirror`,
@@ -1384,10 +1471,10 @@ export function validateApiMirrorEquivalence(
       .getPreEmitDiagnostics(program)
       .filter(
         (diagnostic) =>
-          !(
-            diagnostic.code === 6133 &&
-            diagnostic.file &&
-            resolve(diagnostic.file.fileName) === specPath
+          !isGovernedStubParameterDiagnostic(
+            compiler,
+            diagnostic,
+            governedParameterStarts,
           ),
       )
       .map((diagnostic) =>

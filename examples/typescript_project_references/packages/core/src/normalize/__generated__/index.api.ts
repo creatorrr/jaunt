@@ -1,8 +1,8 @@
 // ⛓️ jaunt:api-mirror — generated; do not edit.
 // jaunt:module=ts:packages/core/src/normalize/index
-// jaunt:structural=sha256:fd995ef37737e50fbacd4c1b63a5b5a05d5ad48927cc3b2bdbdbc21f03c88b17
+// jaunt:structural=sha256:b2e1c32db9c05c81fa1fc19bf958f70e88420158b4245509b0d856463abe167e
 // jaunt:prose=sha256:fe36c3763b8865671942e43121b369178cedb891ef3436c7263ba68da757b456
-// jaunt:api=sha256:f0cb3d36428b6c58f259c4fbce4fe3570196b262f6f5c3b72dc2910ec0e0c223
+// jaunt:api=sha256:3a61ccfd55851b5f8792223a127f903093cfb7ff0caba25bb2a90ec485e83081
 /**
  * Normalize spacing in a title.
  *

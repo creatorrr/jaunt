@@ -3954,7 +3954,7 @@ async def test_failed_vitest_run_repairs_once_with_protected_feedback_and_reruns
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("existing", [False, True])
-async def test_failed_test_and_repair_preserve_batteries_and_do_not_fill_cache(
+async def test_failed_test_and_repair_preserve_outputs_and_stage_valid_batteries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     existing: bool,
@@ -4027,11 +4027,12 @@ async def test_failed_test_and_repair_preserve_batteries_and_do_not_fill_cache(
     assert build_calls == 2
     for output, original in before.items():
         assert (output.read_bytes() if output.exists() else None) == original
-    assert cache.info()["entries"] == 0
+    assert cache.info()["entries"] == 2
+    assert {item["state"] for item in report.runner["batteries"]} == {"staged"}
 
 
 @pytest.mark.asyncio
-async def test_passing_test_candidate_commits_disk_then_cache_after_vitest(
+async def test_passing_test_candidate_stages_cache_before_atomic_disk_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = _config(tmp_path)
@@ -4048,7 +4049,7 @@ async def test_passing_test_candidate_commits_disk_then_cache_after_vitest(
         if not kwargs.get("typecheck_only"):
             saw_run = True
             assert all(not output.exists() for output in outputs)
-            assert cache.info()["entries"] == 0
+            assert cache.info()["entries"] == 2
         return {
             "ok": True,
             "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
@@ -4069,6 +4070,181 @@ async def test_passing_test_candidate_commits_disk_then_cache_after_vitest(
     assert saw_run is True
     assert all(output.is_file() for output in outputs)
     assert cache.info()["entries"] == 2
+    assert report.runner["jobs"] == config.test.jobs
+
+
+@pytest.mark.asyncio
+async def test_test_generation_honors_jobs_and_reports_each_staged_tier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+        }
+
+    class ConcurrentGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.active = 0
+            self.max_active = 0
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            try:
+                await asyncio.sleep(0.05)
+                return await super().generate_request(request, **kwargs)
+            finally:
+                self.active -= 1
+
+    generator = ConcurrentGenerator()
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        jobs=2,
+        generator=generator,
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 0
+    assert generator.max_active == 2
+    assert report.runner["jobs"] == 2
+    assert report.runner["batteries"] == [
+        {
+            "path": "tests/__generated__/math.derived.test.ts",
+            "tier": "derived",
+            "state": "staged",
+        },
+        {
+            "path": "tests/__generated__/math.example.test.ts",
+            "tier": "example",
+            "state": "staged",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_late_generation_failure_resumes_from_staged_battery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    cache = ResponseCache(tmp_path / ".test-response-cache")
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+        }
+
+    class LateFailureGenerator(FakeGenerator):
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            if request.cache_payload.get("tier") == "derived":
+                return (
+                    'import "../../src/__generated__/math.js";\n',
+                    TokenUsage(20, 10, "fake-ts", "fake"),
+                    (),
+                )
+            return await super().generate_request(request, **kwargs)
+
+    class CountingGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            self.calls += 1
+            return await super().generate_request(request, **kwargs)
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    failed = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        jobs=1,
+        max_attempts=1,
+        generator=LateFailureGenerator(),
+        response_cache=cache,
+        worker_factory=lambda *_: worker,
+    )
+
+    assert failed.exit_code == 3
+    assert cache.info()["entries"] == 1
+    assert not (tmp_path / "tests/__generated__/math.example.test.ts").exists()
+
+    resumed_generator = CountingGenerator()
+    resumed = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        jobs=1,
+        generator=resumed_generator,
+        response_cache=cache,
+        worker_factory=lambda *_: worker,
+    )
+
+    assert resumed.exit_code == 0
+    assert resumed_generator.calls == 1
+    assert resumed.runner["cache"]["hits"] == 1
+    assert cache.info()["entries"] == 2
+
+
+@pytest.mark.asyncio
+async def test_cross_battery_preflight_rejects_candidates_before_cache_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    cache = ResponseCache(tmp_path / ".test-response-cache")
+
+    async def cross_battery_failure(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        files = tuple(kwargs.get("files", ()))
+        if kwargs.get("typecheck_only") and len(files) == 1:
+            return {"ok": True, "mode": "typecheck", "tests": []}
+        return {
+            "ok": False,
+            "mode": "typecheck",
+            "diagnostics": [
+                {
+                    "code": "TS2451",
+                    "message": "cross-battery declaration conflict",
+                    "severity": "error",
+                }
+            ],
+            "tests": [],
+        }
+
+    monkeypatch.setattr(
+        "jaunt.typescript.tester._run_test_batches",
+        cross_battery_failure,
+    )
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        jobs=2,
+        generator=FakeGenerator(),
+        response_cache=cache,
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 3
+    assert cache.info()["entries"] == 0
+    assert {item["state"] for item in report.runner["batteries"]} == {"rejected"}
+    assert not (tmp_path / "tests/__generated__/math.example.test.ts").exists()
+    assert not (tmp_path / "tests/__generated__/math.derived.test.ts").exists()
 
 
 @pytest.mark.asyncio
@@ -4076,7 +4252,7 @@ async def test_passing_test_candidate_commits_disk_then_cache_after_vitest(
     "category",
     ["collection", "runner", "runner-protocol", "timeout"],
 )
-async def test_runner_nonbehavioral_failures_skip_repair_and_do_not_cache_candidates(
+async def test_runner_nonbehavioral_failures_skip_repair_and_keep_staged_candidates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     category: str,
@@ -4128,7 +4304,7 @@ async def test_runner_nonbehavioral_failures_skip_repair_and_do_not_cache_candid
     assert report.exit_code == 4
     assert len(build_calls) == 1
     assert "repair" not in report.runner
-    assert cache.info()["entries"] == 0
+    assert cache.info()["entries"] == 2
     assert not (tmp_path / "tests/__generated__/math.example.test.ts").exists()
     assert not (tmp_path / "tests/__generated__/math.derived.test.ts").exists()
 
@@ -4203,7 +4379,7 @@ async def test_failed_post_repair_rerun_rolls_back_implementation_and_journal(
         assert path.read_bytes() == content
     assert not (tmp_path / "tests/__generated__/math.example.test.ts").exists()
     assert not (tmp_path / "tests/__generated__/math.derived.test.ts").exists()
-    assert cache.info()["entries"] == 0
+    assert cache.info()["entries"] == 2
 
 
 @pytest.mark.asyncio

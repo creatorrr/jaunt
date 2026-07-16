@@ -1,6 +1,6 @@
 {
   "name": "@usejaunt/ts",
-  "version": "0.1.0-alpha.6",
+  "version": "0.1.0-alpha.7",
   "description": "Static TypeScript analyzer and marker API for Jaunt",
   "type": "module",
   "license": "MIT",
