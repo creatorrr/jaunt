@@ -2756,6 +2756,31 @@ def _runner_allows_implementation_repair(result: Mapping[str, Any]) -> bool:
     return bool(categories) and categories.issubset(_IMPLEMENTATION_REPAIR_CATEGORIES)
 
 
+def _failed_runner_test_paths(result: Mapping[str, Any]) -> tuple[str, ...]:
+    """Collect public failed-test paths from an aggregated protected-runner result."""
+
+    paths: set[str] = set()
+
+    def visit(value: object) -> None:
+        if not isinstance(value, Mapping):
+            return
+        tests = value.get("tests", ())
+        if isinstance(tests, list):
+            for item in tests:
+                if not isinstance(item, Mapping) or item.get("status") != "failed":
+                    continue
+                path = item.get("file")
+                if isinstance(path, str) and path:
+                    paths.add(path.replace("\\", "/").removeprefix("./"))
+        batches = value.get("batches", {})
+        if isinstance(batches, Mapping):
+            for batch in batches.values():
+                visit(batch)
+
+    visit(result)
+    return tuple(sorted(paths))
+
+
 def _cost_summary(*summaries: Mapping[str, Any]) -> dict[str, int | float]:
     merged: dict[str, int | float] = {}
     for summary in summaries:
@@ -3452,6 +3477,12 @@ async def run_test(
                 result,
                 generation_fingerprint=fingerprint,
             )
+            if isinstance(result.source, str):
+                cached_battery_responses[path] = (
+                    request,
+                    fingerprint,
+                    result.source,
+                )
             record_battery_outcome(path, tier, "staged")
             _progress_phase(progress, path, "staged", tier)
         pending_cache_writes.clear()
@@ -4237,6 +4268,26 @@ async def run_test(
                         with _preserve_managed_files(root, commit_paths) as transaction:
                             commit_test_files()
                             transaction.commit()
+
+    if (
+        no_build
+        and not no_run
+        and not bool(runner.get("ok", False))
+        and _runner_allows_implementation_repair(runner)
+    ):
+        failed_cache_paths = tuple(
+            path for path in _failed_runner_test_paths(runner) if path in cached_battery_responses
+        )
+        reject_batteries(
+            failed_cache_paths,
+            {
+                path: (
+                    "The final protected Vitest run rejected this battery; "
+                    "its cached response was removed.",
+                )
+                for path in failed_cache_paths
+            },
+        )
 
     exit_code = repair_exit_code or (0 if bool(runner.get("ok", False)) else 4)
     if exit_code:

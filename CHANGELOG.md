@@ -37,6 +37,9 @@ Python or TypeScript release.
 - Keep mixed-workspace `clean --orphans` Python preflight independent of the
   clean parser's argument shape. Workspaces with Python specs no longer crash
   because the status-only `jobs` default is absent.
+- Evict an identifiable cached battery when a `--no-build` final protected
+  Vitest run rejects it. The next retry regenerates that battery instead of
+  replaying a known behavior failure; unrelated validated cache entries remain.
 
 ### Packages
 

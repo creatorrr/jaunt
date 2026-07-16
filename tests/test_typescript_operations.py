@@ -4869,6 +4869,17 @@ async def test_test_modes_never_enter_implementation_repair(
     assert len(build_calls) == expected_build_calls
     assert all("ephemeral_prompt" not in call for call in build_calls)
     assert "repair" not in report.runner
+    if no_build:
+        outcomes = {item["path"]: item for item in report.runner["batteries"]}
+        rejected = outcomes["tests/__generated__/math.derived.test.ts"]
+        assert rejected["state"] == "rejected"
+        assert rejected["cache_evicted"] is True
+        assert rejected["rejection_reasons"] == (
+            "The final protected Vitest run rejected this battery; "
+            "its cached response was removed.",
+        )
+        assert outcomes["tests/__generated__/math.example.test.ts"]["state"] == "staged"
+        assert ResponseCache(tmp_path / ".jaunt" / "cache").info()["entries"] == 1
 
 
 @pytest.mark.asyncio
