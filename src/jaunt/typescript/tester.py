@@ -30,7 +30,11 @@ from urllib.parse import unquote
 from jaunt.config import JauntConfig
 from jaunt.cache import ResponseCache
 from jaunt.cost import CostTracker
-from jaunt.errors import JauntConfigError, JauntGenerationError
+from jaunt.errors import (
+    JauntBudgetExceededError,
+    JauntConfigError,
+    JauntGenerationError,
+)
 from jaunt.generate.base import GenerationRequest, GenerationResult, GeneratorBackend
 from jaunt.generate.request_cache import (
     discard_cached_generation,
@@ -1988,14 +1992,13 @@ def _valid_runner_dto(
         if not isinstance(item, Mapping):
             return False
         keys = set(item)
-        if redact_derived and (
-            keys == protected_derived_allowed or keys == protected_runner_startup_allowed
-        ):
+        if keys == protected_runner_startup_allowed and _runner_startup_failure(item):
+            failed = True
+            continue
+        if redact_derived and keys == protected_derived_allowed:
             if not _safe_runner_case_id(item.get("caseId")) or not _safe_runner_category(
                 item.get("category")
             ):
-                return False
-            if keys == protected_runner_startup_allowed and not _runner_startup_failure(item):
                 return False
             failed = True
             continue
@@ -3723,6 +3726,8 @@ async def run_test(
                         ),
                         store=False,
                     )
+                except JauntBudgetExceededError:
+                    raise
                 except JauntGenerationError as exc:
                     message = str(exc)
                     result = GenerationResult(

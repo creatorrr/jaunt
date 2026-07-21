@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
 from jaunt.cost import CostTracker, _estimate_cost
-from jaunt.errors import JauntGenerationError
+from jaunt.errors import JauntBudgetExceededError, JauntGenerationError
 from jaunt.generate.base import (
     GenerationModuleResult,
     GenerationRequest,
@@ -60,7 +60,7 @@ class _SharedBudgetLedger:
         with self._lock:
             estimated = self._estimated_cost_unlocked()
             if self.max_cost is not None and estimated > self.max_cost:
-                raise JauntGenerationError(
+                raise JauntBudgetExceededError(
                     f"Combined mixed-target cost ${estimated:.4f} exceeds budget "
                     f"limit ${self.max_cost:.4f}. Aborting."
                 )

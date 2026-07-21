@@ -20,6 +20,7 @@ from jaunt.cache import CacheEntry, ResponseCache
 from jaunt.config import JauntConfig, load_config
 from jaunt.cost import CostTracker
 from jaunt.errors import (
+    JauntBudgetExceededError,
     JauntConfigError,
     JauntGenerationError,
     JauntTransientGenerationError,
@@ -3254,6 +3255,25 @@ def test_protected_runner_dto_keeps_aggregate_success_with_no_derived_records() 
     assert not _valid_runner_dto(successful, expected_mode="run", redact_derived=False)
 
 
+def test_runner_dto_keeps_startup_failure_details_without_redaction() -> None:
+    startup = {
+        "ok": False,
+        "mode": "run",
+        "diagnostics": [],
+        "tests": [
+            {
+                "caseId": "opaque-runner-failure",
+                "category": "runner",
+                "message": "startVitest failed: bad reporter\n    at start (runner.ts:1)",
+            }
+        ],
+        "captured": {"stdout": "", "stderr": ""},
+    }
+
+    assert _valid_runner_dto(startup, expected_mode="run", redact_derived=False)
+    assert _valid_runner_dto(startup, expected_mode="run", redact_derived=True)
+
+
 @pytest.mark.parametrize(
     "source",
     [
@@ -4574,6 +4594,52 @@ async def test_stream_failure_is_per_battery_and_remaining_work_continues(
     summary = "\n".join(human_lines(payload))
     assert "tests/math.jaunt-test.ts#example" in summary
     assert "JAUNT_TS_TEST_INFRASTRUCTURE: stream disconnected before completion" in summary
+
+
+@pytest.mark.asyncio
+async def test_budget_abort_stops_test_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    cache = ResponseCache(tmp_path / ".test-response-cache")
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+        }
+
+    class BudgetAbortGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate_request(
+            self,
+            request: GenerationRequest,
+            **kwargs: Any,
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            self.calls += 1
+            raise JauntBudgetExceededError(
+                "Combined mixed-target cost $1.0000 exceeds budget limit $0.5000. Aborting."
+            )
+
+    generator = BudgetAbortGenerator()
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+
+    with pytest.raises(JauntBudgetExceededError):
+        await run_test(
+            tmp_path,
+            config,
+            no_build=True,
+            jobs=1,
+            generator=generator,
+            response_cache=cache,
+            worker_factory=lambda *_: worker,
+        )
+
+    assert generator.calls >= 1
 
 
 @pytest.mark.asyncio
