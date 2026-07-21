@@ -21,7 +21,11 @@ from pathlib import Path, PurePosixPath
 from typing import cast
 
 from jaunt.config import CodexConfig, LLMConfig, PromptsConfig
-from jaunt.errors import JauntGenerationError, JauntTransientGenerationError
+from jaunt.errors import (
+    JauntGenerationError,
+    JauntQuotaGenerationError,
+    JauntTransientGenerationError,
+)
 from jaunt.generate.base import GenerationRequest, GeneratorBackend, ModuleSpecContext, TokenUsage
 from jaunt.generate.shared import load_prompt
 from jaunt.skill_seed import seed_skills_into_workspace
@@ -254,11 +258,13 @@ async def run_codex_exec(
         elif not parsed.saw_turn_completed:
             failure_message = "no turn.completed event (protocol failure)"
     if failure_message is not None:
-        error_type = (
-            JauntTransientGenerationError
-            if _is_transient_exec_error(failure_message)
-            else JauntGenerationError
-        )
+        failure_detail = f"{failure_message}\n{stderr}"
+        if _is_usage_limit_exec_error(failure_detail):
+            error_type = JauntQuotaGenerationError
+        elif _is_transient_exec_error(failure_detail):
+            error_type = JauntTransientGenerationError
+        else:
+            error_type = JauntGenerationError
         raise error_type(_format_exec_failure(failure_message, stderr))
 
     return CodexExecResult(
@@ -374,6 +380,16 @@ def _is_transient_exec_error(message: str) -> bool:
     return "selected model is at capacity" in message.casefold()
 
 
+def _is_usage_limit_exec_error(message: str) -> bool:
+    """Classify Codex plan-level usage limits separately from capacity failures."""
+
+    folded = message.casefold()
+    return any(
+        marker in folded
+        for marker in ("you've hit your usage limit", "you have hit your usage limit")
+    )
+
+
 def _truncate_stderr(stderr: str, *, limit: int = 4000) -> str:
     if len(stderr) <= limit:
         return stderr
@@ -424,6 +440,10 @@ class CodexBackend(GeneratorBackend):
     @property
     def provider_name(self) -> str:
         return "codex"
+
+    @property
+    def quota_wait_minutes(self) -> float:
+        return self._codex.quota_wait_minutes
 
     @property
     def supports_structured_output(self) -> bool:

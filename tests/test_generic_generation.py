@@ -7,7 +7,11 @@ from pathlib import Path
 import pytest
 
 from jaunt.config import CodexConfig, LLMConfig
-from jaunt.errors import JauntGenerationError, JauntTransientGenerationError
+from jaunt.errors import (
+    JauntGenerationError,
+    JauntQuotaGenerationError,
+    JauntTransientGenerationError,
+)
 from jaunt.generate.base import (
     GenerationRequest,
     GeneratorBackend,
@@ -125,6 +129,153 @@ def test_generic_retry_returns_structured_result_when_capacity_stays_exhausted(
     assert len(result.infrastructure_errors) == 3
     assert result.infrastructure_exhausted is True
     assert result.errors == ["Selected model is at capacity"]
+
+
+def test_quota_wait_does_not_consume_capacity_retry_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class QuotaThenCapacityBackend(GenericBackend):
+        @property
+        def quota_wait_minutes(self) -> float:
+            return 1.0
+
+        async def generate_request(self, request: GenerationRequest, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise JauntQuotaGenerationError("You've hit your usage limit")
+            if self.calls <= 3:
+                raise JauntTransientGenerationError("Selected model is at capacity")
+            return "good", None
+
+    sleeps: list[float] = []
+
+    async def no_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("jaunt.generate.base.asyncio.sleep", no_sleep)
+    request = GenerationRequest(
+        language="ts",
+        kind="test",
+        target_path="tests/generated.test.ts",
+        context_files={},
+        prompt="Generate tests.",
+        cache_payload={},
+        validator=lambda source: [] if source == "good" else ["bad"],
+    )
+    result = asyncio.run(QuotaThenCapacityBackend().generate_request_with_retry(request))
+
+    assert result.attempts == 1
+    assert result.infrastructure_retries == 2
+    assert len(result.infrastructure_errors) == 2
+    assert sleeps == [60.0, 1.0, 2.0]
+
+
+def test_codex_quota_wait_retries_same_candidate_with_exponential_backoff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    sleeps: list[float] = []
+    progress: list[tuple[str, str]] = []
+
+    async def fake_exec(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            raise JauntQuotaGenerationError("You've hit your usage limit")
+        cwd = Path(kwargs["cwd"])
+        (cwd / "out").mkdir(exist_ok=True)
+        (cwd / "out/index.ts").write_text("export const answer = 42;\n", encoding="utf-8")
+        return CodexExecResult(
+            returncode=0,
+            final_message="ADVISORIES: none",
+            usage_input=1,
+            usage_output=2,
+            usage_cached=0,
+            stderr="",
+        )
+
+    async def no_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("jaunt.generate.codex_backend.run_codex_exec", fake_exec)
+    monkeypatch.setattr("jaunt.generate.base.asyncio.sleep", no_sleep)
+    backend = CodexBackend(
+        CodexConfig(quota_wait_minutes=3),
+        LLMConfig("openai", "unused", "OPENAI_API_KEY"),
+    )
+    request = GenerationRequest(
+        language="ts",
+        kind="test",
+        target_path="out/index.ts",
+        context_files={},
+        prompt="Generate the target.",
+        cache_payload={},
+        validator=lambda source: [] if "answer" in source else ["missing answer"],
+        project_root=tmp_path,
+    )
+
+    result = asyncio.run(
+        backend.generate_request_with_retry(
+            request,
+            progress=lambda stage, detail: progress.append((stage, detail)),
+        )
+    )
+
+    assert calls == 3
+    assert sleeps == [60.0, 120.0]
+    assert result.attempts == 1
+    assert result.source == "export const answer = 42;\n"
+    quota_progress = [detail for stage, detail in progress if stage == "quota-wait"]
+    assert len(quota_progress) == 2
+    assert quota_progress[0].startswith("waiting 1 minute(s)")
+    assert quota_progress[1].startswith("waiting 2 minute(s)")
+
+
+@pytest.mark.parametrize(
+    ("budget_minutes", "expected_calls", "expected_sleeps"),
+    [(0.0, 1, []), (1.0, 2, [60.0])],
+)
+def test_codex_quota_wait_exhaustion_rethrows_without_candidate_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    budget_minutes: float,
+    expected_calls: int,
+    expected_sleeps: list[float],
+) -> None:
+    calls = 0
+    sleeps: list[float] = []
+
+    async def fake_exec(**_kwargs):
+        nonlocal calls
+        calls += 1
+        raise JauntQuotaGenerationError("You've hit your usage limit")
+
+    async def no_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("jaunt.generate.codex_backend.run_codex_exec", fake_exec)
+    monkeypatch.setattr("jaunt.generate.base.asyncio.sleep", no_sleep)
+    backend = CodexBackend(
+        CodexConfig(quota_wait_minutes=budget_minutes),
+        LLMConfig("openai", "unused", "OPENAI_API_KEY"),
+    )
+    request = GenerationRequest(
+        language="ts",
+        kind="test",
+        target_path="out/index.ts",
+        context_files={},
+        prompt="Generate the target.",
+        cache_payload={},
+        validator=lambda _source: [],
+        project_root=tmp_path,
+    )
+
+    with pytest.raises(JauntQuotaGenerationError, match="usage limit"):
+        asyncio.run(backend.generate_request_with_retry(request, max_attempts=2))
+
+    assert calls == expected_calls
+    assert sleeps == expected_sleeps
 
 
 def test_generic_cache_key_is_language_and_target_namespaced() -> None:

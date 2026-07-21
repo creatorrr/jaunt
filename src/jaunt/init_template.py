@@ -54,6 +54,8 @@ engine = "codex"
 model = "gpt-5.6-sol"
 reasoning_effort = "medium"
 sandbox = "workspace-write"
+# Wait budget for plan-level Codex usage limits (0 = fail immediately).
+quota_wait_minutes = 0
 # Opt-in: include `codex --version` in freshness fingerprints. Couples
 # `jaunt check` to environments that have the codex binary installed.
 # fingerprint_cli_version = false
@@ -122,6 +124,7 @@ engine = "codex"               # the only supported engine
 model = "gpt-5.6-sol"
 reasoning_effort = "medium"    # low | medium | high
 sandbox = "workspace-write"
+quota_wait_minutes = 0          # usage-limit wait budget; 0 fails immediately
 # Opt-in: embed `codex --version` in freshness fingerprints. Couples `jaunt
 # check` to environments that have the codex binary installed.
 fingerprint_cli_version = false
@@ -209,6 +212,7 @@ jobs = 4
 model = "gpt-5.6-sol"
 reasoning_effort = "medium"
 sandbox = "workspace-write"
+quota_wait_minutes = 0
 
 [semantic_gate]
 enabled = true

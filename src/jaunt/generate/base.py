@@ -12,7 +12,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal, TypeAlias, cast
 
-from jaunt.errors import JauntTransientGenerationError
+from jaunt.errors import JauntQuotaGenerationError, JauntTransientGenerationError
 from jaunt.spec_ref import SpecRef
 from jaunt.validation import validate_generated_source
 
@@ -126,12 +126,21 @@ GenerationModuleResult: TypeAlias = (
 )
 
 _MAX_INFRASTRUCTURE_RETRIES = 2
+_INITIAL_QUOTA_WAIT_SECONDS = 60.0
+_MAX_QUOTA_WAIT_SECONDS = 8 * 60.0
+
+
+@dataclass(slots=True)
+class _QuotaRetryState:
+    remaining_seconds: float
+    next_delay_seconds: float = _INITIAL_QUOTA_WAIT_SECONDS
 
 
 async def _call_with_infrastructure_retry(
     call: Callable[[], Awaitable[GenerationModuleResult]],
     *,
     progress: Callable[[str, str], None] | None,
+    quota: _QuotaRetryState,
 ) -> tuple[GenerationModuleResult | None, tuple[str, ...]]:
     """Retry explicitly transient provider failures without spending candidate attempts."""
 
@@ -139,6 +148,22 @@ async def _call_with_infrastructure_retry(
     while True:
         try:
             return await call(), tuple(errors)
+        except JauntQuotaGenerationError as exc:
+            if quota.remaining_seconds <= 0:
+                raise
+            delay = min(quota.next_delay_seconds, quota.remaining_seconds)
+            if progress is not None:
+                progress(
+                    "quota-wait",
+                    f"waiting {delay / 60:g} minute(s); "
+                    f"{(quota.remaining_seconds - delay) / 60:g} minute(s) remain: {exc}",
+                )
+            await asyncio.sleep(delay)
+            quota.remaining_seconds -= delay
+            quota.next_delay_seconds = min(
+                quota.next_delay_seconds * 2,
+                _MAX_QUOTA_WAIT_SECONDS,
+            )
         except JauntTransientGenerationError as exc:
             errors.append(str(exc))
             if len(errors) > _MAX_INFRASTRUCTURE_RETRIES:
@@ -170,6 +195,10 @@ class GeneratorBackend(ABC):
     @property
     def provider_name(self) -> str:
         return ""
+
+    @property
+    def quota_wait_minutes(self) -> float:
+        return 0.0
 
     def generation_fingerprint(self, ctx: ModuleSpecContext) -> str:
         """Stable fingerprint for freshness invalidation and cache partitioning."""
@@ -249,6 +278,7 @@ class GeneratorBackend(ABC):
         total_cached_prompt = 0
         attempt_request = request
         infrastructure_errors: list[str] = []
+        quota = _QuotaRetryState(max(0.0, self.quota_wait_minutes * 60.0))
 
         while attempts < max_attempts:
             attempts += 1
@@ -262,6 +292,7 @@ class GeneratorBackend(ABC):
                     )
                 ),
                 progress=progress,
+                quota=quota,
             )
             infrastructure_errors.extend(transient_errors)
             if generated is None:
@@ -359,6 +390,7 @@ class GeneratorBackend(ABC):
         total_completion = 0
         total_cached_prompt = 0
         infrastructure_errors: list[str] = []
+        quota = _QuotaRetryState(max(0.0, self.quota_wait_minutes * 60.0))
 
         while attempts < max_attempts:
             attempts += 1
@@ -370,6 +402,7 @@ class GeneratorBackend(ABC):
                     extra_error_context=current_context,
                 ),
                 progress=progress,
+                quota=quota,
             )
             infrastructure_errors.extend(transient_errors)
             if gen is None:

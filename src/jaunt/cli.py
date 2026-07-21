@@ -10,6 +10,7 @@ import asyncio
 import glob
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -17,7 +18,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
@@ -174,6 +175,16 @@ def _add_build_generation_flags(p: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_quota_wait_flag(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--quota-wait",
+        type=_nonnegative_float,
+        default=None,
+        metavar="MINUTES",
+        help="Wait up to MINUTES for a Codex plan-level usage limit (default: config or 0).",
+    )
+
+
 def _positive_float(value: str) -> float:
     try:
         parsed = float(value)
@@ -189,8 +200,8 @@ def _nonnegative_float(value: str) -> float:
         parsed = float(value)
     except ValueError as e:
         raise argparse.ArgumentTypeError("must be a number") from e
-    if parsed < 0:
-        raise argparse.ArgumentTypeError("must be greater than or equal to 0")
+    if not math.isfinite(parsed) or parsed < 0:
+        raise argparse.ArgumentTypeError("must be finite and greater than or equal to 0")
     return parsed
 
 
@@ -203,6 +214,7 @@ def _build_parser() -> argparse.ArgumentParser:
     build_p = subparsers.add_parser("build", help="Generate code for magic specs.")
     _add_common_flags(build_p)
     _add_build_generation_flags(build_p)
+    _add_quota_wait_flag(build_p)
     build_p.add_argument(
         "--no-repo-map", action="store_true", help="Disable repo-map injection for this build."
     )
@@ -217,6 +229,7 @@ def _build_parser() -> argparse.ArgumentParser:
     test_p = subparsers.add_parser("test", help="Generate tests and run the target test runner.")
     _add_common_flags(test_p)
     _add_build_generation_flags(test_p)
+    _add_quota_wait_flag(test_p)
     test_p.add_argument("--no-build", action="store_true", help="Skip `jaunt build`.")
     test_p.add_argument("--no-run", action="store_true", help="Skip running pytest or Vitest.")
     test_p.add_argument(
@@ -825,6 +838,9 @@ def _load_config(args: argparse.Namespace) -> tuple[Path, JauntConfig]:
 
     assert root is not None
     cfg = load_config(root=root, config_path=config_path)
+    quota_wait = getattr(args, "quota_wait", None)
+    if quota_wait is not None:
+        cfg = replace(cfg, codex=replace(cfg.codex, quota_wait_minutes=quota_wait))
     return root, cfg
 
 
