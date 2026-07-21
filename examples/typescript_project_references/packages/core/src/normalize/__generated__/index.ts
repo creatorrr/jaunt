@@ -1,9 +1,9 @@
 // ⛓️ jaunt:generated — generated; do not edit.
 // jaunt:state=built
 // jaunt:module=ts:packages/core/src/normalize/index
-// jaunt:structural=sha256:c4f716f19aaf96bd3672aae056580676cd62fc1fc3db2abca7ad12ac8fca6276
+// jaunt:structural=sha256:ede0c338776ab727068234ccf12db0e48c0aaf1378ede87c2b9edcbce0828da0
 // jaunt:prose=sha256:fe36c3763b8865671942e43121b369178cedb891ef3436c7263ba68da757b456
-// jaunt:api=sha256:d7f87ef01e4b85c13d497d3acddc171157dde44bbc4ac12f20faefd99e926639
+// jaunt:api=sha256:2701ba65d8884e6e7ae949ba1a63e61261dd5a9bd983a76090cb04f308eb45f0
 import type * as __JauntApi from "./index.api.js";
 function __jaunt_impl_normalizeSpacing(value: string): string {
   return value.replace(/[\t\n\v\f\r ]+/g, " ").replace(/^ | $/g, "");

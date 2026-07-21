@@ -179,6 +179,44 @@ interface SourceSpan {
   readonly end: number;
 }
 
+interface TemplateTokenStarts {
+  readonly all: ReadonlySet<number>;
+  readonly tagged: ReadonlySet<number>;
+}
+
+function templateTokenStarts(
+  compiler: typeof import("@typescript/typescript6"),
+  sourceFile: ts.SourceFile,
+): TemplateTokenStarts {
+  const all = new Set<number>();
+  const tagged = new Set<number>();
+  function visit(node: ts.Node): void {
+    if (
+      compiler.isTemplateExpression(node) ||
+      compiler.isTemplateLiteralTypeNode(node)
+    ) {
+      all.add(node.head.getStart(sourceFile));
+      for (const span of node.templateSpans) {
+        all.add(span.literal.getStart(sourceFile));
+      }
+    }
+    if (compiler.isTaggedTemplateExpression(node)) {
+      const template = node.template;
+      if (compiler.isNoSubstitutionTemplateLiteral(template)) {
+        tagged.add(template.getStart(sourceFile));
+      } else {
+        tagged.add(template.head.getStart(sourceFile));
+        for (const span of template.templateSpans) {
+          tagged.add(span.literal.getStart(sourceFile));
+        }
+      }
+    }
+    compiler.forEachChild(node, visit);
+  }
+  visit(sourceFile);
+  return { all, tagged };
+}
+
 function declarationBodySpans(
   compiler: typeof import("@typescript/typescript6"),
   sourceFile: ts.SourceFile,
@@ -245,6 +283,7 @@ function semanticSource(
       ? compiler.ScriptKind.TSX
       : compiler.ScriptKind.TS,
   );
+  const templates = templateTokenStarts(compiler, sourceFile);
   const bodySpans = /\.d\.[cm]?ts$/.test(path)
     ? []
     : declarationBodySpans(compiler, sourceFile);
@@ -257,6 +296,12 @@ function semanticSource(
     kind = scanner.scan()
   ) {
     const position = scanner.getTokenPos();
+    if (
+      kind === compiler.SyntaxKind.CloseBraceToken &&
+      templates.all.has(position)
+    ) {
+      kind = scanner.reScanTemplateToken(true);
+    }
     while (bodySpans[spanIndex] && position >= bodySpans[spanIndex]!.end) {
       spanIndex += 1;
       emittedBodyMarker = false;
@@ -267,9 +312,10 @@ function semanticSource(
       emittedBodyMarker = true;
       continue;
     }
-    const text =
-      kind === compiler.SyntaxKind.StringLiteral ||
-      kind === compiler.SyntaxKind.NoSubstitutionTemplateLiteral
+    const text = templates.tagged.has(position)
+      ? "<tagged-template-text>"
+      : kind === compiler.SyntaxKind.StringLiteral ||
+          kind === compiler.SyntaxKind.NoSubstitutionTemplateLiteral
         ? scanner.getTokenValue()
         : kind === compiler.SyntaxKind.NumericLiteral ||
             kind === compiler.SyntaxKind.BigIntLiteral

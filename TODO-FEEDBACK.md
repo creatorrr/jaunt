@@ -131,3 +131,12 @@
 - [x] Report the exact package-manager provenance record in status and migration JSON.
 - [x] Cover package-manager-only drift with analyzer and model-free migration regressions.
 - [x] Limit SessionStart freshness to the nearest active workspace instead of nested examples.
+
+## Cycle 16 — 2026-07-21
+
+- [x] Exclude tagged-template text from TypeScript semantic-environment freshness.
+- [x] Preserve substitution expressions and ordinary template literals in the digest.
+- [x] Add an adopter-shaped transitive-closure regression and run the full validation suite.
+- [ ] Let CI verify a stale battery through committed or worker-proven API-transition evidence.
+- [ ] Attribute `target_api_digest` battery drift to the changed closure records.
+- [ ] Release Jaunt 1.7.10 and `@usejaunt/ts` 0.1.1.

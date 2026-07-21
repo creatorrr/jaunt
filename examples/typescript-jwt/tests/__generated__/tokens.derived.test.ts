@@ -2,14 +2,14 @@
 // jaunt:tier=derived
 // jaunt:source=tests/tokens.jaunt-test.ts
 // jaunt:test_spec_digest=sha256:af5a7a64a6ba14f47956cdca7e8990398929d529817d11c369f8f6ca36b53797
-// jaunt:target_api_digest=sha256:bd2aec9e1a74ed06e29bb8a0649e9fdc68d7258137b754aa7eafb915bb3188b1
+// jaunt:target_api_digest=sha256:c9f35159a23a017c4e7f585ef5ba87208326cf1387af32391ecf1891086125db
 // jaunt:vitest_fingerprint=sha256:5ef9c3f603f2a5e5aa0967833c5876ba1374afb318d3777d80f2d86c1fb0a905
 // jaunt:fast_check_fingerprint=sha256:97f62ee354ca9285052845e71b421a6e36baf29fd9d99056da8a9e34f27b47d8
-// jaunt:runner_fingerprint=sha256:121df54c0d39753e6ddf516f4fa49ab6c5d060454f9297715c92ac521c5dfca4
+// jaunt:runner_fingerprint=sha256:91ac9ef7c168797eab787ce3947bbfc5ecf1a4957a36d051d9fc7ec5877048d2
 // jaunt:prompt_fingerprint=sha256:c01073b453383c0f7394eaaf1cfeebadd1099a87810a688a2e8785b50876635f
 // jaunt:policy_fingerprint=sha256:babe1406e8e4cc1024536374f7e50070a88000c5e80db5f17d2914c1e7752693
 // jaunt:skills_fingerprint=462d7ee5b605e739480d217bc7874e1490ce7a1a8d700cb2a516c776f04fbcaf
-// jaunt:battery_fingerprint=sha256:ccfc8672aa7bae65d2759285fdd8167d0a960a406776828aa72b711931dc2142
+// jaunt:battery_fingerprint=sha256:5e5b9808da6830b6c6368b72020fd93af5f7afa27a5893dc2fab1acbc7bbd5d1
 // jaunt:body_digest=sha256:fd4826e42afa7e3d396af8de02baa1a1dfe8714c46749a4c4f27354127dcf442
 
 import { createHmac } from "node:crypto";

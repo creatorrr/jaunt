@@ -4,6 +4,22 @@ All notable changes to Jaunt and `@usejaunt/ts`. Generated from conventional
 commits by [git-cliff](https://git-cliff.org), with one section per published
 Python or TypeScript release.
 
+## [1.7.10 / @usejaunt/ts 0.1.1] - 2026-07-21
+
+### Fixes
+
+- Exclude the raw text segments of tagged template literals from TypeScript
+  semantic-environment freshness. Editing a GraphQL `gql` document or another
+  tagged string in a transitive application import no longer restales governed
+  modules and their generated batteries when the TypeScript contract is
+  unchanged. Substitution expressions and ordinary untagged template literals
+  remain part of the structural digest.
+
+### Packages
+
+- Publish `@usejaunt/ts` 0.1.1 with the tagged-template freshness correction.
+  Jaunt 1.7.10 carries the matching worker behavior and upgrade guidance.
+
 ## [1.7.9 / @usejaunt/ts 0.1.0] - 2026-07-15
 
 ### Fixes

@@ -1,9 +1,9 @@
 {
-  "apiDigest": "sha256:d7f87ef01e4b85c13d497d3acddc171157dde44bbc4ac12f20faefd99e926639",
+  "apiDigest": "sha256:2701ba65d8884e6e7ae949ba1a63e61261dd5a9bd983a76090cb04f308eb45f0",
   "apiMirrorPath": "packages/core/src/normalize/__generated__/index.api.ts",
   "artifactHashes": {
-    "packages/core/src/normalize/__generated__/index.api.ts": "sha256:91837fd792064c9586095cdd2e69d90c14e70ac9bb735022498b7855fa3892a1",
-    "packages/core/src/normalize/__generated__/index.ts": "sha256:9410801a35ee45bea789dc3d28e3095c3d54d23638e9ae66ddca082007003cce",
+    "packages/core/src/normalize/__generated__/index.api.ts": "sha256:23a096746de0b646db6064dacb64cbaea7ca86cf72df7ac97038e89b1f0380c6",
+    "packages/core/src/normalize/__generated__/index.ts": "sha256:88f4d1c15eecbb21ca035d282d21030351ea6ee06800a8f4d63fdba0fee9149d",
     "packages/core/src/normalize/index.ts": "sha256:1db00b0df482881a7fe6f67c5d84bf3d48659187a8e4ed17909cf395260f6874"
   },
   "contextDocs": [
@@ -146,12 +146,12 @@
   "facadePath": "packages/core/src/normalize/index.ts",
   "fingerprint": {
     "compilerOptionsHash": "sha256:733b0de60903c3a6ff99040ca855c84b231f4a33ec486b0681a52c9fd9c80560",
-    "generationFingerprint": "sha256:c224278278145a0cba16c9a95ea9e588de5bb3cdf87bf12ff0ac54caaab217ef",
+    "generationFingerprint": "sha256:ef61b35232e312d89a7a64375ea79e4713bdee38d2d6ef8d23cc6e91fd05b06d",
     "ir": "contract-ir/1-draft.3",
     "protocol": "jaunt-ts/1-draft.3",
-    "toolVersion": "1.7.9",
+    "toolVersion": "1.7.10",
     "typescriptVersion": "5.9.3",
-    "workerVersion": "0.1.0"
+    "workerVersion": "0.1.1"
   },
   "implementationPath": "packages/core/src/normalize/__generated__/index.ts",
   "moduleId": "ts:packages/core/src/normalize/index",
@@ -160,7 +160,7 @@
   "project": "packages/core/tsconfig.json",
   "proseDigest": "sha256:fe36c3763b8865671942e43121b369178cedb891ef3436c7263ba68da757b456",
   "schema": "contract-ir/1-draft.3",
-  "semanticEnvironmentDigest": "sha256:ff64926d5c1adcdb5e676a56e30601ca31de824ec582f73fe958aa1d12ea18d5",
+  "semanticEnvironmentDigest": "sha256:73dacd4f857ea1367c052a967d86b941c7da92c97e3ce61a5cc128f2b0a27ca9",
   "semanticEnvironmentRecords": [
     {
       "digest": "sha256:902d170f88eb669ac3f428a62b2a914929deb9871c81804d22cd546026071cef",
@@ -171,7 +171,7 @@
       "id": "environment:packages/core/package.json"
     },
     {
-      "digest": "sha256:8010d0efb81c07aacf6bc4f13368b3ec2683a916c6b0f18d240bc399b0f8a658",
+      "digest": "sha256:a78e14c50b95b4c59d0d80c5950e9bbbd29eaacbd9decaba820d034f56d830d7",
       "id": "package:@types/node"
     },
     {
@@ -185,7 +185,7 @@
   ],
   "specPath": "packages/core/src/normalize/index.jaunt.ts",
   "state": "built",
-  "structuralDigest": "sha256:c4f716f19aaf96bd3672aae056580676cd62fc1fc3db2abca7ad12ac8fca6276",
+  "structuralDigest": "sha256:ede0c338776ab727068234ccf12db0e48c0aaf1378ede87c2b9edcbce0828da0",
   "symbols": [
     {
       "docs": "Normalize spacing in a title.\n\nTrim leading and trailing ASCII whitespace and replace each non-empty run of\nASCII whitespace characters with one literal space. Return an empty string\nwhen the input is empty or contains only ASCII whitespace.\n\n@example normalizeSpacing(\"  Jaunt\\tTS  \") // => \"Jaunt TS\"",
@@ -218,6 +218,7 @@
       "typeParameters": []
     }
   ],
+  "toolingProvenanceRecords": [],
   "typeDeclarations": [],
   "typeImports": []
 }

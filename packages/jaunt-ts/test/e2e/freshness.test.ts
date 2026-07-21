@@ -254,6 +254,94 @@ export type Normalizer = typeof normalize;
   expect(await structuralDigest(workspace)).not.toBe(original);
 });
 
+for (const compilerPackage of [
+  "@typescript/typescript58",
+  "@typescript/typescript6",
+] as const) {
+  test(`tagged-template text is type-neutral while substitutions and plain templates are not on ${compilerPackage}`, async () => {
+    const workspace = createFixtureWorkspace({ compilerPackage });
+    roots.push(workspace.root);
+    write(
+      workspace.root,
+      "src/slug/index.jaunt.ts",
+      `import * as jaunt from "@usejaunt/ts/spec";
+import type { Brief } from "../types.js";
+jaunt.magicModule();
+/** Read a brief title. */
+export function titleOf(brief: Brief): string {
+  return jaunt.magic();
+}
+`,
+    );
+    write(
+      workspace.root,
+      "src/types.ts",
+      `import "./queries.js";
+export interface Brief { id: string; title: string; }
+`,
+    );
+    write(
+      workspace.root,
+      "src/queries.ts",
+      `declare function gql(strings: TemplateStringsArray, ...values: unknown[]): string;
+export type Label = \`brief-\${string}\`;
+export const LABEL = \`brief \${1}\`;
+export const LIST = gql\`query { briefs { id } }\`;
+export const NESTED = gql\`query { \${\`brief \${1}\`} }\`;
+export const QUERY = gql\`query { brief(id: \${1}) { id } }\`;
+export const FIELD = \`id\`;
+`,
+    );
+    const original = await freshnessDigests(workspace);
+
+    write(
+      workspace.root,
+      "src/queries.ts",
+      `declare function gql(strings: TemplateStringsArray, ...values: unknown[]): string;
+export type Label = \`brief-\${string}\`;
+export const LABEL = \`brief \${1}\`;
+export const LIST = gql\`query { briefs { id title } }\`;
+export const NESTED = gql\`query { changed \${\`brief \${1}\`} }\`;
+export const QUERY = gql\`query { brief(id: \${1}) { id title } }\`;
+export const FIELD = \`id\`;
+`,
+    );
+    const textEdit = await freshnessDigests(workspace);
+    expect(textEdit).toEqual(original);
+
+    write(
+      workspace.root,
+      "src/queries.ts",
+      `declare function gql(strings: TemplateStringsArray, ...values: unknown[]): string;
+export type Label = \`brief-\${string}\`;
+export const LABEL = \`brief \${1}\`;
+export const LIST = gql\`query { briefs { id title } }\`;
+export const NESTED = gql\`query { changed \${\`brief \${1}\`} }\`;
+export const QUERY = gql\`query { brief(id: \${"1"}) { id title } }\`;
+export const FIELD = \`id\`;
+`,
+    );
+    const substitutionEdit = await freshnessDigests(workspace);
+    expect(substitutionEdit.structural).not.toBe(textEdit.structural);
+
+    write(
+      workspace.root,
+      "src/queries.ts",
+      `declare function gql(strings: TemplateStringsArray, ...values: unknown[]): string;
+export type Label = \`brief-\${string}\`;
+export const LABEL = \`brief \${1}\`;
+export const LIST = gql\`query { briefs { id title } }\`;
+export const NESTED = gql\`query { changed \${\`brief \${1}\`} }\`;
+export const QUERY = gql\`query { brief(id: \${"1"}) { id title } }\`;
+export const FIELD = \`title\`;
+`,
+    );
+    expect((await freshnessDigests(workspace)).structural).not.toBe(
+      substitutionEdit.structural,
+    );
+  });
+}
+
 test("imported public TSDoc is prose while explicit-return bodies are freshness-neutral", async () => {
   const workspace = createFixtureWorkspace();
   roots.push(workspace.root);

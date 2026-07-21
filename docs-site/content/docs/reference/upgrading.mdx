@@ -12,6 +12,20 @@ invalidate built modules. The exception is a correctness repair for artifacts
 whose provenance was previously marked fresh incorrectly; that safety migration
 is called out explicitly below.
 
+## 1.7.10 / `@usejaunt/ts` 0.1.1
+
+Tagged-template text no longer participates in the TypeScript semantic
+environment. A change inside a `gql` document or another tagged string in a
+transitive import therefore leaves governed modules and generated batteries
+fresh when their type contract is unchanged. Expressions inside `${...}` and
+ordinary untagged template literals remain structural inputs.
+
+Existing 0.1.0 artifacts whose import closure contains tagged templates may
+show one toolchain transition after upgrading. Preview it with
+`jaunt migrate --language ts --json`; when the tagged-template normalization is
+the only change, the current compiler can validate it as `free-recompose`
+without a model call.
+
 ## 1.7.9 / `@usejaunt/ts` 0.1.0
 
 `@usejaunt/ts` 0.1.0 is the first release on npm's `latest` channel. Pair it with
