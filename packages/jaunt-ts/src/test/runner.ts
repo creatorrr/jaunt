@@ -33,7 +33,10 @@ import {
 export const RUNNER_PROTOCOL = "jaunt-ts-test-runner/1" as const;
 export const MAX_RUNNER_INPUT_BYTES = 16 * 1024 * 1024;
 export const MAX_CAPTURED_STREAM_BYTES = 64 * 1024;
+export const MAX_RUNNER_STARTUP_ERROR_CHARS = 2_000;
 const TRUNCATION_MARKER = "\n[jaunt: captured output truncated]\n";
+const STARTUP_ERROR_TRUNCATION_MARKER =
+  "\n[jaunt: runner startup error truncated]";
 
 export interface TestRunnerInput {
   readonly root: string;
@@ -69,6 +72,7 @@ export interface TestRunnerOutput {
 export interface ProtectedDerivedTestResultRecord {
   readonly caseId: string;
   readonly category: FailureCategory;
+  readonly message?: string;
 }
 
 export type RunnerTestResultRecord =
@@ -91,6 +95,7 @@ export function projectTestResults(
 
 export function redactedRunnerFailure(
   mode: "typecheck" | "run",
+  startupError?: string,
 ): TestRunnerOutput {
   return {
     ok: false,
@@ -100,10 +105,21 @@ export function redactedRunnerFailure(
       {
         caseId: "opaque-runner-failure",
         category: "runner",
+        ...(startupError === undefined ? {} : { message: startupError }),
       },
     ],
     captured: { stdout: "", stderr: "" },
   };
+}
+
+function runnerStartupError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const stack = error instanceof Error ? error.stack : undefined;
+  const rendered = [message, stack].filter(Boolean).join("\n");
+  if (rendered.length <= MAX_RUNNER_STARTUP_ERROR_CHARS) return rendered;
+  const limit =
+    MAX_RUNNER_STARTUP_ERROR_CHARS - STARTUP_ERROR_TRUNCATION_MARKER.length;
+  return rendered.slice(0, limit) + STARTUP_ERROR_TRUNCATION_MARKER;
 }
 
 function redactTypecheckResult(result: TestRunnerOutput): TestRunnerOutput {
@@ -1409,48 +1425,58 @@ async function run(input: TestRunnerInput): Promise<TestRunnerOutput> {
     stderrTruncated ||= captured.truncated;
     return true;
   }) as typeof process.stderr.write;
+  let startupError: string | undefined;
   try {
     const sourceResolver = await projectSourceResolver(input);
-    const instance = await startVitest(
-      "test",
-      input.files.map((path) => resolve(input.root, path)),
-      {
-        root: input.root,
-        run: true,
-        watch: false,
-        passWithNoTests: false,
-        reporters: [reporter],
-        include: [...input.files],
-        testTimeout: input.timeoutMs,
-        hookTimeout: input.timeoutMs,
-        ...(input.tier ? { pool: "threads" as const } : {}),
-        config: input.vitestConfigPath
-          ? resolve(input.root, input.vitestConfigPath)
-          : false,
-      },
-      {
-        cacheDir: resolve(input.root, ".jaunt-vitest-cache"),
-        server: { fs: { allow: [input.root], strict: true } },
-        plugins: [
-          ...(sourceResolver ? [sourceResolver] : []),
-          {
-            name: "jaunt-test-overlays",
-            enforce: "pre",
-            load(id: string) {
-              return (
-                overlayAbsolute.get(comparableEntryPath(id.split("?")[0]!)) ??
-                null
-              );
+    let instance: Awaited<ReturnType<typeof startVitest>> | undefined;
+    try {
+      instance = await startVitest(
+        "test",
+        input.files.map((path) => resolve(input.root, path)),
+        {
+          root: input.root,
+          run: true,
+          watch: false,
+          passWithNoTests: false,
+          reporters: [reporter],
+          include: [...input.files],
+          testTimeout: input.timeoutMs,
+          hookTimeout: input.timeoutMs,
+          ...(input.tier ? { pool: "threads" as const } : {}),
+          config: input.vitestConfigPath
+            ? resolve(input.root, input.vitestConfigPath)
+            : false,
+        },
+        {
+          cacheDir: resolve(input.root, ".jaunt-vitest-cache"),
+          server: { fs: { allow: [input.root], strict: true } },
+          plugins: [
+            ...(sourceResolver ? [sourceResolver] : []),
+            {
+              name: "jaunt-test-overlays",
+              enforce: "pre",
+              load(id: string) {
+                return (
+                  overlayAbsolute.get(
+                    comparableEntryPath(id.split("?")[0]!),
+                  ) ?? null
+                );
+              },
             },
-          },
-        ],
-      },
-    );
+          ],
+        },
+      );
+    } catch (error) {
+      startupError = runnerStartupError(error);
+    }
     await instance?.close();
   } finally {
     process.stdout.write = originalOut;
     process.stderr.write = originalErr;
     removeOverlayPlaceholders(placeholders);
+  }
+  if (startupError !== undefined) {
+    return redactedRunnerFailure("run", startupError);
   }
   const ok =
     reporter.results.length > 0 &&

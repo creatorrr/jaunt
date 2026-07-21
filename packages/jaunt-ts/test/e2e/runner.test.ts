@@ -14,6 +14,7 @@ import { afterEach, expect, test } from "vitest";
 import { sha256Bytes } from "../../src/analyzer/canonical.js";
 import {
   MAX_CAPTURED_STREAM_BYTES,
+  MAX_RUNNER_STARTUP_ERROR_CHARS,
   readBoundedInput,
   runTestRunner,
 } from "../../src/test/runner.js";
@@ -1202,7 +1203,7 @@ test("never exposes teardown", () => {});
   }
 });
 
-test("redacted config failure returns a minimal opaque fallback", async () => {
+test("redacted startVitest failure preserves bounded startup detail", async () => {
   const workspace = createFixtureWorkspace();
   roots.push(workspace.root);
   write(
@@ -1218,21 +1219,51 @@ import { test } from "vitest";
 test("not collected", () => {});
 `,
   );
-  const result = await runTestRunner({
+  const result = JSON.parse(
+    JSON.stringify(
+      await runTestRunner({
+        root: workspace.root,
+        files: ["tests/__generated__/config.derived.test.ts"],
+        vitestConfigPath: "vitest.secret.config.mjs",
+        timeoutMs: 5_000,
+        redactDerived: true,
+        mode: "run",
+      }),
+    ),
+  ) as Awaited<ReturnType<typeof runTestRunner>>;
+  expect(result).toMatchObject({
+    ok: false,
+    tests: [
+      {
+        caseId: "opaque-runner-failure",
+        category: "runner",
+        message: expect.stringContaining("CONFIG-SENTINEL"),
+      },
+    ],
+    captured: { stdout: "", stderr: "" },
+  });
+  expect(result.tests[0]!.message).toContain("Error: CONFIG-SENTINEL");
+
+  write(
+    workspace.root,
+    "vitest.long-error.config.mjs",
+    `throw new Error("LONG-CONFIG-SENTINEL-" + "x".repeat(3_000));\n`,
+  );
+  const truncated = await runTestRunner({
     root: workspace.root,
     files: ["tests/__generated__/config.derived.test.ts"],
-    vitestConfigPath: "vitest.secret.config.mjs",
+    vitestConfigPath: "vitest.long-error.config.mjs",
     timeoutMs: 5_000,
     redactDerived: true,
     mode: "run",
   });
-  expect(result).toMatchObject({
-    ok: false,
-    tests: [{ caseId: "opaque-runner-failure", category: "runner" }],
-    captured: { stdout: "", stderr: "" },
-  });
-  expect(Object.keys(result.tests[0]!).sort()).toEqual(["caseId", "category"]);
-  expect(JSON.stringify(result)).not.toContain("CONFIG-SENTINEL");
+  expect(truncated.tests[0]!.message).toContain("LONG-CONFIG-SENTINEL");
+  expect(truncated.tests[0]!.message).toHaveLength(
+    MAX_RUNNER_STARTUP_ERROR_CHARS,
+  );
+  expect(truncated.tests[0]!.message).toMatch(
+    /\[jaunt: runner startup error truncated\]$/,
+  );
 });
 
 test("runner resolves package aliases through the owning referenced source project", async () => {
