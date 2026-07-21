@@ -139,4 +139,4 @@
 - [x] Add an adopter-shaped transitive-closure regression and run the full validation suite.
 - [ ] Let CI verify a stale battery through committed or worker-proven API-transition evidence.
 - [ ] Attribute `target_api_digest` battery drift to the changed closure records.
-- [ ] Release Jaunt 1.7.10 and `@usejaunt/ts` 0.1.1.
+- [x] Release Jaunt 1.7.10 and `@usejaunt/ts` 0.1.1.
