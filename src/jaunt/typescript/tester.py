@@ -30,8 +30,8 @@ from urllib.parse import unquote
 from jaunt.config import JauntConfig
 from jaunt.cache import ResponseCache
 from jaunt.cost import CostTracker
-from jaunt.errors import JauntConfigError
-from jaunt.generate.base import GenerationRequest, GeneratorBackend
+from jaunt.errors import JauntConfigError, JauntGenerationError
+from jaunt.generate.base import GenerationRequest, GenerationResult, GeneratorBackend
 from jaunt.generate.request_cache import (
     discard_cached_generation,
     generate_request_cached,
@@ -1879,6 +1879,14 @@ def _safe_runner_category(value: object) -> bool:
     return isinstance(value, str) and value in _RUNNER_CATEGORIES
 
 
+def _runner_startup_failure(item: Mapping[str, Any]) -> bool:
+    return (
+        item.get("caseId") == "opaque-runner-failure"
+        and item.get("category") == "runner"
+        and isinstance(item.get("message"), str)
+    )
+
+
 def _safe_runner_diagnostic(item: object) -> bool:
     if not isinstance(item, Mapping):
         return False
@@ -1974,15 +1982,20 @@ def _valid_runner_dto(
 
     test_allowed = {"file", "tier", "status", "caseId", "category", "durationMs", "message"}
     protected_derived_allowed = {"caseId", "category"}
+    protected_runner_startup_allowed = protected_derived_allowed | {"message"}
     failed = False
     for item in tests:
         if not isinstance(item, Mapping):
             return False
         keys = set(item)
-        if redact_derived and keys == protected_derived_allowed:
+        if redact_derived and (
+            keys == protected_derived_allowed or keys == protected_runner_startup_allowed
+        ):
             if not _safe_runner_case_id(item.get("caseId")) or not _safe_runner_category(
                 item.get("category")
             ):
+                return False
+            if keys == protected_runner_startup_allowed and not _runner_startup_failure(item):
                 return False
             failed = True
             continue
@@ -2075,6 +2088,8 @@ def _runner_surfaces(result: Mapping[str, Any]) -> tuple[list[object], list[obje
                     allowed.append(item)
                     continue
                 public_keys = {"caseId", "category"}
+                if _runner_startup_failure(item):
+                    public_keys.add("message")
                 allowed.append({name: item[name] for name in public_keys if name in item})
                 sensitive.append(
                     {
@@ -2124,7 +2139,10 @@ def _assert_no_held_out_leak(
                 )
             if item.get("tier") == "example":
                 continue
-            if not set(item).issubset({"caseId", "category"}):
+            allowed = {"caseId", "category"}
+            if _runner_startup_failure(item):
+                allowed.add("message")
+            if not set(item).issubset(allowed):
                 raise _HeldOutLeakError(
                     "Protected runner output failed the held-out shape assertion"
                 )
@@ -2200,6 +2218,8 @@ def _redact_runner_result(result: Mapping[str, Any], *, enabled: bool) -> dict[s
                 redacted.append(dict(test))
                 continue
             public = {key: str(test[key]) for key in ("caseId", "category") if key in test}
+            if _runner_startup_failure(test):
+                public["message"] = _bounded_runner_diagnostic_message(str(test["message"]))
             if public:
                 redacted.append(public)
         copy["tests"] = redacted
@@ -3689,19 +3709,29 @@ async def run_test(
             validated_request = replace(request, validator=validate_candidate)
             async with semaphore:
                 _progress_phase(progress, request.target_path, "generating", tier)
-                result = await generate_request_cached(
-                    backend,
-                    validated_request,
-                    max_attempts=max_attempts,
-                    generation_fingerprint=cache_fingerprint,
-                    response_cache=cache_for_request,
-                    cost_tracker=cost,
-                    usage_label=key,
-                    progress=lambda stage, detail, path=request.target_path: _progress_phase(
-                        progress, path, stage, detail
-                    ),
-                    store=False,
-                )
+                try:
+                    result = await generate_request_cached(
+                        backend,
+                        validated_request,
+                        max_attempts=max_attempts,
+                        generation_fingerprint=cache_fingerprint,
+                        response_cache=cache_for_request,
+                        cost_tracker=cost,
+                        usage_label=key,
+                        progress=lambda stage, detail, path=request.target_path: _progress_phase(
+                            progress, path, stage, detail
+                        ),
+                        store=False,
+                    )
+                except JauntGenerationError as exc:
+                    message = str(exc)
+                    result = GenerationResult(
+                        attempts=0,
+                        source=None,
+                        errors=[message],
+                        infrastructure_errors=(message,),
+                        infrastructure_exhausted=True,
+                    )
             return (
                 spec_path,
                 validated_request,

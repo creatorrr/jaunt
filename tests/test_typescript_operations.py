@@ -45,7 +45,12 @@ from jaunt.typescript.builder import (
     run_build,
     run_sync,
 )
-from jaunt.typescript.cli_bridge import check_payload, human_lines, status_payload
+from jaunt.typescript.cli_bridge import (
+    check_payload,
+    human_lines,
+    status_payload,
+    test_payload as typescript_test_payload,
+)
 from jaunt.typescript.contracts import (
     _add_contract_tag,
     _battery_request,
@@ -3640,6 +3645,61 @@ async def test_runner_protocol_failure_never_exposes_child_output(
 
 
 @pytest.mark.asyncio
+async def test_runner_startup_failure_survives_child_protocol(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    package_root = tmp_path / "tooling"
+    runner = package_root / "dist/test/runner.js"
+    runner.parent.mkdir(parents=True)
+    detail = "startVitest exploded\nError: startVitest exploded\n" + ("stack-frame\n" * 300)
+    result = {
+        "ok": False,
+        "mode": "run",
+        "diagnostics": [],
+        "tests": [
+            {
+                "caseId": "opaque-runner-failure",
+                "category": "runner",
+                "message": detail,
+            }
+        ],
+        "captured": {"stdout": "", "stderr": ""},
+    }
+    runner.write_text(
+        "import sys\nsys.stdin.read()\n"
+        f"sys.stdout.write({json.dumps(json.dumps(result))})\n"
+        "raise SystemExit(1)\n",
+        encoding="utf-8",
+    )
+    compiler = tmp_path / "typescript.js"
+    compiler.write_text("", encoding="utf-8")
+    client = SimpleNamespace(
+        installation=SimpleNamespace(
+            node=sys.executable,
+            package_root=package_root,
+            compiler_module_path=compiler,
+        )
+    )
+
+    protected = await _run_test_runner(
+        client,
+        tmp_path,
+        config,
+        files=(),
+        redact_derived=True,
+        timeout=2,
+    )
+
+    failure = protected["tests"][0]
+    assert protected["ok"] is False
+    assert protected["exitCode"] == 1
+    assert failure["caseId"] == "opaque-runner-failure"
+    assert failure["category"] == "runner"
+    assert failure["message"].startswith("startVitest exploded\nError: startVitest exploded")
+    assert len(failure["message"]) <= 2_000
+    assert failure["message"].endswith("[jaunt: diagnostic truncated]")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("reported_ok", [False, True])
 async def test_nonzero_runner_exit_preserves_valid_failure_but_rejects_claimed_success(
     tmp_path: Path,
@@ -4445,6 +4505,75 @@ async def test_capacity_exhaustion_reports_failed_battery_and_preserves_complete
     assert len(outcomes["derived"]["infrastructure_errors"]) == 3
     assert outcomes["example"]["state"] == "staged"
     assert cache.info()["entries"] == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_failure_is_per_battery_and_remaining_work_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    cache = ResponseCache(tmp_path / ".test-response-cache")
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "diagnostics": [],
+            "tests": [],
+        }
+
+    class DisconnectedGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def generate_request(
+            self,
+            request: GenerationRequest,
+            **kwargs: Any,
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            tier = str(request.cache_payload["tier"])
+            self.calls.append(tier)
+            if tier == "example":
+                raise JauntGenerationError("stream disconnected before completion")
+            return await super().generate_request(request, **kwargs)
+
+    generator = DisconnectedGenerator()
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        jobs=1,
+        generator=generator,
+        response_cache=cache,
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 3
+    assert generator.calls == ["example", "derived"]
+    failure = report.failed["tests/math.jaunt-test.ts#example"][0]
+    assert failure.code == "JAUNT_TS_TEST_INFRASTRUCTURE"
+    assert failure.message == "stream disconnected before completion"
+    outcomes = {item["tier"]: item for item in report.runner["batteries"]}
+    assert outcomes["example"]["state"] == "infrastructure-failed"
+    assert outcomes["example"]["infrastructure_errors"] == (
+        "stream disconnected before completion",
+    )
+    assert outcomes["derived"]["state"] == "staged"
+    assert cache.info()["entries"] == 1
+
+    payload = typescript_test_payload(report)
+    assert payload["failed"]["tests/math.jaunt-test.ts#example"][0]["code"] == (
+        "JAUNT_TS_TEST_INFRASTRUCTURE"
+    )
+    payload_outcomes = {item["tier"]: item for item in payload["vitest"]["batteries"]}
+    assert payload_outcomes["example"]["state"] == "infrastructure-failed"
+    summary = "\n".join(human_lines(payload))
+    assert "tests/math.jaunt-test.ts#example" in summary
+    assert "JAUNT_TS_TEST_INFRASTRUCTURE: stream disconnected before completion" in summary
 
 
 @pytest.mark.asyncio
