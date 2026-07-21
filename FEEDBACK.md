@@ -2,6 +2,875 @@
 
 Running notes from real adopters. Newest section first.
 
+## 2026-07-21: a one-line gql string edit restales four unrelated batteries and hard-fails PR CI
+
+Under published Jaunt 1.7.8 / `@usejaunt/ts` 0.1.0-alpha.7, adding one field
+name inside a `gql` tagged-template string in a plain app module
+(`src/lib/graphql/queries/briefs.ts`) restaled all four dashboard battery
+targets at once (`battery_fingerprint, target_api_digest`), so `jaunt check`
+exited 4 and blocked two pull requests that never touched a governed module,
+a battery, or a target. Bisecting the branch diff file-by-file isolated the
+single line; reverting it restored zero diagnostics. The five governed spec
+modules also went structurally stale from the same edit.
+
+The mechanism, as far as we can trace it: `collectTypeEnvironment` follows
+every static import reachable from a target, and `semanticSource` keeps all
+value initializers in the digest — only bodies of callables with explicit
+return annotations are masked. Our pure spec modules type-import shared
+shapes from app modules (`transport`, `services/mcp/briefs`,
+`components/memory/entity-highlights`), so their closures cover most of the
+dashboard app graph, and any edit inside that graph — even one that cannot
+affect a type — restales the batteries. A tagged-template literal's contents
+can never change TypeScript types (the tag receives `TemplateStringsArray`;
+literal inference is erased), so this particular dependency is provably
+false.
+
+The cost asymmetry is what makes this a CI problem rather than a rebuild
+annoyance. The free restamp path in the tester only accepts a
+`target_api_digest` mismatch when a prior build proved the API transition,
+and that proof lives in local state a PR branch does not have. So the
+prescribed remedy for a semantics-neutral string edit is a paid
+`jaunt test --language ts` per branch. Practically, every PR that edits any
+file in a battery target's import closure now fails `check` until someone
+spends model calls on it. Two PRs were blocked the first business day after
+the batteries landed; the closure is wide enough that most dashboard work
+will keep hitting this.
+
+Requests, in order of value to us:
+
+- Mask tagged-template literal contents in `semanticSource` the same way
+  explicitly-annotated function bodies are masked. This is type-safe and
+  fixes the trigger we hit.
+- Give `check` a free path to verify a suspected-stale battery against the
+  target's actual contract (or accept a committed API-transition proof), so
+  a digest-level false positive does not force paid regeneration in CI.
+- Per-diagnostic drift attribution: when a battery is stale for
+  `target_api_digest`, name the closure file whose record changed. We found
+  ours only by bisecting a 20-file branch diff one file at a time.
+
+We will mitigate on our side by moving the shared types our pure modules
+import into import-free leaf modules to shrink the closures, but the default
+geometry — spec modules that type-import from app code — seems common enough
+that other adopters will land in the same trap. This is the same family as
+the 2026-07-16 `packageManager` finding: content that cannot change the
+contract still restales it, and the remedy is paid.
+
+## 2026-07-16: package-manager metadata alone forces paid TypeScript rebuilds
+
+Adding only `"packageManager": "pnpm@11.5.0"` to the dashboard
+`package.json`, with dependencies, lockfile, `node_modules`, specs, and compiler
+inputs unchanged, made all 19 TypeScript modules structurally stale and all 30
+batteries stale under published Jaunt 1.7.8 / `@usejaunt/ts` 0.1.0-alpha.7.
+`migrate --language ts --json` offered 19 `model-rebuild` actions and zero free
+recompositions. Removing that one field immediately restored 19/19 fresh with
+zero diagnostics. We correctly refused the paid rebuilds and pinned pnpm 11.5.0
+in CI and Docker outside `package.json` instead.
+
+This independently confirms the package-manager provenance issue. Please treat
+`packageManager` metadata as tool/provenance input rather than semantic-contract
+input when installed declarations are unchanged, and have per-record status
+identify this exact source of drift.
+
+## 2026-07-15: local 1.7.9 / TS 0.1.0 lands 19 frontend specs with excellent cache reuse
+
+The completed migration has 19 Jaunt implementation specs covering 55 exports,
+with 15 generated test intents retained. Exact TypeScript and policy
+diagnostics reached per-battery retries instead of the old generic fallback.
+Six-way generation concurrency and protected candidate validation both worked;
+the worker stayed around 836 MiB RSS and protected runners were typically
+around 700 MiB, materially below the earlier multi-gigabyte worker peaks.
+
+The first full run made 40 model calls with 15 cache hits and 21 misses. It used
+16,812,935 tokens and cost $35.119666. The calls were 21 initial generations
+plus 19 diagnostic-driven retries. Accepted candidates survived that failed
+run, and later intent edits invalidated only their own requests.
+
+The final protected combined run passed all 30 selected tiers. Twenty-eight
+were cache hits and two were already fresh, so the run made zero model calls
+and cost $0. The final Jaunt check reported zero unbuilt modules and zero
+orphans. Cache preservation and reuse were excellent across repeated failed,
+targeted, and final full-workspace runs.
+
+The completed state was then revalidated against clean Jaunt source HEAD
+`2b168db`, installed editable and reporting 1.7.9. A full
+`test --language ts --no-build --json --progress plain` run found all 30
+batteries fresh and still executed the final isolated protected Vitest
+validation: 30/30 passed, with zero API calls and $0 cost. A mixed Python and
+TypeScript `check` also passed with zero unbuilt modules and zero orphans.
+
+Four implementation modules remain governed by Jaunt, but their unreliable
+generated test intents were removed in favor of existing native Vitest
+coverage: `brief-draft-proposal`, `select-starter-topics`,
+`onboarding-steps`, and `briefs-nav-model-core`. Jaunt currently has neither
+per-tier selection on an intent nor a config-level per-intent opt-out, so one
+repeatedly bad `example` or `derived` tier cannot be quarantined while keeping
+the other generated tier.
+
+Those abandoned batteries repeatedly regenerated forbidden dynamic loaders or
+type-invalid fixtures even after receiving exact compiler and policy feedback.
+Other candidates passed the compiler gate but then failed public assertions in
+the final protected run; those behavioral failures did not enter a useful
+candidate repair loop. Exact diagnostics helped, but adopters still had to
+repeat fixture shapes, required fields, discriminants, static-import rules, and
+safe malformed-input construction across several intents. Native Vitest was
+the more reliable boundary for these four modules.
+
+Operational findings and follow-ups:
+
+- A successful targeted implementation build used three model calls, but its
+  mixed-workspace JSON omitted `candidate_outcomes`. The updated local source
+  now retains those outcomes in mixed payloads; the final cache-only battery
+  run did not independently re-exercise a paid implementation build.
+- The initial full TypeScript run was silent under `--progress plain --json`.
+  Updated local source now constructs and passes the reporter through
+  TypeScript-only and mixed build/test paths, including nested implementation
+  work. A later targeted retry confirmed live stderr paths, tiers, retry
+  diagnostics, and completion counts while stdout remained one JSON object.
+- Two earlier targeted retries aborted on transient `gpt-5.6-sol` capacity
+  errors without a report. The updated local source adds infrastructure retries
+  and structured terminal outcomes; the capacity condition did not recur after
+  that patch, so this recovery path was not independently re-exercised.
+- In the mixed Python/TypeScript workspace, unqualified
+  `jaunt clean --orphans --json` crashed with
+  `AttributeError: Namespace has no attribute jobs` during its Python status
+  preflight, while `--language ts` completed successfully. Against clean source
+  HEAD `2b168db`, the unqualified command now passes with no removals. This
+  directly confirms the mixed-clean `args.jobs` fix.
+- Running the adopter's broad `uv sync --all-packages ...` replaced the editable
+  1.7.9 source install with the lockfile's published 1.7.8. The old mixed-clean
+  crash therefore appeared to regress until the editable source was restored.
+  This is expected environment reconciliation rather than a Jaunt correctness
+  defect, but it is easy to misdiagnose during local release testing. A clear
+  `jaunt doctor` provenance line showing the resolved executable/module path
+  and locked requirement, plus a documented workflow for restoring or
+  preserving editable installs across `uv sync`, would reduce that friction.
+- The same downgrade exposed a more consequential release-handoff gap. With
+  published Jaunt 1.7.8 and `@usejaunt/ts` 0.1.0-alpha.7 restored, `status`
+  classified all 19 implementations as structurally stale even though the
+  committed artifacts had just passed under 1.7.9 / 0.1.0. The supported
+  no-write `migrate --language ts --json` planner classified all 19 as
+  `model-rebuild`; none qualified for `free-recompose` or `free-restamp`.
+  Reconstructing the exact old-tool request keys found zero of 19 implementation
+  cache hits and zero of 30 retained battery cache hits. A targeted old-version
+  build would therefore make a paid call, and an old-version test refresh would
+  regenerate every battery.
+
+  The cache key does not name the Jaunt versions directly, but it includes the
+  full analyzer contract and structural/API/battery fingerprints, which change
+  across this stable-to-alpha tool boundary. Please provide a supported
+  model-free forward/downgrade restamp for already validated, semantically
+  unchanged artifacts when the worker can prove compatibility. If downgrade
+  reuse cannot be made safe, release handoff guidance should explicitly say
+  that artifacts produced by an unpublished release candidate must not be
+  committed until matching Python and npm packages are available, and should
+  provide a deterministic way to verify that the adopter lock matches the
+  artifact provenance before any build can spend.
+- A follow-up under the restored editable 1.7.9 / source `@usejaunt/ts` 0.1.0
+  isolated the current all-19 rebuild to the semantic environment. For
+  `auth/return-to`, the current analyzer matched the committed sidecar's route,
+  symbols, options, type declarations/imports, context docs, dependencies,
+  prose digest, and toolchain fingerprint. The only model-facing difference
+  was `semanticEnvironmentDigest` (`89c2da...` versus `c41e0a...`), which then
+  cascaded into `structuralDigest` and `apiDigest`. The supported migration
+  planner still classified all 19 modules as `model-rebuild`.
+
+  Type-environment capture currently hashes each whole lockfile while
+  normalizing only Jaunt entries. Thus unrelated pnpm peer/snapshot rewrites
+  are sufficient to invalidate every governed module even when its authored
+  contract and imported declarations are unchanged. Restoring the original
+  staged lock and doing a frozen install also remained stale; because
+  `tsconfig.app.json` includes `vite/client`, the installed declaration/peer
+  closure is the remaining likely historical input, but the sidecar exposes
+  only an aggregate digest and cannot identify the changed record. Treedocs
+  metadata and Jaunt's ignored build output were ruled out.
+
+  Please scope lockfile compatibility to packages in the resolved declaration
+  closure (or otherwise prove irrelevant lock changes), expose per-record
+  semantic-environment diffs in `status`/`migrate`, and allow a worker-proven
+  model-free restamp when authored contracts and relevant declarations are
+  unchanged. Without that evidence, the only supported recovery is a paid
+  rebuild or recreating an opaque historical `node_modules` state.
+- Final resolution narrowed that conclusion. Restoring the original pnpm 11.5
+  lock and the required `minimumReleaseAgeExclude` reproduced the authored
+  semantic environment: source Jaunt 1.7.9 / `@usejaunt/ts` 0.1.0 then reported
+  all 19 TypeScript modules fresh. The earlier reconstruction had changed the
+  package-manager environment and therefore was not equivalent to the one that
+  produced the sidecars.
+
+  A clean install of the published Jaunt 1.7.8 / `@usejaunt/ts`
+  0.1.0-alpha.7 under that same pnpm 11 tree classified all 19 modules as
+  toolchain-stale. The migration preview correctly offered 19
+  `free-recompose` actions and zero model rebuilds. Its default 4 GiB worker
+  exhausted the heap during `validateOverlay` request 16; setting
+  `worker_heap_mb = 8192` let the preview complete. `migrate --apply` then
+  refused the dirty adopter worktree, but `build --language ts` recomposed all
+  19 modules with zero API calls, zero tokens, and $0 cost. With Codex auth
+  disabled, `test --language ts --no-build` reheadered and ran all 30 retained
+  batteries with zero calls; all passed, followed by a clean final `check`.
+
+  The compatibility path is therefore sound once the exact package-manager
+  environment is restored. Remaining DX asks are to expose pnpm/package-manager
+  semantic provenance and warn before analysis under the wrong package manager;
+  avoid cumulative overlay heap growth by batching or resetting worker/compiler
+  state; and permit deterministic migration apply on a dirty tree when writes
+  are restricted to declared generated artifacts, or explicitly document
+  `build` as the dirty-worktree fallback.
+- Mixed-workspace freshness reporting then produced a dangerous false positive.
+  An unqualified status payload exposed 19 Python modules through its top-level
+  `fresh` collection while all 19 TypeScript modules remained structurally
+  stale under `targets.ts`. The injected workspace summary reduced that to
+  "19 fresh" and omitted the TypeScript target entirely, so we initially
+  mistook the output for recovery from the semantic-environment blocker.
+
+  Please make mixed top-level freshness either a true aggregate or explicitly
+  language-qualified, and have hook/plugin summaries consume every target and
+  report stale, unbuilt, and invalid counts per language. A partial probe must
+  say that it is partial rather than presenting one target's fresh count as
+  workspace health.
+- The successful full test JSON was about 12,862 lines, roughly 135,000 tokens,
+  because it emits every individual Vitest case; the detailed runner payload is
+  also exposed both top-level and under `targets.ts`. No compact JSON or
+  report-file option is currently exposed by the test CLI. Please add a summary
+  mode that keeps aggregate counts, failures, battery states, cache, and cost
+  inline, with an optional file for complete per-case results.
+
+## 2026-07-15: local 1.7.9 replay validates targeted repair, with two cache/diagnostic gaps
+
+I temporarily installed the prepared Python 1.7.9 source editable from
+`/home/diwank/github.com/creatorrr/jaunt-ts-0-1-0` and linked its locally built
+`@usejaunt/ts` package into the adopter checkout. The tracked dependency
+manifests remained unchanged.
+
+Status correctly classified all 19 TypeScript implementations as
+toolchain-stale. Build then recomposed and refroze all 19 in 181.75s, with
+3,421,004 KB peak RSS and zero API calls or cost. A targeted
+`brief-blocks-core` test generated and staged both batteries with all 85
+protected tests green. It used two calls, 780,130 tokens, and $1.678826 over
+342.73s, with 1,844,852 KB peak RSS. Both battery outcomes reported
+`attempts=1`, `retry_count=0`, and no diagnostics. The atomic accepted-subset
+manifest write appears sound in this replay.
+
+Two independent source-review findings remain:
+
+1. The default validation path requests `redact_derived=True` in
+   `tester.py:3598-3611`. Redaction strips diagnostic messages at
+   `tester.py:2141-2159`, while `_runner_validation_errors` at
+   `tester.py:3217-3242` requires both code and message and can therefore
+   return only its generic fallback. The runner does supply messages at
+   `runner.ts:109-128`, but the regression mocks exercise unredacted
+   diagnostics. Please preserve bounded diagnostic messages through the
+   default redaction path, and add a regression test that uses the production
+   redaction setting.
+2. An incompatible cached battery reports `attempts=0` at
+   `tester.py:3679-3688`, so it is not added to `pending_cache_writes` at
+   `tester.py:3888-3892`. Combined isolation filters only pending new writes at
+   `tester.py:3787-3796`; it does not evict the rejected cached entry.
+   `generate/request_cache.py:96-113` will therefore return the same
+   incompatible hit on later runs unless the adopter uses `--force` or clears
+   the cache. Please invalidate or replace a cached response that fails the
+   current validator.
+
+The full replay against adopter commit `662275e` selected 38 batteries: two
+were already fresh from the targeted run, and 36 were missing or stale. The
+six-job command remained concurrent, but took 26m09.95s and exited 3, with
+1,915,336 KB peak RSS. It made 59 API calls (36 initial candidates plus 23
+retries), used 23,144,390 tokens, and cost $48.539620. The response cache
+reported zero hits and 36 misses.
+
+Sixteen valid candidates reached a green combined `stage_preflight` and were
+preserved in the response cache; 20 failed after the maximum two attempts, and
+the other two were the pre-existing fresh batteries. Three retries repaired
+their candidates and staged successfully: both `auth/user-roles` tiers and the
+`digest-model` derived tier. The other 20 retries failed. This accepted-subset
+cache preservation is a material improvement over alpha.7, but no battery
+artifact landed because generation did not complete; the top-level
+`generated` list remained empty.
+
+Every retry reason and every top-level generation failure was exactly
+`TypeScript test overlay validation failed without a diagnostic`. This
+directly confirms the redaction finding above: all 23 repair calls were blind
+to the actual compiler or policy defect. The run was correspondingly slower
+than alpha.7's 10m52.43s because each live candidate now performs a protected
+overlay and 23 additional model calls ran, even though six-way generation
+concurrency remained active.
+
+## 2026-07-15: 1.7.8 parallelizes battery generation but still loses valid work
+
+A full `jaunt test --language ts --no-build --jobs 6 --json --progress plain`
+run over 19 intents and 38 batteries used true six-way concurrency. It finished
+in 10m52.43s instead of the roughly 55-minute serialized 1.7.7 run, with
+1,663,552 KB peak RSS. The run made 38 calls, used 10,309,128 tokens, and cost
+$21.769356. The concurrency fix is material.
+
+The command still exited 3 at the final overlay typecheck with `generated=[]`.
+All 38 battery states were `rejected`. Exactly 38 API calls means no candidate
+retry occurred. The actual diagnostics were confined to six modules:
+
+- TS2532 in the example batteries for `brief-blocks-core`, `onboarding-steps`,
+  and `digest-model`;
+- TS2352 in the `meeting-readiness` example battery; and
+- `JAUNT_TS_TEST_DYNAMIC_LOADER` in batteries for `brief-blocks-core`,
+  `brief-draft-proposal`, `entity-mention-menu`, `onboarding-steps`, and
+  `meeting-readiness`.
+
+This does not realize the advertised per-battery compiler validation and retry
+for these failure classes. The final atomic overlay rejection also still
+discards every unaffected artifact. Please:
+
+- validate each candidate against the exact final overlay project, including
+  the dynamic-loader policy, before accepting it;
+- expose per-candidate outcomes and retry reasons in test JSON; and
+- preserve response-cache entries and commit unaffected valid batteries after
+  a late cross-battery failure, while keeping the final artifact update atomic
+  where paths actually conflict.
+
+A targeted rerun of the unaffected `auth/return-to` intent confirmed both
+losses. It reported `cache.hits=0` and `cache.misses=2`, launched two fresh API
+calls, and spent another 510,101 tokens / $1.072072 over 252.41s, with
+1,604,312 KB peak RSS. The rerun passed and staged both batteries. The failed
+full run therefore preserved neither reusable response-cache entries nor valid
+artifacts for this unaffected intent.
+
+The installed 1.7.8 source shows the validation gap. The per-battery compiler
+validator is defined in `jaunt/typescript/tester.py:3522-3555`, but lines
+3561-3574 pass it only as `cached_validator`. `generate/request_cache.py:96-102`
+uses that validator on cache hits; fresh candidates at lines 126-130 retain
+their original text-only validator from `tester.py:1272-1294`.
+`generate/base.py:237-258` can therefore retry only the text checks. The
+combined preflight at `tester.py:3701-3716` catches compiler and policy failures
+too late, then returns before artifact staging at line 3750 and cache storage
+at lines 3353-3364.
+
+The narrow fix appears to be passing
+`replace(request, validator=validate_candidate)` into fresh generation. Please
+also return bounded, exact compiler or policy diagnostics from that validator
+instead of the generic message at `tester.py:3553-3555`, so retries can repair
+the actual defect.
+
+## 2026-07-15: 1.7.7 discards every successful battery after a late typecheck failure
+
+A full 19-intent `jaunt test --language ts --jobs 6` run generated all 38
+example and derived battery candidates serially over roughly 55 minutes. It
+used 10,863,354 tokens and cost $22.90245. The final workspace overlay
+typecheck then failed, and the command committed neither generated batteries
+nor response-cache entries. No generated batteries landed.
+
+The final diagnostics mixed three failure classes:
+
+- generated batteries for `brief-blocks-core`, `brief-draft-proposal`,
+  `entity-mention-menu`, `onboarding-steps`, and `meeting-readiness` used
+  forbidden dynamic loaders that did not typecheck;
+- the briefs-navigation batteries invented properties and used unsafe partial
+  casts, producing TS2339 and TS2352 diagnostics; and
+- the existing native `src/pure/home-data.test.ts` had TS2591 in Jaunt's
+  overlay because the child `tsconfig.jaunt-test.json` `exclude` replaces,
+  rather than extends, the inherited parent `exclude`.
+
+Jaunt did not compile/analyze and repair each battery after generation. It
+first surfaced these candidate defects in the final all-workspace preflight,
+after all 38 paid generation calls had completed.
+
+The source confirms why all successful responses were lost.
+`src/jaunt/typescript/tester.py:3341-3544` holds generation results in the
+process-local `pending_cache_writes` list. The final overlay typecheck returns
+at lines 3605-3633 on failure. `commit_test_files()` and
+`commit_test_cache()` are not defined until lines 3654-3704, so neither the
+candidate files nor their cache entries can be committed on that path.
+
+Please treat this as an urgent resumability and transaction-boundary issue:
+
+- commit each successful model response to the response cache after validating
+  that individual response, independently of the final artifact transaction;
+- honor `--jobs` with bounded battery-generation concurrency;
+- typecheck and repair each battery before advancing to the next work unit; and
+- limit the final atomic transaction to candidates that already passed their
+  per-battery validation.
+
+Thirty-eight successful, paid model responses must not be discarded because a
+few candidates or an accidentally included native test fail the final
+workspace typecheck.
+
+## 2026-07-15: 1.7.7 TypeScript test jobs do not parallelize battery generation
+
+With 19 fresh dashboard specs, `jaunt test --language ts --jobs 6 --json
+--progress plain` visibly kept only one paid Codex child active at a time. The
+source matches the observation: `src/jaunt/typescript/tester.py:3431-3523`
+walks the prepared example and derived requests with a plain `for` plus
+`await generate_request_cached(...)`. The `jobs` value reaches the
+implementation build and held-out implementation repair, but not this battery
+loop. The build path does use a bounded semaphore and `asyncio.gather` in
+`src/jaunt/typescript/builder.py:1500-1612`.
+
+Launching targeted test commands in parallel is not a safe replacement. Each
+process owns a separate analyzer worker, but all processes share unlocked
+response-cache files and process-local artifact transactions. A full command
+and a targeted command can overlap the same battery paths; even disjoint
+targets still share `.jaunt` state without an interprocess coordination
+contract.
+
+Please make TypeScript battery generation honor `--jobs` inside one process,
+with dependency-safe validation and landing. Also commit or durably stage each
+validated battery so a long 19-spec, 38-battery refresh can resume instead of
+losing all successful work when a late request fails. Plain and JSON progress
+should report each completed battery and tier as it lands.
+
+## 2026-07-15: 1.7.6 fixes full-workspace OOM, but sync typechecks authored marker bodies
+
+The full 19-spec `status --language ts` now succeeds without a heap override:
+70.30 seconds at 3,817,384 KB peak RSS. This is a material improvement over
+1.7.5's repeated worker OOMs. Full `sync --language ts` likewise completed its
+workspace analysis in 82.63 seconds at 3,755,892 KB peak RSS, and its
+independent batches successfully landed eight API mirrors before the command
+exited 2.
+
+The remaining failure is that sync compiles authored `index.jaunt.ts` marker
+bodies under `noUnusedParameters`. `brief-blocks-core` emitted TS6133 for
+`raw`, `blocks`, `patch`, and `opts`; `source-health` emitted TS6133 for
+`status`, `source`, and `input`. These are governed specs whose
+`jaunt.magic()` marker bodies necessarily do not read their public parameters,
+and the authored spec files were already excluded from the production
+project's normal include.
+
+Please suppress TS6133 only for governed stub parameters, or synthesize marker
+uses in the compiler overlay. Public API parameters should not need underscore
+renaming, and adopters should not have to disable `noUnusedParameters` in the
+production project. The fact that eight independent mirrors still landed is
+good evidence that the new batching and failure isolation are working.
+
+One smaller consistency issue: `jaunt instructions` reported all 19 modules
+fresh immediately before authoritative status found 18 stale and one unbuilt.
+Please have instructions use the same freshness source, or label its summary as
+cached when it is not authoritative.
+
+## 2026-07-15: 1.7.5 follow-up conformance failure again skips retries
+
+After adding an explicit no-self-import prompt, the targeted `detect-core`
+build again made exactly one API call instead of using the advertised retry
+budget. It generated private input types that narrowed optional
+`content_blocks` to required, causing repeated TS2322 conformance failures for
+`factRows`, `hasFactsView`, and `detectSectionViews` in both `index.ts` and
+`.jaunt-conformance.ts`; zero artifacts landed.
+
+The call used 745,204 prompt tokens, 13,683 completion tokens, 758,887 total
+tokens, and cost $1.599872. Across the two failed attempts, this small module
+spent 1,750,324 tokens and $3.683570 without producing an artifact.
+
+Please retry or repair type-narrowing conformance failures, deduplicate
+candidate and conformance diagnostics, and ensure generated private types
+preserve source optionality exactly.
+
+## 2026-07-15: FEEDBACK-REPLY release state is already stale
+
+`FEEDBACK-REPLY.md` still says PR #90 is unmerged and Jaunt 1.7.5 / TypeScript
+alpha.4 are unpublished, while both releases are live and installed here.
+Please update the release-state preamble, or date/version-stamp replies so a
+reader can distinguish historical status from current availability.
+
+## 2026-07-15: 1.7.5 targeted conformance failure still skips its retry budget
+
+A targeted rebuild of the small pure `detect-core` module made one API call:
+974,633 prompt tokens, 16,804 completion tokens, 991,437 total tokens, and an
+estimated $2.083698. The candidate imported its own
+`__generated__/index.ts`, failed `JAUNT_TS_GENERATED_PRIVATE_IMPORT`, and
+landed zero artifacts.
+
+The 1.7.5 reply says compile and conformance failures now retry within the
+configured budget, but this failure returned after that single call with no
+retry. Please automatically rewrite or retry same-module generated-private
+imports, report the retry count and reason clearly in JSON, and substantially
+reduce target prompt size: nearly one million prompt tokens is disproportionate
+for this module.
+
+## 2026-07-15: 1.7.5 target-scoped sync still emits strict-project-invalid mirrors
+
+Target-scoped `sync` now avoids the full-workspace OOM, but strict TypeScript
+placeholder and API-mirror compatibility is still incomplete. A type-only
+import present in a Jaunt spec but unused by its declarations is copied into
+`__generated__/index.api.ts`, where it triggers TS6196 under
+`noUnusedLocals`. Every requested target in the same sync invocation then
+fails with repeated diagnostics attributed to that unrelated mirror.
+
+Separately, an unbuilt module's generated API imports a runtime helper used
+only by the eventual implementation, triggering TS6133.
+
+Please prune mirror imports that are unused by public declarations, including
+runtime dependencies needed only by the implementation; keep placeholders
+clean under strict projects; deduplicate diagnostics and attribute them to the
+blocking module; and prevent one unrelated mirror failure from poisoning
+independent target syncs.
+
+## 2026-07-15: 1.7.5 fixes protocol batching, but overlay validation still OOMs
+
+With the `mem-mcp-c` dashboard's 19 TypeScript specs, both the full dashboard
+project and a strict project limited to `src/pure` now get past the prior
+16 MiB worker-response limit. This confirms that 1.7.5's protocol batching is
+working.
+
+However, `jaunt status --language ts` then drives the worker to roughly
+4.0-4.1 GiB and OOMs in `validateOverlay` / `module-overlays`. The worker
+restarts, replays the same work, and OOMs again. `NODE_OPTIONS` appears to be
+stripped from the worker environment, and no supported worker heap setting was
+found.
+
+Please consider:
+
+- batching overlay validation itself and releasing program/AST state between
+  batches;
+- a supported worker heap setting or `NODE_OPTIONS` pass-through;
+- diagnostics identifying the largest project or dependency closure; and
+- avoiding automatic replay after a deterministic OOM.
+
+## 2026-07-15: 1.7.4 TypeScript migration exposed mixed-clean and discovery gaps
+
+### Addendum: advertised compile-repair retries were not used
+
+The first `plan-state` build made 1 API call, used 1,094,962 tokens
+(981,142 cached prompt), and cost $2.241098. It then failed conformance with
+TS2339, `Property status does not exist on type never`, in both the candidate
+and `.jaunt-conformance`; zero artifacts landed. Status and the build plan
+advertised `max_attempts_per_unit=3`, but no compile-repair retry occurred.
+
+Please retry candidate compile/conformance failures before aborting, report
+clearly why an advertised retry budget was not used, and reuse and repair the
+failed cached candidate instead of regenerating it.
+
+### Addendum: one invalid candidate aborts independent modules
+
+A four-module briefs build made 4 API calls, used 1,708,130 tokens
+(1,431,991 cached prompt), and cost $3.580972. One
+`brief-draft-proposal` candidate failed `JAUNT_TS_GENERATED_PRIVATE_IMPORT`
+after importing its own `__generated__/index.ts`. The other three unrelated
+modules were then marked `JAUNT_TS_COMPONENT_ABORTED` because the owner/reference
+component failed, so zero artifacts landed.
+
+Please isolate independent modules/components, retain or park successful
+candidates instead of discarding them, retry or repair only the failing
+candidate, and report per-module phase and candidate outcomes.
+
+### Addendum: full-workspace bootstrap still requires manual config slicing
+
+With 19 configured TypeScript specs, both unified `status` and `sync` fail with
+`TypeScript worker response exceeds 16777216 bytes`. Passing `--target` does
+not reduce analysis scope: it still analyzes the entire configured workspace
+and fails with the same response-size error. A broad root also reproduces the
+Vitest provenance problem described below.
+
+Strict unbuilt placeholders then produce sibling TS6133/TS6192 diagnostics.
+Successful adoption has required repeatedly rotating committed
+`jaunt.toml` source/test roots and the TypeScript project `include`, syncing or
+building a small slice, then widening again. Even after building two blocking
+placeholders, a six-spec dashboard slice initially failed until it was narrowed
+further.
+
+Please provide:
+
+- truly target-scoped analysis and bootstrap;
+- automatic dependency-ordered batching for sync, build, and test;
+- unbuilt placeholder code compatible with `noUnusedLocals` and
+  `noUnusedParameters`;
+- chunked/streamed worker responses, or a larger configurable protocol limit;
+- a supported temporary project/overlay mechanism that does not mutate
+  committed configuration.
+
+A larger frontend migration found four remaining adoption issues.
+
+1. In the mixed Python/TypeScript workspace, `jaunt clean --orphans` crashes before cleaning: `cmd_clean` -> `_mixed_python_preflight` -> `cmd_status` raises `AttributeError: 'Namespace' object has no attribute 'no_infer_deps'`. The language-qualified `jaunt clean --language ts --orphans` succeeds. Please populate the status-only argparse fields in mixed-clean preflight and add a mixed-target clean regression.
+2. Broadening `[target.ts].source_roots` to the pure frontend tree, which also contains ordinary co-located native Vitest tests, reports `vitest is not declared by .../package.json` even though `vitest` is in that package's `devDependencies`. If generated production code must depend only on `dependencies`, keep that policy, but identify the offending native-test import and explain that `devDependencies` do not authorize production candidates. Better, exclude ordinary tests from implementation provenance unless selected as Jaunt test intent. The current workaround is explicit per-spec roots.
+3. Plugin doctor reported Jaunt status unavailable and the TS worker/compiler unavailable immediately after `jaunt instructions` reported 19 fresh modules and direct status had worked. This looks like a timeout or false negative on the slow full TS project. Doctor should distinguish timeout from missing worker/compiler, use a lighter handshake or honor configured worker deadlines, and avoid turning one status timeout into multiple unavailable diagnoses.
+4. The TS alpha grammar cannot preserve module-level runtime constants. `brief-blocks` therefore needs a handwritten `brief-blocks.ts` wrapper exporting `BLOCK_META_FORMAT` plus a generated `brief-blocks-core`, while wrapper/core patterns multiply configured roots. Please support explicitly preserved runtime constants, or document wrapper/core as the canonical migration pattern and discover the paired core without one literal root per module.
+
+## 2026-07-15: 1.7.4 fixes full-project overlays, but reused batteries still regenerate
+
+The alpha.2 to alpha.3 retest confirmed model-free implementation reuse. With
+the narrow project, status classified the helper as `toolchain` and build
+finished in 3.5 seconds with zero calls or tokens. Switching to
+`apps/dashboard/tsconfig.app.json` made status `fingerprint`; it completed in
+68.33 seconds at 4,049,124 KB maximum RSS. The full-project build completed in
+63.63 seconds at 4,047,836 KB with no redirect assertion and again used zero
+calls or tokens.
+
+Both build JSON results reported the helper under `refrozen`, not the documented
+`recomposed` field. More importantly, targeted `jaunt test` regenerated both
+unchanged batteries in two calls: 256,955 tokens, $0.534484, and zero cache
+hits. The protected runner passed eight example cases and reported zero
+derived cases. This appears inconsistent with the reply's promise to reheader
+matching batteries when every target is proven recomposed; the test path may
+not recognize a `refrozen` implementation as recomposed.
+
+Please align the build JSON vocabulary with the documentation and let this
+model-free reuse state authorize battery reheadering. The cached failed-candidate
+retry was not exercised in this run because the full-project change took the
+deterministic fingerprint/refreeze path.
+
+## 2026-07-15: 1.7.3 full-project overlay reuse crashes after a successful candidate validation
+
+The configurable worker deadlines work: with
+`projects = ["apps/dashboard/tsconfig.app.json"]`, a targeted 1.7.3 status run
+completed instead of timing out. A repeat took 63.07 seconds and about 4.05 GB
+maximum RSS. It reported the one TypeScript module as structurally stale and
+all 19 Python modules as fresh.
+
+The targeted build then generated a valid nine-line helper, but failed after
+one model call with:
+
+```text
+TypeScript worker INTERNAL_ERROR: Debug Failure. False expression: Host should
+not return a redirect source file from `getSourceFile`
+```
+
+That call used 216,509 tokens and cost $0.441226. The implementation, API
+mirror, facade, sidecar, and both batteries were untouched; their timestamps
+and hashes still match the prior 1.7.2 / alpha.1 build. The old sidecar still
+names `tsconfig.jaunt.json`, worker `0.1.0-alpha.1`, and tool `1.7.2`.
+
+The response cache tells us where the crash happened. A new cache entry was
+written at the failure time with exactly 215,141 prompt tokens, 1,368
+completion tokens, and the generated candidate. In the 1.7.3 builder, a model
+result is cached only after its request validator accepts it. The builder then
+runs the same candidate through a second, transaction-level `validateOverlay`.
+`OverlayProgramCache` supplies that second call with `oldProgram`, and
+`overlayHost.getSourceFile` returns `oldProgram.getSourceFile(...)` directly.
+On this pnpm/Vite project, one of those prior files is a TypeScript redirect
+source, which violates TypeScript 5.9's reuse invariant and triggers the exact
+assertion above.
+
+Restoring the narrow `tsconfig.jaunt.json` made the implementation build pass,
+but the project-identity change invalidated the full-project response cache.
+The retry reported zero cache hits and spent a second model call: 187,359
+tokens and $0.382086. `jaunt test` then regenerated both alpha.1 batteries in
+two more calls (393,315 tokens, $0.811356); the protected runner reported seven
+passing example cases and zero derived cases. Across the failed full-project
+attempt and the workaround, the upgrade used four calls, 797,183 tokens, and
+$1.634668. An independent first-build review found no behavior drift, and
+`jaunt check`, dashboard typecheck, lint, and the full dashboard test suite all
+passed.
+
+Please unwrap redirect sources before returning a reused `SourceFile`, or let
+the compiler host recreate them. Add a regression that runs two consecutive
+overlay validations against a pnpm project large enough to contain package
+redirects. `INTERNAL_ERROR` should also report the worker phase and preserve
+the first successful validation evidence. A retry with the same project should
+reuse the accepted candidate, but changing projects for the workaround did not.
+
+## 2026-07-14: Jaunt 1.7.2 TypeScript frontend retest
+
+The 1.7.2 retest confirmed several fixes. Before disabling TypeScript auto
+skills, `jaunt status --json` previewed the full 77-file, 315,932-byte npm
+skills surface. `[target.ts].auto_skills = false` removed that fanout without
+disabling Python skills. Strict `noUnusedLocals` and `noUnusedParameters` now
+pass without Jaunt-specific overrides, and the exported
+`shouldConsumeChatSeed.name` regression passes. Root `jaunt status` and
+`jaunt check` are clean, and all 1,119 frontend tests pass.
+
+Two issues remain:
+
+1. The intended narrow source root with the normal
+   `apps/dashboard/tsconfig.app.json` no longer produces the old provenance
+   flood, but it repeatedly times out in `validateOverlay` at the fixed
+   30-second `WorkerClient` deadline. This reproduced in sequential runs. An
+   earlier concurrent `status` plus `doctor` run instead timed out during
+   initialization; that is a separate concurrency result, not evidence for the
+   `validateOverlay` failure. There is no config or environment override for
+   the deadline, so the trial still needs a dedicated narrow tsconfig. Please
+   make the deadline configurable or adaptive and report phase timings when a
+   worker request times out.
+2. Upgrading from Jaunt 1.7.1 / `@usejaunt/ts` 0.1.0-alpha.0 to 1.7.2 /
+   0.1.0-alpha.1 made the unchanged nine-line helper structurally stale and
+   both batteries fingerprint-stale. Rebuilding required three model calls,
+   625,706 total tokens, and $1.287910: implementation was one call, 271,452
+   tokens, and $0.554892; tests were two calls, 354,254 tokens, and $0.733018.
+   Can compatible toolchain-only upgrades revalidate and recompose existing
+   candidates without model calls?
+
+The shipped documentation also has two stale claims. The TypeScript guide says
+infrastructure-failed candidates are cached, while the shipped code and tests
+intentionally do not cache them. `FEEDBACK-REPLY.md` still says the PR is open
+and the packages are unpublished, though 1.7.2 and 0.1.0-alpha.1 are live.
+
+## 2026-07-14 — Tiny TypeScript adoption generated a broad skills surface
+
+The first TypeScript build for a zero-import, one-function spec owned by
+`apps/dashboard` auto-generated 77 `npm-*` skill files, one for every direct
+dashboard dependency: roughly 0.8 MB and a large review and commit surface for
+a tiny adoption. This is documented default behavior, and current project
+policy commits generated skills, so we kept them. Please support
+dependency-reachable skill generation per target/spec, a per-target auto-skills
+switch (shared `[skills].auto=false` would also disable Python skills), and
+pre-build plan visibility into the generated file count and total size.
+
+The same trial found a smaller repository-hygiene gap: `jaunt test` created
+root `.jaunt-vitest-cache/`, but init/migration had not added it to `.gitignore`,
+so we added `.jaunt-vitest-cache/` manually. Jaunt should seed and check this
+ignore alongside `.jaunt/`.
+
+## 2026-07-14 — Overlapping TypeScript roots orphan freshly generated batteries
+
+With `[target.ts].source_roots` and `test_roots` set to the same narrow
+directory, `jaunt test` succeeded and wrote co-located
+`__generated__/index.example.test.ts` and `index.derived.test.ts`. An immediate
+root `jaunt check` classified both fresh batteries as orphans, and
+`jaunt clean --orphans --language ts` removed them. Moving authored test intent
+to `apps/dashboard/jaunt-tests/...`, adding explicit `test_projects`, and
+regenerating fixed routing; the final mixed Python and TypeScript check was
+green. The protected separate-root run reported eight passed example cases and
+zero derived cases (passed derived cases are redacted there). After adding
+`jaunt-tests/**/*.{test,spec}.{ts,tsx}` to the normal Vite include, Vitest
+passed eight example plus 12 derived cases: 25 total including five native.
+
+That route-only correction forced another 2 generation calls, 434,348 total
+tokens, and $0.894958. Please either support co-located source/test roots or
+reject their overlap before generation and model spend, and reuse or move fresh
+battery candidates when only the test-root route changes instead of charging
+for generation again.
+
+## 2026-07-14 — Generated TypeScript functions expose internal names
+
+The first implementation build with Jaunt 1.7.1 and `@usejaunt/ts`
+0.1.0-alpha.0 succeeded in one call for $0.637042 with no advisories, and its
+native behavior and type checks were otherwise faithful. Review found one
+observable compatibility drift: handwritten `shouldConsumeChatSeed.name` was
+`shouldConsumeChatSeed`, while the generated export is a const alias of named
+`__jaunt_impl_shouldConsumeChatSeed`, so `.name` exposes the internal name. No
+current consumer depends on it, but the composer should preserve exported
+function names or explicitly document this reflective compatibility boundary.
+
+## 2026-07-14 — Opaque TypeScript runner failure triggered a repair of correct code
+
+With Jaunt 1.7.1 and `@usejaunt/ts` 0.1.0-alpha.0,
+`jaunt test --language ts` generated two tiers, but both protected Vitest runs
+returned only category `runner-protocol`, empty stdout/stderr, and zero test
+records or diagnostics. Jaunt then automatically spent a third API call
+repairing an implementation already proven correct; the rerun returned the
+same opaque protocol failure and no batteries landed. Totals were 3 calls,
+814,159 prompt tokens (702,176 cached), 6,445 completion tokens, 820,604 total,
+and $1.679878: test generation used 2 calls/$1.169232 and the unnecessary repair
+used 1 call/$0.510646.
+
+The cause is now isolated. Invoking the protected runner manually against the
+same native five-case test with
+`vitestConfigPath=apps/dashboard/vite.config.ts` returned a collection failure;
+omitting `vitestConfigPath` passed all five cases. Removing
+`[target.ts].vitest_config` made `jaunt test` succeed: both batteries were
+generated and all eight example cases passed (the derived tier contained zero
+cases). That successful rerun used 2 calls, 414,597 total tokens, and $0.858696.
+
+The primary bug is therefore the Python layer converting an underlying
+config/collection error into opaque `runner-protocol`, then treating it as an
+implementation defect eligible for repair. Please preserve the runner's
+collection diagnostic and exit cause, never repair implementation for this
+infrastructure category, persist or cache generated candidates across reruns,
+and document that application Vite config should be omitted for pure batteries
+unless their tests specifically require it.
+
+## 2026-07-14 — TypeScript mirror validation conflicts with strict unused checks
+
+With Jaunt 1.7.1 and `@usejaunt/ts` 0.1.0-alpha.0, `sync` under a normal strict
+Vite `tsconfig` with `noUnusedLocals` and `noUnusedParameters` enabled rejected
+Jaunt's synthetic
+`.jaunt-mirror-check.ts` bindings (`__api_from_spec_0`, `__spec_from_api_0`, and
+`__facade_value_0`) and every intentionally unused magic-stub parameter as
+TS6133. The workaround was a dedicated Jaunt `tsconfig` disabling those two
+checks while the real app project retained them. Synthetic worker validation
+should consume or suppress its own bindings and stub parameters so strict
+projects do not need a weakened analysis configuration.
+
+## 2026-07-14 — TypeScript provenance rejected workspace-local imports outside the target
+
+With Jaunt 1.7.1 and `@usejaunt/ts` 0.1.0-alpha.0, doctor/status against the
+`mem-mcp` dashboard's `tsconfig.app.json` failed before model spend with
+hundreds of provenance errors, even though the targeted spec had zero imports.
+Jaunt classified the configured `@/*` path alias (for example `@/assets`) as an
+undeclared npm package, and treated existing tests that import sibling app API
+modules as undeclared `mem-dashboard-api` dependencies of the frontend package.
+Repeated copies of the same errors made the output enormous and eventually
+truncated.
+
+Please resolve `tsconfig` path aliases as local source, offer scoped/project
+diagnostics that do not validate unrelated files for a one-module target,
+deduplicate identical provenance failures with counts, and clarify how
+workspace-local package imports should be authorized. The trial proceeded with
+a dedicated narrow `tsconfig` as a workaround.
+
+## 2026-07-14 — Successful 1.7.1 build still emitted a non-canonical stub
+
+The successful targeted `temporal` build emitted
+`apps/memory-api/mcp_memory_server/temporal.pyi`, then the repo's required
+pre-commit formatter failed with exactly:
+
+```text
+Would reformat: apps/memory-api/mcp_memory_server/temporal.pyi
+```
+
+`uv run ruff format` changed that one file, while `jaunt status` still reported
+every module fresh. This narrows the release reply's Ruff-clean artifact claim:
+the stub may be lint-clean, but it is not canonical under the owning repo's
+required Ruff formatter, and Jaunt does not surface the byte mismatch. Emitted
+provenance stubs should use the same deterministic formatting as the owner, or
+`jaunt check` should report the mismatch.
+
+## 2026-07-14 — One local contract fix rebuilt a large module for $20.86
+
+After we documented the invalid-year `ValueError` behavior only in
+`parse_temporal_reference`, status marked the single
+`mcp_memory_server.temporal` module prose-stale and warned of at most 51
+generation attempts. The build succeeded, but ran 16 component generations
+plus the monolithic fallback: 35 API calls, 9,998,887 prompt tokens (8,695,646
+cached), 107,823 completion tokens, an estimated $20.860358, and zero Jaunt
+cache hits. Its only advisory concerned the inferred `_coerce_instant`, not the
+changed parser contract.
+
+This is a high-cost locality problem. A behavior clarification in one function
+regenerated every function in a large module. Can prose-diff symbol targeting
+preserve unaffected generated components, or can the semantic refreeze path
+retain them when their contracts did not change? The pre-build plan should also
+make the component fan-out and conditions for monolithic fallback explicit so
+adopters can see this cost before starting the build.
+
+## 2026-07-14 — Fresh regeneration exposed an underspecified invalid-year contract
+
+A Jaunt 1.7.1 regeneration of `mcp_memory_server.temporal` removed the prior
+generated implementation's `ValueError` guards around four-digit year parsing
+and year-range parsing. Inputs such as `"0000"` matched the documented forms, but
+now reached `datetime(year, ...)` directly and raised instead of returning
+`None`. The generated module was fresh and `jaunt check` was clean; PR review
+found the behavior change.
+
+This is not evidence of a compiler defect. The spec described valid input forms
+and one invalid calendar-date case, but never said what to do with an invalid
+Gregorian year. Both implementations were plausible readings of that contract.
+The adoption lesson is to characterize established boundary and failure
+behavior before a structural regeneration, and to review a fresh generated diff
+as a semantic change even when every Jaunt gate passes.
+
+Jaunt could make that review cheaper when a previous artifact exists. A targeted
+differential advisory that calls out removed exception guards or changed failure
+paths, or a prompt to add characterization cases for affected branches, would
+surface this class of risk without claiming that Jaunt can prove semantic
+equivalence.
+
+## 2026-07-14 — 1.7.1 provenance stubs are lint-clean but not formatter-stable
+
+After 1.7.1 deterministically re-emitted the workspace stubs, with no model
+calls, the repo-required `uv run poe check` ran `ruff format .` and reformatted
+exactly six Jaunt-owned provenance files:
+
+- `apps/memory-api/mcp_memory_server/temporal.pyi`
+- `memory_store_utils/{compression_utils,deixis,entity_text}.pyi`
+- `memory_store_telemetry/dbos_instrumentation.pyi`
+- `memory_store_postgres/pool.pyi`
+
+`jaunt status` and `jaunt check` still reported all 17 modules fresh afterward
+because stub freshness does not track the rendered bytes. Thus 1.7.1 stubs now
+pass the adopter's Ruff lint rules, but they are not stable under its required
+formatter: the normal repo gate modifies generated artifacts despite Jaunt's
+"never edit generated files" guidance, and Jaunt's drift gate does not notice.
+
+The likely cause is target-version inference: the repo formats for Python 3.13,
+while Jaunt's isolated stub validation uses Python 3.12. That is an inference,
+not yet a confirmed root cause. The emitter should honor the owning package's
+Ruff/target-Python configuration (or otherwise emit formatter-canonical bytes),
+and a deterministic post-build check should catch this without a model call.
+
 ## 2026-07-13 — 1.7.0 Codex plugin: resolver works; doctor crosses workspace and host boundaries
 
 First package-adoption pass with the installed Codex plugin. The resolver
