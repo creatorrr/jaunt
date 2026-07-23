@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import contextlib
 import hashlib
 import inspect
@@ -30,8 +31,8 @@ from urllib.parse import unquote
 from jaunt.config import JauntConfig
 from jaunt.cache import ResponseCache
 from jaunt.cost import CostTracker
-from jaunt.errors import JauntConfigError
-from jaunt.generate.base import GenerationRequest, GeneratorBackend
+from jaunt.errors import JauntConfigError, JauntGenerationError
+from jaunt.generate.base import GenerationRequest, GenerationResult, GeneratorBackend, TokenUsage
 from jaunt.generate.request_cache import (
     discard_cached_generation,
     generate_request_cached,
@@ -42,7 +43,12 @@ from jaunt.skill_seed import skills_fingerprint
 from jaunt.targets.base import TargetBuildReport, TargetDiagnostic, TargetTestReport
 from jaunt.typescript.builder import (
     MISSING_INPUT,
+    WorkerLike,
     WorkerFactory,
+    _CommittedBatteryInfrastructureError,
+    _PinnedDirectory,
+    _PinnedWorkspace,
+    _assert_inputs_unchanged,
     _default_backend,
     _input_hashes,
     _module_id,
@@ -53,9 +59,16 @@ from jaunt.typescript.builder import (
     _progress_finish,
     _progress_phase,
     _progress_reset,
+    _acquire_transaction_lease,
+    _recover_atomic_write_manifests,
+    _retire_transaction_manifest,
     _safe_path,
+    _seal_worker_runtime_identity,
     _sha256,
+    _split_context_source,
     _target,
+    _verify_worker_runtime_identity,
+    _write_transaction_manifest,
     _Write,
     analyze,
     atomic_write_manifest,
@@ -75,32 +88,38 @@ from jaunt.typescript.provenance import (
     render_managed_document,
 )
 from jaunt.typescript.reuse import (
+    expected_target_api_record,
     proven_previous_target_api_digests,
     target_api_digest,
 )
-from jaunt.typescript.worker import TypeScriptWorkerError, worker_environment
+from jaunt.typescript.worker import (
+    _is_toolchain_identity_file,
+    _runtime_manifest_identity,
+    compiler_runtime_identity,
+    resolve_node_package,
+    runtime_package_identity,
+    TypeScriptWorkerError,
+    WorkerInstallation,
+    WorkerToolchainChangedError,
+    worker_environment,
+)
 
 _DEFAULT_RUNNER_TIMEOUT = 300.0
 _RUNNER_PROTOCOL = "jaunt-ts-test-runner/1"
 _RUNNER_ENTRY = "dist/test/runner.js"
-# Keep this list to the runtime closure of ``runner.js``. In particular,
-# ``heldout.js`` is part of the security boundary: changing its leak checks must
-# invalidate/refreeze every generated battery before those tests run again.
-_RUNNER_RUNTIME_FILES = (
+_RUNNER_REQUIRED_FILES = (
     _RUNNER_ENTRY,
     "dist/test/permission_guard.cjs",
     "dist/test/reporter.js",
     "dist/test/heldout.js",
-    "dist/analyzer/artifacts.js",
-    "dist/analyzer/diagnostics.js",
-    "dist/analyzer/canonical.js",
-    "dist/protocol/errors.js",
 )
 _TEST_SPEC_RE = re.compile(r"\.jaunt-test\.(?:ts|tsx)$")
 _GENERATED_TEST_HEADER = "// ⚙️ jaunt:generated — DO NOT EDIT. Regenerate with `jaunt test`."
 _TEST_PROVENANCE_FIELDS = (
     "test_spec_digest",
     "target_api_digest",
+    "imported_type_context_fingerprint",
+    "fixture_fingerprint",
     "vitest_fingerprint",
     "fast_check_fingerprint",
     "runner_fingerprint",
@@ -112,6 +131,24 @@ _TEST_PROVENANCE_FIELDS = (
 )
 _TEST_REHEADER_FINGERPRINTS = frozenset({"runner_fingerprint", "vitest_fingerprint"})
 _TEST_IMPORT_POLICY = "static-esm-only-resolved-boundary-v3"
+_REJECTED_TEST_DIR = Path(".jaunt/typescript/rejected-tests")
+_REJECTED_TEST_STEM_MAX_CHARS = 96
+_REJECTED_TEST_SEMANTIC_FIELDS = ("test_spec_digest", "target_api_digest")
+_REJECTED_TEST_OPTIONAL_SEMANTIC_FIELDS = (
+    "imported_type_context_fingerprint",
+    "fixture_fingerprint",
+)
+_IMPORTED_TYPE_SOURCE_RE = re.compile(
+    r"^// <jaunt:imported-type-source (?P<meta>\{[^\r\n]+\})>\r?\n"
+    r"(?P<source>.*?)"
+    r"^// </jaunt:imported-type-source>$",
+    re.MULTILINE | re.DOTALL,
+)
+_IMPORTED_TYPE_SOURCE_V2_RE = re.compile(
+    r"^// jaunt:imported-type-record=(?P<payload>[A-Za-z0-9+/]+={0,2})$",
+    re.MULTILINE,
+)
+_IMPORTED_TYPE_CONTEXT_LIMIT = 64 * 1024
 
 
 def _test_output(
@@ -265,22 +302,137 @@ def _declared_dev_dependencies(owner: Path) -> Mapping[str, object]:
     return dependencies if isinstance(dependencies, Mapping) else {}
 
 
+def _installed_test_dependency(root: Path, owner: Path, package: str) -> Path | None:
+    """Resolve a test tool from its actual package owner, preserving symlinks."""
+
+    try:
+        return resolve_node_package(owner, package, boundary=root)
+    except TypeScriptWorkerError as exc:
+        raise JauntConfigError(
+            f"Could not resolve {package!r} from test package owner {owner}"
+        ) from exc
+
+
+def _module_resolved_test_dependency(module_path: Path, package: str) -> Path | None:
+    """Resolve a bare package from the physical module location Node executes.
+
+    Jaunt strips ``NODE_OPTIONS``, so Node does not preserve package symlinks.
+    Starting at the runner's physical path therefore mirrors ESM's parent
+    ``node_modules`` search and, importantly, enters pnpm's peer-context tree.
+    The returned candidate stays lexical within that physical tree so a peer
+    symlink retarget changes its command-local filesystem identity.
+    """
+
+    try:
+        return resolve_node_package(module_path, package, module_path=True)
+    except TypeScriptWorkerError as exc:
+        raise JauntConfigError(f"Could not resolve protected test runner: {module_path}") from exc
+
+
+def _runner_test_dependency(client: object, package: str) -> Path | None:
+    try:
+        runner = _runner_path(client)
+    except RuntimeError:
+        return None
+    return _module_resolved_test_dependency(runner, package)
+
+
 def _installed_test_dependency_version(root: Path, owner: Path, package: str) -> str | None:
-    package_path = Path(*package.split("/"))
-    current = owner.resolve()
-    root = root.resolve()
-    while current == root or current.is_relative_to(root):
-        candidate = current / "node_modules" / package_path / "package.json"
+    package_root = _installed_test_dependency(root, owner, package)
+    if package_root is not None:
         try:
-            parsed = json.loads(candidate.read_text(encoding="utf-8"))
+            parsed = json.loads((package_root / "package.json").read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
             parsed = None
         if isinstance(parsed, Mapping) and isinstance(parsed.get("version"), str):
             return str(parsed["version"])
-        if current == root:
-            break
-        current = current.parent
     return None
+
+
+def _test_dependency_runtime_identity(root: Path, owner: Path, package: str) -> str:
+    package_root = _installed_test_dependency(root, owner, package)
+    if package_root is None:
+        return "unresolved"
+    return runtime_package_identity(package_root, expected_name=package)
+
+
+def _pin_test_dependency_runtimes(
+    client: object,
+    root: Path,
+    workspace: Mapping[str, Any],
+    grouped: Mapping[str, Sequence[str]],
+) -> None:
+    """Pin each Vitest resolution topology through the artifact commit."""
+
+    pin_closure = getattr(client, "pin_package_resolution_closure", None)
+    pin_resolution = getattr(client, "pin_package_resolution_identity", None)
+    pin_runtime = getattr(client, "pin_package_runtime_identity", None)
+    if not callable(pin_closure) and not callable(pin_resolution) and not callable(pin_runtime):
+        return
+    try:
+        runner = _runner_path(client)
+    except RuntimeError as exc:
+        raise JauntConfigError(
+            "The protected TypeScript runner cannot resolve its Vitest runtime"
+        ) from exc
+    runner_package = _module_resolved_test_dependency(runner, "vitest")
+    if runner_package is None:
+        raise JauntConfigError("The protected TypeScript runner cannot resolve its Vitest runtime")
+    if callable(pin_closure):
+        pin_closure(
+            "Vitest package resolved by the protected runner",
+            runner,
+            "vitest",
+            module_path=True,
+            expected_name="vitest",
+        )
+    elif callable(pin_resolution):
+        pin_resolution(
+            "Vitest package resolved by the protected runner",
+            runner,
+            "vitest",
+            module_path=True,
+            expected_name="vitest",
+        )
+    else:
+        assert callable(pin_runtime)
+        pin_runtime(
+            "Vitest package resolved by the protected runner",
+            runner_package,
+            expected_name="vitest",
+        )
+    for project in grouped:
+        owner = _test_package_owner(root, workspace, project)
+        package_root = _installed_test_dependency(root, owner, "vitest")
+        if package_root is None:
+            relative_owner = owner.relative_to(root.resolve()).as_posix() or "."
+            raise JauntConfigError(
+                f"TypeScript test owner {relative_owner!r} does not resolve installed vitest"
+            )
+        relative_owner = owner.relative_to(root.resolve()).as_posix() or "."
+        if callable(pin_closure):
+            pin_closure(
+                f"Vitest package for {relative_owner}",
+                owner,
+                "vitest",
+                boundary=root,
+                expected_name="vitest",
+            )
+        elif callable(pin_resolution):
+            pin_resolution(
+                f"Vitest package for {relative_owner}",
+                owner,
+                "vitest",
+                boundary=root,
+                expected_name="vitest",
+            )
+        else:
+            assert callable(pin_runtime)
+            pin_runtime(
+                f"Vitest package for {relative_owner}",
+                package_root,
+                expected_name="vitest",
+            )
 
 
 def _supported_test_dependency(package: str, version: str) -> bool:
@@ -358,60 +510,185 @@ def _tool_search_roots(root: Path, client: object) -> tuple[Path, ...]:
     return tuple(dict.fromkeys(path for path in values if isinstance(path, Path)))
 
 
-def _local_config_closure(root: Path, initial: str) -> Mapping[str, str]:
-    """Hash a Vitest config and statically referenced local setup/config files."""
+_LOCAL_CONFIG_EXTENSIONS = (
+    ".ts",
+    ".tsx",
+    ".mts",
+    ".cts",
+    ".js",
+    ".mjs",
+    ".cjs",
+    ".json",
+)
 
+
+def _local_config_snapshot(
+    root: Path,
+    initial: str,
+) -> tuple[Mapping[str, str], Mapping[str, str]]:
+    """Capture a confined Vitest config closure as exact hashes and overlays."""
+
+    root = root.resolve()
     pending = [_safe_path(root, initial)]
     seen: set[Path] = set()
     hashes: dict[str, str] = {}
+    overlays: dict[str, str] = {}
     while pending:
         path = pending.pop()
-        if path in seen or not path.is_file():
+        if path in seen:
             continue
         seen.add(path)
         relative = path.relative_to(root).as_posix()
-        source = path.read_text(encoding="utf-8")
-        hashes[relative] = _sha256(source.encode("utf-8"))
-        specifiers = re.findall(r"[\"'](?P<path>\.{1,2}/[^\"']+)[\"']", source)
-        for specifier in specifiers:
-            base = path.parent / specifier
-            candidates = (
-                base,
-                *(base.with_suffix(extension) for extension in (".ts", ".tsx", ".mts", ".cts")),
-                *(base.with_suffix(extension) for extension in (".js", ".mjs", ".cjs", ".json")),
-                *(base / f"index{extension}" for extension in (".ts", ".tsx", ".js", ".json")),
-                root / specifier,
+        try:
+            physical = path.resolve(strict=True)
+            physical.relative_to(root)
+            if not physical.is_file():
+                raise FileNotFoundError(path)
+            source_bytes = physical.read_bytes()
+        except (FileNotFoundError, NotADirectoryError):
+            previous_digest = hashes.setdefault(relative, MISSING_INPUT)
+            if previous_digest != MISSING_INPUT:
+                raise JauntGenerationError(
+                    "TypeScript Vitest configuration changed while its closure was captured: "
+                    + relative
+                ) from None
+            continue
+        except (OSError, ValueError) as exc:
+            raise JauntConfigError(
+                "Vitest configuration dependency escapes or cannot be read: " + relative
+            ) from exc
+        source = source_bytes.decode("utf-8")
+        digest = _sha256(source_bytes)
+        previous_digest = hashes.setdefault(relative, digest)
+        if previous_digest != digest:
+            raise JauntGenerationError(
+                "TypeScript Vitest configuration changed while its closure was captured: "
+                + relative
             )
-            for candidate in candidates:
+        overlays[relative] = source
+        quoted_values = re.findall(r"[\"'](?P<path>[^\"'\r\n]+)[\"']", source)
+        specifiers = [
+            value
+            for value in quoted_values
+            if not value.startswith(("data:", "http:", "https:", "node:"))
+            and (
+                value.startswith(("./", "../"))
+                or "/" in value
+                or "\\" in value
+                or Path(value).suffix
+                in {".cjs", ".cts", ".js", ".json", ".mjs", ".mts", ".ts", ".tsx"}
+            )
+        ]
+        for specifier in specifiers:
+            normalized = specifier.replace("\\", "/")
+            bases = (
+                (path.parent / normalized,)
+                if normalized.startswith(("./", "../"))
+                else (root / normalized,)
+            )
+            candidates: list[Path] = []
+            for base in bases:
+                lexical_base = Path(os.path.abspath(base))
                 try:
-                    relative_candidate = candidate.resolve().relative_to(root)
-                except (ValueError, OSError):
+                    lexical_base.relative_to(root)
+                except ValueError as exc:
+                    raise JauntConfigError(
+                        "Vitest configuration references a path outside the workspace: " + specifier
+                    ) from exc
+                candidates.append(base)
+                if base.suffix.casefold() not in _LOCAL_CONFIG_EXTENSIONS:
+                    candidates.extend(
+                        Path(f"{base}{extension}") for extension in _LOCAL_CONFIG_EXTENSIONS
+                    )
+                candidates.extend(
+                    base / f"index{extension}" for extension in _LOCAL_CONFIG_EXTENSIONS
+                )
+            for candidate in dict.fromkeys(candidates):
+                lexical_candidate = Path(os.path.abspath(candidate))
+                try:
+                    relative_lexical = lexical_candidate.relative_to(root).as_posix()
+                except ValueError as exc:
+                    raise JauntConfigError(
+                        "Vitest configuration dependency escapes the workspace: " + specifier
+                    ) from exc
+                try:
+                    physical = candidate.resolve(strict=True)
+                except FileNotFoundError:
+                    try:
+                        unresolved = candidate.resolve(strict=False)
+                        unresolved.relative_to(root)
+                    except (OSError, ValueError) as exc:
+                        raise JauntConfigError(
+                            "Vitest configuration dependency escapes the workspace: " + specifier
+                        ) from exc
+                    previous_digest = hashes.setdefault(relative_lexical, MISSING_INPUT)
+                    if previous_digest != MISSING_INPUT:
+                        raise JauntGenerationError(
+                            "TypeScript Vitest configuration changed while its closure was "
+                            f"captured: {relative_lexical}"
+                        ) from None
                     continue
+                except NotADirectoryError:
+                    # An already captured regular-file ancestor makes this index
+                    # candidate impossible without changing that ancestor first.
+                    continue
+                except OSError as exc:
+                    raise JauntConfigError(
+                        "Vitest configuration dependency could not be resolved: " + specifier
+                    ) from exc
+                try:
+                    relative_candidate = physical.relative_to(root)
+                except ValueError as exc:
+                    raise JauntConfigError(
+                        "Vitest configuration dependency escapes the workspace: " + specifier
+                    ) from exc
                 confined = _safe_path(root, relative_candidate.as_posix())
                 if confined.is_file():
                     pending.append(confined)
-                    break
-    return dict(sorted(hashes.items()))
+    return dict(sorted(hashes.items())), dict(sorted(overlays.items()))
 
 
-def _fixture_fingerprint(root: Path, config: JauntConfig) -> str:
-    target = _target(config)
-    fixtures: dict[str, str] = {}
-    for entry in target.test_roots:
-        roots = (
-            [path for path in root.glob(entry) if path.is_dir()]
-            if any(character in entry for character in "*?[")
-            else [_safe_path(root, entry)]
+def _local_config_closure(root: Path, initial: str) -> Mapping[str, str]:
+    """Hash a Vitest config and statically referenced local setup/config files."""
+
+    return _local_config_snapshot(root, initial)[0]
+
+
+def _verify_local_config_closure(
+    root: Path,
+    initial: str,
+    expected: Mapping[str, str],
+) -> None:
+    """Hold Vitest config resolution and exact bytes through publication."""
+
+    if _local_config_closure(root, initial) != expected:
+        raise JauntGenerationError(
+            "TypeScript Vitest configuration changed during battery validation; "
+            "no test artifacts were committed."
         )
-        for test_root in roots:
-            if not test_root.is_dir():
-                continue
-            for pattern in ("**/fixtures.ts", "**/fixtures.tsx"):
-                for path in test_root.glob(pattern):
-                    fixtures[path.relative_to(root).as_posix()] = _semantic_test_spec_digest(
-                        path.read_text(encoding="utf-8")
-                    )
-    return _canonical_digest(fixtures)
+
+
+def _fixture_fingerprint(request: GenerationRequest) -> str:
+    """Hash the exact canonical fixture bytes supplied to one battery request."""
+
+    fixture_path = request.cache_payload.get("fixturePath")
+    fixture_source = request.context_files.get("_context/fixtures.ts")
+    fixture_digest = request.cache_payload.get("fixtureDigest")
+    if (
+        isinstance(fixture_path, str)
+        and fixture_path
+        and isinstance(fixture_source, str)
+        and isinstance(fixture_digest, str)
+    ):
+        exact_digest = _sha256(fixture_source.encode("utf-8"))
+        if fixture_digest != exact_digest:
+            raise JauntConfigError(
+                f"TypeScript fixture bytes changed while preparing {fixture_path}"
+            )
+        return _canonical_digest({"path": fixture_path, "digest": fixture_digest})
+    if fixture_path or fixture_source is not None or fixture_digest:
+        raise JauntConfigError("Incomplete TypeScript fixture provenance in battery request")
+    return _canonical_digest(None)
 
 
 def _runner_export_target(value: object) -> str | None:
@@ -500,6 +777,12 @@ def _runner_runtime_snapshot(
         if isinstance(exports, Mapping):
             runner_export = _runner_export_target(exports.get("./test-runner"))
 
+    if not package_managed and package_version is None:
+        # Protocol-only fakes and arbitrary worker overrides do not establish a
+        # package runtime boundary. The real runner lookup still fails closed if
+        # an operation tries to execute without an installed runner.
+        return None, None, {}
+
     if package_managed:
         if package_version is None:
             raise TypeScriptWorkerError(
@@ -511,24 +794,62 @@ def _runner_runtime_snapshot(
                 f"expected './{_RUNNER_ENTRY}', got {runner_export!r}"
             )
 
-    required = (
-        _RUNNER_RUNTIME_FILES
-        if package_managed
-        else tuple(
-            relative for relative in _RUNNER_RUNTIME_FILES if (package_root / relative).is_file()
-        )
-    )
+    try:
+        physical_root = package_root.resolve(strict=True)
+    except OSError as exc:
+        raise TypeScriptWorkerError(
+            f"Could not resolve @usejaunt/ts test-runner package at {package_root}: {exc}"
+        ) from exc
+
+    def runtime_paths() -> tuple[Path, ...]:
+        dist = physical_root / "dist"
+        if not dist.is_dir():
+            if package_managed:
+                raise TypeScriptWorkerError(
+                    f"Installed @usejaunt/ts has no runtime directory at {dist}"
+                )
+            return ()
+        try:
+            paths = {
+                path.resolve(strict=True)
+                for path in dist.rglob("*")
+                if path.is_file() and _is_toolchain_identity_file(path)
+            }
+        except OSError as exc:
+            raise TypeScriptWorkerError(
+                f"Could not enumerate @usejaunt/ts test-runner runtime under {dist}: {exc}"
+            ) from exc
+        if any(path != physical_root and physical_root not in path.parents for path in paths):
+            raise TypeScriptWorkerError("@usejaunt/ts test-runner runtime file escapes its package")
+        missing = [
+            relative
+            for relative in _RUNNER_REQUIRED_FILES
+            if not (physical_root / relative).is_file()
+        ]
+        if package_managed and missing:
+            raise TypeScriptWorkerError(
+                "Installed @usejaunt/ts is missing required test-runner runtime file(s): "
+                + ", ".join(missing)
+            )
+        return tuple(sorted(paths, key=lambda path: path.relative_to(physical_root).as_posix()))
+
+    required = runtime_paths()
 
     def digest_files() -> dict[str, str]:
-        return {
-            relative: _stable_runner_digest(package_root / relative, package_root=package_root)
-            for relative in required
+        files = {
+            path.relative_to(physical_root).as_posix(): _stable_runner_digest(
+                path, package_root=physical_root
+            )
+            for path in required
         }
+        if isinstance(manifest, Mapping):
+            files["package.json"] = _canonical_digest(_runtime_manifest_identity(manifest))
+        return files
 
     files = digest_files()
     # A second full read catches a runner/support replacement between individual
     # reads, while remaining path-independent for source checkouts and installs.
-    if files != digest_files():
+    if required != runtime_paths() or files != digest_files():
         raise TypeScriptWorkerError(
             "@usejaunt/ts test-runner runtime changed while its freshness identity was read"
         )
@@ -557,6 +878,11 @@ def _runner_fingerprint(root: Path, client: object, initialized: object) -> str:
             package_root,
             package_managed=bool(getattr(installation, "package_managed", False)),
         )
+    compiler_identity = (
+        compiler_runtime_identity(installation)
+        if isinstance(installation, WorkerInstallation)
+        else None
+    )
     roots = _tool_search_roots(root, client)
     return _canonical_digest(
         {
@@ -565,6 +891,7 @@ def _runner_fingerprint(root: Path, client: object, initialized: object) -> str:
             "testRunnerExport": runner_export,
             "workerVersion": str(getattr(initialized, "worker_version", "unknown")),
             "typescriptVersion": str(getattr(initialized, "typescript_version", "unknown")),
+            "typescriptRuntimeIdentity": compiler_identity,
             "files": files,
             "settings": {
                 "customReporters": False,
@@ -577,6 +904,88 @@ def _runner_fingerprint(root: Path, client: object, initialized: object) -> str:
     )
 
 
+def _verify_runner_runtime_identity(
+    root: Path,
+    client: object,
+    initialized: object,
+    expected: str,
+) -> None:
+    """Reject a runner/held-out runtime replacement after validation began."""
+
+    try:
+        current = _runner_fingerprint(root, client, initialized)
+    except TypeScriptWorkerError as exc:
+        raise WorkerToolchainChangedError(
+            "The project-local @usejaunt/ts test runtime became unreadable while "
+            "battery validation was active. Rerun after the toolchain is stable; "
+            "Jaunt will not commit the candidate batteries."
+        ) from exc
+    if current != expected:
+        raise WorkerToolchainChangedError(
+            "The project-local @usejaunt/ts test runtime changed while battery "
+            "validation was active. Rerun after the toolchain is stable; Jaunt will "
+            "not commit the candidate batteries."
+        )
+
+
+def _pin_test_runtime_identity(client: object) -> None:
+    """Extend a real worker session pin across runner and declaration inputs."""
+
+    pin = getattr(client, "pin_full_runtime_identity", None)
+    if callable(pin):
+        pin()
+
+
+def _verify_test_runtime_identity(
+    root: Path,
+    client: WorkerLike,
+    initialized: object,
+    expected_runner: str,
+) -> None:
+    _verify_runner_runtime_identity(root, client, initialized, expected_runner)
+    _verify_worker_runtime_identity(client)
+
+
+def _seal_test_runtime_identity(
+    root: Path,
+    client: WorkerLike,
+    initialized: object,
+    expected_runner: str,
+) -> None:
+    # Seal the worker first, then re-read the complete test runtime while the
+    # artifact transaction still has its rollback bytes.
+    _seal_worker_runtime_identity(client)
+    _verify_runner_runtime_identity(root, client, initialized, expected_runner)
+
+
+def _verify_test_commit_environment(
+    root: Path,
+    client: WorkerLike,
+    initialized: object,
+    expected_runner: str,
+    *,
+    vitest_config: str,
+    config_closure: Mapping[str, str],
+) -> None:
+    if vitest_config:
+        _verify_local_config_closure(root, vitest_config, config_closure)
+    _verify_test_runtime_identity(root, client, initialized, expected_runner)
+
+
+def _seal_test_commit_environment(
+    root: Path,
+    client: WorkerLike,
+    initialized: object,
+    expected_runner: str,
+    *,
+    vitest_config: str,
+    config_closure: Mapping[str, str],
+) -> None:
+    _seal_test_runtime_identity(root, client, initialized, expected_runner)
+    if vitest_config:
+        _verify_local_config_closure(root, vitest_config, config_closure)
+
+
 def _test_provenance(
     root: Path,
     config: JauntConfig,
@@ -587,6 +996,9 @@ def _test_provenance(
     *,
     tier: str,
     builtin_skill_names: Sequence[str] | None = None,
+    prepared_request: GenerationRequest | None = None,
+    runner_fingerprint: str | None = None,
+    workspace: Mapping[str, Any] | None = None,
 ) -> Mapping[str, str]:
     path = str(test_spec.get("path", ""))
     source = (
@@ -597,9 +1009,26 @@ def _test_provenance(
     selected = _selected_test_modules(test_spec, modules)
     target = _target(config)
     roots = _tool_search_roots(root, client)
+    vitest_runtime_identity = _read_package_version(roots, "vitest")
+    runner_vitest_runtime_identity = "unresolved"
+    runner_vitest_package = _runner_test_dependency(client, "vitest")
+    if runner_vitest_package is not None:
+        runner_vitest_runtime_identity = runtime_package_identity(
+            runner_vitest_package,
+            expected_name="vitest",
+        )
+    if workspace is not None:
+        project = test_spec.get("project")
+        if not isinstance(project, str):
+            project = _owner_project_for_source(root, config, workspace, path)
+        owner = _test_package_owner(root, workspace, project)
+        vitest_runtime_identity = _test_dependency_runtime_identity(root, owner, "vitest")
     config_digest: object = (
         _local_config_closure(root, target.vitest_config) if target.vitest_config else "default"
     )
+    # Invocation-only ``--instruction`` values guide a paid repair attempt but
+    # are not a committed behavioral input. Canonical config instructions still
+    # flow through the default request and therefore remain provenance-bearing.
     request = _test_request(
         root,
         config,
@@ -608,16 +1037,31 @@ def _test_provenance(
         tier=tier,
         builtin_skill_names=builtin_skill_names,
     )
+    fixture_request = prepared_request or request
+    imported_type_context = {
+        path: source
+        for path, source in request.context_files.items()
+        if path.startswith("_context/imported-types/")
+    }
     values = {
         "test_spec_digest": _semantic_test_spec_digest(source),
         "target_api_digest": target_api_digest(selected),
+        **(
+            {"imported_type_context_fingerprint": _canonical_digest(imported_type_context)}
+            if imported_type_context
+            else {}
+        ),
+        # Fixture source is behavioral generation context. Keep it separate
+        # from the reheader-safe Vitest toolchain fingerprint so a fixture
+        # change can never stamp an unchanged battery fresh.
+        "fixture_fingerprint": _fixture_fingerprint(fixture_request),
         "vitest_fingerprint": _canonical_digest(
             {
                 "runner": target.test_runner,
                 "configPath": target.vitest_config,
                 "configDigest": config_digest,
-                "version": _read_package_version(roots, "vitest"),
-                "fixtures": _fixture_fingerprint(root, config),
+                "ownerRuntimeIdentity": vitest_runtime_identity,
+                "runnerRuntimeIdentity": runner_vitest_runtime_identity,
             }
         ),
         "fast_check_fingerprint": _canonical_digest(
@@ -636,7 +1080,7 @@ def _test_provenance(
                 ),
             }
         ),
-        "runner_fingerprint": _runner_fingerprint(root, client, initialized),
+        "runner_fingerprint": runner_fingerprint or _runner_fingerprint(root, client, initialized),
         "prompt_fingerprint": _sha256(request.prompt.encode("utf-8")),
         "policy_fingerprint": _sha256(_TEST_IMPORT_POLICY.encode("utf-8")),
         "skills_fingerprint": skills_fingerprint(
@@ -687,6 +1131,540 @@ def _with_test_header(
     return render_managed_document(_GENERATED_TEST_HEADER, fields, body)
 
 
+def _rejected_test_paths(
+    target_path: str,
+    *,
+    candidate_digest: str | None = None,
+) -> tuple[Path, Path]:
+    identity = hashlib.sha256(target_path.encode("utf-8")).hexdigest()[:16]
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "-", Path(target_path).stem).strip("-._")
+    stem = stem[:_REJECTED_TEST_STEM_MAX_CHARS].rstrip("-._") or "battery"
+    suffix = Path(target_path).suffix if Path(target_path).suffix in {".ts", ".tsx"} else ".ts"
+    base = _REJECTED_TEST_DIR / f"{stem}-{identity}"
+    content_identity = ""
+    if candidate_digest:
+        raw_digest = candidate_digest.removeprefix("sha256:")
+        bounded_digest = (
+            raw_digest.lower()
+            if re.fullmatch(r"[0-9a-fA-F]{64}", raw_digest)
+            else hashlib.sha256(candidate_digest.encode("utf-8")).hexdigest()
+        )
+        content_identity = f".{bounded_digest}"
+    return (
+        base.parent / f"{base.name}{content_identity}.candidate{suffix}",
+        base.parent / f"{base.name}.json",
+    )
+
+
+@contextmanager
+def _rejected_test_lock(root: Path, target_path: str) -> Iterator[None]:
+    """Serialize publication and CAS cleanup of one rejected-battery record."""
+
+    metadata_relative = _rejected_test_paths(target_path)[1]
+    lock = _safe_path(root, metadata_relative.with_suffix(".lock").as_posix())
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+    locked = False
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            if os.fstat(descriptor).st_size == 0:
+                os.write(descriptor, b"\0")
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            locking = getattr(msvcrt, "locking", None)
+            lock_mode = getattr(msvcrt, "LK_LOCK", None)
+            if not callable(locking) or not isinstance(lock_mode, int):
+                raise RuntimeError("This Python runtime cannot lock rejected-test records")
+            locking(descriptor, lock_mode, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        locked = True
+        yield
+    finally:
+        try:
+            if locked:
+                if os.name == "nt":
+                    import msvcrt
+
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    locking = getattr(msvcrt, "locking", None)
+                    unlock_mode = getattr(msvcrt, "LK_UNLCK", None)
+                    if not callable(locking) or not isinstance(unlock_mode, int):
+                        raise RuntimeError(
+                            "This Python runtime cannot unlock rejected-test records"
+                        )
+                    locking(descriptor, unlock_mode, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        try:
+            with os.fdopen(
+                descriptor,
+                "w",
+                encoding="utf-8",
+                newline="\n",
+                closefd=False,
+            ) as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _rejected_test_semantic_identity(provenance: Mapping[str, Any] | None) -> str | None:
+    """Identify the authored test contract independently of prompt/tool provenance."""
+
+    if not isinstance(provenance, Mapping):
+        return None
+    semantic: dict[str, str] = {}
+    for field in _REJECTED_TEST_SEMANTIC_FIELDS:
+        value = provenance.get(field)
+        if not isinstance(value, str) or not value:
+            return None
+        semantic[field] = value
+    for field in _REJECTED_TEST_OPTIONAL_SEMANTIC_FIELDS:
+        if field not in provenance:
+            continue
+        value = provenance.get(field)
+        if not isinstance(value, str) or not value:
+            return None
+        semantic[field] = value
+    return _canonical_digest(semantic)
+
+
+def _rejected_test_payload_identity(payload: Mapping[str, Any]) -> str | None:
+    """Read a validated semantic identity, falling back for legacy exact markers."""
+
+    if "expected_provenance" in payload or "semantic_identity" in payload:
+        semantic_identity = _rejected_test_semantic_identity(payload.get("expected_provenance"))
+        recorded_identity = payload.get("semantic_identity")
+        return (
+            semantic_identity
+            if isinstance(recorded_identity, str) and recorded_identity == semantic_identity
+            else None
+        )
+    fingerprint = payload.get("battery_fingerprint")
+    return fingerprint if isinstance(fingerprint, str) else None
+
+
+def _expected_rejected_test_identity(
+    expected_fingerprint: str,
+    expected_provenance: Mapping[str, Any] | None,
+) -> str:
+    """Use semantic identity when available and exact fingerprint for legacy callers."""
+
+    return _rejected_test_semantic_identity(expected_provenance) or expected_fingerprint
+
+
+def _write_rejected_test_candidate(
+    root: Path,
+    request: GenerationRequest,
+    *,
+    source_path: str,
+    tier: str,
+    fingerprint: str,
+    candidate_source: str,
+    attempts: int,
+    errors: Sequence[str],
+    attempt_errors: Sequence[Sequence[str]] = (),
+    terminal: bool = True,
+    expected_provenance: Mapping[str, str] | None = None,
+) -> tuple[str, str] | None:
+    """Persist the exact rejected validator input and bounded local diagnostics."""
+
+    if not candidate_source.strip():
+        return None
+    candidate_content = candidate_source
+    candidate_digest = _sha256(candidate_content.encode("utf-8"))
+    candidate_relative, metadata_relative = _rejected_test_paths(
+        request.target_path,
+        candidate_digest=candidate_digest,
+    )
+    semantic_identity = _rejected_test_semantic_identity(expected_provenance)
+    marker_identity = semantic_identity or fingerprint
+    stored_provenance = (
+        {
+            str(key): value
+            for key, value in expected_provenance.items()
+            if isinstance(key, str) and isinstance(value, str)
+        }
+        if expected_provenance is not None
+        else None
+    )
+    metadata = _safe_path(root, metadata_relative.as_posix())
+    with _rejected_test_lock(root, request.target_path):
+        previous_attempts = 0
+        try:
+            previous = json.loads(metadata.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            previous = None
+        if (
+            isinstance(previous, Mapping)
+            and _rejected_test_payload_identity(previous) == marker_identity
+            and isinstance(previous.get("consecutive_attempts"), int)
+        ):
+            previous_attempts = max(0, int(previous["consecutive_attempts"]))
+        candidate = _safe_path(root, candidate_relative.as_posix())
+        _atomic_write_text(candidate, candidate_content)
+        _atomic_write_text(
+            metadata,
+            json.dumps(
+                {
+                    "schema": 2 if semantic_identity is not None else 1,
+                    "target": request.target_path,
+                    "source": source_path,
+                    "tier": tier,
+                    "battery_fingerprint": fingerprint,
+                    **(
+                        {
+                            "semantic_identity": semantic_identity,
+                            "expected_provenance": stored_provenance,
+                        }
+                        if semantic_identity is not None
+                        else {}
+                    ),
+                    "attempts_this_run": attempts,
+                    "consecutive_attempts": previous_attempts + max(0, attempts),
+                    "terminal": terminal,
+                    "errors": list(errors),
+                    "attempt_errors": [list(items) for items in attempt_errors],
+                    "candidate": candidate_relative.as_posix(),
+                    "candidate_digest": candidate_digest,
+                },
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n",
+        )
+        if isinstance(previous, Mapping):
+            previous_candidate = previous.get("candidate")
+            previous_digest = previous.get("candidate_digest")
+            if isinstance(previous_candidate, str) and isinstance(previous_digest, str):
+                expected_previous = _rejected_test_paths(
+                    request.target_path,
+                    candidate_digest=previous_digest,
+                )[0].as_posix()
+                if previous_candidate == expected_previous and previous_candidate != (
+                    candidate_relative.as_posix()
+                ):
+                    with contextlib.suppress(OSError):
+                        _safe_path(root, previous_candidate).unlink()
+    return candidate_relative.as_posix(), metadata_relative.as_posix()
+
+
+def _rejected_test_diagnostic(
+    root: Path,
+    target_path: str,
+    *,
+    expected_fingerprint: str,
+    expected_provenance: Mapping[str, str] | None = None,
+) -> Mapping[str, Any] | None:
+    """Return a current terminal-generation marker without treating it as freshness proof."""
+
+    metadata_relative = _rejected_test_paths(target_path)[1]
+    metadata = _safe_path(root, metadata_relative.as_posix())
+    with _rejected_test_lock(root, target_path):
+        try:
+            payload = json.loads(metadata.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, Mapping):
+            return None
+        recorded_digest = payload.get("candidate_digest")
+        candidate_value = payload.get("candidate")
+        if not isinstance(recorded_digest, str) or not isinstance(candidate_value, str):
+            return None
+        candidate_relative = _rejected_test_paths(
+            target_path,
+            candidate_digest=recorded_digest,
+        )[0]
+        if candidate_value != candidate_relative.as_posix():
+            return None
+        candidate = _safe_path(root, candidate_relative.as_posix())
+        try:
+            candidate_digest = _sha256(candidate.read_bytes())
+        except OSError:
+            return None
+        if (
+            payload.get("target") != target_path
+            or _rejected_test_payload_identity(payload)
+            != _expected_rejected_test_identity(expected_fingerprint, expected_provenance)
+            or payload.get("terminal") is not True
+            or recorded_digest != candidate_digest
+        ):
+            return None
+        return {**payload, "metadata": metadata_relative.as_posix()}
+
+
+def _rejected_test_token(
+    root: Path,
+    target_path: str,
+    *,
+    expected_fingerprint: str,
+    expected_provenance: Mapping[str, str] | None = None,
+) -> tuple[str, str, str] | None:
+    """Snapshot the exact marker a successful run is authorized to clear."""
+
+    metadata_relative = _rejected_test_paths(target_path)[1]
+    metadata = _safe_path(root, metadata_relative.as_posix())
+    expected_identity = _expected_rejected_test_identity(
+        expected_fingerprint,
+        expected_provenance,
+    )
+    with _rejected_test_lock(root, target_path):
+        try:
+            metadata_bytes = metadata.read_bytes()
+            payload = json.loads(metadata_bytes)
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return None
+        if (
+            not isinstance(payload, Mapping)
+            or payload.get("target") != target_path
+            or _rejected_test_payload_identity(payload) != expected_identity
+            or not isinstance(payload.get("candidate_digest"), str)
+        ):
+            return None
+        candidate_digest = str(payload["candidate_digest"])
+        candidate_relative = _rejected_test_paths(
+            target_path,
+            candidate_digest=candidate_digest,
+        )[0]
+        if payload.get("candidate") != candidate_relative.as_posix():
+            return None
+        try:
+            actual_candidate_digest = _sha256(
+                _safe_path(root, candidate_relative.as_posix()).read_bytes()
+            )
+        except OSError:
+            return None
+        if actual_candidate_digest != candidate_digest:
+            return None
+        return _sha256(metadata_bytes), candidate_digest, expected_identity
+
+
+def _clear_rejected_test_candidate(
+    root: Path,
+    target_path: str,
+    *,
+    expected_token: tuple[str, str, str] | None,
+) -> bool:
+    """Delete only the exact rejected marker observed by this successful run."""
+
+    if expected_token is None:
+        return False
+    expected_metadata_digest, expected_candidate_digest, expected_identity = expected_token
+    metadata_relative = _rejected_test_paths(target_path)[1]
+    metadata = _safe_path(root, metadata_relative.as_posix())
+    with _rejected_test_lock(root, target_path):
+        try:
+            metadata_bytes = metadata.read_bytes()
+            payload = json.loads(metadata_bytes)
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return False
+        candidate_relative = _rejected_test_paths(
+            target_path,
+            candidate_digest=expected_candidate_digest,
+        )[0]
+        if (
+            not isinstance(payload, Mapping)
+            or _sha256(metadata_bytes) != expected_metadata_digest
+            or payload.get("target") != target_path
+            or _rejected_test_payload_identity(payload) != expected_identity
+            or payload.get("candidate_digest") != expected_candidate_digest
+            or payload.get("candidate") != candidate_relative.as_posix()
+        ):
+            return False
+        candidate = _safe_path(root, candidate_relative.as_posix())
+        try:
+            if _sha256(candidate.read_bytes()) != expected_candidate_digest:
+                return False
+        except OSError:
+            return False
+        metadata.unlink()
+        with contextlib.suppress(OSError):
+            candidate.unlink()
+        return True
+
+
+def _is_verifiable_api_transition(mismatches: set[str]) -> bool:
+    """Recognize drift that the safety-first committed-body check can prove."""
+
+    required = {"target_api_digest", "battery_fingerprint"}
+    # The prompt embeds target contract/API context, so a real API transition
+    # can legitimately change it. Runner/Vitest drift is reheader-safe, but the
+    # active runner still safety-typechecks the old body before it can execute.
+    allowed = required | set(_TEST_REHEADER_FINGERPRINTS) | {"prompt_fingerprint"}
+    return required.issubset(mismatches) and mismatches.issubset(allowed)
+
+
+def _test_provenance_mismatches(
+    metadata: Mapping[str, str],
+    provenance: Mapping[str, str],
+) -> set[str]:
+    """Compare current provenance without losing removed optional inputs."""
+
+    mismatches = {key for key, value in provenance.items() if metadata.get(key) != value}
+    if (
+        "imported_type_context_fingerprint" in metadata
+        and "imported_type_context_fingerprint" not in provenance
+    ):
+        mismatches.add("imported_type_context_fingerprint")
+    return mismatches
+
+
+def _read_current_target_artifact_snapshot(
+    root: Path,
+    modules: Sequence[Mapping[str, Any]],
+) -> tuple[frozenset[str], Mapping[str, str]]:
+    """Read one lease-protected target snapshot and validate its built proof."""
+
+    from jaunt.typescript.upgrade import compatible_semantic_modules
+
+    compatible = compatible_semantic_modules(
+        root,
+        tuple(modules),
+        allow_environment_drift=True,
+    )
+    current: set[str] = set()
+    observed: dict[str, str] = {}
+    for module in modules:
+        module_id = module.get("moduleId")
+        routes = module.get("routes")
+        artifact_paths: dict[str, str] = {}
+        for key in ("facadePath", "apiMirrorPath", "implementationPath", "sidecarPath"):
+            value = module.get(key)
+            if not isinstance(value, str) and isinstance(routes, Mapping):
+                value = routes.get(key)
+            if isinstance(value, str) and value:
+                artifact_paths[key] = value
+
+        sidecar_path = artifact_paths.get("sidecarPath")
+        contents: dict[str, bytes | None] = {}
+        for relative in artifact_paths.values():
+            try:
+                content = _safe_path(root, relative).read_bytes()
+            except FileNotFoundError:
+                content = None
+            contents[relative] = content
+            observed[relative] = _sha256(content) if content is not None else MISSING_INPUT
+        sidecar_content = contents.get(sidecar_path) if sidecar_path is not None else None
+        try:
+            actual_sidecar = (
+                json.loads(sidecar_content.decode("utf-8")) if sidecar_content is not None else None
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            actual_sidecar = None
+        artifact_hashes = (
+            actual_sidecar.get("artifactHashes") if isinstance(actual_sidecar, Mapping) else None
+        )
+        artifacts_match = isinstance(artifact_hashes, Mapping)
+        for key in ("facadePath", "apiMirrorPath", "implementationPath"):
+            relative = artifact_paths.get(key)
+            recorded = (
+                artifact_hashes.get(relative) if isinstance(artifact_hashes, Mapping) else None
+            )
+            if not isinstance(relative, str) or not isinstance(recorded, str):
+                artifacts_match = False
+                break
+            normalized = recorded if recorded.startswith("sha256:") else f"sha256:{recorded}"
+            content = contents.get(relative)
+            if content is None or _sha256(content) != normalized:
+                artifacts_match = False
+                break
+        expected_api = expected_target_api_record(module)
+        api_path = artifact_paths.get("apiMirrorPath")
+        api_source = contents.get(api_path) if api_path is not None else None
+        live_api = (
+            {
+                "moduleId": actual_sidecar.get("moduleId"),
+                "apiDigest": actual_sidecar.get("apiDigest"),
+                "apiSourceDigest": _sha256(api_source),
+            }
+            if isinstance(actual_sidecar, Mapping) and api_source is not None
+            else None
+        )
+        if (
+            isinstance(module_id, str)
+            and module_id in compatible
+            and isinstance(actual_sidecar, Mapping)
+            and actual_sidecar.get("state") == "built"
+            and actual_sidecar.get("moduleId") == module_id
+            and artifacts_match
+            and expected_api == live_api
+        ):
+            current.add(module_id)
+    return frozenset(current), dict(sorted(observed.items()))
+
+
+def _current_target_artifact_snapshot(
+    root: Path,
+    modules: Sequence[Mapping[str, Any]],
+    *,
+    strict: bool,
+) -> tuple[frozenset[str], Mapping[str, str]]:
+    """Snapshot target proof and bytes under the global artifact lease."""
+
+    root = root.resolve()
+    transaction_directory = root / ".jaunt" / "transactions"
+    try:
+        workspace = _PinnedWorkspace(root)
+        with workspace:
+            pinned_directory = workspace.directory(transaction_directory)
+            lease = _acquire_transaction_lease(
+                transaction_directory,
+                blocking=True,
+                pinned_directory=pinned_directory,
+                authority_directory=workspace.root_directory,
+            )
+            if lease is None:  # pragma: no cover - blocking acquisition
+                raise JauntGenerationError("Could not acquire the TypeScript transaction lease")
+            try:
+                pending = pinned_directory.iter_names("*.json")
+                if pending:
+                    if strict:
+                        raise JauntGenerationError(
+                            "An unresolved TypeScript artifact transaction blocks test "
+                            "verification: " + ", ".join(pending)
+                        )
+                    return frozenset(), {}
+                snapshot = _read_current_target_artifact_snapshot(root, modules)
+                workspace.verify_namespace()
+                return snapshot
+            finally:
+                lease.release()
+    except (JauntConfigError, JauntGenerationError, OSError):
+        if strict:
+            raise
+        return frozenset(), {}
+
+
+def _current_target_artifact_ids(
+    root: Path,
+    modules: Sequence[Mapping[str, Any]],
+) -> frozenset[str]:
+    """Identify targets whose committed implementation and API match analysis."""
+
+    current, _preconditions = _current_target_artifact_snapshot(root, modules, strict=False)
+    return current
+
+
 def _existing_test_battery_action(
     root: Path,
     request: GenerationRequest,
@@ -697,6 +1675,7 @@ def _existing_test_battery_action(
     force: bool,
     generated_dirs: Sequence[str] = (),
     proven_previous_api_digests: frozenset[str] = frozenset(),
+    allow_verified_api_transition: bool = True,
 ) -> tuple[str, str | None]:
     """Classify an existing managed battery without trusting its header alone.
 
@@ -728,11 +1707,53 @@ def _existing_test_battery_action(
     ):
         return "generate", None
 
-    mismatches = {key for key, value in provenance.items() if metadata.get(key) != value}
+    mismatches = _test_provenance_mismatches(metadata, provenance)
     if not mismatches:
         return "skip", source
 
     allowed_tooling = set(_TEST_REHEADER_FINGERPRINTS)
+    # ``fixture_fingerprint`` was added after committed batteries already
+    # existed.  A missing legacy field is migration-safe only when the current
+    # request has no fixture at all; there are then no fixture bytes whose
+    # behavioral intent could have changed.  Keep every real fixture mismatch
+    # content-bearing so adding or editing fixtures still regenerates.
+    if "fixture_fingerprint" not in metadata and provenance.get(
+        "fixture_fingerprint"
+    ) == _canonical_digest(None):
+        allowed_tooling.add("fixture_fingerprint")
+    # Older batteries predate declaration-only imported-context provenance.
+    # Missing evidence is not safe to restamp directly, but it can take the
+    # stronger verification path: the unchanged body must pass the current
+    # static policy, compile against the current declarations, and then pass
+    # protected Vitest execution.  A present fingerprint that changed is real
+    # content drift and remains generation-only.
+    legacy_imported_context = (
+        "imported_type_context_fingerprint" in provenance
+        and "imported_type_context_fingerprint" not in metadata
+    )
+    legacy_verification_allowed = {
+        "battery_fingerprint",
+        "imported_type_context_fingerprint",
+        "prompt_fingerprint",
+        "runner_fingerprint",
+        "target_api_digest",
+        "vitest_fingerprint",
+    } | ({"fixture_fingerprint"} if "fixture_fingerprint" in allowed_tooling else set())
+    if (
+        allow_verified_api_transition
+        and legacy_imported_context
+        and {"battery_fingerprint", "imported_type_context_fingerprint"}.issubset(mismatches)
+        and mismatches.issubset(legacy_verification_allowed)
+    ):
+        return (
+            "verify",
+            _with_test_header(
+                body,
+                tier=tier,
+                source_path=source_path,
+                provenance=provenance,
+            ),
+        )
     api_proof_matches = metadata.get("target_api_digest") in proven_previous_api_digests
     if api_proof_matches:
         allowed_tooling.add("target_api_digest")
@@ -742,6 +1763,16 @@ def _existing_test_battery_action(
         or "battery_fingerprint" not in mismatches
         or not mismatches.issubset(allowed)
     ):
+        if allow_verified_api_transition and _is_verifiable_api_transition(mismatches):
+            return (
+                "verify",
+                _with_test_header(
+                    body,
+                    tier=tier,
+                    source_path=source_path,
+                    provenance=provenance,
+                ),
+            )
         return "generate", None
     return (
         "refreeze",
@@ -1045,7 +2076,7 @@ def _static_test_validation(
     return errors
 
 
-def _fixture_for_path(root: Path, relative: str) -> tuple[str, str] | None:
+def _fixture_for_path(root: Path, relative: str) -> tuple[str, str, str] | None:
     """Return the nearest canonical fixture module above one test/battery path."""
 
     root = root.resolve()
@@ -1061,11 +2092,39 @@ def _fixture_for_path(root: Path, relative: str) -> tuple[str, str] | None:
             )
         if matches:
             path = matches[0]
-            return path.relative_to(root).as_posix(), path.read_text(encoding="utf-8")
+            try:
+                source_bytes = path.read_bytes()
+                source = source_bytes.decode("utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise JauntConfigError(f"Could not read TypeScript fixture module: {path}") from exc
+            return (
+                path.relative_to(root).as_posix(),
+                source,
+                _sha256(source_bytes),
+            )
         if current == root:
             break
         current = current.parent
     return None
+
+
+def _fixture_resolution_preconditions(root: Path, relative: str) -> Mapping[str, str]:
+    """Guard every canonical candidate that determines nearest-fixture selection."""
+
+    root = root.resolve()
+    current = _safe_path(root, relative).parent
+    expected: dict[str, str] = {}
+    while current == root or current.is_relative_to(root):
+        for name in ("fixtures.ts", "fixtures.tsx"):
+            candidate = current / name
+            relative_candidate = candidate.relative_to(root).as_posix()
+            expected[relative_candidate] = _path_hash(candidate) or MISSING_INPUT
+        if any((current / name).is_file() for name in ("fixtures.ts", "fixtures.tsx")):
+            break
+        if current == root:
+            break
+        current = current.parent
+    return expected
 
 
 def _fixture_names(*sources: str) -> tuple[str, ...]:
@@ -1128,6 +2187,97 @@ def _selected_test_modules(
     return selected
 
 
+def _imported_type_context_files(
+    modules: Sequence[Mapping[str, Any]],
+) -> dict[str, str]:
+    """Extract marked worker declarations under one UTF-8 request budget."""
+
+    records_by_identity: dict[tuple[str, str], tuple[int, int, str, str]] = {}
+    order = 0
+    for module in modules:
+        context_source = module.get("contextSource")
+        if not isinstance(context_source, str):
+            continue
+        _authored, block = _split_context_source(context_source)
+        if block is None:
+            continue
+        records: list[tuple[object, object, object]] = []
+        for match in _IMPORTED_TYPE_SOURCE_V2_RE.finditer(block.strip()):
+            try:
+                decoded = base64.b64decode(match.group("payload"), validate=True).decode("utf-8")
+                payload = json.loads(decoded)
+            except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if isinstance(payload, Mapping):
+                records.append((payload.get("id"), payload.get("priority"), payload.get("source")))
+        # Version 1 remains readable for committed sidecars and older workers.
+        for match in _IMPORTED_TYPE_SOURCE_RE.finditer(block.strip()):
+            try:
+                metadata = json.loads(match.group("meta"))
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(metadata, Mapping):
+                continue
+            records.append((metadata.get("id"), metadata.get("priority"), match.group("source")))
+        for source_id, priority, raw_source in records:
+            source = raw_source.strip() if isinstance(raw_source, str) else ""
+            if (
+                not isinstance(source_id, str)
+                or priority not in {"requested", "supporting"}
+                or not source
+            ):
+                continue
+            identity = (source_id, source)
+            rank = 0 if priority == "requested" else 1
+            previous = records_by_identity.get(identity)
+            if previous is None:
+                records_by_identity[identity] = (rank, order, source_id, source)
+                order += 1
+            elif rank < previous[0]:
+                records_by_identity[identity] = (rank, previous[1], source_id, source)
+
+    rendered: list[tuple[str, str]] = []
+    for _priority, _order, source_id, source in sorted(records_by_identity.values()):
+        original = source_id.removeprefix("workspace:")
+        suffix = Path(original).suffix if Path(original).suffix in {".ts", ".tsx"} else ".ts"
+        stem = re.sub(r"[^A-Za-z0-9_.-]+", "-", Path(original).stem).strip("-._")
+        stem = stem or "types"
+        rendered.append(
+            (
+                f"{stem}{suffix}",
+                f"// Resolved type source: {source_id}\n{source.rstrip()}\n",
+            )
+        )
+    total = sum(len(source.encode("utf-8")) for _name, source in rendered)
+    omission_template = (
+        f"// Jaunt omitted {len(rendered)} imported type-context records to stay within "
+        f"{_IMPORTED_TYPE_CONTEXT_LIMIT} UTF-8 bytes.\n"
+    )
+    available = (
+        _IMPORTED_TYPE_CONTEXT_LIMIT
+        if total <= _IMPORTED_TYPE_CONTEXT_LIMIT
+        else _IMPORTED_TYPE_CONTEXT_LIMIT - len(omission_template.encode("utf-8"))
+    )
+    files: dict[str, str] = {}
+    used = 0
+    omitted = 0
+    accepted_index = 0
+    for name, source in rendered:
+        size = len(source.encode("utf-8"))
+        if used + size > available:
+            omitted += 1
+            continue
+        files[f"_context/imported-types/{accepted_index:02d}-{name}"] = source
+        accepted_index += 1
+        used += size
+    if omitted:
+        files["_context/imported-types/zz-omitted.ts"] = (
+            f"// Jaunt omitted {omitted} imported type-context records to stay within "
+            f"{_IMPORTED_TYPE_CONTEXT_LIMIT} UTF-8 bytes.\n"
+        )
+    return files
+
+
 def _test_request(
     root: Path,
     config: JauntConfig,
@@ -1135,6 +2285,7 @@ def _test_request(
     modules: Mapping[str, Mapping[str, Any]],
     *,
     tier: str = "example",
+    build_instructions: Sequence[str] | None = None,
     builtin_skill_names: Sequence[str] | None = None,
 ) -> GenerationRequest:
     path = str(test_spec.get("path", ""))
@@ -1206,6 +2357,15 @@ def _test_request(
         .replace("{{facade_specifier}}", facade_specifier)
         .replace("{{tier}}", tier)
     )
+    effective_instructions = (
+        tuple(build_instructions)
+        if build_instructions is not None
+        else tuple(config.build.instructions)
+    )
+    if effective_instructions:
+        user += "\n\nAdditional project instructions:\n" + "\n".join(
+            f"- {instruction}" for instruction in effective_instructions
+        )
     if property_count:
         user += (
             "\n\nJaunt has parsed every supported `@prop` bullet into "
@@ -1256,10 +2416,19 @@ def _test_request(
         for index, module in enumerate(selected[1:], start=1):
             context[f"_context/target_{index}.spec.ts"] = str(module.get("specSource", ""))
             context[f"_context/target_{index}.api.ts"] = str(module.get("apiSource", ""))
+    imported_type_context = _imported_type_context_files(selected)
+    if imported_type_context:
+        context.update(imported_type_context)
+        user += (
+            "\n\nResolved declarations for workspace-local type-only imports are under "
+            "`_context/imported-types/`. Use their exact required fields instead of guessing "
+            "fixture shapes."
+        )
     fixture_path = ""
+    fixture_digest = ""
     fixture_specifier = ""
     if fixture is not None:
-        fixture_path, fixture_source = fixture
+        fixture_path, fixture_source, fixture_digest = fixture
         fixture_specifier = _runtime_import_specifier(target_path, fixture_path)
         context["_context/fixtures.ts"] = fixture_source
         user += (
@@ -1313,6 +2482,8 @@ def _test_request(
             "propertySeed": property_seed,
             "fastCheckRuns": _target(config).fast_check_runs,
             "fixturePath": fixture_path,
+            "fixtureDigest": fixture_digest,
+            "buildInstructions": effective_instructions,
             "propertyCount": property_count,
             "propertyCases": [case.payload() for case in property_cases],
             "propertyBlock": property_block,
@@ -1486,16 +2657,54 @@ def _test_battery_diagnostics(
         for tier in ("example", "derived"):
             relative = _test_output(source_path, _target(config).generated_dir, tier)
             path = _safe_path(root, relative)
+            expected = _test_provenance(
+                root,
+                config,
+                test_spec,
+                modules,
+                client,
+                initialized,
+                tier=tier,
+                workspace=workspace,
+            )
             if not path.is_file():
+                distinct = _rejected_test_diagnostic(
+                    root,
+                    relative,
+                    expected_fingerprint=str(expected["battery_fingerprint"]),
+                    expected_provenance=expected,
+                )
                 diagnostics.append(
                     TargetDiagnostic(
-                        code="JAUNT_TS_TEST_BATTERY_MISSING",
+                        code=(
+                            "JAUNT_TS_TEST_GENERATION_EXHAUSTED"
+                            if distinct is not None
+                            else "JAUNT_TS_TEST_BATTERY_MISSING"
+                        ),
                         message=(
-                            f"The {tier} TypeScript battery for {source_path} is missing; "
-                            "run `jaunt test --language ts`."
+                            f"The {tier} TypeScript battery for {source_path} "
+                            + (
+                                f"could not be generated; inspect {distinct['candidate']}; "
+                                if distinct is not None
+                                else "is missing; "
+                            )
+                            + "run `jaunt test --language ts`."
                         ),
                         path=relative,
-                        data={"scope": "magic", "source": source_path, "tier": tier},
+                        data={
+                            "scope": "magic",
+                            "source": source_path,
+                            "tier": tier,
+                            **(
+                                {
+                                    "candidate": distinct["candidate"],
+                                    "metadata": _rejected_test_paths(relative)[1].as_posix(),
+                                    "consecutive_attempts": distinct.get("consecutive_attempts", 0),
+                                }
+                                if distinct is not None
+                                else {}
+                            ),
+                        },
                     )
                 )
                 continue
@@ -1519,15 +2728,6 @@ def _test_battery_diagnostics(
                     )
                 )
                 continue
-            expected = _test_provenance(
-                root,
-                config,
-                test_spec,
-                modules,
-                client,
-                initialized,
-                tier=tier,
-            )
             mismatches: list[str] = []
             if metadata is None:
                 mismatches.append("provenance")
@@ -1536,29 +2736,58 @@ def _test_battery_diagnostics(
                     mismatches.append("tier")
                 if metadata.get("source") != source_path:
                     mismatches.append("source")
-                mismatches.extend(
-                    key for key, value in expected.items() if metadata.get(key) != value
-                )
+                mismatches.extend(sorted(_test_provenance_mismatches(metadata, expected)))
                 rendered_body_digest = _sha256(
                     (_strip_test_header(source).rstrip() + "\n").encode("utf-8")
                 )
                 if metadata.get("body_digest") != rendered_body_digest:
                     mismatches.append("body_digest")
             if mismatches:
+                mismatch_fields = set(mismatches)
+                distinct = _rejected_test_diagnostic(
+                    root,
+                    relative,
+                    expected_fingerprint=str(expected["battery_fingerprint"]),
+                    expected_provenance=expected,
+                )
+                diagnostic_code = (
+                    "JAUNT_TS_TEST_GENERATION_EXHAUSTED"
+                    if distinct is not None
+                    else "JAUNT_TS_TEST_BATTERY_STALE"
+                )
+                detail = (
+                    " generation exhausted; inspect " + str(distinct["candidate"])
+                    if distinct is not None
+                    else " stale"
+                )
+                remedy = (
+                    "run `jaunt test --language ts --no-build` without `--no-run`, then "
+                    "rerun `jaunt check`."
+                    if _is_verifiable_api_transition(mismatch_fields)
+                    else "run `jaunt test --language ts`."
+                )
                 diagnostics.append(
                     TargetDiagnostic(
-                        code="JAUNT_TS_TEST_BATTERY_STALE",
+                        code=diagnostic_code,
                         message=(
-                            f"The {tier} TypeScript battery for {source_path} is stale "
-                            f"({', '.join(sorted(set(mismatches)))}); run `jaunt test "
-                            "--language ts`."
+                            f"The {tier} TypeScript battery for {source_path} is{detail} "
+                            f"({', '.join(sorted(mismatch_fields))}); {remedy}"
                         ),
                         path=relative,
                         data={
                             "scope": "magic",
                             "source": source_path,
                             "tier": tier,
-                            "mismatches": tuple(sorted(set(mismatches))),
+                            "mismatches": tuple(sorted(mismatch_fields)),
+                            **(
+                                {
+                                    "candidate": distinct["candidate"],
+                                    "metadata": _rejected_test_paths(relative)[1].as_posix(),
+                                    "consecutive_attempts": distinct.get("consecutive_attempts", 0),
+                                }
+                                if distinct is not None
+                                else {}
+                            ),
                         },
                     )
                 )
@@ -1856,6 +3085,7 @@ _RUNNER_CATEGORIES = {
     "runner-protocol",
 }
 _IMPLEMENTATION_REPAIR_CATEGORIES = {"assertion", "type", "runtime"}
+_CANDIDATE_REJECTION_CATEGORIES = _IMPLEMENTATION_REPAIR_CATEGORIES | {"collection"}
 _RUNNER_DIAGNOSTIC_CODE = re.compile(r"(?:TS\d+|JAUNT_TS_[A-Z0-9_]+)")
 _OPAQUE_CASE_ID = re.compile(r"[0-9a-f]{16}")
 _MAX_PROTECTED_DIAGNOSTIC_MESSAGE_CHARS = 2_000
@@ -2284,16 +3514,104 @@ def _is_reviewable_example_battery(path: str, source: str) -> bool:
 
 
 class _RepairFileTransaction:
-    __slots__ = ("add_paths", "commit")
+    __slots__ = ("_commit", "_publish")
 
     def __init__(
         self,
         *,
-        add_paths: Callable[[Sequence[str]], None],
         commit: Callable[[], None],
+        publish: Callable[
+            [
+                Sequence[_Write],
+                Mapping[str, str],
+                Callable[[], None] | None,
+                Callable[[], None] | None,
+            ],
+            None,
+        ],
     ) -> None:
-        self.add_paths = add_paths
-        self.commit = commit
+        self._commit = commit
+        self._publish = publish
+
+    def publish(
+        self,
+        writes: Sequence[_Write],
+        *,
+        expected_inputs: Mapping[str, str],
+        pre_commit_guard: Callable[[], None] | None = None,
+        commit_seal: Callable[[], None] | None = None,
+    ) -> None:
+        self._publish(writes, expected_inputs, pre_commit_guard, commit_seal)
+
+    def commit(self) -> None:
+        self._commit()
+
+
+_TEST_REPAIR_SCHEME = "jaunt-ts-test-repair/2"
+
+
+def _repair_snapshot_bytes(
+    snapshot: Mapping[str, Any],
+    manifest: Path,
+) -> tuple[bytes | None, int | None]:
+    encoded = snapshot.get("content")
+    mode = snapshot.get("mode")
+    if encoded is None and mode is None:
+        return None, None
+    if not isinstance(encoded, str) or not isinstance(mode, int):
+        raise JauntConfigError(f"Invalid snapshot in test-repair marker: {manifest}")
+    try:
+        return base64.b64decode(encoded, validate=True), mode
+    except ValueError as error:
+        raise JauntConfigError(f"Invalid backup bytes in test-repair marker: {manifest}") from error
+
+
+def _replace_repair_file(
+    directory: _PinnedDirectory,
+    path: Path,
+    content: bytes,
+    mode: int,
+) -> None:
+    """Durably replace one repair-owned file with exact saved bytes."""
+
+    descriptor, temporary = directory.create_temp(prefix=f".{path.name}.jaunt-repair-")
+    try:
+        try:
+            with os.fdopen(descriptor, "wb", closefd=False) as stream:
+                stream.write(content)
+                stream.flush()
+                if hasattr(os, "fchmod"):
+                    os.fchmod(stream.fileno(), mode)
+                os.fsync(stream.fileno())
+        finally:
+            os.close(descriptor)
+        directory.replace(temporary, path.name)
+        directory.fsync_required()
+    finally:
+        directory.unlink(temporary, missing_ok=True)
+
+
+def _restore_repair_snapshot(
+    directory: _PinnedDirectory,
+    path: Path,
+    content: bytes | None,
+    mode: int | None,
+) -> None:
+    if content is None:
+        existed = directory.unlink(path.name, missing_ok=True)
+        if existed:
+            directory.fsync_required()
+        return
+    _replace_repair_file(
+        directory,
+        path,
+        content,
+        mode if mode is not None else 0o644,
+    )
+
+
+def _repair_path_hash(directory: _PinnedDirectory, path: Path) -> str:
+    return directory.path_hash(path.name) or MISSING_INPUT
 
 
 def _recover_pending_test_repairs(root: Path) -> tuple[str, ...]:
@@ -2301,84 +3619,123 @@ def _recover_pending_test_repairs(root: Path) -> tuple[str, ...]:
 
     root = root.resolve()
     directory = root / ".jaunt" / "transactions"
-    if not directory.is_dir():
-        return ()
-    restored: list[str] = []
-    for manifest in sorted(directory.glob("test-repair-*.json")):
+    with _PinnedWorkspace(root) as workspace:
         try:
-            payload = json.loads(manifest.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as error:
-            raise JauntConfigError(f"Invalid TypeScript test-repair marker: {manifest}") from error
-        if not isinstance(payload, Mapping) or payload.get("scheme") != "jaunt-ts-test-repair/1":
-            raise JauntConfigError(f"Invalid TypeScript test-repair marker: {manifest}")
-        owner_pid = payload.get("ownerPid")
-        if not isinstance(owner_pid, int) or owner_pid < 1:
-            raise JauntConfigError(f"TypeScript test-repair marker has no owner PID: {manifest}")
-        if owner_pid == os.getpid():
-            continue
+            transaction_directory = workspace.directory(directory, create=False)
+        except FileNotFoundError:
+            return ()
+        lease = _acquire_transaction_lease(
+            directory,
+            blocking=True,
+            pinned_directory=transaction_directory,
+            authority_directory=workspace.root_directory,
+        )
+        if lease is None:  # pragma: no cover - blocking acquisition
+            raise JauntConfigError("Could not acquire the TypeScript transaction recovery lease")
+        restored: list[str] = []
         try:
-            os.kill(owner_pid, 0)
-        except ProcessLookupError:
-            pass
-        except PermissionError as error:
-            raise JauntConfigError(
-                f"TypeScript test repair is still owned by process {owner_pid}"
-            ) from error
-        else:
-            raise JauntConfigError(f"TypeScript test repair is still owned by process {owner_pid}")
-        snapshots = payload.get("snapshots")
-        if not isinstance(snapshots, list):
-            raise JauntConfigError(f"TypeScript test-repair marker has no snapshots: {manifest}")
-        restored_paths: set[str] = set()
-        for snapshot in snapshots:
-            if not isinstance(snapshot, Mapping) or not isinstance(snapshot.get("path"), str):
-                raise JauntConfigError(f"Invalid snapshot in test-repair marker: {manifest}")
-            relative = str(snapshot["path"])
-            path = _safe_path(root, relative)
-            encoded = snapshot.get("content")
-            mode = snapshot.get("mode")
-            if encoded is None:
-                path.unlink(missing_ok=True)
-            elif isinstance(encoded, str) and isinstance(mode, int):
+            # The first scan happens only after acquisition: a live writer holds
+            # this lease before it creates its marker, so a pre-lease empty scan
+            # could otherwise let a worker observe transient repair bytes.
+            for manifest_name in transaction_directory.iter_names("test-repair-*.json"):
+                manifest = directory / manifest_name
                 try:
-                    content = base64.b64decode(encoded, validate=True)
-                except ValueError as error:
+                    payload = json.loads(
+                        transaction_directory.read_bytes(manifest.name).decode("utf-8")
+                    )
+                except (OSError, UnicodeError, json.JSONDecodeError) as error:
                     raise JauntConfigError(
-                        f"Invalid backup bytes in test-repair marker: {manifest}"
+                        f"Invalid TypeScript test-repair marker: {manifest}"
                     ) from error
-                path.parent.mkdir(parents=True, exist_ok=True)
-                descriptor, temporary_name = tempfile.mkstemp(
-                    prefix=f".{path.name}.jaunt-recover-", dir=path.parent
-                )
-                temporary = Path(temporary_name)
-                try:
-                    with os.fdopen(descriptor, "wb") as stream:
-                        stream.write(content)
-                        stream.flush()
-                        os.fsync(stream.fileno())
-                    os.chmod(temporary, mode)
-                    os.replace(temporary, path)
-                finally:
-                    temporary.unlink(missing_ok=True)
-            else:
-                raise JauntConfigError(f"Invalid snapshot in test-repair marker: {manifest}")
-            restored_paths.add(relative)
-            restored.append(relative)
-        for transaction in directory.glob("ts-*.json"):
-            try:
-                value = json.loads(transaction.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, json.JSONDecodeError):
-                continue
-            writes = value.get("writes") if isinstance(value, Mapping) else None
-            paths = {
-                str(write.get("path"))
-                for write in writes or []
-                if isinstance(write, Mapping) and isinstance(write.get("path"), str)
-            }
-            if paths and paths <= restored_paths:
-                transaction.unlink(missing_ok=True)
-        manifest.unlink(missing_ok=True)
-    return tuple(sorted(set(restored)))
+                if not isinstance(payload, Mapping) or payload.get("scheme") != _TEST_REPAIR_SCHEME:
+                    raise JauntConfigError(f"Invalid TypeScript test-repair marker: {manifest}")
+                owner_pid = payload.get("ownerPid")
+                if not isinstance(owner_pid, int) or owner_pid < 1:
+                    raise JauntConfigError(
+                        f"TypeScript test-repair marker has no owner PID: {manifest}"
+                    )
+                # The v2 writer holds the global lease for its full lifetime. Once
+                # this process owns that lease there cannot be a conforming live
+                # owner, even if a PID was reused or a prior attempt in this same
+                # process failed during retirement. Avoid non-portable PID probes.
+                snapshots = payload.get("snapshots")
+                if not isinstance(snapshots, list):
+                    raise JauntConfigError(
+                        f"TypeScript test-repair marker has no snapshots: {manifest}"
+                    )
+                restored_paths: set[str] = set()
+                for snapshot in snapshots:
+                    if not isinstance(snapshot, Mapping) or not isinstance(
+                        snapshot.get("path"), str
+                    ):
+                        raise JauntConfigError(
+                            f"Invalid snapshot in test-repair marker: {manifest}"
+                        )
+                    relative = str(snapshot["path"])
+                    _safe_path(root, relative)
+                    path = root / Path(relative)
+                    expected_after = snapshot.get("after")
+                    if expected_after is None:
+                        continue
+                    if expected_after != MISSING_INPUT and (
+                        not isinstance(expected_after, str)
+                        or re.fullmatch(r"sha256:[0-9a-f]{64}", expected_after) is None
+                    ):
+                        raise JauntConfigError(
+                            f"Invalid after hash in test-repair marker: {manifest}"
+                        )
+                    content, mode = _repair_snapshot_bytes(snapshot, manifest)
+                    output_directory = workspace.directory(path.parent)
+                    workspace.verify_namespace()
+                    # A later writer owns any non-matching state. Recovery is a
+                    # compare-and-swap, never an unconditional historical restore.
+                    try:
+                        current_hash = _repair_path_hash(output_directory, path)
+                    except OSError as error:
+                        raise JauntConfigError(
+                            f"Could not inspect TypeScript test-repair path: {relative}"
+                        ) from error
+                    if current_hash != expected_after:
+                        continue
+                    _restore_repair_snapshot(output_directory, path, content, mode)
+                    restored_paths.add(relative)
+                    restored.append(relative)
+                for transaction_name in transaction_directory.iter_names("ts-*.json"):
+                    transaction = directory / transaction_name
+                    try:
+                        value = json.loads(
+                            transaction_directory.read_bytes(transaction.name).decode("utf-8")
+                        )
+                    except (OSError, UnicodeError, json.JSONDecodeError):
+                        continue
+                    writes = value.get("writes") if isinstance(value, Mapping) else None
+                    paths = {
+                        str(write.get("path"))
+                        for write in writes or []
+                        if isinstance(write, Mapping) and isinstance(write.get("path"), str)
+                    }
+                    if paths and paths <= restored_paths and isinstance(value, Mapping):
+                        workspace.verify_namespace()
+                        if not _retire_transaction_manifest(
+                            transaction,
+                            value,
+                            pinned_directory=transaction_directory,
+                        ):
+                            raise JauntConfigError(
+                                f"Could not durably retire TypeScript transaction: {transaction}"
+                            )
+                workspace.verify_namespace()
+                if not _retire_transaction_manifest(
+                    manifest,
+                    payload,
+                    pinned_directory=transaction_directory,
+                ):
+                    raise JauntConfigError(
+                        f"Could not durably retire TypeScript test-repair marker: {manifest}"
+                    )
+            return tuple(sorted(set(restored)))
+        finally:
+            lease.release()
 
 
 @contextmanager
@@ -2386,110 +3743,241 @@ def _preserve_managed_files(
     root: Path,
     paths: Sequence[str],
 ) -> Iterator[_RepairFileTransaction]:
-    """Rollback a bounded repair's managed files unless its final battery passes."""
+    """Publish or CAS-rollback one bounded repair under the global lease."""
 
     root = root.resolve()
     originals: dict[Path, tuple[bytes | None, int | None]] = {}
+    original_hashes: dict[Path, str] = {}
+    expected_after: dict[Path, str] = {}
     committed = False
-    manifest = root / ".jaunt" / "transactions" / f"test-repair-{uuid.uuid4().hex}.json"
+    directory = root / ".jaunt" / "transactions"
+    manifest = directory / f"test-repair-{uuid.uuid4().hex}.json"
+    payload: dict[str, Any] = {}
+    pinned_workspace = _PinnedWorkspace(root)
+    transaction_directory: _PinnedDirectory | None = None
 
-    def replace(path: Path, content: bytes, mode: int) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=f".{path.name}.jaunt-rollback-",
-            dir=path.parent,
-        )
-        temporary = Path(temporary_name)
-        try:
-            with os.fdopen(descriptor, "wb") as stream:
-                stream.write(content)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.chmod(temporary, mode)
-            os.replace(temporary, path)
-        finally:
-            with contextlib.suppress(FileNotFoundError):
-                temporary.unlink()
+    def pin_for(path: Path) -> _PinnedDirectory:
+        return pinned_workspace.directory(path.parent)
 
-    def fsync_directory(path: Path) -> None:
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-        try:
-            descriptor = os.open(path, flags)
-        except OSError:
-            return
-        try:
-            os.fsync(descriptor)
-        except OSError:
-            pass
-        finally:
-            os.close(descriptor)
+    def transaction_pin() -> _PinnedDirectory:
+        if transaction_directory is None:  # pragma: no cover - closure ordering
+            raise RuntimeError("TypeScript repair transaction directory is not pinned")
+        return transaction_directory
 
     def write_manifest() -> None:
-        manifest.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "scheme": "jaunt-ts-test-repair/1",
-            "ownerPid": os.getpid(),
-            "snapshots": [
-                {
-                    "path": path.relative_to(root).as_posix(),
-                    "content": (
-                        base64.b64encode(content).decode("ascii") if content is not None else None
-                    ),
-                    "mode": mode,
-                }
-                for path, (content, mode) in sorted(
-                    originals.items(), key=lambda item: item[0].as_posix()
-                )
-            ],
-        }
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=f".{manifest.name}.", suffix=".tmp", dir=manifest.parent
+        payload.clear()
+        payload.update(
+            {
+                "scheme": _TEST_REPAIR_SCHEME,
+                "ownerPid": os.getpid(),
+                "snapshots": [
+                    {
+                        "path": path.relative_to(root).as_posix(),
+                        "content": (
+                            base64.b64encode(content).decode("ascii")
+                            if content is not None
+                            else None
+                        ),
+                        "mode": mode,
+                        **({"after": expected_after[path]} if path in expected_after else {}),
+                    }
+                    for path, (content, mode) in sorted(
+                        originals.items(), key=lambda item: item[0].as_posix()
+                    )
+                ],
+            }
         )
-        temporary = Path(temporary_name)
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
-                json.dump(payload, stream, sort_keys=True, separators=(",", ":"))
-                stream.write("\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, manifest)
-            fsync_directory(manifest.parent)
-        finally:
-            temporary.unlink(missing_ok=True)
+        _write_transaction_manifest(
+            manifest,
+            payload,
+            pinned_directory=transaction_pin(),
+        )
 
     def add_paths(values: Sequence[str]) -> None:
         for relative in sorted(set(values)):
-            path = _safe_path(root, relative)
+            _safe_path(root, relative)
+            path = root / Path(relative)
             if path in originals:
                 continue
-            if path.is_symlink():
-                raise JauntConfigError(f"Refusing to repair a managed symlink: {relative}")
-            if path.exists() and not path.is_file():
-                raise JauntConfigError(f"Managed repair path is not a file: {relative}")
-            originals[path] = (
-                path.read_bytes() if path.is_file() else None,
-                stat.S_IMODE(path.stat().st_mode) if path.is_file() else None,
-            )
+            pinned_directory = pin_for(path)
+            try:
+                content, metadata = pinned_directory.read_bytes_with_stat(path.name)
+                mode = stat.S_IMODE(metadata.st_mode)
+            except FileNotFoundError:
+                content = None
+                mode = None
+            except OSError as error:
+                raise JauntConfigError(
+                    f"Could not snapshot managed repair path: {relative}"
+                ) from error
+            original_hash = _sha256(content) if content is not None else MISSING_INPUT
+            if _repair_path_hash(pinned_directory, path) != original_hash:
+                raise JauntConfigError(f"Managed repair path changed while read: {relative}")
+            originals[path] = (content, mode)
+            original_hashes[path] = original_hash
         write_manifest()
+
+    def publish(
+        writes: Sequence[_Write],
+        expected_inputs: Mapping[str, str],
+        pre_commit_guard: Callable[[], None] | None,
+        commit_seal: Callable[[], None] | None,
+    ) -> None:
+        writes_by_path: dict[Path, _Write] = {}
+        for write in writes:
+            _safe_path(root, write.path)
+            path = root / Path(write.path)
+            if path in writes_by_path:
+                raise JauntGenerationError(f"Duplicate TypeScript artifact path: {write.path}")
+            writes_by_path[path] = write
+        add_paths(tuple(write.path for write in writes))
+        _assert_inputs_unchanged(root, expected_inputs)
+        for path, before in original_hashes.items():
+            if path in writes_by_path and _repair_path_hash(pin_for(path), path) != before:
+                raise JauntGenerationError(
+                    f"TypeScript artifact changed during validation: {path.relative_to(root)}"
+                )
+
+        staged: dict[Path, str] = {}
+        try:
+            for path, write in writes_by_path.items():
+                if write.content is None:
+                    expected_after[path] = MISSING_INPUT
+                    continue
+                pinned_directory = pin_for(path)
+                descriptor, temporary = pinned_directory.create_temp(
+                    prefix=f".{path.name}.jaunt-repair-"
+                )
+                staged[path] = temporary
+                try:
+                    with os.fdopen(descriptor, "wb", closefd=False) as stream:
+                        content = write.content.encode("utf-8")
+                        stream.write(content)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                finally:
+                    os.close(descriptor)
+                expected_after[path] = _sha256(content)
+            # The CAS targets are durable before the first output mutation.
+            write_manifest()
+            if pre_commit_guard is not None:
+                pre_commit_guard()
+            _assert_inputs_unchanged(root, expected_inputs)
+            pinned_workspace.verify_namespace()
+            for path in sorted(writes_by_path, key=lambda item: item.as_posix()):
+                pinned_directory = pin_for(path)
+                # All Jaunt publishers honor the surrounding global lease. Keep
+                # the byte CAS immediately adjacent to replacement as an extra
+                # guard against non-cooperating filesystem edits; no portable
+                # conditional-replace syscall exists across Windows and POSIX.
+                if _repair_path_hash(pinned_directory, path) != original_hashes[path]:
+                    raise JauntGenerationError(
+                        f"TypeScript artifact changed during validation: {path.relative_to(root)}"
+                    )
+                write = writes_by_path[path]
+                if write.content is None:
+                    pinned_directory.unlink(path.name, missing_ok=True)
+                else:
+                    pinned_directory.replace(staged[path], path.name)
+                pinned_directory.fsync_required()
+            unconverged = [
+                path
+                for path in writes_by_path
+                if _repair_path_hash(pin_for(path), path) != expected_after[path]
+            ]
+            if unconverged:
+                raise JauntGenerationError(
+                    "TypeScript test-repair transaction did not converge: "
+                    + ", ".join(path.relative_to(root).as_posix() for path in sorted(unconverged))
+                )
+            pinned_workspace.verify_namespace()
+            if commit_seal is not None:
+                commit_seal()
+            pinned_workspace.verify_namespace()
+        finally:
+            active_error = sys.exception()
+            cleanup_error: OSError | None = None
+            for path, temporary in staged.items():
+                try:
+                    pin_for(path).unlink(temporary, missing_ok=True)
+                except OSError as error:
+                    if cleanup_error is None:
+                        cleanup_error = error
+            if cleanup_error is not None:
+                if active_error is None:
+                    raise cleanup_error
+                active_error.add_note(f"TypeScript repair cleanup also failed: {cleanup_error}")
 
     def commit() -> None:
         nonlocal committed
-        manifest.unlink(missing_ok=True)
-        fsync_directory(manifest.parent)
+        changed = [
+            path.relative_to(root).as_posix()
+            for path, after in expected_after.items()
+            if _repair_path_hash(pin_for(path), path) != after
+        ]
+        if changed:
+            raise JauntGenerationError(
+                "TypeScript test-repair outputs changed before outer commit: "
+                + ", ".join(sorted(changed))
+            )
+        pinned_workspace.verify_namespace()
+        if not _retire_transaction_manifest(
+            manifest,
+            payload,
+            pinned_directory=transaction_pin(),
+        ):
+            raise JauntConfigError(
+                f"Could not durably retire TypeScript test-repair marker: {manifest}"
+            )
         committed = True
 
-    add_paths(paths)
-    try:
-        yield _RepairFileTransaction(add_paths=add_paths, commit=commit)
-    finally:
-        if not committed:
-            for path, (content, mode) in originals.items():
-                if content is None:
-                    path.unlink(missing_ok=True)
-                    continue
-                replace(path, content, mode or 0o644)
-            manifest.unlink(missing_ok=True)
-            fsync_directory(manifest.parent)
+    with pinned_workspace:
+        transaction_directory = pinned_workspace.directory(directory)
+        lease = _acquire_transaction_lease(
+            directory,
+            blocking=True,
+            pinned_directory=transaction_directory,
+            authority_directory=pinned_workspace.root_directory,
+        )
+        if lease is None:  # pragma: no cover - blocking acquisition
+            raise JauntConfigError("Could not acquire the TypeScript test-repair transaction lease")
+        try:
+            pending_manifests = transaction_directory.iter_names("*.json")
+            if pending_manifests:
+                raise JauntGenerationError(
+                    "An unresolved TypeScript artifact transaction blocks test repair: "
+                    + ", ".join(pending_manifests)
+                )
+            add_paths(paths)
+            yield _RepairFileTransaction(
+                commit=commit,
+                publish=publish,
+            )
+        finally:
+            try:
+                if not committed:
+                    pinned_workspace.verify_namespace()
+                    for path, after in expected_after.items():
+                        pinned_directory = pin_for(path)
+                        # A mismatch is a newer owner, not a failed rollback. Leave
+                        # those bytes intact and retire this superseded marker once
+                        # every still-owned path has been restored.
+                        if _repair_path_hash(pinned_directory, path) != after:
+                            continue
+                        content, mode = originals[path]
+                        _restore_repair_snapshot(pinned_directory, path, content, mode)
+                    if transaction_pin().stat(
+                        manifest.name
+                    ) is not None and not _retire_transaction_manifest(
+                        manifest,
+                        payload,
+                        pinned_directory=transaction_pin(),
+                    ):
+                        raise JauntConfigError(
+                            f"Could not durably retire TypeScript test-repair marker: {manifest}"
+                        )
+            finally:
+                lease.release()
 
 
 @contextmanager
@@ -2499,6 +3987,7 @@ def _isolated_test_workspace(
     overlays: Mapping[str, str],
     *,
     tier: str,
+    deleted_files: Sequence[str] = (),
 ) -> Iterator[Path]:
     """Copy one test tier without leaving links back into the source workspace.
 
@@ -2636,6 +4125,19 @@ def _isolated_test_workspace(
         if not any((temporary / name).is_file() for name in ("pnpm-workspace.yaml", "lerna.json")):
             (temporary / "pnpm-workspace.yaml").write_text("packages: []\n", encoding="utf-8")
 
+        # Negative config-resolution inputs are as important as captured files:
+        # a concurrently created extension/index candidate must not enter the
+        # disposable run and then disappear before the publication seal.
+        for relative in sorted(set(deleted_files), key=lambda item: (-item.count("/"), item)):
+            path = Path(relative)
+            if path.is_absolute() or ".." in path.parts:
+                raise JauntConfigError(f"Unsafe deleted TypeScript test input: {relative!r}")
+            target = temporary / path
+            if target.is_symlink() or target.is_file():
+                target.unlink(missing_ok=True)
+            elif target.is_dir():
+                shutil.rmtree(target)
+
         # Non-test overlays (notably an implementation repair candidate) belong
         # to both tier views.  Battery overlays are admitted only via the exact
         # selected-file loop below.
@@ -2644,7 +4146,7 @@ def _isolated_test_workspace(
                 continue
             target = _safe_path(temporary, relative)
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(source, encoding="utf-8")
+            target.write_text(source, encoding="utf-8", newline="")
 
         for relative in sorted(set(files)):
             source = overlays.get(relative)
@@ -2659,7 +4161,7 @@ def _isolated_test_workspace(
                 continue
             target = _safe_path(temporary, relative)
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(source, encoding="utf-8")
+            target.write_text(source, encoding="utf-8", newline="")
 
         # No link in the isolated tree may physically resolve into the source
         # workspace.  This catches package-manager and hand-authored traversal
@@ -2689,10 +4191,18 @@ def _isolated_test_repair_workspace(
     root: Path,
     files: Sequence[str],
     overlays: Mapping[str, str],
+    *,
+    deleted_files: Sequence[str] = (),
 ) -> Iterator[Path]:
     """Copy a model-safe workspace with examples visible and held-out tests absent."""
 
-    with _isolated_test_workspace(root, files, overlays, tier="example") as temporary:
+    with _isolated_test_workspace(
+        root,
+        files,
+        overlays,
+        tier="example",
+        deleted_files=deleted_files,
+    ) as temporary:
         yield temporary
 
 
@@ -2757,10 +4267,70 @@ def _runner_allows_implementation_repair(result: Mapping[str, Any]) -> bool:
     return bool(categories) and categories.issubset(_IMPLEMENTATION_REPAIR_CATEGORIES)
 
 
-def _failed_runner_test_paths(result: Mapping[str, Any]) -> tuple[str, ...]:
-    """Collect public failed-test paths from an aggregated protected-runner result."""
+def _runner_candidate_rejection_paths(
+    result: Mapping[str, Any],
+    candidate_paths: Sequence[str],
+) -> tuple[str, ...]:
+    """Identify failures attributable to generated battery source.
+
+    Behavioral failures retain the historical all-candidates fallback because a
+    protected derived result may intentionally omit its path. Collection failures
+    are rejectable only when the runner attributes them to an exact candidate;
+    global collection, protocol, timeout, and runner failures remain infrastructure.
+    """
+
+    candidates = {path.replace("\\", "/").removeprefix("./") for path in candidate_paths}
+    categories = _runner_failure_categories(result)
+    if not categories or not categories.issubset(_CANDIDATE_REJECTION_CATEGORIES):
+        return ()
+    attributed = candidates.intersection(
+        _failed_runner_test_paths(result, candidate_paths=tuple(candidates))
+    )
+    if "collection" in categories:
+        return tuple(sorted(attributed))
+    return tuple(sorted(attributed or candidates))
+
+
+def _typecheck_failure_is_infrastructure(result: Mapping[str, Any]) -> bool:
+    """Distinguish compiler incompatibility from an unavailable protected runner."""
+
+    if bool(result.get("ok", False)):
+        return False
+    categories = _runner_failure_categories(result)
+    if categories:
+        return not _runner_allows_implementation_repair(result)
+    raw_diagnostics = result.get("diagnostics", [])
+    source_mismatch = isinstance(raw_diagnostics, list) and any(
+        isinstance(item, Mapping)
+        and isinstance(item.get("code"), str)
+        and (
+            re.fullmatch(r"TS\d+", str(item["code"])) is not None
+            or str(item["code"]).startswith("JAUNT_TS_TEST_")
+            or str(item["code"])
+            in {
+                "JAUNT_TS_TOOLING_RUNTIME_IMPORT",
+                "JAUNT_TS_UNDECLARED_PACKAGE",
+            }
+        )
+        for item in raw_diagnostics
+    )
+    return not source_mismatch
+
+
+def _failed_runner_test_paths(
+    result: Mapping[str, Any],
+    *,
+    candidate_paths: Sequence[str] = (),
+) -> tuple[str, ...]:
+    """Collect failed paths, including opaque candidate-owned collection failures."""
 
     paths: set[str] = set()
+    candidate_by_collection_id = {
+        hashlib.sha256(path.replace("\\", "/").removeprefix("./").encode("utf-8")).hexdigest()[
+            :16
+        ]: path.replace("\\", "/").removeprefix("./")
+        for path in candidate_paths
+    }
 
     def visit(value: object) -> None:
         if not isinstance(value, Mapping):
@@ -2772,11 +4342,15 @@ def _failed_runner_test_paths(result: Mapping[str, Any]) -> tuple[str, ...]:
                 if not isinstance(item, Mapping):
                     continue
                 test_record = cast("Mapping[str, object]", item)
-                if test_record.get("status") != "failed":
-                    continue
                 path = test_record.get("file")
-                if isinstance(path, str) and path:
+                if test_record.get("status") == "failed" and isinstance(path, str) and path:
                     paths.add(path.replace("\\", "/").removeprefix("./"))
+                    continue
+                case_id = test_record.get("caseId")
+                if test_record.get("category") == "collection" and isinstance(case_id, str):
+                    candidate = candidate_by_collection_id.get(case_id)
+                    if candidate is not None:
+                        paths.add(candidate)
         batches = record.get("batches", {})
         if isinstance(batches, Mapping):
             for batch in batches.values():
@@ -2796,6 +4370,25 @@ def _cost_summary(*summaries: Mapping[str, Any]) -> dict[str, int | float]:
     if "estimated_cost_usd" in merged:
         merged["estimated_cost_usd"] = round(float(merged["estimated_cost_usd"]), 6)
     return merged
+
+
+class _ForwardingPhaseCostTracker(CostTracker):
+    """Keep phase-local summaries while charging a caller-owned aggregate tracker."""
+
+    def __init__(self, parent: CostTracker) -> None:
+        super().__init__(max_cost=None)
+        self._parent = parent
+
+    def record(self, module_name: str, usage: TokenUsage) -> None:
+        super().record(module_name, usage)
+        self._parent.record(module_name, usage)
+
+    def record_cache_hit(self) -> None:
+        super().record_cache_hit()
+        self._parent.record_cache_hit()
+
+    def check_budget(self) -> None:
+        self._parent.check_budget()
 
 
 def _build_phase_metadata(report: TargetBuildReport) -> dict[str, Any]:
@@ -3181,7 +4774,25 @@ async def _run_test_batches(
     overlays: Mapping[str, str] | None = None,
     redact_derived: bool = True,
     typecheck_only: bool = False,
+    config_snapshot: tuple[Mapping[str, str], Mapping[str, str]] | None = None,
 ) -> Mapping[str, Any]:
+    effective_overlays = dict(overlays or {})
+    deleted_files: tuple[str, ...] = ()
+    if config_snapshot is not None:
+        config_closure, config_overlays = config_snapshot
+        for path, source in config_overlays.items():
+            previous = effective_overlays.setdefault(path, source)
+            if previous != source:
+                raise JauntGenerationError(
+                    "TypeScript validation overlays conflict with captured Vitest input: " + path
+                )
+        deleted_files = tuple(
+            sorted(
+                path
+                for path, digest in config_closure.items()
+                if digest == MISSING_INPUT and path not in effective_overlays
+            )
+        )
     grouped = _group_test_files(
         root,
         config,
@@ -3193,15 +4804,15 @@ async def _run_test_batches(
         root,
         workspace,
         grouped,
-        overlays=overlays,
+        overlays=effective_overlays,
     )
+    _pin_test_dependency_runtimes(client, root, workspace, grouped)
+    selected_files = set(files)
     test_overlays = {
-        path: source
-        for path, source in (overlays or {}).items()
-        if path.endswith((".test.ts", ".test.tsx"))
+        path: source for path, source in effective_overlays.items() if path in selected_files
     }
     shared_overlays = {
-        path: source for path, source in (overlays or {}).items() if path not in test_overlays
+        path: source for path, source in effective_overlays.items() if path not in test_overlays
     }
     project_config_paths = _workspace_project_config_paths(workspace)
     results: dict[str, Mapping[str, Any]] = {}
@@ -3219,6 +4830,7 @@ async def _run_test_batches(
                 overlays=batch_overlays,
                 redact_derived=redact_derived,
                 typecheck_only=True,
+                deleted_files=deleted_files,
                 tsconfig_path=project,
                 project_config_paths=project_config_paths,
             )
@@ -3242,6 +4854,7 @@ async def _run_test_batches(
                 project_files,
                 batch_overlays,
                 tier=tier,
+                deleted_files=deleted_files,
             ) as isolated_root:
                 tier_results[tier] = await _run_test_runner(
                     client,
@@ -3263,6 +4876,262 @@ async def _run_test_batches(
         results,
         mode="typecheck" if typecheck_only else "run",
     )
+
+
+async def _validate_committed_target_batteries(
+    client: Any,
+    initialized: Any,
+    root: Path,
+    config: JauntConfig,
+    analysis: Any,
+    *,
+    module_ids: Sequence[str],
+    artifact_overlays: Mapping[str, str],
+    proof_sink: dict[str, Any] | None = None,
+) -> list[str]:
+    """Reject a build candidate that breaks a still-compatible committed battery."""
+
+    from jaunt.typescript.upgrade import compatible_semantic_modules
+
+    if proof_sink is not None:
+        proof_sink.clear()
+    requested_ids = set(module_ids)
+    modules = {_module_id(module): module for module in analysis.modules}
+    raw_specs = analysis.workspace.get("testSpecs", [])
+    missing_relevant_targets: set[str] = set()
+    if isinstance(raw_specs, list):
+        for spec in raw_specs:
+            if not isinstance(spec, Mapping):
+                continue
+            raw_targets = spec.get("targets", [])
+            if not isinstance(raw_targets, list):
+                continue
+            declared = {
+                str(target).split("#", 1)[0]
+                for target in raw_targets
+                if isinstance(target, str) and target.startswith("ts:")
+            }
+            if requested_ids.intersection(declared):
+                missing_relevant_targets.update(declared - set(modules))
+    if missing_relevant_targets:
+        # Scoped analysis intentionally omits independent modules. A committed
+        # multi-target battery still needs their API records, so expand only
+        # when one of those batteries is relevant to the candidate under test.
+        # Fetch contracts directly: a full workspace analysis could reintroduce
+        # unrelated diagnostics that targeted builds deliberately excluded.
+        pending = set(missing_relevant_targets)
+        while pending:
+            requested_batch = set(pending)
+            response = await client.request(
+                "analyzeContracts",
+                {"moduleIds": sorted(requested_batch)},
+            )
+            raw_modules = response.get("modules", [])
+            received = (
+                [module for module in raw_modules if isinstance(module, Mapping)]
+                if isinstance(raw_modules, list)
+                else []
+            )
+            if not received:
+                break
+            received_ids = {_module_id(module) for module in received}
+            pending.difference_update(received_ids)
+            for module in received:
+                module_id = _module_id(module)
+                modules[module_id] = module
+                dependencies = module.get("dependencies", [])
+                if isinstance(dependencies, list):
+                    pending.update(
+                        str(dependency).split("#", 1)[0]
+                        for dependency in dependencies
+                        if isinstance(dependency, str)
+                        and str(dependency).split("#", 1)[0] not in modules
+                    )
+            if not received_ids.intersection(requested_batch):
+                break
+        unresolved = missing_relevant_targets - set(modules)
+        if pending or unresolved:
+            unavailable = sorted(pending | unresolved)
+            raise _CommittedBatteryInfrastructureError(
+                (
+                    "Committed multi-target battery validation could not load target "
+                    f"contract(s): {', '.join(unavailable)}; the implementation was not retried.",
+                )
+            )
+        analysis = replace(
+            analysis,
+            contracts={
+                **analysis.contracts,
+                "modules": [modules[module_id] for module_id in sorted(modules)],
+            },
+        )
+
+    compatible = compatible_semantic_modules(
+        root,
+        tuple(analysis.modules),
+        allow_environment_drift=True,
+    )
+    requested = tuple(module_id for module_id in module_ids if module_id in compatible)
+    if not requested:
+        return []
+    specs = _selected_test_specs(
+        root,
+        config,
+        analysis.workspace,
+        modules,
+        target_ids=requested,
+    )
+    if not specs:
+        return []
+    pinned_runner_fingerprint = _runner_fingerprint(root, client, initialized)
+    _pin_test_runtime_identity(client)
+    target = _target(config)
+    config_closure, config_overlays = (
+        _local_config_snapshot(root, target.vitest_config) if target.vitest_config else ({}, {})
+    )
+    owners = dict(_workspace_test_file_owners(root, config, analysis.workspace))
+    files: list[str] = []
+    battery_overlays: dict[str, str] = {}
+    battery_preconditions: dict[str, str] = {}
+    for spec in specs:
+        selected = _selected_test_modules(spec, modules)
+        selected_ids = {_module_id(module) for module in selected}
+        if not selected_ids or not selected_ids.issubset(compatible):
+            continue
+        source_path = str(spec.get("path", ""))
+        for tier in ("example", "derived"):
+            relative = _test_output(source_path, _target(config).generated_dir, tier)
+            path = _safe_path(root, relative)
+            try:
+                source_bytes = path.read_bytes()
+                source = source_bytes.decode("utf-8")
+            except (OSError, UnicodeError):
+                continue
+            metadata = _test_header_metadata(source)
+            body = _strip_test_header(source)
+            if (
+                metadata is None
+                or metadata.get("tier") != tier
+                or metadata.get("source") != source_path
+                or metadata.get("body_digest") != _sha256(body.encode("utf-8"))
+                or _static_test_validation(
+                    body,
+                    generated_dirs=(_target(config).generated_dir,),
+                )
+            ):
+                continue
+            expected = _test_provenance(
+                root,
+                config,
+                spec,
+                modules,
+                client,
+                initialized,
+                tier=tier,
+                workspace=analysis.workspace,
+            )
+            # API and reheader-safe runner/Vitest drift may co-move with an
+            # implementation candidate: execute the unchanged committed body
+            # under the current pinned runtime. Every content-bearing battery
+            # input must still match exactly before this gate is trusted.
+            stable_fields = set(_TEST_PROVENANCE_FIELDS) - {
+                "target_api_digest",
+                "battery_fingerprint",
+                "body_digest",
+                *_TEST_REHEADER_FINGERPRINTS,
+            }
+            if any(metadata.get(field) != expected.get(field) for field in stable_fields):
+                continue
+            if relative not in owners:
+                owners[relative] = _owner_project_for_source(
+                    root,
+                    config,
+                    analysis.workspace,
+                    relative,
+                )
+            files.append(relative)
+            battery_overlays[relative] = source
+            battery_preconditions[relative] = _sha256(source_bytes)
+    selected_files = tuple(sorted(set(files)))
+    if not selected_files:
+        return []
+    validation_overlays = dict(artifact_overlays)
+    for relative, source in {**config_overlays, **battery_overlays}.items():
+        previous = validation_overlays.setdefault(relative, source)
+        if previous != source:
+            raise _CommittedBatteryInfrastructureError(
+                (
+                    "Committed battery validation has conflicting captured bytes for "
+                    f"{relative}; the implementation was not retried.",
+                )
+            )
+    checked = await _run_test_batches(
+        client,
+        root,
+        config,
+        analysis.workspace,
+        files=selected_files,
+        explicit_owners=owners,
+        overlays=validation_overlays,
+        redact_derived=True,
+        typecheck_only=True,
+        config_snapshot=(config_closure, config_overlays),
+    )
+    if not bool(checked.get("ok", False)):
+        if _typecheck_failure_is_infrastructure(checked):
+            categories = _runner_failure_categories(checked)
+            rendered_categories = ", ".join(sorted(categories)) or "unknown runner failure"
+            raise _CommittedBatteryInfrastructureError(
+                (
+                    "Committed battery typecheck could not validate the candidate because "
+                    f"the protected runner failed ({rendered_categories}); the implementation "
+                    "was not retried. " + " ".join(_runner_validation_errors(checked)),
+                )
+            )
+        return ["JAUNT_TS_COMMITTED_BATTERY: " + " ".join(_runner_validation_errors(checked))]
+    ran = await _run_test_batches(
+        client,
+        root,
+        config,
+        analysis.workspace,
+        files=selected_files,
+        explicit_owners=owners,
+        overlays=validation_overlays,
+        redact_derived=True,
+        config_snapshot=(config_closure, config_overlays),
+    )
+    if bool(ran.get("ok", False)):
+        if proof_sink is not None:
+            preconditions = dict(config_closure)
+            for relative, digest in battery_preconditions.items():
+                previous = preconditions.setdefault(relative, digest)
+                if previous != digest:
+                    raise _CommittedBatteryInfrastructureError(
+                        (
+                            "Committed battery validation has conflicting commit proof for "
+                            f"{relative}; the implementation was not retried.",
+                        )
+                    )
+            proof_sink.update(
+                {
+                    "preconditions": dict(sorted(preconditions.items())),
+                    "vitest_config": target.vitest_config,
+                    "config_closure": dict(config_closure),
+                    "runner_fingerprint": pinned_runner_fingerprint,
+                }
+            )
+        return []
+    if not _runner_allows_implementation_repair(ran):
+        categories = _runner_failure_categories(ran)
+        rendered_categories = ", ".join(sorted(categories)) or "unknown runner failure"
+        raise _CommittedBatteryInfrastructureError(
+            (
+                "Committed battery execution could not validate the candidate "
+                f"because the protected runner failed ({rendered_categories}); "
+                "the implementation was not retried.",
+            )
+        )
+    return ["JAUNT_TS_COMMITTED_BATTERY: " + _implementation_repair_feedback(ran)]
 
 
 def _runner_validation_errors(result: Mapping[str, Any]) -> list[str]:
@@ -3324,6 +5193,7 @@ async def run_test(
     """Generate typed Vitest batteries and run them through the protected runner."""
 
     root = root.resolve()
+    _recover_atomic_write_manifests(root)
     if response_cache is None:
         response_cache = ResponseCache(root / ".jaunt" / "cache")
     generated: set[str] = set()
@@ -3342,6 +5212,11 @@ async def run_test(
         tuple(builtin_skill_names)
         if builtin_skill_names is not None
         else (tuple(config.skills.builtin_skills) if config.skills.builtin else ())
+    )
+    effective_instructions = (
+        tuple(build_instructions)
+        if build_instructions is not None
+        else tuple(config.build.instructions)
     )
     target_config = _target(config)
     use_auto_skills = (
@@ -3364,7 +5239,7 @@ async def run_test(
         if cost_tracker is None:
             return CostTracker(max_cost=config.llm.max_cost_per_build)
         child = getattr(cost_tracker, "child", None)
-        return child() if callable(child) else cost_tracker
+        return child() if callable(child) else _ForwardingPhaseCostTracker(cost_tracker)
 
     if not no_build:
         _progress_reset(progress)
@@ -3391,6 +5266,7 @@ async def run_test(
                 auto_skills_enabled=False,
                 builtin_skill_names=effective_builtin_skills,
                 reuse_proof_sink=in_memory_api_reuse_proof,
+                validate_committed_batteries=not no_run,
             )
         else:
             build = await run_build_in_session(
@@ -3413,6 +5289,7 @@ async def run_test(
                 project_overview_enabled=bool(config.context.overview),
                 builtin_skill_names=effective_builtin_skills,
                 reuse_proof_sink=in_memory_api_reuse_proof,
+                validate_committed_batteries=not no_run,
             )
         build_metadata = _build_phase_metadata(build)
         raw_build_cost = build.metadata.get("cost")
@@ -3435,9 +5312,15 @@ async def run_test(
     battery_outcomes: dict[str, dict[str, Any]] = {}
     pending_cache_writes: list[tuple[GenerationRequest, Any, str, str, str]] = []
     cached_battery_responses: dict[str, tuple[GenerationRequest, str, str]] = {}
+    failed_battery_paths: set[str] = set()
     output_preconditions: dict[str, str] = {}
     repair_targets_by_file: dict[str, tuple[str, ...]] = {}
+    rejected_test_tokens: dict[str, tuple[str, str, str] | None] = {}
+    expected_test_provenance: dict[str, Mapping[str, str]] = {}
     modules: dict[str, Mapping[str, Any]] = {}
+    current_target_artifact_ids: frozenset[str] = frozenset()
+    pinned_vitest_config_snapshot: tuple[Mapping[str, str], Mapping[str, str]] = ({}, {})
+    pinned_vitest_config_closure: Mapping[str, str] = {}
     test_owners: dict[str, str] = {}
     files: tuple[str, ...] = ()
     runner: Mapping[str, Any] = {"ok": True, "skipped": True}
@@ -3506,7 +5389,32 @@ async def run_test(
 
     async with operation_worker() as (client, initialized):
         analysis = await analyze(client, initialized, target_ids=target_ids)
+        pinned_runner_fingerprint = _runner_fingerprint(root, client, initialized)
+        _pin_test_runtime_identity(client)
         modules = {_module_id(module): module for module in analysis.modules}
+        current_target_artifact_ids, target_artifact_preconditions = (
+            _current_target_artifact_snapshot(
+                root,
+                tuple(modules.values()),
+                strict=True,
+            )
+        )
+        pinned_vitest_config_snapshot = (
+            _local_config_snapshot(root, target_config.vitest_config)
+            if target_config.vitest_config
+            else ({}, {})
+        )
+        pinned_vitest_config_closure, pinned_vitest_config_overlays = pinned_vitest_config_snapshot
+        for relative, digest in {
+            **target_artifact_preconditions,
+            **pinned_vitest_config_closure,
+        }.items():
+            previous = output_preconditions.setdefault(relative, digest)
+            if previous != digest:
+                raise JauntGenerationError(
+                    "TypeScript test input changed while transaction preconditions "
+                    f"were prepared: {relative}"
+                )
         test_specs = _selected_test_specs(
             root,
             config,
@@ -3534,6 +5442,7 @@ async def run_test(
                     test_spec,
                     modules,
                     tier=tier,
+                    build_instructions=effective_instructions,
                     builtin_skill_names=effective_builtin_skills,
                 )
                 owner = test_spec.get("project")
@@ -3549,6 +5458,42 @@ async def run_test(
                 output_preconditions[request.target_path] = (
                     _path_hash(_safe_path(root, request.target_path)) or MISSING_INPUT
                 )
+                for candidate, candidate_digest in _fixture_resolution_preconditions(
+                    root, spec_path
+                ).items():
+                    previous_candidate_digest = output_preconditions.setdefault(
+                        candidate, candidate_digest
+                    )
+                    if previous_candidate_digest != candidate_digest:
+                        raise JauntGenerationError(
+                            "TypeScript fixture resolution changed while battery requests "
+                            f"were prepared: {candidate}"
+                        )
+                fixture_path = request.cache_payload.get("fixturePath")
+                fixture_source = request.context_files.get("_context/fixtures.ts")
+                fixture_digest = request.cache_payload.get("fixtureDigest")
+                if (
+                    isinstance(fixture_path, str)
+                    and fixture_path
+                    and isinstance(fixture_source, str)
+                    and isinstance(fixture_digest, str)
+                    and fixture_digest
+                ):
+                    # Bind the commit to the exact fixture bytes supplied to the
+                    # request even when the fixture is outside every tsconfig.
+                    if _sha256(fixture_source.encode("utf-8")) != fixture_digest:
+                        raise JauntGenerationError(
+                            "TypeScript fixture bytes do not match their captured digest: "
+                            + fixture_path
+                        )
+                    previous_fixture_digest = output_preconditions.setdefault(
+                        fixture_path, fixture_digest
+                    )
+                    if previous_fixture_digest != fixture_digest:
+                        raise JauntGenerationError(
+                            "TypeScript fixture changed while battery requests were prepared: "
+                            + fixture_path
+                        )
                 prepared_requests.append((test_spec, spec_path, selected_module_ids, request))
 
         planned_files = tuple(request.target_path for *_prefix, request in prepared_requests)
@@ -3574,6 +5519,12 @@ async def run_test(
                     for *_prefix, request in prepared_requests
                 ),
             )
+            _pin_test_dependency_runtimes(
+                client,
+                root,
+                analysis.workspace,
+                planned_groups,
+            )
 
         generation_work: list[
             tuple[
@@ -3584,6 +5535,17 @@ async def run_test(
                 str,
             ]
         ] = []
+        verification_work: list[
+            tuple[
+                str,
+                GenerationRequest,
+                Mapping[str, Any],
+                str,
+                str,
+                str,
+            ]
+        ] = []
+        verified_paths: set[str] = set()
         for test_spec, spec_path, _selected_module_ids, request in prepared_requests:
             tier = str(request.cache_payload.get("tier", "example"))
             provenance = _test_provenance(
@@ -3595,8 +5557,18 @@ async def run_test(
                 initialized,
                 tier=tier,
                 builtin_skill_names=effective_builtin_skills,
+                prepared_request=request,
+                runner_fingerprint=pinned_runner_fingerprint,
+                workspace=analysis.workspace,
             )
+            expected_test_provenance[request.target_path] = provenance
             selected_modules = _selected_test_modules(test_spec, modules)
+            rejected_test_tokens[request.target_path] = _rejected_test_token(
+                root,
+                request.target_path,
+                expected_fingerprint=str(provenance["battery_fingerprint"]),
+                expected_provenance=provenance,
+            )
             action, existing_source = _existing_test_battery_action(
                 root,
                 request,
@@ -3610,8 +5582,21 @@ async def run_test(
                     selected_modules,
                     additional_previous=in_memory_api_reuse_proof,
                 ),
+                allow_verified_api_transition=(
+                    not no_run
+                    and bool(selected_modules)
+                    and all(
+                        _module_id(module) in current_target_artifact_ids
+                        for module in selected_modules
+                    )
+                ),
             )
             if action == "skip":
+                _clear_rejected_test_candidate(
+                    root,
+                    request.target_path,
+                    expected_token=rejected_test_tokens[request.target_path],
+                )
                 skipped.add(request.target_path)
                 record_battery_outcome(request.target_path, tier, "fresh")
                 _progress_phase(progress, request.target_path, "fresh")
@@ -3625,8 +5610,123 @@ async def run_test(
                 _progress_phase(progress, request.target_path, "refrozen")
                 _progress_advance(progress, request.target_path, ok=True)
                 continue
+            if action == "verify":
+                assert existing_source is not None
+                record_battery_outcome(request.target_path, tier, "verification-pending")
+                _progress_phase(progress, request.target_path, "verifying", tier)
+                verification_work.append(
+                    (
+                        spec_path,
+                        request,
+                        provenance,
+                        tier,
+                        f"{spec_path}#{tier}",
+                        existing_source,
+                    )
+                )
+                continue
             key = f"{spec_path}#{tier}"
             generation_work.append((spec_path, request, provenance, tier, key))
+
+        async def verify_existing(
+            items: Sequence[tuple[str, GenerationRequest, Mapping[str, Any], str, str, str]],
+        ) -> tuple[str, Mapping[str, Any]]:
+            paths = tuple(item[1].target_path for item in items)
+            candidate_overlays = {item[1].target_path: item[5] for item in items}
+            checked = await _run_test_batches(
+                client,
+                root,
+                config,
+                analysis.workspace,
+                files=paths,
+                explicit_owners=test_owners,
+                overlays=candidate_overlays,
+                redact_derived=not no_redact_derived,
+                typecheck_only=True,
+                config_snapshot=pinned_vitest_config_snapshot,
+            )
+            if not bool(checked.get("ok", False)):
+                return (
+                    "infrastructure"
+                    if _typecheck_failure_is_infrastructure(checked)
+                    else "incompatible",
+                    checked,
+                )
+            ran = await _run_test_batches(
+                client,
+                root,
+                config,
+                analysis.workspace,
+                files=paths,
+                explicit_owners=test_owners,
+                overlays=candidate_overlays,
+                redact_derived=not no_redact_derived,
+                config_snapshot=pinned_vitest_config_snapshot,
+            )
+            if bool(ran.get("ok", False)):
+                return "verified", ran
+            return (
+                "incompatible" if _runner_allows_implementation_repair(ran) else "infrastructure",
+                ran,
+            )
+
+        verified_items: set[str] = set()
+        verification_infrastructure: dict[str, Mapping[str, Any]] = {}
+        if verification_work:
+            verification_state, verification_result = await verify_existing(verification_work)
+            if verification_state == "verified":
+                verified_items.update(item[1].target_path for item in verification_work)
+            elif verification_state == "infrastructure":
+                verification_infrastructure.update(
+                    {item[1].target_path: verification_result for item in verification_work}
+                )
+            else:
+                for item in verification_work:
+                    item_state, item_result = await verify_existing((item,))
+                    if item_state == "verified":
+                        verified_items.add(item[1].target_path)
+                    elif item_state == "infrastructure":
+                        verification_infrastructure[item[1].target_path] = item_result
+        for spec_path, request, provenance, tier, key, existing_source in verification_work:
+            if request.target_path in verified_items:
+                overlays[request.target_path] = existing_source
+                planned_refrozen.add(request.target_path)
+                verified_paths.add(request.target_path)
+                record_battery_outcome(request.target_path, tier, "verified")
+                _progress_phase(progress, request.target_path, "verified", tier)
+                _progress_advance(progress, request.target_path, ok=True)
+            elif request.target_path in verification_infrastructure:
+                infrastructure_result = verification_infrastructure[request.target_path]
+                categories = _runner_failure_categories(infrastructure_result)
+                failed_battery_paths.add(request.target_path)
+                failed[key] = (
+                    TargetDiagnostic(
+                        code="JAUNT_TS_TEST_VERIFICATION_INFRASTRUCTURE",
+                        message=(
+                            "The existing TypeScript battery could not verify its API-only "
+                            "transition because the protected runner was unavailable; no model "
+                            "generation was queued. "
+                            + " ".join(_runner_validation_errors(infrastructure_result))
+                        ),
+                        path=request.target_path,
+                        data={
+                            "source": spec_path,
+                            "tier": tier,
+                            "categories": tuple(sorted(categories)) or ("unknown",),
+                        },
+                    ),
+                )
+                record_battery_outcome(
+                    request.target_path,
+                    tier,
+                    "verification-infrastructure",
+                )
+                _progress_phase(progress, request.target_path, "failed", tier)
+                _progress_advance(progress, request.target_path, ok=False)
+            else:
+                record_battery_outcome(request.target_path, tier, "verification-failed")
+                _progress_phase(progress, request.target_path, "regenerating", tier)
+                generation_work.append((spec_path, request, provenance, tier, key))
 
         semaphore = asyncio.Semaphore(effective_jobs)
 
@@ -3679,9 +5779,23 @@ async def run_test(
                     overlays={_request.target_path: rendered},
                     redact_derived=not no_redact_derived,
                     typecheck_only=True,
+                    config_snapshot=pinned_vitest_config_snapshot,
                 )
                 if bool(checked.get("ok", False)):
                     return []
+                if _typecheck_failure_is_infrastructure(checked):
+                    categories = _runner_failure_categories(checked)
+                    rendered_categories = ", ".join(sorted(categories)) or "unknown runner failure"
+                    error = _CommittedBatteryInfrastructureError(
+                        (
+                            "Generated TypeScript battery typechecking could not validate the "
+                            "candidate because the protected runner failed "
+                            f"({rendered_categories}); the candidate was preserved and no "
+                            "additional model attempt was made. "
+                            + " ".join(_runner_validation_errors(checked)),
+                        )
+                    )
+                    raise error.attach_candidate(source)
                 return _runner_validation_errors(checked)
 
             cache_fingerprint = str(provenance["battery_fingerprint"])
@@ -3689,19 +5803,75 @@ async def run_test(
             validated_request = replace(request, validator=validate_candidate)
             async with semaphore:
                 _progress_phase(progress, request.target_path, "generating", tier)
-                result = await generate_request_cached(
-                    backend,
-                    validated_request,
-                    max_attempts=max_attempts,
-                    generation_fingerprint=cache_fingerprint,
-                    response_cache=cache_for_request,
-                    cost_tracker=cost,
-                    usage_label=key,
-                    progress=lambda stage, detail, path=request.target_path: _progress_phase(
-                        progress, path, stage, detail
-                    ),
-                    store=False,
-                )
+                attempt_count = 0
+                attempt_usage: list[TokenUsage] = []
+                cached_source_failed_infrastructure = False
+
+                def request_progress(stage: str, detail: str) -> None:
+                    nonlocal attempt_count
+                    if stage == "attempt":
+                        attempt_count += 1
+                    _progress_phase(progress, request.target_path, stage, detail)
+
+                def record_request_usage(usage: TokenUsage) -> None:
+                    attempt_usage.append(usage)
+                    cost.record(key, usage)
+                    cost.check_budget()
+
+                async def validate_cached_source(source: str) -> list[str]:
+                    nonlocal cached_source_failed_infrastructure
+                    try:
+                        return await validate_candidate(source)
+                    except _CommittedBatteryInfrastructureError:
+                        cached_source_failed_infrastructure = True
+                        raise
+
+                try:
+                    result = await generate_request_cached(
+                        backend,
+                        validated_request,
+                        max_attempts=max_attempts,
+                        generation_fingerprint=cache_fingerprint,
+                        response_cache=cache_for_request,
+                        cost_tracker=cost,
+                        usage_callback=record_request_usage,
+                        usage_label=key,
+                        progress=request_progress,
+                        cached_validator=validate_cached_source,
+                        store=False,
+                    )
+                except _CommittedBatteryInfrastructureError as error:
+                    usage = (
+                        TokenUsage(
+                            prompt_tokens=sum(item.prompt_tokens for item in attempt_usage),
+                            completion_tokens=sum(item.completion_tokens for item in attempt_usage),
+                            model=attempt_usage[-1].model,
+                            provider=attempt_usage[-1].provider,
+                            cached_prompt_tokens=sum(
+                                item.cached_prompt_tokens for item in attempt_usage
+                            ),
+                        )
+                        if attempt_usage
+                        else None
+                    )
+                    result = GenerationResult(
+                        attempts=(
+                            0 if cached_source_failed_infrastructure else max(1, attempt_count)
+                        ),
+                        source=error.candidate_source,
+                        errors=list(error.errors),
+                        usage=usage,
+                        infrastructure_errors=error.errors,
+                        infrastructure_exhausted=True,
+                    )
+                    if result.source is not None and result.attempts > 0:
+                        store_generation_result(
+                            response_cache,
+                            backend,
+                            validated_request,
+                            replace(result, errors=[]),
+                            generation_fingerprint=cache_fingerprint,
+                        )
             return (
                 spec_path,
                 validated_request,
@@ -3725,14 +5895,69 @@ async def run_test(
                     cache_fingerprint,
                 ) = await completed
                 if result.source is None or result.errors:
+                    failed_battery_paths.add(request.target_path)
+                    property_block = request.cache_payload.get("propertyBlock", "")
+                    rejected_source = (
+                        attach_property_block(
+                            result.source,
+                            property_block if isinstance(property_block, str) else "",
+                        )
+                        if isinstance(result.source, str)
+                        else ""
+                    )
+                    rejected_artifacts = (
+                        None
+                        if result.infrastructure_exhausted or not rejected_source
+                        else _write_rejected_test_candidate(
+                            root,
+                            request,
+                            source_path=spec_path,
+                            tier=tier,
+                            fingerprint=cache_fingerprint,
+                            candidate_source=rejected_source,
+                            attempts=result.attempts,
+                            errors=result.errors,
+                            attempt_errors=result.attempt_errors,
+                            terminal=result.attempts >= max_attempts,
+                            expected_provenance=provenance,
+                        )
+                    )
+                    exhausted = (
+                        not result.infrastructure_exhausted and result.attempts >= max_attempts
+                    )
                     failed[key] = tuple(
                         TargetDiagnostic(
                             code=(
                                 "JAUNT_TS_TEST_INFRASTRUCTURE"
                                 if result.infrastructure_exhausted
-                                else "JAUNT_TS_TEST_GENERATION"
+                                else (
+                                    "JAUNT_TS_TEST_GENERATION_EXHAUSTED"
+                                    if exhausted
+                                    else "JAUNT_TS_TEST_GENERATION"
+                                )
                             ),
-                            message=error,
+                            message=(
+                                error
+                                + (
+                                    f" Last rejected candidate: {rejected_artifacts[0]}."
+                                    if rejected_artifacts is not None
+                                    else ""
+                                )
+                            ),
+                            path=request.target_path,
+                            data={
+                                "source": spec_path,
+                                "tier": tier,
+                                "attempts": result.attempts,
+                                **(
+                                    {
+                                        "candidate": rejected_artifacts[0],
+                                        "metadata": rejected_artifacts[1],
+                                    }
+                                    if rejected_artifacts is not None
+                                    else {}
+                                ),
+                            },
                         )
                         for error in result.errors or ["The generator returned no test source"]
                     )
@@ -3742,6 +5967,14 @@ async def run_test(
                         "infrastructure-failed" if result.infrastructure_exhausted else "failed",
                         result=result,
                     )
+                    if rejected_artifacts is not None:
+                        battery_outcomes[request.target_path].update(
+                            {
+                                "candidate": rejected_artifacts[0],
+                                "candidate_metadata": rejected_artifacts[1],
+                                "terminal": exhausted,
+                            }
+                        )
                     _progress_phase(progress, request.target_path, "failed", tier)
                     _progress_advance(progress, request.target_path, ok=False)
                     continue
@@ -3803,7 +6036,10 @@ async def run_test(
             )
         )
 
-        async def isolate_valid_overlays() -> tuple[
+        async def isolate_valid_overlays(
+            *, excluded_paths: frozenset[str] = frozenset()
+        ) -> tuple[
+            tuple[str, ...],
             tuple[str, ...],
             tuple[str, ...],
             tuple[str, ...],
@@ -3812,8 +6048,9 @@ async def run_test(
         ]:
             """Find a deterministic maximal overlay subset that validates together."""
 
-            candidate_paths = tuple(sorted(overlays))
-            baseline_files = tuple(path for path in files if path not in overlays)
+            effective_files = tuple(path for path in files if path not in excluded_paths)
+            candidate_paths = tuple(sorted(path for path in overlays if path not in excluded_paths))
+            baseline_files = tuple(path for path in effective_files if path not in overlays)
             baseline_result: Mapping[str, Any] = {"ok": True, "skipped": True}
             if baseline_files:
                 baseline_result = await _run_test_batches(
@@ -3826,15 +6063,35 @@ async def run_test(
                     overlays={},
                     redact_derived=not no_redact_derived,
                     typecheck_only=True,
+                    config_snapshot=pinned_vitest_config_snapshot,
                 )
             if not bool(baseline_result.get("ok", False)):
+                if _typecheck_failure_is_infrastructure(baseline_result):
+                    return (
+                        (),
+                        (),
+                        candidate_paths,
+                        effective_files,
+                        {
+                            "baseline": baseline_result,
+                            "candidates": [],
+                            "infrastructure": True,
+                        },
+                        {},
+                    )
                 reasons = tuple(_runner_validation_errors(baseline_result))
                 return (
                     (),
+                    (),
                     candidate_paths,
-                    baseline_files,
-                    {"baseline": baseline_result, "candidates": []},
-                    {path: reasons for path in candidate_paths},
+                    effective_files,
+                    {
+                        "baseline": baseline_result,
+                        "candidates": [],
+                        "baseline_failure": True,
+                        "baseline_errors": reasons,
+                    },
+                    {},
                 )
 
             accepted: list[str] = []
@@ -3854,18 +6111,34 @@ async def run_test(
                     overlays={item: overlays[item] for item in trial_paths},
                     redact_derived=not no_redact_derived,
                     typecheck_only=True,
+                    config_snapshot=pinned_vitest_config_snapshot,
                 )
                 valid = bool(checked.get("ok", False))
                 candidate_results.append({"path": path, "ok": valid})
                 if valid:
                     accepted.append(path)
                     continue
+                if _typecheck_failure_is_infrastructure(checked):
+                    retained = tuple(path for path in candidate_paths if path not in accepted)
+                    return (
+                        tuple(accepted),
+                        (),
+                        retained,
+                        tuple(sorted({*baseline_files, *accepted})),
+                        {
+                            "baseline": baseline_result,
+                            "candidates": candidate_results,
+                            "infrastructure": True,
+                        },
+                        {},
+                    )
                 rejected.append(path)
                 rejection_reasons[path] = tuple(_runner_validation_errors(checked))
             accepted_files = tuple(sorted({*baseline_files, *accepted}))
             return (
                 tuple(accepted),
                 tuple(rejected),
+                (),
                 accepted_files,
                 {"baseline": baseline_result, "candidates": candidate_results},
                 rejection_reasons,
@@ -3882,47 +6155,245 @@ async def run_test(
                 record_battery_outcome(path, tiers[path], "rejected")
                 battery_outcomes[path]["rejection_reasons"] = reasons.get(path, ())
                 cached = cached_battery_responses.pop(path, None)
-                if cached is not None:
-                    request, fingerprint, source = cached
-                    battery_outcomes[path]["cache_evicted"] = discard_cached_generation(
-                        response_cache,
-                        backend,
-                        request,
-                        generation_fingerprint=fingerprint,
-                        expected_source=source,
+                pending = next(
+                    (item for item in pending_cache_writes if item[3] == path),
+                    None,
+                )
+                if cached is not None or pending is not None:
+                    result = None
+                    if cached is not None:
+                        request, fingerprint, source = cached
+                    else:
+                        assert pending is not None
+                        request, result, fingerprint, _pending_path, _pending_tier = pending
+                        source = result.source if isinstance(result.source, str) else ""
+                    property_block = request.cache_payload.get("propertyBlock", "")
+                    candidate_source = attach_property_block(
+                        source,
+                        property_block if isinstance(property_block, str) else "",
                     )
+                    rejected_artifacts = _write_rejected_test_candidate(
+                        root,
+                        request,
+                        source_path=str(request.cache_payload.get("path", "")),
+                        tier=tiers[path],
+                        fingerprint=fingerprint,
+                        candidate_source=candidate_source,
+                        attempts=(
+                            result.attempts
+                            if result is not None
+                            else int(battery_outcomes[path].get("attempts", 0))
+                        ),
+                        errors=reasons.get(path, ()),
+                        attempt_errors=(
+                            (*result.attempt_errors, reasons.get(path, ()))
+                            if result is not None
+                            else (reasons.get(path, ()),)
+                        ),
+                        terminal=False,
+                        expected_provenance=expected_test_provenance[path],
+                    )
+                    if rejected_artifacts is not None:
+                        battery_outcomes[path].update(
+                            {
+                                "candidate": rejected_artifacts[0],
+                                "candidate_metadata": rejected_artifacts[1],
+                            }
+                        )
+                    if cached is not None:
+                        battery_outcomes[path]["cache_evicted"] = discard_cached_generation(
+                            response_cache,
+                            backend,
+                            request,
+                            generation_fingerprint=fingerprint,
+                            expected_source=source,
+                        )
 
         if failed:
             stage_preflight: Mapping[str, Any] = {"ok": True, "skipped": True}
             stage_isolation: Mapping[str, Any] | None = None
-            if pending_cache_writes and files:
+            accepted_paths = tuple(sorted(overlays))
+            rejected_paths: tuple[str, ...] = ()
+            retained_paths: tuple[str, ...] = ()
+            stage_files = tuple(path for path in files if path not in failed_battery_paths)
+            if overlays and stage_files:
                 stage_preflight = await _run_test_batches(
                     client,
                     root,
                     config,
                     analysis.workspace,
-                    files=files,
+                    files=stage_files,
                     explicit_owners=test_owners,
                     overlays=overlays,
                     redact_derived=not no_redact_derived,
                     typecheck_only=True,
+                    config_snapshot=pinned_vitest_config_snapshot,
                 )
+            stage_preflight_infrastructure = False
+            stage_preflight_baseline_failure = False
             if bool(stage_preflight.get("ok", False)):
-                stage_validated_batteries()
+                accepted = set(accepted_paths)
+            elif _typecheck_failure_is_infrastructure(stage_preflight):
+                retained_paths = accepted_paths
+                accepted_paths = ()
+                accepted = set()
+                stage_preflight_infrastructure = True
+                stage_isolation = {"infrastructure": True, "preflight": stage_preflight}
             else:
                 (
                     accepted_paths,
                     rejected_paths,
+                    retained_paths,
                     _accepted_files,
                     stage_isolation,
                     reasons,
-                ) = await isolate_valid_overlays()
+                ) = await isolate_valid_overlays(excluded_paths=frozenset(failed_battery_paths))
                 accepted = set(accepted_paths)
-                pending_cache_writes[:] = [
-                    item for item in pending_cache_writes if item[3] in accepted
-                ]
-                stage_validated_batteries()
-                reject_batteries(rejected_paths, reasons)
+                stage_preflight_infrastructure = bool(stage_isolation.get("infrastructure"))
+                stage_preflight_baseline_failure = bool(stage_isolation.get("baseline_failure"))
+                if not stage_preflight_infrastructure and not stage_preflight_baseline_failure:
+                    reject_batteries(rejected_paths, reasons)
+
+            stage_preflight_blocked = (
+                stage_preflight_infrastructure or stage_preflight_baseline_failure
+            )
+            if stage_preflight_blocked:
+                failed["stage-preflight"] = (
+                    TargetDiagnostic(
+                        code=(
+                            "JAUNT_TS_TEST_INFRASTRUCTURE"
+                            if stage_preflight_infrastructure
+                            else "JAUNT_TS_TEST_TYPECHECK"
+                        ),
+                        message=(
+                            "The surviving TypeScript battery set could not be typechecked "
+                            + (
+                                "because the protected runner was unavailable; "
+                                if stage_preflight_infrastructure
+                                else "because a committed baseline battery is invalid; "
+                            )
+                            + "validated candidates were retained in the response cache and "
+                            "were not committed."
+                        ),
+                    ),
+                )
+
+            accepted_overlays = {path: overlays[path] for path in accepted_paths}
+            surviving_stage_files = tuple(
+                path for path in stage_files if path not in set(rejected_paths)
+            )
+            stage_runner: Mapping[str, Any] = (
+                {
+                    "ok": False,
+                    "skipped": True,
+                    "reason": (
+                        "preflight-infrastructure"
+                        if stage_preflight_infrastructure
+                        else "baseline-typecheck"
+                    ),
+                }
+                if stage_preflight_blocked
+                else {"ok": True, "skipped": True}
+            )
+            if accepted_overlays and not no_run and not stage_preflight_blocked:
+                stage_runner = await _run_test_batches(
+                    client,
+                    root,
+                    config,
+                    analysis.workspace,
+                    files=surviving_stage_files,
+                    explicit_owners=test_owners,
+                    overlays=accepted_overlays,
+                    redact_derived=not no_redact_derived,
+                    config_snapshot=pinned_vitest_config_snapshot,
+                )
+                if not bool(stage_runner.get("ok", False)):
+                    runtime_rejected = _runner_candidate_rejection_paths(
+                        stage_runner,
+                        accepted_paths,
+                    )
+                    if runtime_rejected:
+                        runtime_reasons = tuple(_runner_validation_errors(stage_runner))
+                        reject_batteries(
+                            runtime_rejected,
+                            {path: runtime_reasons for path in runtime_rejected},
+                        )
+                        accepted.difference_update(runtime_rejected)
+                        accepted_paths = tuple(path for path in accepted_paths if path in accepted)
+                        rejected_paths = tuple(sorted({*rejected_paths, *runtime_rejected}))
+                        accepted_overlays = {path: overlays[path] for path in accepted_paths}
+                    else:
+                        failed["stage-runner"] = (
+                            TargetDiagnostic(
+                                code="JAUNT_TS_TEST_INFRASTRUCTURE",
+                                message=(
+                                    "The surviving TypeScript battery set could not be executed; "
+                                    "validated candidates were retained in the response cache and "
+                                    "were not committed."
+                                ),
+                            ),
+                        )
+
+            cacheable_paths = accepted | set(retained_paths)
+            pending_cache_writes[:] = [
+                item for item in pending_cache_writes if item[3] in cacheable_paths
+            ]
+            stage_validated_batteries()
+            partial_committed = bool(accepted_overlays) and bool(stage_runner.get("ok", False))
+            if partial_committed:
+                atomic_write_manifest(
+                    root,
+                    tuple(
+                        _Write(
+                            path=path,
+                            content=source,
+                            kind="test",
+                            module_id=f"ts-test:{path}",
+                        )
+                        for path, source in accepted_overlays.items()
+                    ),
+                    expected_inputs={
+                        **_input_hashes(analysis.contracts),
+                        **output_preconditions,
+                    },
+                    pre_commit_guard=lambda: _verify_test_commit_environment(
+                        root,
+                        client,
+                        initialized,
+                        pinned_runner_fingerprint,
+                        vitest_config=target_config.vitest_config,
+                        config_closure=pinned_vitest_config_closure,
+                    ),
+                    commit_seal=lambda: _seal_test_commit_environment(
+                        root,
+                        client,
+                        initialized,
+                        pinned_runner_fingerprint,
+                        vitest_config=target_config.vitest_config,
+                        config_closure=pinned_vitest_config_closure,
+                    ),
+                )
+                generated.update(planned_generated.intersection(accepted))
+                refrozen.update(planned_refrozen.intersection(accepted))
+                for path in accepted:
+                    _clear_rejected_test_candidate(
+                        root,
+                        path,
+                        expected_token=rejected_test_tokens.get(path),
+                    )
+                    if path in planned_generated:
+                        record_battery_outcome(
+                            path,
+                            str(battery_outcomes[path].get("tier", "example")),
+                            "committed",
+                        )
+                for path in planned_refrozen.intersection(accepted):
+                    if battery_outcomes.get(path, {}).get("state") == "verification-pending":
+                        record_battery_outcome(
+                            path,
+                            str(battery_outcomes[path].get("tier", "example")),
+                            "verified",
+                        )
             _progress_finish(progress)
             test_cost = cost.summary_dict()
             merged_cost = (
@@ -3941,6 +6412,13 @@ async def run_test(
                     "test_cost": test_cost,
                     "build": build_metadata,
                     "stage_preflight": stage_preflight,
+                    "partial_landing": {
+                        "accepted": accepted_paths,
+                        "rejected": rejected_paths,
+                        "retained": retained_paths,
+                        "committed": partial_committed,
+                        "runner": stage_runner,
+                    },
                     **({"stage_isolation": stage_isolation} if stage_isolation is not None else {}),
                     "jobs": effective_jobs,
                     "batteries": [
@@ -3973,23 +6451,44 @@ async def run_test(
                 overlays=overlays,
                 redact_derived=not no_redact_derived,
                 typecheck_only=True,
+                config_snapshot=pinned_vitest_config_snapshot,
             )
         if not bool(preflight.get("ok", False)):
             (
                 accepted_paths,
                 rejected_paths,
+                retained_paths,
                 accepted_files,
                 isolation,
                 reasons,
             ) = await isolate_valid_overlays()
             accepted = set(accepted_paths)
             accepted_overlays = {path: overlays[path] for path in accepted_paths}
-            pending_cache_writes[:] = [item for item in pending_cache_writes if item[3] in accepted]
+            preflight_infrastructure = bool(isolation.get("infrastructure"))
+            preflight_baseline_failure = bool(isolation.get("baseline_failure"))
+            preflight_blocked = preflight_infrastructure or preflight_baseline_failure
+            if not preflight_blocked:
+                reject_batteries(rejected_paths, reasons)
+            cacheable_paths = accepted | set(retained_paths)
+            pending_cache_writes[:] = [
+                item for item in pending_cache_writes if item[3] in cacheable_paths
+            ]
             stage_validated_batteries()
-            reject_batteries(rejected_paths, reasons)
 
-            partial_runner: Mapping[str, Any] = {"ok": True, "skipped": True}
-            if not no_run and accepted_overlays and accepted_files:
+            partial_runner: Mapping[str, Any] = (
+                {
+                    "ok": False,
+                    "skipped": True,
+                    "reason": (
+                        "preflight-infrastructure"
+                        if preflight_infrastructure
+                        else "baseline-typecheck"
+                    ),
+                }
+                if preflight_blocked
+                else {"ok": True, "skipped": True}
+            )
+            if not no_run and not preflight_blocked and accepted_overlays and accepted_files:
                 partial_runner = await _run_test_batches(
                     client,
                     root,
@@ -3999,15 +6498,14 @@ async def run_test(
                     explicit_owners=test_owners,
                     overlays=accepted_overlays,
                     redact_derived=not no_redact_derived,
+                    config_snapshot=pinned_vitest_config_snapshot,
                 )
-            if not bool(partial_runner.get("ok", False)) and _runner_allows_implementation_repair(
-                partial_runner
-            ):
-                failed_partial_paths = tuple(
-                    path
-                    for path in _failed_runner_test_paths(partial_runner)
-                    if path in accepted_overlays
-                )
+            failed_partial_paths = (
+                _runner_candidate_rejection_paths(partial_runner, accepted_paths)
+                if not bool(partial_runner.get("ok", False))
+                else ()
+            )
+            if failed_partial_paths:
                 reject_batteries(
                     failed_partial_paths,
                     {
@@ -4018,6 +6516,14 @@ async def run_test(
                         for path in failed_partial_paths
                     },
                 )
+                failed_partial = set(failed_partial_paths)
+                accepted.difference_update(failed_partial)
+                accepted_paths = tuple(path for path in accepted_paths if path in accepted)
+                rejected_paths = tuple(sorted({*rejected_paths, *failed_partial_paths}))
+                retained_paths = tuple(
+                    path for path in retained_paths if path not in failed_partial
+                )
+                accepted_overlays = {path: overlays[path] for path in accepted_paths}
             partial_committed = bool(accepted_overlays) and bool(partial_runner.get("ok", False))
             committed_generated = planned_generated.intersection(accepted)
             committed_refrozen = planned_refrozen.intersection(accepted)
@@ -4037,9 +6543,44 @@ async def run_test(
                         **_input_hashes(analysis.contracts),
                         **output_preconditions,
                     },
+                    pre_commit_guard=lambda: _verify_test_commit_environment(
+                        root,
+                        client,
+                        initialized,
+                        pinned_runner_fingerprint,
+                        vitest_config=target_config.vitest_config,
+                        config_closure=pinned_vitest_config_closure,
+                    ),
+                    commit_seal=lambda: _seal_test_commit_environment(
+                        root,
+                        client,
+                        initialized,
+                        pinned_runner_fingerprint,
+                        vitest_config=target_config.vitest_config,
+                        config_closure=pinned_vitest_config_closure,
+                    ),
                 )
                 generated.update(committed_generated)
                 refrozen.update(committed_refrozen)
+                for path in accepted:
+                    _clear_rejected_test_candidate(
+                        root,
+                        path,
+                        expected_token=rejected_test_tokens.get(path),
+                    )
+                    if path in committed_generated:
+                        record_battery_outcome(
+                            path,
+                            str(battery_outcomes[path].get("tier", "example")),
+                            "committed",
+                        )
+                for path in committed_refrozen:
+                    if battery_outcomes.get(path, {}).get("state") == "verification-pending":
+                        record_battery_outcome(
+                            path,
+                            str(battery_outcomes[path].get("tier", "example")),
+                            "verified",
+                        )
             _progress_finish(progress)
             test_cost = cost.summary_dict()
             merged_cost = (
@@ -4055,8 +6596,23 @@ async def run_test(
                 failed={
                     "typecheck": (
                         TargetDiagnostic(
-                            code="JAUNT_TS_TEST_TYPECHECK",
-                            message="Generated TypeScript tests failed overlay typechecking.",
+                            code=(
+                                "JAUNT_TS_TEST_INFRASTRUCTURE"
+                                if preflight_infrastructure
+                                else "JAUNT_TS_TEST_TYPECHECK"
+                            ),
+                            message=(
+                                "The protected TypeScript typecheck runner was unavailable; "
+                                "validated candidates were retained in the response cache."
+                                if preflight_infrastructure
+                                else (
+                                    "A committed TypeScript battery failed baseline "
+                                    "typechecking; unrelated validated candidates were retained "
+                                    "in the response cache."
+                                    if preflight_baseline_failure
+                                    else "Generated TypeScript tests failed overlay typechecking."
+                                )
+                            ),
                         ),
                     )
                 },
@@ -4069,6 +6625,7 @@ async def run_test(
                     "partial_landing": {
                         "accepted": accepted_paths,
                         "rejected": rejected_paths,
+                        "retained": retained_paths,
                         "committed": partial_committed,
                         "isolation": isolation,
                         "runner": partial_runner,
@@ -4103,15 +6660,16 @@ async def run_test(
                 explicit_owners=test_owners,
                 overlays=overlays,
                 redact_derived=not no_redact_derived,
+                config_snapshot=pinned_vitest_config_snapshot,
             )
         )
 
     files_committed = False
     repair_writes: tuple[_Write, ...] = ()
     repair_output_preconditions: dict[str, str] = {}
+    delayed_repair_journal_events: tuple[JournalEvent, ...] = ()
 
-    def commit_test_files() -> None:
-        nonlocal files_committed
+    def publish_test_files(transaction: _RepairFileTransaction | None = None) -> None:
         if files_committed:
             return
         test_writes = tuple(
@@ -4123,38 +6681,92 @@ async def run_test(
             )
             for path, source in overlays.items()
         )
-        atomic_write_manifest(
-            root,
-            (*repair_writes, *test_writes),
-            expected_inputs={
-                **_input_hashes(analysis.contracts),
-                **output_preconditions,
-                **repair_output_preconditions,
-            },
-        )
-        if repair_writes:
-            append_events(
+        all_writes = (*repair_writes, *test_writes)
+        expected_inputs = {
+            **_input_hashes(analysis.contracts),
+            **output_preconditions,
+            **repair_output_preconditions,
+        }
+
+        def pre_commit_guard() -> None:
+            _verify_test_commit_environment(
                 root,
-                [
-                    JournalEvent("build", module_id, "TypeScript test repair validated")
-                    for module_id in sorted({write.module_id for write in repair_writes})
-                ],
+                client,
+                initialized,
+                pinned_runner_fingerprint,
+                vitest_config=target_config.vitest_config,
+                config_closure=pinned_vitest_config_closure,
             )
+
+        def commit_seal() -> None:
+            _seal_test_commit_environment(
+                root,
+                client,
+                initialized,
+                pinned_runner_fingerprint,
+                vitest_config=target_config.vitest_config,
+                config_closure=pinned_vitest_config_closure,
+            )
+
+        if transaction is None:
+            atomic_write_manifest(
+                root,
+                all_writes,
+                expected_inputs=expected_inputs,
+                pre_commit_guard=pre_commit_guard,
+                commit_seal=commit_seal,
+            )
+        else:
+            transaction.publish(
+                all_writes,
+                expected_inputs=expected_inputs,
+                pre_commit_guard=pre_commit_guard,
+                commit_seal=commit_seal,
+            )
+
+    def finalize_test_files(*, delay_repair_journal: bool) -> None:
+        nonlocal delayed_repair_journal_events, files_committed
+        if files_committed:
+            return
         generated.update(planned_generated)
         refrozen.update(planned_refrozen)
+        for path in overlays:
+            _clear_rejected_test_candidate(
+                root,
+                path,
+                expected_token=rejected_test_tokens.get(path),
+            )
+        if repair_writes:
+            events = tuple(
+                JournalEvent("build", module_id, "TypeScript test repair validated")
+                for module_id in sorted({write.module_id for write in repair_writes})
+            )
+            if delay_repair_journal:
+                delayed_repair_journal_events = events
+            else:
+                append_events(root, events)
         files_committed = True
 
     def commit_test_outputs() -> None:
-        commit_test_files()
+        publish_test_files()
+        finalize_test_files(delay_repair_journal=False)
 
     initial_runner = runner
     repair_exit_code = 0
+
+    def runner_failed_verified_battery(result: Mapping[str, Any]) -> bool:
+        failed_paths = set(_failed_runner_test_paths(result))
+        return bool(verified_paths) and (
+            not failed_paths or bool(failed_paths.intersection(verified_paths))
+        )
+
     if (
         not no_build
         and not no_run
         and files
         and not bool(runner.get("ok", False))
         and _runner_allows_implementation_repair(runner)
+        and not runner_failed_verified_battery(runner)
     ):
         repair_targets = _repair_module_ids(
             runner,
@@ -4191,7 +6803,25 @@ async def run_test(
                     and _is_reviewable_example_battery(relative, path.read_text(encoding="utf-8"))
                 )
             )
-            with _isolated_test_repair_workspace(root, files, overlays) as repair_root:
+            repair_workspace_overlays = dict(overlays)
+            for relative, source in pinned_vitest_config_overlays.items():
+                previous = repair_workspace_overlays.setdefault(relative, source)
+                if previous != source:
+                    raise JauntGenerationError(
+                        "TypeScript repair overlays conflict with captured Vitest input: "
+                        + relative
+                    )
+            missing_config_inputs = tuple(
+                relative
+                for relative, digest in pinned_vitest_config_closure.items()
+                if digest == MISSING_INPUT and relative not in repair_workspace_overlays
+            )
+            with _isolated_test_repair_workspace(
+                root,
+                files,
+                repair_workspace_overlays,
+                deleted_files=missing_config_inputs,
+            ) as repair_root:
                 repair_phase_cost = phase_cost_tracker()
                 _progress_reset(progress)
                 repair = await run_build(
@@ -4215,6 +6845,7 @@ async def run_test(
                     repo_map_block_override=repo_map_block_override,
                     auto_skills_enabled=False,
                     builtin_skill_names=effective_builtin_skills,
+                    validate_committed_batteries=False,
                 )
                 prepared_paths = {
                     str(path)
@@ -4280,26 +6911,32 @@ async def run_test(
                             explicit_owners=test_owners,
                             overlays={**repair_overlays, **overlays},
                             redact_derived=not no_redact_derived,
+                            config_snapshot=pinned_vitest_config_snapshot,
                         )
                     repair_metadata = {**repair_metadata, "reran": True}
                     if bool(runner.get("ok", False)):
                         commit_paths = [
                             *(write.path for write in repair_writes),
                             *overlays,
-                            *(["JAUNT_LOG"] if (root / "JAUNT_LOG").is_file() else []),
                         ]
                         with _preserve_managed_files(root, commit_paths) as transaction:
-                            commit_test_files()
+                            publish_test_files(transaction)
                             transaction.commit()
+                        finalize_test_files(delay_repair_journal=True)
+                        # This is auxiliary provenance, not part of the repair's
+                        # rollback domain. Emit it only after the marker is
+                        # durably retired and the publication lease is released.
+                        # A crash or journal I/O error may omit the line, but can
+                        # never leave a validation claim for rolled-back bytes.
+                        if delayed_repair_journal_events:
+                            with contextlib.suppress(OSError):
+                                append_events(root, delayed_repair_journal_events)
 
-    if (
-        no_build
-        and not no_run
-        and not bool(runner.get("ok", False))
-        and _runner_allows_implementation_repair(runner)
-    ):
-        failed_cache_paths = tuple(
-            path for path in _failed_runner_test_paths(runner) if path in cached_battery_responses
+    should_reject_final_candidates = no_build or not _runner_allows_implementation_repair(runner)
+    if not no_run and not bool(runner.get("ok", False)) and should_reject_final_candidates:
+        failed_cache_paths = _runner_candidate_rejection_paths(
+            runner,
+            tuple(cached_battery_responses),
         )
         reject_batteries(
             failed_cache_paths,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
+import os
 import re
 import subprocess
 import uuid
@@ -22,15 +23,19 @@ from jaunt.targets.base import TargetDiagnostic
 from jaunt.typescript.artifacts import _atomic_text, _fsync_directory
 from jaunt.typescript.builder import (
     WorkerFactory,
+    _acquire_transaction_lease,
     _default_backend,
     _module_id,
     _module_path,
+    _PinnedWorkspace,
     _progress_advance,
     _progress_finish,
     _progress_phase,
     _prompt_text,
+    _retire_transaction_manifest,
     _safe_path,
     _sha256,
+    _write_transaction_manifest,
     _Write,
     analyze,
     atomic_write_manifest,
@@ -624,8 +629,8 @@ def _prepare_design_manifest(
 ) -> Path:
     """Durably mark the validation window before exposing proposed source bytes."""
 
+    root = root.resolve()
     directory = root / ".jaunt" / "transactions"
-    directory.mkdir(parents=True, exist_ok=True)
     manifest = directory / f"design-{uuid.uuid4().hex}.json"
     payload = {
         "state": "prepared",
@@ -640,13 +645,90 @@ def _prepare_design_manifest(
             }
         ],
     }
-    _atomic_text(manifest, json.dumps(payload, sort_keys=True, indent=2) + "\n")
+    with _PinnedWorkspace(root) as workspace:
+        pinned_directory = workspace.directory(directory)
+        lease = _acquire_transaction_lease(
+            directory,
+            blocking=True,
+            pinned_directory=pinned_directory,
+            authority_directory=workspace.root_directory,
+        )
+        if lease is None:  # pragma: no cover - blocking acquisition
+            raise JauntGenerationError("Could not acquire TypeScript transaction lease")
+        try:
+            pending_manifests = pinned_directory.iter_names("*.json")
+            if pending_manifests:
+                raise JauntGenerationError(
+                    "An unresolved TypeScript artifact transaction blocks design publication: "
+                    + ", ".join(pending_manifests)
+                )
+            workspace.verify_namespace()
+            _write_transaction_manifest(
+                manifest,
+                payload,
+                pinned_directory=pinned_directory,
+            )
+            workspace.verify_namespace()
+        finally:
+            lease.release()
     return manifest
 
 
-def _complete_design_manifest(manifest: Path) -> None:
-    manifest.unlink(missing_ok=True)
-    _fsync_directory(manifest.parent)
+def _complete_design_manifest(root: Path, manifest: Path) -> None:
+    """Durably retire exactly one owned design marker under the global lease."""
+
+    root = root.resolve()
+    directory = root / ".jaunt" / "transactions"
+    absolute_manifest = Path(os.path.abspath(manifest))
+    if absolute_manifest.parent != directory:
+        raise JauntGenerationError("Design transaction marker is outside the workspace journal")
+    manifest = absolute_manifest
+    with _PinnedWorkspace(root) as workspace:
+        try:
+            pinned_directory = workspace.directory(directory, create=False)
+        except FileNotFoundError as error:
+            raise JauntGenerationError("Design transaction marker directory is missing") from error
+        lease = _acquire_transaction_lease(
+            directory,
+            blocking=True,
+            pinned_directory=pinned_directory,
+            authority_directory=workspace.root_directory,
+        )
+        if lease is None:  # pragma: no cover - blocking acquisition
+            raise JauntGenerationError("Could not acquire TypeScript transaction lease")
+        try:
+            manifests = pinned_directory.iter_names("*.json")
+            foreign_manifests = tuple(name for name in manifests if name != manifest.name)
+            if foreign_manifests:
+                raise JauntGenerationError(
+                    "An unresolved TypeScript artifact transaction blocks design completion: "
+                    + ", ".join(foreign_manifests)
+                )
+            if manifest.name not in manifests:
+                raise JauntGenerationError(f"Design transaction marker is missing: {manifest.name}")
+            try:
+                payload = json.loads(pinned_directory.read_bytes(manifest.name).decode("utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as error:
+                raise JauntGenerationError(
+                    f"Design transaction marker is invalid: {manifest.name}"
+                ) from error
+            if not isinstance(payload, Mapping) or not (
+                payload.get("state") == "prepared" and payload.get("operation") == "design"
+            ):
+                raise JauntGenerationError(f"Design transaction marker is invalid: {manifest.name}")
+            workspace.verify_namespace()
+            if not _retire_transaction_manifest(
+                manifest,
+                payload,
+                pinned_directory=pinned_directory,
+            ):
+                raise JauntGenerationError(
+                    "Design transaction completed, but its recovery marker could not be "
+                    "durably retired"
+                )
+            workspace.verify_namespace()
+        finally:
+            lease.release()
 
 
 async def run_design(
@@ -837,6 +919,7 @@ async def run_design(
             root,
             (_Write(relative_spec, updated, "design", symbol_id),),
             expected_inputs={relative_spec: f"sha256:{source_digest}"},
+            allowed_transaction_manifests=(manifest.name,),
         )
         wrote_proposal = True
         async with worker_session(root, config, worker_factory=worker_factory) as (
@@ -869,14 +952,15 @@ async def run_design(
                     root,
                     (_Write(relative_spec, current, "design-rollback", symbol_id),),
                     expected_inputs={relative_spec: _sha256(updated.encode("utf-8"))},
+                    allowed_transaction_manifests=(manifest.name,),
                 )
         except BaseException:
             # Preserve the prepared marker when rollback itself cannot complete.
             raise
         else:
-            _complete_design_manifest(manifest)
+            _complete_design_manifest(root, manifest)
         raise
-    _complete_design_manifest(manifest)
+    _complete_design_manifest(root, manifest)
     _discard_design_proposal(proposal_path)
     append_events(root, [JournalEvent("design", symbol_id, "applied declaration patch")])
     _progress_finish(progress)

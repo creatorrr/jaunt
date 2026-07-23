@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
@@ -9,6 +10,9 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,13 +34,26 @@ from jaunt.generate.base import (
     ModuleSpecContext,
     TokenUsage,
 )
-from jaunt.targets.base import TargetBuildReport, TargetCheckReport, TargetDiagnostic, TargetStatus
+from jaunt.journal import JournalEvent, append_events as append_journal_events
+from jaunt.targets.base import (
+    TargetArtifact,
+    TargetBuildReport,
+    TargetCheckReport,
+    TargetDiagnostic,
+    TargetStatus,
+)
+from jaunt.typescript import builder as ts_builder
+from jaunt.typescript import tester as ts_tester
 from jaunt.typescript.builder import (
+    MISSING_INPUT,
+    _acquire_transaction_lease,
     _build_units,
     _build_request,
+    _CommittedBatteryInfrastructureError,
     _dependency_module_ids,
     _gate_prose_change,
     _generation_fingerprint,
+    _split_context_source,
     _topological_modules,
     _Write,
     TypeScriptAnalysis,
@@ -44,8 +61,14 @@ from jaunt.typescript.builder import (
     atomic_write_manifest,
     run_build,
     run_sync,
+    worker_session,
 )
-from jaunt.typescript.cli_bridge import check_payload, human_lines, status_payload
+from jaunt.typescript.cli_bridge import (
+    check_payload,
+    human_lines,
+    status_payload,
+    test_payload as typescript_test_payload,
+)
 from jaunt.typescript.contracts import (
     _add_contract_tag,
     _battery_request,
@@ -61,6 +84,7 @@ from jaunt.typescript.contracts import (
     run_eject,
 )
 from jaunt.typescript.design import (
+    _complete_design_manifest,
     _design_output_errors,
     _design_ranges,
     _materialize_magic_stubs,
@@ -78,25 +102,44 @@ from jaunt.typescript.protocol import (
 from jaunt.typescript.status import run_check, run_clean, run_status
 from jaunt.typescript.tester import (
     _assert_no_held_out_leak,
+    _canonical_digest,
+    _fixture_resolution_preconditions,
     _HeldOutLeakError,
     _implementation_repair_feedback,
+    _imported_type_context_files,
     _implicit_class_test_specs,
     _isolated_test_workspace,
     _is_reviewable_example_battery,
+    _module_resolved_test_dependency,
     _redact_runner_result,
+    _recover_pending_test_repairs,
+    _preserve_managed_files,
+    _rejected_test_diagnostic,
+    _rejected_test_paths,
+    _rejected_test_token,
     _runner_fingerprint,
     _run_test_runner,
     _static_test_validation,
     _strip_test_header,
     _terminate_runner_process,
     _test_header_metadata,
+    _test_dependency_runtime_identity,
+    _test_provenance,
     _test_request,
     _valid_runner_dto,
     _validate_test_owner_dependencies,
     _with_test_header,
+    _write_rejected_test_candidate,
+    _clear_rejected_test_candidate,
     run_test,
 )
-from jaunt.typescript.worker import REQUIRED_WORKER_CAPABILITIES, WorkerRemoteError
+from jaunt.typescript.worker import (
+    REQUIRED_WORKER_CAPABILITIES,
+    WorkerClient,
+    WorkerInstallation,
+    WorkerRemoteError,
+    WorkerToolchainChangedError,
+)
 
 
 def _digest(value: str) -> str:
@@ -145,6 +188,9 @@ def _config(root: Path) -> JauntConfig:
             json.dumps({"name": package, "version": version}) + "\n",
             encoding="utf-8",
         )
+        runtime = package_root / "dist/index.js"
+        runtime.parent.mkdir()
+        runtime.write_text(f"export const packageVersion = {version!r};\n", encoding="utf-8")
     (root / "tsconfig.json").write_text("{}\n")
     (root / "tsconfig.test.json").write_text("{}\n")
     (root / "jaunt.toml").write_text(
@@ -224,6 +270,84 @@ def test_test_owner_requires_direct_vitest_and_fast_check_dependencies(tmp_path:
             overlays={relative_test: 'import fc from "fast-check";\n'},
             require_fast_check=True,
         )
+
+
+def test_vitest_runtime_identity_uses_the_actual_owner_resolved_package(tmp_path: Path) -> None:
+    root_owner = tmp_path
+    child_owner = tmp_path / "packages/web"
+    child_owner.mkdir(parents=True)
+
+    def install(owner: Path, marker: str) -> None:
+        package = owner / "node_modules/vitest"
+        (package / "dist").mkdir(parents=True)
+        (package / "package.json").write_text(
+            '{"name":"vitest","version":"4.1.10","exports":"./dist/index.js"}\n',
+            encoding="utf-8",
+        )
+        (package / "dist/index.js").write_text(
+            f"export const owner = {marker!r};\n",
+            encoding="utf-8",
+        )
+
+    install(root_owner, "root")
+    install(child_owner, "child")
+
+    root_identity = _test_dependency_runtime_identity(tmp_path, root_owner, "vitest")
+    child_identity = _test_dependency_runtime_identity(tmp_path, child_owner, "vitest")
+
+    assert child_identity != root_identity
+    shutil.rmtree(child_owner / "node_modules/vitest")
+    assert _test_dependency_runtime_identity(tmp_path, child_owner, "vitest") == root_identity
+
+
+def test_runner_vitest_resolution_matches_node_peer_context(tmp_path: Path) -> None:
+    runner = tmp_path / "node_modules/@usejaunt/ts/dist/test/runner.js"
+    runner.parent.mkdir(parents=True)
+    runner.write_text("export {};\n", encoding="utf-8")
+
+    def install(package: Path, marker: str) -> None:
+        (package / "dist").mkdir(parents=True)
+        (package / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "vitest",
+                    "version": "4.1.10",
+                    "exports": {"./node": "./dist/node.js"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (package / "dist/node.js").write_text(
+            f"export const owner = {marker!r};\n",
+            encoding="utf-8",
+        )
+
+    install(tmp_path / "node_modules/vitest", "owner")
+    peer_vitest = tmp_path / "node_modules/@usejaunt/ts/node_modules/vitest"
+    install(peer_vitest, "runner-peer")
+
+    resolved = _module_resolved_test_dependency(runner, "vitest")
+    assert resolved is not None
+    node = shutil.which("node")
+    assert node is not None
+    node_entry = subprocess.run(
+        [
+            node,
+            "-e",
+            (
+                "const {createRequire}=require('node:module');"
+                "const r=createRequire(process.argv[1]);"
+                "process.stdout.write(r.resolve('vitest/node'));"
+            ),
+            str(runner),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+    assert Path(node_entry).resolve().is_relative_to(resolved.resolve())
+    assert resolved.resolve() == peer_vitest.resolve()
 
 
 class FakeWorker:
@@ -431,6 +555,189 @@ class FakeWorker:
             "kind": kind,
             "moduleId": "ts:src/math",
         }
+
+
+class _RuntimeMutationWorker(FakeWorker):
+    runtime_source = "export const workerRuntime = 1;\n"
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        package_root = root / ".tooling/@usejaunt/ts"
+        runtime_entry = package_root / "dist/worker.js"
+        runtime_entry.parent.mkdir(parents=True)
+        runtime_entry.write_text(self.runtime_source, encoding="utf-8")
+        for relative in (
+            "dist/test/runner.js",
+            "dist/test/permission_guard.cjs",
+            "dist/test/reporter.js",
+            "dist/test/heldout.js",
+            "dist/analyzer/artifacts.js",
+            "dist/analyzer/diagnostics.js",
+            "dist/analyzer/canonical.js",
+            "dist/analyzer/provenance.js",
+            "dist/protocol/errors.js",
+        ):
+            support = package_root / relative
+            support.parent.mkdir(parents=True, exist_ok=True)
+            support.write_text("export {};\n", encoding="utf-8")
+        (package_root / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "@usejaunt/ts",
+                    "version": "0.1.1",
+                    "exports": {
+                        "./worker": "./dist/worker.js",
+                        "./test-runner": "./dist/test/runner.js",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        compiler_root = root / "node_modules/typescript"
+        compiler_entry = compiler_root / "lib/typescript.js"
+        compiler_entry.parent.mkdir(parents=True, exist_ok=True)
+        compiler_entry.write_text("export const version = '6.0.2';\n", encoding="utf-8")
+        (compiler_root / "lib/lib.es2024.d.ts").write_text(
+            "interface Array<T> { readonly length: number; }\n",
+            encoding="utf-8",
+        )
+        (compiler_root / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "typescript",
+                    "version": "6.0.2",
+                    "main": "./lib/typescript.js",
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.installation = WorkerInstallation(
+            node=sys.executable,
+            worker_entry=runtime_entry,
+            compiler_module_path=compiler_entry,
+            package_root=package_root,
+            tool_owner=root,
+            package_managed=True,
+        )
+        self._identity_guard = WorkerClient(root=root, installation=self.installation)
+        self._runtime_rewrite: str | None = None
+        self._remove_runtime = False
+        self._mutation_trigger = "recomposeModuleIds"
+        self._mutate_after_verification = False
+        self._runtime_identity_sealed = False
+
+    async def __aenter__(self) -> _RuntimeMutationWorker:
+        self._identity_guard.reset_full_runtime_identity()
+        return self
+
+    def arm_runtime_rewrite(
+        self,
+        source: str,
+        *,
+        trigger: str = "recomposeModuleIds",
+    ) -> None:
+        self._runtime_rewrite = source
+        self._mutation_trigger = trigger
+
+    def arm_runtime_removal(self, *, trigger: str = "recomposeModuleIds") -> None:
+        self._remove_runtime = True
+        self._mutation_trigger = trigger
+
+    def arm_runtime_removal_after_next_verification(self) -> None:
+        """Remove the runtime after one successful transaction-boundary check."""
+
+        self._remove_runtime = True
+        self._mutate_after_verification = True
+
+    def verify_runtime_identity(self) -> str:
+        identity = self._identity_guard.verify_runtime_identity()
+        if self._mutate_after_verification:
+            if self._remove_runtime:
+                self.installation.worker_entry.unlink()
+                self._remove_runtime = False
+            else:
+                assert self._runtime_rewrite is not None
+                self.installation.worker_entry.write_text(
+                    self._runtime_rewrite,
+                    encoding="utf-8",
+                )
+            self._runtime_rewrite = None
+            self._mutate_after_verification = False
+        return identity
+
+    def pin_full_runtime_identity(self) -> str:
+        return self._identity_guard.pin_full_runtime_identity()
+
+    def pin_package_runtime_identity(
+        self,
+        label: str,
+        package_root: Path,
+        *,
+        expected_name: str | None = None,
+    ) -> str:
+        return self._identity_guard.pin_package_runtime_identity(
+            label,
+            package_root,
+            expected_name=expected_name,
+        )
+
+    def pin_package_resolution_identity(
+        self,
+        label: str,
+        start: Path,
+        package: str,
+        *,
+        boundary: Path | None = None,
+        module_path: bool = False,
+        expected_name: str | None = None,
+    ) -> str:
+        return self._identity_guard.pin_package_resolution_identity(
+            label,
+            start,
+            package,
+            boundary=boundary,
+            module_path=module_path,
+            expected_name=expected_name,
+        )
+
+    def pin_package_resolution_closure(
+        self,
+        label: str,
+        start: Path,
+        package: str,
+        *,
+        boundary: Path | None = None,
+        module_path: bool = False,
+        expected_name: str | None = None,
+    ) -> str:
+        return self._identity_guard.pin_package_resolution_closure(
+            label,
+            start,
+            package,
+            boundary=boundary,
+            module_path=module_path,
+            expected_name=expected_name,
+        )
+
+    def seal_runtime_identity(self) -> str:
+        identity = self.verify_runtime_identity()
+        self._runtime_identity_sealed = True
+        return identity
+
+    async def initialize(self, _params: InitializeParams) -> InitializeResult:
+        self.verify_runtime_identity()
+        return await super().initialize(_params)
+
+    async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        self._runtime_identity_sealed = False
+        result = await super().request(method, params)
+        if (
+            method == "validateOverlay"
+            and params.get(self._mutation_trigger)
+            and (self._remove_runtime or self._runtime_rewrite is not None)
+        ):
+            self._mutate_after_verification = True
+        return result
 
 
 class FakeGenerator(GeneratorBackend):
@@ -684,6 +991,34 @@ class _TestSpecWorker(FakeWorker):
         return result
 
 
+class _RuntimeMutationTestWorker(_RuntimeMutationWorker):
+    def __init__(self, root: Path) -> None:
+        self.session_exited = False
+        self.verification_session_states: list[bool] = []
+        super().__init__(root)
+        self.test_spec_path = "tests/math.jaunt-test.ts"
+        (root / self.test_spec_path).write_text("// Verify the public double function.\n")
+
+    async def __aexit__(self, *_args: object) -> None:
+        self.session_exited = True
+
+    def verify_runtime_identity(self) -> str:
+        self.verification_session_states.append(self.session_exited)
+        return super().verify_runtime_identity()
+
+    async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        result = await super().request(method, params)
+        if method == "analyzeWorkspace":
+            result["testSpecs"] = [
+                {
+                    "path": self.test_spec_path,
+                    "project": "tsconfig.test.json",
+                    "targets": ["ts:src/math#double"],
+                }
+            ]
+        return result
+
+
 def _cost(
     *,
     prompt: int,
@@ -828,10 +1163,10 @@ def test_artifact_transaction_rolls_back_and_clears_manifest(
     second.write_text("old-b\n")
     original_replace = os.replace
 
-    def fail_second(source: str | Path, destination: str | Path) -> None:
-        if Path(destination) == second:
+    def fail_second(source: str | Path, destination: str | Path, **kwargs: Any) -> None:
+        if Path(destination).name == second.name:
             raise OSError("simulated second replacement failure")
-        original_replace(source, destination)
+        original_replace(source, destination, **kwargs)
 
     monkeypatch.setattr("jaunt.typescript.builder.os.replace", fail_second)
     with pytest.raises(OSError, match="simulated"):
@@ -845,6 +1180,77 @@ def test_artifact_transaction_rolls_back_and_clears_manifest(
 
     assert first.read_text() == "old-a\n"
     assert second.read_text() == "old-b\n"
+    assert not tuple((tmp_path / ".jaunt/transactions").glob("*.json"))
+
+
+def test_artifact_transaction_rolls_back_unconverged_touched_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "out/a.ts"
+    output.parent.mkdir()
+    output.write_text("old-a\n", encoding="utf-8")
+    from jaunt.typescript import builder as typescript_builder
+
+    original_path_hash = typescript_builder._PinnedDirectory.path_hash
+    reads = 0
+
+    def stale_post_write_hash(pinned: Any, name: str) -> str | None:
+        nonlocal reads
+        digest = original_path_hash(pinned, name)
+        if pinned.path == output.parent and name == output.name:
+            reads += 1
+            if reads == 2:
+                return "sha256:" + "0" * 64
+        return digest
+
+    monkeypatch.setattr(
+        typescript_builder._PinnedDirectory,
+        "path_hash",
+        stale_post_write_hash,
+    )
+    with pytest.raises(
+        JauntGenerationError,
+        match="did not converge after commit for ts:a",
+    ):
+        atomic_write_manifest(
+            tmp_path,
+            (_Write("out/a.ts", "new-a\n", "implementation", "ts:a"),),
+        )
+
+    assert output.read_text(encoding="utf-8") == "old-a\n"
+    assert not tuple((tmp_path / ".jaunt/transactions").glob("*.json"))
+
+
+def test_artifact_transaction_final_seal_rolls_back_replaced_bytes(tmp_path: Path) -> None:
+    output = tmp_path / "out/a.ts"
+    output.parent.mkdir()
+    output.write_text("old-a\n", encoding="utf-8")
+    pre_commit_calls = 0
+    seal_calls = 0
+
+    def pre_commit_guard() -> None:
+        nonlocal pre_commit_calls
+        pre_commit_calls += 1
+
+    def commit_seal() -> None:
+        nonlocal seal_calls
+        seal_calls += 1
+        raise WorkerToolchainChangedError("runtime changed at the final commit boundary")
+
+    with pytest.raises(
+        WorkerToolchainChangedError,
+        match="JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+    ):
+        atomic_write_manifest(
+            tmp_path,
+            (_Write("out/a.ts", "new-a\n", "implementation", "ts:a"),),
+            pre_commit_guard=pre_commit_guard,
+            commit_seal=commit_seal,
+        )
+
+    assert pre_commit_calls == 1
+    assert seal_calls == 1
+    assert output.read_text(encoding="utf-8") == "old-a\n"
     assert not tuple((tmp_path / ".jaunt/transactions").glob("*.json"))
 
 
@@ -863,15 +1269,28 @@ async def test_next_typescript_operation_recovers_killed_test_repair(
 import os
 import sys
 from pathlib import Path
+from jaunt.typescript.builder import _Write
 from jaunt.typescript.tester import _preserve_managed_files
 
 root = Path(sys.argv[1])
-implementation = root / "src/__generated__/math.ts"
-battery = root / "tests/__generated__/math.derived.test.ts"
-with _preserve_managed_files(root, ["src/__generated__/math.ts"]) as transaction:
-    implementation.write_text("unaccepted repair\\n", encoding="utf-8")
-    transaction.add_paths(["tests/__generated__/math.derived.test.ts"])
-    battery.write_text("partial candidate battery\\n", encoding="utf-8")
+with _preserve_managed_files(root, []) as transaction:
+    transaction.publish(
+        (
+            _Write(
+                "src/__generated__/math.ts",
+                "unaccepted repair\\n",
+                "implementation",
+                "ts:math",
+            ),
+            _Write(
+                "tests/__generated__/math.derived.test.ts",
+                "partial candidate battery\\n",
+                "test",
+                "ts-test:math",
+            ),
+        ),
+        expected_inputs={},
+    )
     os._exit(99)
 """
     crashed = subprocess.run(
@@ -894,6 +1313,548 @@ with _preserve_managed_files(root, ["src/__generated__/math.ts"]) as transaction
     assert implementation.read_text(encoding="utf-8") == "prior implementation\n"
     assert battery.read_text(encoding="utf-8") == "prior derived battery\n"
     assert not tuple((tmp_path / ".jaunt/transactions").glob("test-repair-*.json"))
+
+
+def test_test_repair_recovery_waits_for_global_transaction_lease(tmp_path: Path) -> None:
+    output = tmp_path / "src/__generated__/math.ts"
+    output.parent.mkdir(parents=True)
+    output.write_text("unaccepted repair\n", encoding="utf-8")
+
+    directory = tmp_path / ".jaunt/transactions"
+    directory.mkdir(parents=True)
+    manifest = directory / "test-repair-crashed.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "scheme": "jaunt-ts-test-repair/2",
+                # A failed retirement from this same process must be recoverable
+                # after it releases the authoritative transaction lease.
+                "ownerPid": os.getpid(),
+                "snapshots": [
+                    {
+                        "path": "src/__generated__/math.ts",
+                        "content": base64.b64encode(b"prior implementation\n").decode("ascii"),
+                        "mode": 0o644,
+                        "after": _digest("unaccepted repair\n"),
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    holder_ready = threading.Event()
+    release_holder = threading.Event()
+    started = threading.Event()
+
+    def hold_workspace_and_lease() -> None:
+        with ts_builder._PinnedWorkspace(tmp_path) as workspace:
+            transaction_directory = workspace.directory(directory, create=False)
+            lease = _acquire_transaction_lease(
+                directory,
+                blocking=True,
+                pinned_directory=transaction_directory,
+                authority_directory=workspace.root_directory,
+            )
+            assert lease is not None
+            holder_ready.set()
+            try:
+                assert release_holder.wait(timeout=5)
+            finally:
+                lease.release()
+
+    def recover() -> tuple[str, ...]:
+        started.set()
+        return _recover_pending_test_repairs(tmp_path)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        holder = executor.submit(hold_workspace_and_lease)
+        assert holder_ready.wait(timeout=5)
+        try:
+            pending = executor.submit(recover)
+            assert started.wait(timeout=5)
+            assert not pending.done()
+            assert output.read_text(encoding="utf-8") == "unaccepted repair\n"
+            assert manifest.is_file()
+        finally:
+            release_holder.set()
+        holder.result(timeout=5)
+        assert pending.result(timeout=5) == ("src/__generated__/math.ts",)
+
+    assert output.read_text(encoding="utf-8") == "prior implementation\n"
+    expected_lock_files = {".atomic-write.lock"} if os.name == "nt" else set()
+    assert {path.name for path in directory.iterdir()} == expected_lock_files
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows root handles serialize before this gap")
+def test_test_repair_recovery_waits_when_writer_has_lease_before_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "src/__generated__/math.ts"
+    output.parent.mkdir(parents=True)
+    output.write_text("prior implementation\n", encoding="utf-8")
+    directory = tmp_path / ".jaunt/transactions"
+    directory.mkdir(parents=True)
+    manifest = directory / "test-repair-live.json"
+    holder_ready = threading.Event()
+    publish_marker = threading.Event()
+    marker_published = threading.Event()
+    release_holder = threading.Event()
+    recovery_attempted_lease = threading.Event()
+    role = threading.local()
+    original_acquire = ts_tester._acquire_transaction_lease
+
+    def observed_acquire(*args, **kwargs):
+        if getattr(role, "recovery", False):
+            recovery_attempted_lease.set()
+        return original_acquire(*args, **kwargs)
+
+    def hold_then_publish() -> None:
+        with ts_builder._PinnedWorkspace(tmp_path) as workspace:
+            transaction_directory = workspace.directory(directory, create=False)
+            lease = _acquire_transaction_lease(
+                directory,
+                blocking=True,
+                pinned_directory=transaction_directory,
+                authority_directory=workspace.root_directory,
+            )
+            assert lease is not None
+            holder_ready.set()
+            try:
+                assert publish_marker.wait(timeout=5)
+                output.write_text("unaccepted repair\n", encoding="utf-8")
+                manifest.write_text(
+                    json.dumps(
+                        {
+                            "scheme": "jaunt-ts-test-repair/2",
+                            "ownerPid": os.getpid(),
+                            "snapshots": [
+                                {
+                                    "path": "src/__generated__/math.ts",
+                                    "content": base64.b64encode(b"prior implementation\n").decode(
+                                        "ascii"
+                                    ),
+                                    "mode": 0o644,
+                                    "after": _digest("unaccepted repair\n"),
+                                }
+                            ],
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                marker_published.set()
+                assert release_holder.wait(timeout=5)
+            finally:
+                lease.release()
+
+    def recover() -> tuple[str, ...]:
+        role.recovery = True
+        return _recover_pending_test_repairs(tmp_path)
+
+    monkeypatch.setattr(ts_tester, "_acquire_transaction_lease", observed_acquire)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        holder = executor.submit(hold_then_publish)
+        assert holder_ready.wait(timeout=5)
+        try:
+            pending = executor.submit(recover)
+            assert recovery_attempted_lease.wait(timeout=5)
+            assert not pending.done()
+            publish_marker.set()
+            assert marker_published.wait(timeout=5)
+            assert output.read_text(encoding="utf-8") == "unaccepted repair\n"
+        finally:
+            release_holder.set()
+            publish_marker.set()
+        holder.result(timeout=5)
+        assert pending.result(timeout=5) == ("src/__generated__/math.ts",)
+
+    assert output.read_text(encoding="utf-8") == "prior implementation\n"
+    assert not manifest.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink regression")
+def test_test_repair_publication_does_not_follow_managed_file_symlink(tmp_path: Path) -> None:
+    output_directory = tmp_path / "src/__generated__"
+    output_directory.mkdir(parents=True)
+    victim = output_directory / "victim.ts"
+    victim.write_text("victim bytes\n", encoding="utf-8")
+    managed = output_directory / "math.ts"
+    managed.symlink_to(victim.name)
+
+    with pytest.raises(JauntConfigError, match="Could not snapshot managed repair path"):
+        with _preserve_managed_files(
+            tmp_path,
+            ["src/__generated__/math.ts"],
+        ) as transaction:
+            transaction.publish(
+                (
+                    _Write(
+                        "src/__generated__/math.ts",
+                        "candidate bytes\n",
+                        "implementation",
+                        "ts:math",
+                    ),
+                ),
+                expected_inputs={},
+            )
+
+    assert managed.is_symlink()
+    assert victim.read_text(encoding="utf-8") == "victim bytes\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink regression")
+def test_test_repair_recovery_does_not_follow_managed_file_symlink(tmp_path: Path) -> None:
+    output_directory = tmp_path / "src/__generated__"
+    output_directory.mkdir(parents=True)
+    victim = output_directory / "victim.ts"
+    victim.write_text("unaccepted repair\n", encoding="utf-8")
+    managed = output_directory / "math.ts"
+    managed.symlink_to(victim.name)
+    directory = tmp_path / ".jaunt/transactions"
+    directory.mkdir(parents=True)
+    manifest = directory / "test-repair-crashed.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "scheme": "jaunt-ts-test-repair/2",
+                "ownerPid": os.getpid(),
+                "snapshots": [
+                    {
+                        "path": "src/__generated__/math.ts",
+                        "content": base64.b64encode(b"prior implementation\n").decode("ascii"),
+                        "mode": 0o644,
+                        "after": _digest("unaccepted repair\n"),
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(JauntConfigError, match="Could not inspect TypeScript test-repair path"):
+        _recover_pending_test_repairs(tmp_path)
+
+    assert managed.is_symlink()
+    assert victim.read_text(encoding="utf-8") == "unaccepted repair\n"
+    assert manifest.is_file()
+
+
+def test_test_repair_recovery_keeps_marker_when_retirement_is_not_durable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "src/__generated__/math.ts"
+    output.parent.mkdir(parents=True)
+    output.write_text("unaccepted repair\n", encoding="utf-8")
+    terminated = subprocess.Popen([sys.executable, "-c", "pass"])
+    owner_pid = terminated.pid
+    assert terminated.wait(timeout=5) == 0
+    directory = tmp_path / ".jaunt/transactions"
+    directory.mkdir(parents=True)
+    manifest = directory / "test-repair-crashed.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "scheme": "jaunt-ts-test-repair/2",
+                "ownerPid": owner_pid,
+                "snapshots": [
+                    {
+                        "path": "src/__generated__/math.ts",
+                        "content": base64.b64encode(b"prior implementation\n").decode("ascii"),
+                        "mode": 0o644,
+                        "after": _digest("unaccepted repair\n"),
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    original_fsync = ts_builder._PinnedDirectory.fsync_required
+
+    def fail_transaction_directory_sync(pinned: Any) -> None:
+        if pinned.path.resolve() == directory.resolve():
+            raise OSError("simulated directory sync failure")
+        original_fsync(pinned)
+
+    monkeypatch.setattr(
+        ts_builder._PinnedDirectory,
+        "fsync_required",
+        fail_transaction_directory_sync,
+    )
+    with pytest.raises(JauntConfigError, match="durably retire.*test-repair marker"):
+        _recover_pending_test_repairs(tmp_path)
+
+    assert output.read_text(encoding="utf-8") == "prior implementation\n"
+    assert manifest.is_file()
+
+
+def test_test_repair_outer_transaction_holds_lease_until_commit(tmp_path: Path) -> None:
+    output = tmp_path / "src/__generated__/math.ts"
+    output.parent.mkdir(parents=True)
+    output.write_text("original\n", encoding="utf-8")
+    started = threading.Event()
+
+    def publish_newer() -> None:
+        started.set()
+        atomic_write_manifest(
+            tmp_path,
+            (_Write("src/__generated__/math.ts", "newer\n", "implementation", "ts:math"),),
+        )
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    pending = None
+    try:
+        with _preserve_managed_files(tmp_path, ["src/__generated__/math.ts"]) as transaction:
+            transaction.publish(
+                (
+                    _Write(
+                        "src/__generated__/math.ts",
+                        "repair\n",
+                        "implementation",
+                        "ts:math",
+                    ),
+                ),
+                expected_inputs={},
+            )
+            pending = executor.submit(publish_newer)
+            assert started.wait(timeout=5)
+            assert not pending.done()
+            assert output.read_text(encoding="utf-8") == "repair\n"
+            transaction.commit()
+        pending.result(timeout=5)
+    finally:
+        executor.shutdown(wait=True)
+
+    assert output.read_text(encoding="utf-8") == "newer\n"
+    assert not tuple((tmp_path / ".jaunt/transactions").glob("*.json"))
+
+
+def test_test_repair_refuses_an_unresolved_foreign_transaction(tmp_path: Path) -> None:
+    output = tmp_path / "src/__generated__/math.ts"
+    output.parent.mkdir(parents=True)
+    output.write_text("original\n", encoding="utf-8")
+    transaction_directory = tmp_path / ".jaunt/transactions"
+    transaction_directory.mkdir(parents=True)
+    marker = transaction_directory / "legacy.json"
+    marker.write_text('{"state":"prepared"}\n', encoding="utf-8")
+
+    with pytest.raises(JauntGenerationError, match="legacy.json"):
+        with _preserve_managed_files(tmp_path, ["src/__generated__/math.ts"]):
+            raise AssertionError("unresolved transaction must block entry")
+
+    assert output.read_text(encoding="utf-8") == "original\n"
+    assert marker.is_file()
+
+
+def test_test_repair_rollback_cas_preserves_newer_artifact(tmp_path: Path) -> None:
+    output = tmp_path / "src/__generated__/math.ts"
+    output.parent.mkdir(parents=True)
+    output.write_text("original\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="post-publication failure"):
+        with _preserve_managed_files(tmp_path, ["src/__generated__/math.ts"]) as transaction:
+            transaction.publish(
+                (
+                    _Write(
+                        "src/__generated__/math.ts",
+                        "repair\n",
+                        "implementation",
+                        "ts:math",
+                    ),
+                ),
+                expected_inputs={},
+            )
+            # Model an external writer that ignores Jaunt's advisory lease.
+            output.write_text("newer implementation\n", encoding="utf-8")
+            raise RuntimeError("post-publication failure")
+
+    assert output.read_text(encoding="utf-8") == "newer implementation\n"
+    assert not tuple((tmp_path / ".jaunt/transactions").glob("*.json"))
+
+
+def test_test_repair_reuses_pinned_directories_for_publish_and_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outputs = (
+        tmp_path / "src/__generated__/one.ts",
+        tmp_path / "src/__generated__/nested/two.ts",
+    )
+    for output in outputs:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(f"original {output.stem}\n", encoding="utf-8")
+
+    original_directory = ts_tester._PinnedWorkspace.directory
+    pins: list[tuple[object, Path, object]] = []
+
+    def track_directory(
+        workspace: Any,
+        directory: Path,
+        *,
+        create: bool = True,
+    ) -> Any:
+        pinned = original_directory(workspace, directory, create=create)
+        pins.append((workspace, directory, pinned))
+        return pinned
+
+    monkeypatch.setattr(ts_tester._PinnedWorkspace, "directory", track_directory)
+
+    with pytest.raises(RuntimeError, match="rollback after publication"):
+        with _preserve_managed_files(
+            tmp_path,
+            [path.relative_to(tmp_path).as_posix() for path in outputs],
+        ) as transaction:
+            transaction.publish(
+                tuple(
+                    _Write(
+                        path.relative_to(tmp_path).as_posix(),
+                        f"repair {path.stem}\n",
+                        "implementation",
+                        f"ts:{path.stem}",
+                    )
+                    for path in outputs
+                ),
+                expected_inputs={},
+            )
+            raise RuntimeError("rollback after publication")
+
+    assert len({id(workspace) for workspace, _path, _pinned in pins}) == 1
+    pins_by_path: dict[Path, set[int]] = {}
+    for _workspace, path, pinned in pins:
+        pins_by_path.setdefault(path.resolve(), set()).add(id(pinned))
+    assert all(len(identities) == 1 for identities in pins_by_path.values())
+    assert {path.parent.resolve() for path in outputs} <= pins_by_path.keys()
+    assert [path.read_text(encoding="utf-8") for path in outputs] == [
+        "original one\n",
+        "original two\n",
+    ]
+
+
+def test_test_repair_removes_registered_temp_when_staging_fsync_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "src/__generated__/math.ts"
+    output.parent.mkdir(parents=True)
+    output.write_text("original\n", encoding="utf-8")
+    original_create_temp = ts_tester._PinnedDirectory.create_temp
+    original_fsync = ts_tester.os.fsync
+    staged_descriptor: int | None = None
+
+    def track_repair_temp(
+        pinned: Any,
+        prefix: str,
+        suffix: str = "",
+    ) -> tuple[int, str]:
+        nonlocal staged_descriptor
+        descriptor, name = original_create_temp(pinned, prefix, suffix)
+        if "jaunt-repair" in prefix:
+            staged_descriptor = descriptor
+        return descriptor, name
+
+    def fail_staged_fsync(descriptor: int) -> None:
+        if descriptor == staged_descriptor:
+            raise OSError("simulated staging fsync failure")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(ts_tester._PinnedDirectory, "create_temp", track_repair_temp)
+    monkeypatch.setattr(ts_tester.os, "fsync", fail_staged_fsync)
+
+    with _preserve_managed_files(tmp_path, ["src/__generated__/math.ts"]) as transaction:
+        with pytest.raises(OSError, match="staging fsync failure"):
+            transaction.publish(
+                (
+                    _Write(
+                        "src/__generated__/math.ts",
+                        "repair\n",
+                        "implementation",
+                        "ts:math",
+                    ),
+                ),
+                expected_inputs={},
+            )
+
+    assert output.read_text(encoding="utf-8") == "original\n"
+    assert not tuple(output.parent.glob(".math.ts.jaunt-repair-*"))
+
+
+def test_test_repair_recovery_cas_preserves_newer_artifact(tmp_path: Path) -> None:
+    output = tmp_path / "src/__generated__/math.ts"
+    output.parent.mkdir(parents=True)
+    output.write_text("newer implementation\n", encoding="utf-8")
+    terminated = subprocess.Popen([sys.executable, "-c", "pass"])
+    owner_pid = terminated.pid
+    assert terminated.wait(timeout=5) == 0
+    directory = tmp_path / ".jaunt/transactions"
+    directory.mkdir(parents=True)
+    manifest = directory / "test-repair-crashed.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "scheme": "jaunt-ts-test-repair/2",
+                "ownerPid": owner_pid,
+                "snapshots": [
+                    {
+                        "path": "src/__generated__/math.ts",
+                        "content": base64.b64encode(b"original\n").decode("ascii"),
+                        "mode": 0o644,
+                        "after": _digest("repair\n"),
+                    },
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert _recover_pending_test_repairs(tmp_path) == ()
+    assert output.read_text(encoding="utf-8") == "newer implementation\n"
+    assert not manifest.exists()
+
+
+def test_test_repair_outer_retirement_failure_rolls_back_and_keeps_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "src/__generated__/math.ts"
+    directory = tmp_path / ".jaunt/transactions"
+    output.parent.mkdir(parents=True)
+    output.write_text("original\n", encoding="utf-8")
+
+    with pytest.raises(JauntConfigError, match="durably retire.*test-repair marker"):
+        with _preserve_managed_files(tmp_path, ["src/__generated__/math.ts"]) as transaction:
+            transaction.publish(
+                (
+                    _Write(
+                        "src/__generated__/math.ts",
+                        "repair\n",
+                        "implementation",
+                        "ts:math",
+                    ),
+                ),
+                expected_inputs={},
+            )
+            original_fsync = ts_builder._PinnedDirectory.fsync_required
+
+            def fail_transaction_directory_sync(pinned: Any) -> None:
+                if pinned.path.resolve() == directory.resolve():
+                    raise OSError("simulated directory sync failure")
+                original_fsync(pinned)
+
+            monkeypatch.setattr(
+                ts_builder._PinnedDirectory,
+                "fsync_required",
+                fail_transaction_directory_sync,
+            )
+            transaction.commit()
+
+    assert output.read_text(encoding="utf-8") == "original\n"
+    assert tuple((tmp_path / ".jaunt/transactions").glob("test-repair-*.json"))
 
 
 def test_sigkill_during_isolated_model_repair_never_mutates_or_exposes_held_out_files(
@@ -1221,6 +2182,1073 @@ async def test_build_repairs_candidate_rejected_by_final_unit_conformance(
 
 
 @pytest.mark.asyncio
+async def test_build_retries_candidate_rejected_by_committed_target_battery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _RuntimeMutationTestWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    built = await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+        repo_map_enabled=False,
+        auto_skills_enabled=False,
+    )
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    implementation = tmp_path / "src/__generated__/math.ts"
+    committed = implementation.read_bytes()
+
+    async def candidate_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        overlays = kwargs.get("overlays", {})
+        candidate = str(overlays.get("src/__generated__/math.ts", ""))
+        if kwargs.get("typecheck_only") or "value + 1" not in candidate:
+            return {
+                "ok": True,
+                "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+                "tests": [],
+                "diagnostics": [],
+            }
+        assert implementation.read_bytes() == committed
+        return {
+            "ok": False,
+            "mode": "run",
+            "tests": [
+                {
+                    "path": "tests/__generated__/math.example.test.ts",
+                    "ok": False,
+                }
+            ],
+            "failures": [
+                {
+                    "category": "assertion",
+                    "path": "tests/__generated__/math.example.test.ts",
+                }
+            ],
+        }
+
+    class BadThenGoodGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            self.calls += 1
+            operator = "+ 1" if self.calls == 1 else "* 2"
+            return (
+                f"const __jaunt_impl_double = (value: number): number => value {operator};\n",
+                TokenUsage(20, 10, "fake-ts", "fake"),
+                (),
+            )
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", candidate_batches)
+    generator = BadThenGoodGenerator()
+    report = await run_build(
+        tmp_path,
+        config,
+        force=True,
+        max_attempts=2,
+        generator=generator,
+        response_cache=ResponseCache(tmp_path / ".candidate-gate-cache"),
+        worker_factory=lambda *_: worker,
+        repo_map_enabled=False,
+        auto_skills_enabled=False,
+    )
+
+    assert built.exit_code == 0
+    assert seeded.exit_code == 0
+    assert report.exit_code == 0
+    assert generator.calls == 2
+    assert "value * 2" in implementation.read_text(encoding="utf-8")
+    outcome = report.metadata["candidate_outcomes"]["ts:src/math"]
+    assert outcome["retry_count"] == 1
+    assert any("JAUNT_TS_COMMITTED_BATTERY" in reason for reason in outcome["retry_reasons"])
+
+
+@pytest.mark.asyncio
+async def test_build_retries_candidate_rejected_by_committed_battery_typecheck(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    built = await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+        repo_map_enabled=False,
+        auto_skills_enabled=False,
+    )
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+
+    async def candidate_typecheck(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        candidate = str(kwargs.get("overlays", {}).get("src/__generated__/math.ts", ""))
+        if kwargs.get("typecheck_only") and "value + 1" in candidate:
+            return {
+                "ok": False,
+                "mode": "typecheck",
+                "tests": [],
+                "diagnostics": [
+                    {
+                        "code": "TS2322",
+                        "message": "candidate breaks the committed battery type surface",
+                        "severity": "error",
+                    }
+                ],
+            }
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    class BadThenGoodGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            self.calls += 1
+            operator = "+ 1" if self.calls == 1 else "* 2"
+            return (
+                f"const __jaunt_impl_double = (value: number): number => value {operator};\n",
+                TokenUsage(20, 10, "fake-ts", "fake"),
+                (),
+            )
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", candidate_typecheck)
+    generator = BadThenGoodGenerator()
+    report = await run_build(
+        tmp_path,
+        config,
+        force=True,
+        max_attempts=2,
+        generator=generator,
+        response_cache=ResponseCache(tmp_path / ".candidate-typecheck-gate-cache"),
+        worker_factory=lambda *_: worker,
+        repo_map_enabled=False,
+        auto_skills_enabled=False,
+    )
+
+    assert built.exit_code == 0
+    assert seeded.exit_code == 0
+    assert report.exit_code == 0
+    assert generator.calls == 2
+    outcome = report.metadata["candidate_outcomes"]["ts:src/math"]
+    assert outcome["retry_count"] == 1
+    assert any("TS2322" in reason for reason in outcome["retry_reasons"])
+
+
+@pytest.mark.asyncio
+async def test_build_validates_committed_battery_after_runner_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _RuntimeMutationTestWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    built = await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+        repo_map_enabled=False,
+        auto_skills_enabled=False,
+    )
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+
+    runner = worker.installation.package_root / "dist/test/runner.js"
+    runner.write_text("export const changedRunner = true;\n", encoding="utf-8")
+
+    validation_modes: list[str] = []
+
+    async def validate_with_current_runner(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        mode = "typecheck" if kwargs.get("typecheck_only") else "run"
+        validation_modes.append(mode)
+        overlays = kwargs.get("overlays", {})
+        regressed = isinstance(overlays, Mapping) and any(
+            "+ 1" in str(source) for source in overlays.values()
+        )
+        if mode == "run" and regressed:
+            return {
+                "ok": False,
+                "mode": "run",
+                "tests": [
+                    {
+                        "file": "tests/__generated__/math.example.test.ts",
+                        "tier": "example",
+                        "status": "failed",
+                        "caseId": "runner-rebuild-gate",
+                        "category": "assertion",
+                    }
+                ],
+                "diagnostics": [],
+            }
+        return {"ok": True, "mode": mode, "tests": [], "diagnostics": []}
+
+    class BadThenGoodGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate_request(
+            self, request: GenerationRequest, **_kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            self.calls += 1
+            operator = "+ 1" if self.calls == 1 else "* 2"
+            return (
+                f"const __jaunt_impl_double = (value: number): number => value {operator};\n",
+                TokenUsage(20, 10, "fake-ts", "fake"),
+                (),
+            )
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", validate_with_current_runner)
+    generator = BadThenGoodGenerator()
+    report = await run_build(
+        tmp_path,
+        config,
+        force=True,
+        max_attempts=2,
+        generator=generator,
+        response_cache=ResponseCache(tmp_path / ".runner-rebuild-gate-cache"),
+        worker_factory=lambda *_: worker,
+        repo_map_enabled=False,
+        auto_skills_enabled=False,
+    )
+
+    assert built.exit_code == 0
+    assert seeded.exit_code == 0
+    assert report.exit_code == 0
+    assert generator.calls == 2
+    assert validation_modes == ["typecheck", "run"] * 3
+
+
+@pytest.mark.asyncio
+async def test_build_rolls_back_when_runner_changes_after_committed_battery_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    worker = _RuntimeMutationTestWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    built = await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert built.exit_code == seeded.exit_code == 0
+    implementation = tmp_path / "src/__generated__/math.ts"
+    before = implementation.read_bytes()
+    runner = worker.installation.package_root / "dist/test/runner.js"
+    mutated = False
+
+    async def mutate_after_gate(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal mutated
+        mode = "typecheck" if kwargs.get("typecheck_only") else "run"
+        if mode == "run" and not mutated:
+            runner.write_text("export const rebuiltAfterGate = true;\n", encoding="utf-8")
+            mutated = True
+        return {"ok": True, "mode": mode, "tests": [], "diagnostics": []}
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", mutate_after_gate)
+    with pytest.raises(
+        WorkerToolchainChangedError,
+        match="JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+    ):
+        await run_build(
+            tmp_path,
+            config,
+            force=True,
+            generator=FakeGenerator(),
+            worker_factory=lambda *_: worker,
+        )
+
+    assert mutated is True
+    assert implementation.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_build_binds_committed_battery_and_vitest_closure_to_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    assert config.typescript_target is not None
+    config = replace(
+        config,
+        typescript_target=replace(
+            config.typescript_target,
+            vitest_config="vitest.config.ts",
+        ),
+    )
+    (tmp_path / "vitest.config.ts").write_text(
+        'export default { test: { setupFiles: ["tests/setup.ts"] } };\n',
+        encoding="utf-8",
+    )
+    setup = tmp_path / "tests/setup.ts"
+    setup.write_text('export const setupVersion = "v1";\n', encoding="utf-8")
+    worker = _RuntimeMutationTestWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    built = await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert built.exit_code == seeded.exit_code == 0
+    battery_relative = "tests/__generated__/math.example.test.ts"
+    battery = tmp_path / battery_relative
+    battery_source = battery.read_text(encoding="utf-8")
+    setup_source = setup.read_text(encoding="utf-8")
+    implementation = tmp_path / "src/__generated__/math.ts"
+    implementation_before = implementation.read_bytes()
+    observed_captured_overlays = False
+
+    async def observe_captured_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal observed_captured_overlays
+        overlays = kwargs.get("overlays", {})
+        if battery_relative in overlays:
+            assert overlays[battery_relative] == battery_source
+            assert overlays["tests/setup.ts"] == setup_source
+            observed_captured_overlays = True
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(
+        "jaunt.typescript.tester._run_test_batches",
+        observe_captured_batches,
+    )
+    real_atomic_write = ts_builder.atomic_write_manifest
+    mutated = False
+
+    def mutate_inputs_before_publication(*args: Any, **kwargs: Any) -> tuple[Any, ...]:
+        nonlocal mutated
+        expected_inputs = kwargs.get("expected_inputs", {})
+        assert battery_relative in expected_inputs
+        assert "vitest.config.ts" in expected_inputs
+        assert "tests/setup.ts" in expected_inputs
+        if not mutated:
+            battery.write_text(battery_source + "// concurrent edit\n", encoding="utf-8")
+            setup.write_text('export const setupVersion = "v2";\n', encoding="utf-8")
+            mutated = True
+        return real_atomic_write(*args, **kwargs)
+
+    monkeypatch.setattr(ts_builder, "atomic_write_manifest", mutate_inputs_before_publication)
+    with pytest.raises(JauntGenerationError, match="inputs changed after analysis"):
+        await run_build(
+            tmp_path,
+            config,
+            force=True,
+            generator=FakeGenerator(),
+            worker_factory=lambda *_: worker,
+        )
+
+    assert observed_captured_overlays
+    assert mutated
+    assert implementation.read_bytes() == implementation_before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "category",
+    ["runner", "runner-protocol", "timeout", "typecheck-runner-protocol", "typecheck-timeout"],
+)
+async def test_committed_battery_runner_failure_does_not_retry_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    category: str,
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    built = await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+        repo_map_enabled=False,
+        auto_skills_enabled=False,
+    )
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    implementation = tmp_path / "src/__generated__/math.ts"
+    committed = implementation.read_bytes()
+
+    async def unavailable_runner(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("typecheck_only"):
+            if category.startswith("typecheck-"):
+                failure_category = category.removeprefix("typecheck-")
+                return {
+                    "ok": False,
+                    "mode": "typecheck",
+                    "tests": [],
+                    "failures": [{"category": failure_category}],
+                    **({"timedOut": True} if failure_category == "timeout" else {}),
+                }
+            return {"ok": True, "mode": "typecheck", "tests": [], "diagnostics": []}
+        assert not category.startswith("typecheck-")
+        return {
+            "ok": False,
+            "mode": "run",
+            "tests": [],
+            "failures": [{"category": category}],
+            **({"timedOut": True} if category == "timeout" else {}),
+        }
+
+    class CountingGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            self.calls += 1
+            return await super().generate_request(request, **kwargs)
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", unavailable_runner)
+    generator = CountingGenerator()
+    report = await run_build(
+        tmp_path,
+        config,
+        force=True,
+        max_attempts=3,
+        generator=generator,
+        response_cache=ResponseCache(tmp_path / ".runner-gate-cache"),
+        worker_factory=lambda *_: worker,
+        repo_map_enabled=False,
+        auto_skills_enabled=False,
+    )
+
+    assert built.exit_code == 0
+    assert seeded.exit_code == 0
+    assert report.exit_code == 3
+    assert generator.calls == 1
+    assert implementation.read_bytes() == committed
+    assert {item.code for item in report.failed["ts:src/math"]} == {
+        "JAUNT_TS_COMMITTED_BATTERY_INFRASTRUCTURE"
+    }
+    outcome = report.metadata["candidate_outcomes"]["ts:src/math"]
+    assert outcome["attempts"] == 1
+    assert outcome["retry_count"] == 0
+    assert outcome["retry_reasons"] == ()
+
+
+@pytest.mark.asyncio
+async def test_final_committed_battery_runner_failure_skips_unit_repair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    built = await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+        repo_map_enabled=False,
+        auto_skills_enabled=False,
+    )
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    runtime_calls = 0
+
+    async def final_runner_failure(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal runtime_calls
+        if kwargs.get("typecheck_only"):
+            return {"ok": True, "mode": "typecheck", "tests": [], "diagnostics": []}
+        runtime_calls += 1
+        if runtime_calls == 1:
+            return {"ok": True, "mode": "run", "tests": [], "diagnostics": []}
+        return {
+            "ok": False,
+            "mode": "run",
+            "tests": [],
+            "failures": [{"category": "runner-protocol"}],
+        }
+
+    class CountingGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            self.calls += 1
+            return await super().generate_request(request, **kwargs)
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", final_runner_failure)
+    generator = CountingGenerator()
+    report = await run_build(
+        tmp_path,
+        config,
+        force=True,
+        max_attempts=3,
+        generator=generator,
+        response_cache=ResponseCache(tmp_path / ".final-runner-gate-cache"),
+        worker_factory=lambda *_: worker,
+        repo_map_enabled=False,
+        auto_skills_enabled=False,
+    )
+
+    assert built.exit_code == 0
+    assert seeded.exit_code == 0
+    assert report.exit_code == 3
+    assert runtime_calls == 2
+    assert generator.calls == 1
+    assert {item.code for item in report.failed["ts:src/math"]} == {
+        "JAUNT_TS_COMMITTED_BATTERY_INFRASTRUCTURE"
+    }
+    outcome = report.metadata["candidate_outcomes"]["ts:src/math"]
+    assert outcome["attempts"] == 1
+    assert outcome["retry_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_committed_battery_infrastructure_caches_paid_candidate_for_next_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    built = await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+        repo_map_enabled=False,
+        auto_skills_enabled=False,
+    )
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    implementation = tmp_path / "src/__generated__/math.ts"
+    implementation.unlink()
+    runner_available = False
+
+    async def battery_runner(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("typecheck_only"):
+            return {"ok": True, "mode": "typecheck", "tests": [], "diagnostics": []}
+        if runner_available:
+            return {"ok": True, "mode": "run", "tests": [], "diagnostics": []}
+        return {
+            "ok": False,
+            "mode": "run",
+            "tests": [],
+            "failures": [{"category": "runner-protocol"}],
+        }
+
+    class CountingGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            self.calls += 1
+            return await super().generate_request(request, **kwargs)
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", battery_runner)
+    generator = CountingGenerator()
+    response_cache = ResponseCache(tmp_path / ".preserved-build-candidate-cache")
+    first = await run_build(
+        tmp_path,
+        config,
+        max_attempts=3,
+        generator=generator,
+        response_cache=response_cache,
+        worker_factory=lambda *_: worker,
+        repo_map_enabled=False,
+        auto_skills_enabled=False,
+    )
+
+    assert built.exit_code == 0
+    assert seeded.exit_code == 0
+    assert first.exit_code == 3
+    assert generator.calls == 1
+    assert response_cache.info()["entries"] == 1
+    assert not implementation.exists()
+    assert first.metadata["candidate_outcomes"]["ts:src/math"]["attempts"] == 1
+
+    runner_available = True
+    second = await run_build(
+        tmp_path,
+        config,
+        generator=generator,
+        response_cache=response_cache,
+        worker_factory=lambda *_: worker,
+        repo_map_enabled=False,
+        auto_skills_enabled=False,
+    )
+
+    assert second.exit_code == 0
+    assert generator.calls == 1
+    assert implementation.is_file()
+    assert second.metadata["cost"]["cache_hits"] == 1
+    assert second.metadata["candidate_outcomes"]["ts:src/math"]["attempts"] == 0
+
+
+@pytest.mark.asyncio
+async def test_final_repair_battery_infrastructure_preserves_attempt_and_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+
+    class FinalConformanceWorker(_TestSpecWorker):
+        async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            if (
+                method == "validateOverlay"
+                and params.get("baselineUnselected")
+                and "__FINAL_FAIL__" in str(params.get("candidates", {}))
+            ):
+                return {
+                    **self._stamp(),
+                    "valid": False,
+                    "artifacts": [],
+                    "diagnostics": [
+                        {
+                            "code": "TS2322",
+                            "severity": "error",
+                            "message": "final unit candidate is incompatible",
+                            "path": "src/__generated__/math.ts",
+                        }
+                    ],
+                    "affectedProjects": ["tsconfig.json"],
+                }
+            return await super().request(method, params)
+
+    worker = FinalConformanceWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    built = await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+        repo_map_enabled=False,
+        auto_skills_enabled=False,
+    )
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    implementation = tmp_path / "src/__generated__/math.ts"
+    implementation.unlink()
+    runner_available = False
+    runtime_calls = 0
+
+    async def repair_runner(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal runtime_calls
+        if kwargs.get("typecheck_only"):
+            return {"ok": True, "mode": "typecheck", "tests": [], "diagnostics": []}
+        runtime_calls += 1
+        if runner_available or runtime_calls == 1:
+            return {"ok": True, "mode": "run", "tests": [], "diagnostics": []}
+        return {
+            "ok": False,
+            "mode": "run",
+            "tests": [],
+            "failures": [{"category": "runner"}],
+        }
+
+    class RepairingGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            self.calls += 1
+            source = (
+                "const __FINAL_FAIL__ = true;\n"
+                if self.calls == 1
+                else "const __jaunt_impl_double = (value: number): number => value * 2;\n"
+            )
+            return source, TokenUsage(20, 10, "fake-ts", "fake"), ()
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", repair_runner)
+    generator = RepairingGenerator()
+    response_cache = ResponseCache(tmp_path / ".preserved-repair-candidate-cache")
+    first = await run_build(
+        tmp_path,
+        config,
+        max_attempts=3,
+        generator=generator,
+        response_cache=response_cache,
+        worker_factory=lambda *_: worker,
+        repo_map_enabled=False,
+        auto_skills_enabled=False,
+    )
+
+    assert built.exit_code == 0
+    assert seeded.exit_code == 0
+    assert first.exit_code == 3
+    assert generator.calls == 2
+    assert first.metadata["cost"]["api_calls"] == 2
+    assert first.metadata["candidate_outcomes"]["ts:src/math"]["attempts"] == 2
+    assert first.metadata["candidate_outcomes"]["ts:src/math"]["retry_count"] == 1
+    assert response_cache.info()["entries"] == 1
+    assert not implementation.exists()
+
+    runner_available = True
+    second = await run_build(
+        tmp_path,
+        config,
+        generator=generator,
+        response_cache=response_cache,
+        worker_factory=lambda *_: worker,
+        repo_map_enabled=False,
+        auto_skills_enabled=False,
+    )
+
+    assert second.exit_code == 0
+    assert generator.calls == 2
+    assert second.metadata["cost"]["cache_hits"] == 1
+    assert implementation.is_file()
+
+
+@pytest.mark.asyncio
+async def test_targeted_build_expands_analysis_for_independent_multi_target_battery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+
+    class MultiTargetWorker(_TestSpecWorker):
+        def __init__(self, root: Path) -> None:
+            super().__init__(root)
+            self.reject_full_workspace = False
+            triple_source = (
+                'import * as jaunt from "@usejaunt/ts/spec";\n'
+                "jaunt.magicModule();\n"
+                "/** Triple a number. */\n"
+                "export function triple(value: number): number { return jaunt.magic(); }\n"
+            )
+            triple_spec = root / "src/triple.jaunt.ts"
+            triple_spec.write_text(triple_source, encoding="utf-8")
+            self.input_hashes["src/triple.jaunt.ts"] = _digest(triple_source)
+            triple_sidecar = json.loads(self.sidecar)
+            triple_sidecar.update(
+                {
+                    "moduleId": "ts:src/triple",
+                    "specPath": "src/triple.jaunt.ts",
+                    "facadePath": "src/triple.ts",
+                    "apiMirrorPath": "src/__generated__/triple.api.ts",
+                    "implementationPath": "src/__generated__/triple.ts",
+                    "symbols": [{"name": "triple", "kind": "function"}],
+                    "structuralDigest": "sha256:triple-structural",
+                    "proseDigest": "sha256:triple-prose",
+                    "apiDigest": "sha256:triple-api",
+                }
+            )
+            self.triple = {
+                **self.module,
+                **triple_sidecar,
+                "sidecarPath": "src/__generated__/triple.jaunt.json",
+                "apiSource": (
+                    "/** Triple a number. */\n"
+                    "export declare function triple(value: number): number;\n"
+                ),
+                "sidecar": json.dumps(triple_sidecar, sort_keys=True) + "\n",
+                "specSource": triple_source,
+            }
+            quad_source = triple_source.replace("Triple", "Quadruple").replace(
+                "triple", "quadruple"
+            )
+            quad_spec = root / "src/quadruple.jaunt.ts"
+            quad_spec.write_text(quad_source, encoding="utf-8")
+            self.input_hashes["src/quadruple.jaunt.ts"] = _digest(quad_source)
+            quad_sidecar = json.loads(self.sidecar)
+            quad_sidecar.update(
+                {
+                    "moduleId": "ts:src/quadruple",
+                    "specPath": "src/quadruple.jaunt.ts",
+                    "facadePath": "src/quadruple.ts",
+                    "apiMirrorPath": "src/__generated__/quadruple.api.ts",
+                    "implementationPath": "src/__generated__/quadruple.ts",
+                    "symbols": [{"name": "quadruple", "kind": "function"}],
+                    "structuralDigest": "sha256:quadruple-structural",
+                    "proseDigest": "sha256:quadruple-prose",
+                    "apiDigest": "sha256:quadruple-api",
+                }
+            )
+            self.quadruple = {
+                **self.module,
+                **quad_sidecar,
+                "sidecarPath": "src/__generated__/quadruple.jaunt.json",
+                "apiSource": (
+                    "/** Quadruple a number. */\n"
+                    "export declare function quadruple(value: number): number;\n"
+                ),
+                "sidecar": json.dumps(quad_sidecar, sort_keys=True) + "\n",
+                "specSource": quad_source,
+            }
+            self.test_spec_path = "tests/multi.jaunt-test.ts"
+            (root / self.test_spec_path).write_text("// Verify double, triple, and quadruple.\n")
+
+        async def initialize(self, _params: InitializeParams) -> InitializeResult:
+            initialized = await super().initialize(_params)
+            return replace(
+                initialized,
+                capabilities=tuple(
+                    dict.fromkeys(
+                        (
+                            *initialized.capabilities,
+                            "scoped-diagnostics",
+                            "scoped-analysis",
+                        )
+                    )
+                ),
+            )
+
+        async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            result = await super().request(method, params)
+            if method == "analyzeWorkspace":
+                requested = set(params.get("moduleIds", []))
+                modules = [
+                    module
+                    for module in (self.module, self.triple, self.quadruple)
+                    if not requested or str(module["moduleId"]) in requested
+                ]
+                result["routes"] = modules
+                result["specs"] = modules
+                result["testSpecs"] = [
+                    {
+                        "path": self.test_spec_path,
+                        "project": "tsconfig.test.json",
+                        "targets": [
+                            "ts:src/math#double",
+                            "ts:src/triple#triple",
+                            "ts:src/quadruple#quadruple",
+                        ],
+                    }
+                ]
+                if self.reject_full_workspace and not requested:
+                    result["diagnostics"] = [
+                        {
+                            "code": "TS_UNRELATED_C",
+                            "severity": "error",
+                            "message": "Unrelated module C is invalid.",
+                            "path": "src/unrelated-c.jaunt.ts",
+                        }
+                    ]
+            elif method == "analyzeContracts":
+                requested = set(params.get("moduleIds", []))
+                available = (self.module, self.triple, self.quadruple)
+                result["modules"] = [
+                    module
+                    for module in available
+                    if not requested or str(module["moduleId"]) in requested
+                ]
+                if self.reject_full_workspace and {
+                    "ts:src/triple",
+                    "ts:src/quadruple",
+                }.issubset(requested):
+                    result["modules"] = [self.triple]
+            return result
+
+    worker = MultiTargetWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    built = await run_build(
+        tmp_path,
+        config,
+        target_ids=("ts:src/math",),
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+        repo_map_enabled=False,
+        auto_skills_enabled=False,
+    )
+    triple_sidecar = tmp_path / "src/__generated__/triple.jaunt.json"
+    triple_sidecar.parent.mkdir(parents=True, exist_ok=True)
+    triple_sidecar.write_text(str(worker.triple["sidecar"]), encoding="utf-8")
+    quadruple_sidecar = tmp_path / "src/__generated__/quadruple.jaunt.json"
+    quadruple_sidecar.write_text(str(worker.quadruple["sidecar"]), encoding="utf-8")
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    worker.reject_full_workspace = True
+    worker.requests.clear()
+    report = await run_build(
+        tmp_path,
+        config,
+        target_ids=("ts:src/math",),
+        force=True,
+        generator=FakeGenerator(),
+        response_cache=ResponseCache(tmp_path / ".multi-target-gate-cache"),
+        worker_factory=lambda *_: worker,
+        repo_map_enabled=False,
+        auto_skills_enabled=False,
+    )
+
+    assert built.exit_code == 0
+    assert seeded.exit_code == 0
+    assert report.exit_code == 0
+    assert report.generated == frozenset({"ts:src/math"})
+    assert any(
+        method == "analyzeContracts"
+        and set(params.get("moduleIds", [])) == {"ts:src/triple", "ts:src/quadruple"}
+        for method, params in worker.requests
+    )
+    assert any(
+        method == "analyzeContracts" and set(params.get("moduleIds", [])) == {"ts:src/quadruple"}
+        for method, params in worker.requests
+    )
+    assert all(
+        set(params.get("moduleIds", [])) == {"ts:src/math"}
+        for method, params in worker.requests
+        if method == "analyzeWorkspace"
+    )
+
+
+@pytest.mark.asyncio
 async def test_build_bounds_parallel_generation_by_jobs_and_owner_units(tmp_path: Path) -> None:
     config = _config(tmp_path)
     modules = [
@@ -1250,6 +3278,60 @@ async def test_build_bounds_parallel_generation_by_jobs_and_owner_units(tmp_path
     assert generator.max_active == 2
     assert report.metadata["jobs"] == 2
     assert len(report.metadata["build_units"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_parallel_battery_infrastructure_attempt_accounting_is_task_local(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    modules = [
+        _scheduled_module("alpha", owner="packages/a"),
+        _scheduled_module("beta", owner="packages/b"),
+    ]
+    worker = _SchedulingWorker(
+        tmp_path,
+        modules,
+        [{"id": "tsconfig.json", "references": []}],
+    )
+    beta_validated = asyncio.Event()
+
+    async def committed_gate(*_args: Any, **kwargs: Any) -> list[str]:
+        module_ids = tuple(kwargs.get("module_ids", ()))
+        if module_ids == ("ts:packages/b/src/beta",):
+            beta_validated.set()
+            return []
+        if module_ids == ("ts:packages/a/src/alpha",):
+            await beta_validated.wait()
+            raise _CommittedBatteryInfrastructureError(("runner unavailable",))
+        return []
+
+    monkeypatch.setattr(
+        "jaunt.typescript.tester._validate_committed_target_batteries",
+        committed_gate,
+    )
+    response_cache = ResponseCache(tmp_path / ".parallel-infrastructure-cache")
+    report = await run_build(
+        tmp_path,
+        config,
+        force=True,
+        jobs=2,
+        generator=_SchedulingGenerator(),
+        response_cache=response_cache,
+        worker_factory=lambda *_: worker,
+        repo_map_enabled=False,
+        auto_skills_enabled=False,
+    )
+
+    assert report.exit_code == 3
+    assert report.generated == frozenset({"ts:packages/b/src/beta"})
+    alpha = report.metadata["candidate_outcomes"]["ts:packages/a/src/alpha"]
+    beta = report.metadata["candidate_outcomes"]["ts:packages/b/src/beta"]
+    assert alpha["attempts"] == 1
+    assert alpha["retry_count"] == 0
+    assert beta["attempts"] == 1
+    assert report.metadata["cost"]["api_calls"] == 2
+    assert response_cache.info()["entries"] == 1
 
 
 @pytest.mark.asyncio
@@ -1542,6 +3624,42 @@ def test_ephemeral_build_feedback_changes_only_the_invocation_prompt(tmp_path: P
     )
 
 
+def test_build_request_keeps_imported_type_transport_out_of_authored_context(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    worker = FakeWorker(tmp_path)
+    module = {
+        **worker.module,
+        "contextSource": (
+            'export const authored = "preserved";\n\n'
+            "// <jaunt:imported-type-context version=1>\n"
+            '// <jaunt:imported-type-source {"id":"workspace:src/types.ts",'
+            '"priority":"requested"}>\n'
+            "export interface InternalTransport { id: string; }\n"
+            "// </jaunt:imported-type-source>\n"
+            "// </jaunt:imported-type-context>\n"
+        ),
+    }
+
+    async def validator(_source: str) -> list[str]:
+        return []
+
+    request = _build_request(
+        tmp_path,
+        config,
+        module,
+        {str(module["moduleId"]): module},
+        validator,
+    )
+
+    assert request.context_files["_context/context.ts"] == (
+        'export const authored = "preserved";\n'
+    )
+    assert "InternalTransport" not in request.context_files["_context/context.ts"]
+    assert "jaunt:imported-type-context" not in request.context_files["_context/context.ts"]
+
+
 @pytest.mark.asyncio
 async def test_build_refuses_to_commit_after_input_snapshot_changes(tmp_path: Path) -> None:
     config = _config(tmp_path)
@@ -1628,6 +3746,241 @@ async def test_toolchain_digest_drift_recomposes_without_model(tmp_path: Path) -
     assert validation[-1]["recomposeModuleIds"] == ["ts:src/math"]
     implementation = (tmp_path / "src/__generated__/math.ts").read_text()
     assert 'Object.defineProperty(__jaunt_impl_double, "name"' in implementation
+
+
+@pytest.mark.asyncio
+async def test_worker_session_preserves_body_error_during_runtime_change(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+
+    class BodyError(RuntimeError):
+        pass
+
+    class VerifyingExitWorker(_RuntimeMutationWorker):
+        exit_exception_type: object = None
+
+        async def __aexit__(self, *args: object) -> None:
+            exc_type = args[0] if args else None
+            self.exit_exception_type = exc_type
+            if exc_type is None and not self._runtime_identity_sealed:
+                self.verify_runtime_identity()
+
+    worker = VerifyingExitWorker(tmp_path)
+    with pytest.raises(BodyError, match="operation failed"):
+        async with worker_session(
+            tmp_path,
+            config,
+            worker_factory=lambda *_: worker,
+        ):
+            worker.installation.worker_entry.unlink()
+            raise BodyError("operation failed")
+
+    assert worker.exit_exception_type is BodyError
+
+
+@pytest.mark.asyncio
+async def test_build_rolls_back_when_worker_runtime_changes_during_artifact_commit(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    worker = _RuntimeMutationWorker(tmp_path)
+    worker.arm_runtime_removal(trigger="moduleIds")
+
+    with pytest.raises(
+        WorkerToolchainChangedError,
+        match="JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+    ) as raised:
+        await run_build(
+            tmp_path,
+            config,
+            generator=FakeGenerator(),
+            worker_factory=lambda *_: worker,
+        )
+
+    assert raised.value.code == "JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD"
+    assert not any(
+        path.exists()
+        for path in (
+            tmp_path / "src/math.ts",
+            tmp_path / "src/__generated__/math.api.ts",
+            tmp_path / "src/__generated__/math.ts",
+            tmp_path / "src/__generated__/math.jaunt.json",
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_build_seals_final_commit_before_clean_worker_exit(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    class PostSealMutationWorker(_RuntimeMutationWorker):
+        exit_was_sealed = False
+
+        def seal_runtime_identity(self) -> str:
+            identity = super().seal_runtime_identity()
+            self.installation.worker_entry.write_text(
+                self.runtime_source + "// rebuilt after commit seal\n",
+                encoding="utf-8",
+            )
+            return identity
+
+        async def __aexit__(self, *args: object) -> None:
+            exc_type = args[0] if args else None
+            self.exit_was_sealed = self._runtime_identity_sealed
+            if exc_type is None and not self._runtime_identity_sealed:
+                self.verify_runtime_identity()
+
+    worker = PostSealMutationWorker(tmp_path)
+    report = await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 0
+    assert report.generated == frozenset({"ts:src/math"})
+    assert worker.exit_was_sealed is True
+    assert (tmp_path / "src/__generated__/math.ts").is_file()
+
+
+@pytest.mark.asyncio
+async def test_test_battery_commit_rolls_back_when_runner_runtime_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+
+    class RunnerMutationWorker(_RuntimeMutationTestWorker):
+        def seal_runtime_identity(self) -> str:
+            identity = super().seal_runtime_identity()
+            heldout = self.installation.package_root / "dist/test/heldout.js"
+            heldout.write_text("export const heldout = 'rebuilt';\n", encoding="utf-8")
+            return identity
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    worker = RunnerMutationWorker(tmp_path)
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+
+    with pytest.raises(
+        WorkerToolchainChangedError,
+        match="JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+    ):
+        await run_test(
+            tmp_path,
+            config,
+            no_build=True,
+            generator=FakeGenerator(),
+            worker_factory=lambda *_: worker,
+        )
+
+    assert not (tmp_path / "tests/__generated__/math.example.test.ts").exists()
+    assert not (tmp_path / "tests/__generated__/math.derived.test.ts").exists()
+
+
+@pytest.mark.asyncio
+async def test_sync_rolls_back_when_worker_runtime_changes_during_artifact_commit(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    worker = _RuntimeMutationWorker(tmp_path)
+    worker.arm_runtime_removal(trigger="syncModuleIds")
+
+    with pytest.raises(
+        WorkerToolchainChangedError,
+        match="JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+    ) as raised:
+        await run_sync(
+            tmp_path,
+            config,
+            worker_factory=lambda *_: worker,
+        )
+
+    assert raised.value.code == "JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD"
+    assert not any(
+        path.exists()
+        for path in (
+            tmp_path / "src/math.ts",
+            tmp_path / "src/__generated__/math.api.ts",
+            tmp_path / "src/__generated__/math.ts",
+            tmp_path / "src/__generated__/math.jaunt.json",
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_refreeze_rolls_back_when_worker_runtime_changes_during_artifact_commit(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    worker = _RuntimeMutationWorker(tmp_path)
+    await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    artifact_paths = (
+        tmp_path / "src/math.ts",
+        tmp_path / "src/__generated__/math.api.ts",
+        tmp_path / "src/__generated__/math.ts",
+        tmp_path / "src/__generated__/math.jaunt.json",
+    )
+    committed_artifacts = {path: path.read_bytes() for path in artifact_paths}
+    expected = json.loads(worker.sidecar)
+    expected["fingerprint"] = "draft.2"
+    worker.module["sidecar"] = json.dumps(expected, sort_keys=True) + "\n"
+    worker.arm_runtime_removal()
+
+    with pytest.raises(
+        WorkerToolchainChangedError,
+        match="JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+    ) as raised:
+        await run_build(
+            tmp_path,
+            config,
+            generator=ExplodingGenerator(),
+            worker_factory=lambda *_: worker,
+        )
+
+    assert raised.value.code == "JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD"
+    assert {path: path.read_bytes() for path in artifact_paths} == committed_artifacts
+
+
+@pytest.mark.asyncio
+async def test_refreeze_allows_identical_worker_runtime_bytes_during_commit(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    worker = _RuntimeMutationWorker(tmp_path)
+    await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    expected = json.loads(worker.sidecar)
+    expected["fingerprint"] = "draft.2"
+    worker.module["sidecar"] = json.dumps(expected, sort_keys=True) + "\n"
+    worker.arm_runtime_rewrite(worker.runtime_source)
+
+    report = await run_build(
+        tmp_path,
+        config,
+        generator=ExplodingGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 0
+    assert report.refrozen == frozenset({"ts:src/math"})
 
 
 @pytest.mark.asyncio
@@ -2140,6 +4493,20 @@ async def test_contract_check_typechecks_then_runs_committed_battery(
                 'test("adds", () => expect(addOne(1)).toBe(2));\n',
                 "src/util.ts",
                 _digest(source_text),
+                fixture_path=MISSING_INPUT,
+                fixture_digest=MISSING_INPUT,
+                fixture_topology=json.dumps(
+                    dict(
+                        sorted(
+                            _fixture_resolution_preconditions(
+                                tmp_path,
+                                battery.relative_to(tmp_path).as_posix(),
+                            ).items()
+                        )
+                    ),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
             ),
             {
                 "protocol": "jaunt-ts-mutation/1",
@@ -2404,6 +4771,140 @@ async def test_design_apply_refuses_source_changed_since_reviewed_proposal(
     assert spec.read_text() == changed
 
 
+def test_design_marker_creation_waits_for_an_atomic_publisher_lease(tmp_path: Path) -> None:
+    output = tmp_path / "out/value.ts"
+    output.parent.mkdir()
+    output.write_text("old\n", encoding="utf-8")
+    publisher_scanned = threading.Event()
+    release_publisher = threading.Event()
+    design_started = threading.Event()
+
+    def hold_after_manifest_scan() -> None:
+        publisher_scanned.set()
+        assert release_publisher.wait(timeout=5)
+
+    def publish() -> None:
+        atomic_write_manifest(
+            tmp_path,
+            (_Write("out/value.ts", "new\n", "implementation", "ts:value"),),
+            pre_commit_guard=hold_after_manifest_scan,
+        )
+
+    def prepare_design() -> Path:
+        design_started.set()
+        return _prepare_design_manifest(
+            tmp_path,
+            path="src/math.jaunt.ts",
+            module_id="ts:src/math",
+            before="before\n",
+            after="after\n",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        publisher = executor.submit(publish)
+        assert publisher_scanned.wait(timeout=5)
+        pending_design = executor.submit(prepare_design)
+        assert design_started.wait(timeout=5)
+        try:
+            assert not pending_design.done()
+            assert not tuple((tmp_path / ".jaunt/transactions").glob("design-*.json"))
+        finally:
+            release_publisher.set()
+        publisher.result(timeout=5)
+        manifest = pending_design.result(timeout=5)
+
+    assert output.read_text(encoding="utf-8") == "new\n"
+    assert manifest.is_file()
+    _complete_design_manifest(tmp_path, manifest)
+
+
+def test_design_marker_retirement_waits_for_the_global_transaction_lease(
+    tmp_path: Path,
+) -> None:
+    manifest = _prepare_design_manifest(
+        tmp_path,
+        path="src/math.jaunt.ts",
+        module_id="ts:src/math",
+        before="before\n",
+        after="after\n",
+    )
+    directory = tmp_path / ".jaunt/transactions"
+    holder_ready = threading.Event()
+    release_holder = threading.Event()
+    completion_started = threading.Event()
+
+    def hold_lease() -> None:
+        with ts_builder._PinnedWorkspace(tmp_path) as workspace:
+            pinned_directory = workspace.directory(directory, create=False)
+            lease = _acquire_transaction_lease(
+                directory,
+                blocking=True,
+                pinned_directory=pinned_directory,
+                authority_directory=workspace.root_directory,
+            )
+            assert lease is not None
+            holder_ready.set()
+            try:
+                assert release_holder.wait(timeout=5)
+            finally:
+                lease.release()
+
+    def complete_design() -> None:
+        completion_started.set()
+        _complete_design_manifest(tmp_path, manifest)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        holder = executor.submit(hold_lease)
+        assert holder_ready.wait(timeout=5)
+        completion = executor.submit(complete_design)
+        assert completion_started.wait(timeout=5)
+        try:
+            assert not completion.done()
+            assert manifest.is_file()
+        finally:
+            release_holder.set()
+        holder.result(timeout=5)
+        completion.result(timeout=5)
+
+    assert not manifest.exists()
+
+
+def test_design_marker_lifecycle_blocks_every_foreign_transaction_marker(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / ".jaunt/transactions"
+    directory.mkdir(parents=True)
+    foreign = directory / "legacy.json"
+    foreign.write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(JauntGenerationError, match="legacy.json"):
+        _prepare_design_manifest(
+            tmp_path,
+            path="src/math.jaunt.ts",
+            module_id="ts:src/math",
+            before="before\n",
+            after="after\n",
+        )
+    assert not tuple(directory.glob("design-*.json"))
+
+    foreign.unlink()
+    manifest = _prepare_design_manifest(
+        tmp_path,
+        path="src/math.jaunt.ts",
+        module_id="ts:src/math",
+        before="before\n",
+        after="after\n",
+    )
+    foreign.write_text("{}\n", encoding="utf-8")
+    with pytest.raises(JauntGenerationError, match="legacy.json"):
+        _complete_design_manifest(tmp_path, manifest)
+    assert manifest.is_file()
+
+    foreign.unlink()
+    _complete_design_manifest(tmp_path, manifest)
+    assert not manifest.exists()
+
+
 @pytest.mark.asyncio
 async def test_design_apply_keeps_a_durable_marker_through_fresh_validation(
     tmp_path: Path,
@@ -2474,6 +4975,7 @@ async def test_interrupted_design_transaction_is_blocking_not_silently_committed
         tmp_path,
         (_Write("src/math.jaunt.ts", after, "design", "ts:src/math"),),
         expected_inputs={"src/math.jaunt.ts": _digest(before)},
+        allowed_transaction_manifests=(manifest.name,),
     )
 
     status = await run_status(tmp_path, config, worker_factory=lambda *_: worker)
@@ -2774,6 +5276,63 @@ async def test_adopt_executes_proposed_battery_before_returning(
 
     assert report.ok
     assert calls == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_adopt_rejects_vitest_config_change_after_proposed_battery_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    assert config.typescript_target is not None
+    config = replace(
+        config,
+        contract=replace(config.contract, strength=False),
+        typescript_target=replace(
+            config.typescript_target,
+            vitest_config="vitest.config.ts",
+        ),
+    )
+    (tmp_path / "vitest.config.ts").write_text(
+        'export default { test: { setupFiles: ["tests/setup.ts"] } };\n',
+        encoding="utf-8",
+    )
+    setup = tmp_path / "tests/setup.ts"
+    setup.write_text('export const setupVersion = "v1";\n', encoding="utf-8")
+    worker = FakeWorker(tmp_path)
+    source = tmp_path / "src/util.ts"
+    source.write_text(
+        "/** Add one. */\nexport function addOne(value: number): number { return value + 1; }\n",
+        encoding="utf-8",
+    )
+    source_before = source.read_bytes()
+    mutated = False
+
+    async def mutate_config_after_run(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal mutated
+        setup.write_text('export const setupVersion = "v2";\n', encoding="utf-8")
+        mutated = True
+        return {"ok": True, "mode": "run", "tests": [], "diagnostics": []}
+
+    monkeypatch.setattr(
+        "jaunt.typescript.contracts._run_test_batches",
+        mutate_config_after_run,
+    )
+    with pytest.raises(
+        JauntGenerationError,
+        match=r"(?:inputs changed.*setup\.ts|Vitest configuration changed)",
+    ):
+        await run_adopt(
+            tmp_path,
+            config,
+            target="src/util.ts#addOne",
+            generator=FakeGenerator(),
+            worker_factory=lambda *_: worker,
+        )
+
+    assert mutated
+    assert source.read_bytes() == source_before
+    assert not (tmp_path / "tests/contract/src/util.addOne.contract.test.ts").exists()
 
 
 def test_magic_eject_inlines_standalone_types_and_publicizes_reserved_bindings() -> None:
@@ -3274,9 +5833,11 @@ def test_runner_fingerprint_is_portable_between_override_and_installed_packages(
     installed_package = installed_workspace / "node_modules/@usejaunt/ts"
     for package in (override_package, installed_package):
         (package / "dist/test").mkdir(parents=True)
+        (package / "dist/analyzer").mkdir(parents=True)
         (package / "package.json").write_text('{"name":"@usejaunt/ts","version":"0.1.0-alpha.0"}\n')
         (package / "dist/test/runner.js").write_text("export const runner = 1;\n")
         (package / "dist/test/reporter.js").write_text("export const reporter = 1;\n")
+        (package / "dist/analyzer/provenance.js").write_text("export const provenance = 1;\n")
     override_workspace.mkdir()
     initialized = SimpleNamespace(
         worker_version="0.1.0-alpha.0",
@@ -3295,9 +5856,16 @@ def test_runner_fingerprint_is_portable_between_override_and_installed_packages(
         )
     )
 
-    assert _runner_fingerprint(
-        override_workspace, override_client, initialized
-    ) == _runner_fingerprint(installed_workspace, installed_client, initialized)
+    override_fingerprint = _runner_fingerprint(override_workspace, override_client, initialized)
+    installed_fingerprint = _runner_fingerprint(installed_workspace, installed_client, initialized)
+    assert override_fingerprint == installed_fingerprint
+
+    # A same-version rebuild of a transitive analyzer helper is still a new
+    # protected runner runtime, even when it was absent from an old hand list.
+    (override_package / "dist/analyzer/provenance.js").write_text("export const provenance = 2;\n")
+    assert _runner_fingerprint(override_workspace, override_client, initialized) != (
+        installed_fingerprint
+    )
 
 
 def test_runner_fingerprint_is_portable_across_supported_node_runtimes(tmp_path: Path) -> None:
@@ -3779,6 +6347,21 @@ def test_test_request_supplies_typed_fixtures_and_enforces_typed_properties(
                 "export function token(value: string): string;\n"
             ),
             "apiSource": "export declare function token(value: string): string;",
+            "contextSource": (
+                'export const authored = "preserved";\n\n'
+                "// <jaunt:imported-type-context version=1>\n"
+                "// <jaunt:imported-type-source "
+                '{"id":"workspace:src/components/entity-highlights.tsx",'
+                '"priority":"requested"}>\n'
+                "export interface MemoryEntityItem {\n"
+                "  id: string;\n"
+                "  name: string;\n"
+                "  one_liner: string;\n"
+                "  entity_type: string;\n"
+                "}\n"
+                "// </jaunt:imported-type-source>\n"
+                "// </jaunt:imported-type-context>\n"
+            ),
         }
     }
 
@@ -3787,9 +6370,21 @@ def test_test_request_supplies_typed_fixtures_and_enforces_typed_properties(
         config,
         {"path": spec_path, "targets": ["token"]},
         modules,
+        build_instructions=("Populate every required MemoryEntityItem field.",),
     )
 
     assert request.context_files["_context/fixtures.ts"].startswith("import { test as base }")
+    imported_context = request.context_files["_context/imported-types/00-entity-highlights.tsx"]
+    assert "interface MemoryEntityItem" in imported_context
+    assert "entity_type: string" in imported_context
+    assert "Populate every required MemoryEntityItem field." in request.prompt
+    assert "_context/imported-types/" in request.prompt
+    contract_context = request.context_files["_context/contract.json"]
+    assert 'export const authored = "preserved";' in json.loads(contract_context)["contextSource"]
+    assert "<jaunt:imported-type-context" not in contract_context
+    assert request.cache_payload["buildInstructions"] == (
+        "Populate every required MemoryEntityItem field.",
+    )
     assert "../fixtures.js" in request.prompt
     assert request.cache_payload["fixturePath"] == "tests/fixtures.ts"
     assert request.validator is not None
@@ -3818,6 +6413,108 @@ def test_test_request_supplies_typed_fixtures_and_enforces_typed_properties(
     assert "extended test" in invalid_messages
     assert "destructure declared fixture clock" in invalid_messages
     assert "deterministic @prop rendering" in invalid_messages
+
+
+def _test_imported_type_context_source(fields: str) -> str:
+    metadata = json.dumps(
+        {"id": "workspace:src/model.ts", "priority": "requested"},
+        separators=(",", ":"),
+    )
+    return (
+        'export const authored = "preserved";\n'
+        "// <jaunt:imported-type-context version=1>\n"
+        f"// <jaunt:imported-type-source {metadata}>\n"
+        f"export interface Input {{ {fields} }}\n"
+        "// </jaunt:imported-type-source>\n"
+        "// </jaunt:imported-type-context>\n"
+    )
+
+
+def test_v2_imported_type_transport_cannot_be_delimiter_injected() -> None:
+    authored = (
+        'export const marker = "// <jaunt:imported-type-context version=2 '
+        'encoding=base64-json>";\n'
+        "// </jaunt:imported-type-context>\n"
+    )
+    declaration = 'export interface InjectedShape { marker: "// </jaunt:imported-type-context>"; }'
+    payload = base64.b64encode(
+        json.dumps(
+            {
+                "id": "workspace:src/injected.ts",
+                "priority": "requested",
+                "source": declaration,
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).decode("ascii")
+    context_source = (
+        authored
+        + "\n// <jaunt:imported-type-context version=2 encoding=base64-json>\n"
+        + f"// jaunt:imported-type-record={payload}\n"
+        + "// </jaunt:imported-type-context>\n"
+    )
+
+    extracted_authored, extracted_block = _split_context_source(context_source)
+    assert extracted_authored == authored
+    assert extracted_block is not None
+    files = _imported_type_context_files(({"contextSource": context_source},))
+    assert len(files) == 1
+    assert declaration in next(iter(files.values()))
+
+
+def test_imported_type_context_files_enforces_one_utf8_multi_target_budget() -> None:
+    def marked(*records: tuple[str, str, str]) -> str:
+        lines = [
+            'export const authored = "not copied";',
+            "// <jaunt:imported-type-context version=1>",
+        ]
+        for source_id, priority, source in records:
+            metadata = json.dumps(
+                {"id": source_id, "priority": priority},
+                separators=(",", ":"),
+            )
+            lines.extend(
+                (
+                    f"// <jaunt:imported-type-source {metadata}>",
+                    source,
+                    "// </jaunt:imported-type-source>",
+                )
+            )
+        lines.append("// </jaunt:imported-type-context>")
+        return "\n".join(lines) + "\n"
+
+    huge_support = 'export type HugeSupport = "' + ("🙂" * 20_000) + '";'
+    files = _imported_type_context_files(
+        (
+            {
+                "contextSource": marked(
+                    (
+                        "workspace:src/a.ts",
+                        "requested",
+                        "export interface DirectA { a: string; }",
+                    ),
+                    ("workspace:src/a-support.ts", "supporting", huge_support),
+                )
+            },
+            {
+                "contextSource": marked(
+                    (
+                        "workspace:src/z.ts",
+                        "requested",
+                        "export interface DirectZ { z: number; }",
+                    ),
+                )
+            },
+        )
+    )
+
+    combined = "".join(files.values())
+    assert "interface DirectA" in combined
+    assert "interface DirectZ" in combined
+    assert "HugeSupport" not in combined
+    assert "Jaunt omitted 1 imported type-context records" in combined
+    assert "not copied" not in combined
+    assert sum(len(source.encode("utf-8")) for source in files.values()) <= 64 * 1024
 
 
 def test_declared_fixture_without_canonical_surface_fails_before_generation(
@@ -3961,14 +6658,71 @@ async def test_test_command_forwards_build_policy(
 
 
 @pytest.mark.asyncio
-async def test_failed_vitest_run_repairs_once_with_protected_feedback_and_reruns(
+async def test_test_instruction_reaches_both_tiers_without_becoming_provenance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = _config(tmp_path)
     worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    class CapturingGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.prompts: dict[str, str] = {}
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            self.prompts[str(request.cache_payload["tier"])] = request.prompt
+            assert request.cache_payload["buildInstructions"] == (
+                "Use all eight required MemoryEntityItem fields.",
+            )
+            return await super().generate_request(request, **kwargs)
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    generator = CapturingGenerator()
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        build_instructions=("Use all eight required MemoryEntityItem fields.",),
+        generator=generator,
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 0
+    assert set(generator.prompts) == {"example", "derived"}
+    assert all(
+        "Use all eight required MemoryEntityItem fields." in prompt
+        for prompt in generator.prompts.values()
+    )
+    status = await run_status(tmp_path, config, worker_factory=lambda *_: worker)
+    assert not [item for item in status.diagnostics if "TEST_BATTERY" in item.code]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_mode", ["none", "retirement", "input-drift"])
+async def test_failed_vitest_run_repairs_once_with_protected_feedback_and_reruns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
     implementation = tmp_path / "src/__generated__/math.ts"
+    example_battery = tmp_path / "tests/__generated__/math.example.test.ts"
+    derived_battery = tmp_path / "tests/__generated__/math.derived.test.ts"
     implementation.parent.mkdir(parents=True)
-    implementation.write_text("old implementation bytes\n")
+    original_implementation = b"old implementation bytes\n"
+    implementation.write_bytes(original_implementation)
+    journal = tmp_path / "JAUNT_LOG"
+    journal.write_text("prior journal\n", encoding="utf-8")
     build_calls: list[dict[str, Any]] = []
 
     async def fake_build(*_args: Any, **kwargs: Any) -> TargetBuildReport:
@@ -4041,9 +6795,118 @@ async def test_failed_vitest_run_repairs_once_with_protected_feedback_and_reruns
             }
         return {"ok": True, "mode": "run", "tests": [], "captured": {}}
 
+    journal_calls = 0
+
+    def append_after_commit(root: Path, events: Sequence[JournalEvent]) -> bool:
+        nonlocal journal_calls
+        journal_calls += 1
+        assert implementation.read_text(encoding="utf-8") == "repaired implementation bytes\n"
+        assert not tuple((root / ".jaunt/transactions").glob("test-repair-*.json"))
+        # An ordinary Jaunt append can interleave here without participating in
+        # repair rollback or causing a false validation claim.
+        append_journal_events(
+            root,
+            (JournalEvent("build", "ts:other", "ordinary concurrent append"),),
+        )
+        return append_journal_events(root, events)
+
+    cleanup_calls: list[str] = []
+    original_cleanup = ts_tester._clear_rejected_test_candidate
+
+    def track_cleanup(root: Path, target_path: str, **kwargs: Any) -> bool:
+        cleanup_calls.append(target_path)
+        return original_cleanup(root, target_path, **kwargs)
+
     monkeypatch.setattr("jaunt.typescript.tester.run_build", fake_build)
     monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", batches)
+    monkeypatch.setattr("jaunt.typescript.tester.append_events", append_after_commit)
+    monkeypatch.setattr(ts_tester, "_clear_rejected_test_candidate", track_cleanup)
+    mutated_expected_input = False
+    if failure_mode == "input-drift":
+        original_verify = ts_tester._verify_test_runtime_identity
+
+        def mutate_expected_input_during_guard(
+            operation_root: Path,
+            client: Any,
+            initialized: object,
+            expected_runner: str,
+        ) -> None:
+            nonlocal mutated_expected_input
+            original_verify(operation_root, client, initialized, expected_runner)
+            markers = tuple((operation_root / ".jaunt/transactions").glob("test-repair-*.json"))
+            if mutated_expected_input or not markers:
+                return
+            (operation_root / "src/math.jaunt.ts").write_text(
+                worker.spec_source + "// concurrent expected-input edit\n",
+                encoding="utf-8",
+            )
+            mutated_expected_input = True
+
+        monkeypatch.setattr(
+            ts_tester,
+            "_verify_test_runtime_identity",
+            mutate_expected_input_during_guard,
+        )
+    if failure_mode == "retirement":
+        original_retire = ts_tester._retire_transaction_manifest
+
+        def fail_outer_retirement(
+            manifest: Path,
+            payload: Mapping[str, Any],
+            *,
+            pinned_directory: Any = None,
+        ) -> bool:
+            if manifest.name.startswith("test-repair-"):
+                return False
+            return original_retire(
+                manifest,
+                payload,
+                pinned_directory=pinned_directory,
+            )
+
+        monkeypatch.setattr(
+            ts_tester,
+            "_retire_transaction_manifest",
+            fail_outer_retirement,
+        )
     progress = object()
+    if failure_mode == "retirement":
+        with pytest.raises(JauntConfigError, match="durably retire.*test-repair marker"):
+            await run_test(
+                tmp_path,
+                config,
+                generator=FakeGenerator(),
+                worker_factory=lambda *_: worker,
+                progress=progress,
+            )
+    elif failure_mode == "input-drift":
+        with pytest.raises(
+            JauntGenerationError,
+            match=r"inputs changed after analysis.*src/math\.jaunt\.ts",
+        ):
+            await run_test(
+                tmp_path,
+                config,
+                generator=FakeGenerator(),
+                worker_factory=lambda *_: worker,
+                progress=progress,
+            )
+
+    if failure_mode != "none":
+        assert implementation.read_bytes() == original_implementation
+        assert not example_battery.exists()
+        assert not derived_battery.exists()
+        assert cleanup_calls == []
+        assert journal_calls == 0
+        assert journal.read_text(encoding="utf-8") == "prior journal\n"
+        markers = tuple((tmp_path / ".jaunt/transactions").glob("test-repair-*.json"))
+        if failure_mode == "retirement":
+            assert markers
+        else:
+            assert mutated_expected_input is True
+            assert not markers
+        return
+
     report = await run_test(
         tmp_path,
         config,
@@ -4082,6 +6945,12 @@ async def test_failed_vitest_run_repairs_once_with_protected_feedback_and_reruns
     assert report.runner["repair"]["build"]["phase"] == "repair"
     assert report.runner["repair"]["reran"] is True
     assert "DERIVED_SECRET" not in json.dumps(report.runner["repair"]["initial_runner"])
+    assert cleanup_calls
+    assert journal_calls == 1
+    journal_text = journal.read_text(encoding="utf-8")
+    assert journal_text.index("ordinary concurrent append") < journal_text.index(
+        "TypeScript test repair validated"
+    )
     assert report.runner["cost"] == {
         "api_calls": 4,
         "cache_hits": 0,
@@ -4212,6 +7081,59 @@ async def test_passing_test_candidate_stages_cache_before_atomic_disk_commit(
     assert all(output.is_file() for output in outputs)
     assert cache.info()["entries"] == 2
     assert report.runner["jobs"] == config.test.jobs
+
+
+@pytest.mark.asyncio
+async def test_full_battery_commit_rolls_back_runtime_change_after_worker_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    worker = _RuntimeMutationTestWorker(tmp_path)
+    outputs = (
+        tmp_path / "tests/__generated__/math.example.test.ts",
+        tmp_path / "tests/__generated__/math.derived.test.ts",
+    )
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "diagnostics": [],
+            "tests": [],
+        }
+
+    class ArmRuntimeMutationGenerator(FakeGenerator):
+        armed = False
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            generated = await super().generate_request(request, **kwargs)
+            if not self.armed:
+                worker.arm_runtime_removal_after_next_verification()
+                self.armed = True
+            return generated
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    with pytest.raises(
+        WorkerToolchainChangedError,
+        match="JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+    ):
+        await run_test(
+            tmp_path,
+            config,
+            no_build=True,
+            no_run=True,
+            jobs=1,
+            generator=ArmRuntimeMutationGenerator(),
+            worker_factory=lambda *_: worker,
+        )
+
+    assert worker.session_exited is True
+    assert worker.verification_session_states[-2:] == [True, True]
+    assert not any(output.exists() for output in outputs)
+    assert not tuple((tmp_path / ".jaunt/transactions").glob("*.json"))
 
 
 @pytest.mark.asyncio
@@ -4383,6 +7305,178 @@ async def test_test_generation_retries_live_candidate_overlay_failures(
 
 
 @pytest.mark.asyncio
+async def test_test_generation_runner_infrastructure_stops_retries_and_caches_live_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    cache = ResponseCache(tmp_path / ".live-runner-infrastructure-cache")
+    example_path = "tests/__generated__/math.example.test.ts"
+    runner_available = False
+
+    async def candidate_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        files = tuple(kwargs.get("files", ()))
+        if kwargs.get("typecheck_only") and not runner_available and files == (example_path,):
+            return {
+                "ok": False,
+                "mode": "typecheck",
+                "tests": [],
+                "failures": [{"category": "runner-protocol"}],
+            }
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    class CountingGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls: dict[str, int] = {}
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            tier = str(request.cache_payload["tier"])
+            self.calls[tier] = self.calls.get(tier, 0) + 1
+            return await super().generate_request(request, **kwargs)
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", candidate_batches)
+    generator = CountingGenerator()
+    first = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        jobs=1,
+        max_attempts=3,
+        generator=generator,
+        response_cache=cache,
+        worker_factory=lambda *_: worker,
+    )
+
+    assert first.exit_code == 3
+    assert generator.calls == {"example": 1, "derived": 1}
+    assert first.runner["test_cost"]["api_calls"] == 2
+    assert first.runner["test_cost"]["prompt_tokens"] == 40
+    assert first.runner["test_cost"]["completion_tokens"] == 20
+    assert cache.info()["entries"] == 2
+    outcomes = {item["path"]: item for item in first.runner["batteries"]}
+    example = outcomes[example_path]
+    assert example["state"] == "infrastructure-failed"
+    assert example["attempts"] == 1
+    assert example["retry_count"] == 0
+    assert example["infrastructure_retries"] == 0
+    assert "candidate" not in example
+    assert {
+        diagnostic.code for diagnostics in first.failed.values() for diagnostic in diagnostics
+    } == {"JAUNT_TS_TEST_INFRASTRUCTURE"}
+    assert not (tmp_path / _rejected_test_paths(example_path)[1]).exists()
+
+    runner_available = True
+    recovered = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        jobs=1,
+        max_attempts=3,
+        generator=generator,
+        response_cache=cache,
+        worker_factory=lambda *_: worker,
+    )
+
+    assert recovered.exit_code == 0
+    assert generator.calls == {"example": 1, "derived": 1}
+    assert recovered.runner["test_cost"]["api_calls"] == 0
+    assert recovered.runner["test_cost"]["cache_hits"] == 1
+    recovered_outcomes = {item["path"]: item for item in recovered.runner["batteries"]}
+    assert recovered_outcomes[example_path]["attempts"] == 0
+    assert (tmp_path / example_path).is_file()
+    assert cache.info()["entries"] == 2
+
+
+@pytest.mark.asyncio
+async def test_cached_test_candidate_runner_infrastructure_is_not_evicted_or_charged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    cache = ResponseCache(tmp_path / ".cached-runner-infrastructure-cache")
+    example_path = "tests/__generated__/math.example.test.ts"
+    runner_available = True
+
+    async def candidate_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        files = tuple(kwargs.get("files", ()))
+        if kwargs.get("typecheck_only") and not runner_available and files == (example_path,):
+            return {
+                "ok": False,
+                "mode": "typecheck",
+                "tests": [],
+                "failures": [{"category": "timeout"}],
+                "timedOut": True,
+            }
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", candidate_batches)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        response_cache=cache,
+        worker_factory=lambda *_: worker,
+    )
+    assert seeded.exit_code == 0
+    assert cache.info()["entries"] == 2
+    (tmp_path / example_path).unlink()
+
+    runner_available = False
+    blocked = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        max_attempts=3,
+        generator=ExplodingGenerator(),
+        response_cache=cache,
+        worker_factory=lambda *_: worker,
+    )
+
+    assert blocked.exit_code == 3
+    assert blocked.runner["test_cost"]["api_calls"] == 0
+    assert blocked.runner["test_cost"]["cache_hits"] == 0
+    assert blocked.runner["cache"]["hits"] == 1
+    assert cache.info()["entries"] == 2
+    outcomes = {item["path"]: item for item in blocked.runner["batteries"]}
+    example = outcomes[example_path]
+    assert example["state"] == "infrastructure-failed"
+    assert example["attempts"] == 0
+    assert example["retry_count"] == 0
+    assert "cache_evicted" not in example
+    assert "candidate" not in example
+
+    runner_available = True
+    recovered = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=ExplodingGenerator(),
+        response_cache=cache,
+        worker_factory=lambda *_: worker,
+    )
+
+    assert recovered.exit_code == 0
+    assert recovered.runner["test_cost"]["api_calls"] == 0
+    assert recovered.runner["test_cost"]["cache_hits"] == 1
+    assert recovered.runner["cache"]["hits"] == 2
+    assert cache.info()["entries"] == 2
+    assert (tmp_path / example_path).is_file()
+
+
+@pytest.mark.asyncio
 async def test_capacity_exhaustion_reports_failed_battery_and_preserves_completed_peer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4443,7 +7537,8 @@ async def test_capacity_exhaustion_reports_failed_battery_and_preserves_complete
     assert outcomes["derived"]["attempts"] == 0
     assert outcomes["derived"]["infrastructure_retries"] == 2
     assert len(outcomes["derived"]["infrastructure_errors"]) == 3
-    assert outcomes["example"]["state"] == "staged"
+    assert outcomes["example"]["state"] == "committed"
+    assert (tmp_path / "tests/__generated__/math.example.test.ts").is_file()
     assert cache.info()["entries"] == 1
 
 
@@ -4498,7 +7593,10 @@ async def test_late_generation_failure_resumes_from_staged_battery(
 
     assert failed.exit_code == 3
     assert cache.info()["entries"] == 1
-    assert not (tmp_path / "tests/__generated__/math.example.test.ts").exists()
+    example_path = "tests/__generated__/math.example.test.ts"
+    assert (tmp_path / example_path).is_file()
+    assert failed.runner["partial_landing"]["accepted"] == (example_path,)
+    assert failed.runner["partial_landing"]["committed"] is True
 
     resumed_generator = CountingGenerator()
     resumed = await run_test(
@@ -4513,8 +7611,475 @@ async def test_late_generation_failure_resumes_from_staged_battery(
 
     assert resumed.exit_code == 0
     assert resumed_generator.calls == 1
-    assert resumed.runner["cache"]["hits"] == 1
+    assert example_path in resumed.skipped
+    assert resumed.runner["cache"]["hits"] == 0
     assert cache.info()["entries"] == 2
+
+
+@pytest.mark.asyncio
+async def test_partial_battery_commit_rolls_back_runtime_change_inside_worker_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    worker = _RuntimeMutationTestWorker(tmp_path)
+    example_path = tmp_path / "tests/__generated__/math.example.test.ts"
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "diagnostics": [],
+            "tests": [],
+        }
+
+    class LateFailureWithRuntimeMutationGenerator(FakeGenerator):
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            if request.cache_payload.get("tier") == "derived":
+                return (
+                    'import "../../src/__generated__/math.js";\n',
+                    TokenUsage(20, 10, "fake-ts", "fake"),
+                    (),
+                )
+            generated = await super().generate_request(request, **kwargs)
+            worker.arm_runtime_removal_after_next_verification()
+            return generated
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    with pytest.raises(
+        WorkerToolchainChangedError,
+        match="JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+    ):
+        await run_test(
+            tmp_path,
+            config,
+            no_build=True,
+            jobs=1,
+            max_attempts=1,
+            generator=LateFailureWithRuntimeMutationGenerator(),
+            worker_factory=lambda *_: worker,
+        )
+
+    assert worker.session_exited is True
+    assert worker.verification_session_states[-2:] == [False, False]
+    assert not example_path.exists()
+    assert not tuple((tmp_path / ".jaunt/transactions").glob("*.json"))
+
+
+@pytest.mark.asyncio
+async def test_sibling_generation_failure_persists_runtime_rejected_pending_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    cache = ResponseCache(tmp_path / ".pending-rejection-cache")
+    example_path = "tests/__generated__/math.example.test.ts"
+
+    async def reject_example_runtime(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("typecheck_only"):
+            return {"ok": True, "mode": "typecheck", "tests": [], "diagnostics": []}
+        return {
+            "ok": False,
+            "mode": "run",
+            "tests": [
+                {
+                    "file": example_path,
+                    "tier": "example",
+                    "status": "failed",
+                    "category": "assertion",
+                    "message": "candidate behavior failed",
+                }
+            ],
+            "failures": [{"category": "assertion"}],
+        }
+
+    class SiblingFailureGenerator(FakeGenerator):
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            if request.cache_payload.get("tier") == "derived":
+                return (
+                    'import "../../src/__generated__/math.js";\n',
+                    TokenUsage(20, 10, "fake-ts", "fake"),
+                    (),
+                )
+            return await super().generate_request(request, **kwargs)
+
+    monkeypatch.setattr(
+        "jaunt.typescript.tester._run_test_batches",
+        reject_example_runtime,
+    )
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        max_attempts=1,
+        generator=SiblingFailureGenerator(),
+        response_cache=cache,
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 3
+    assert not (tmp_path / example_path).exists()
+    assert cache.info()["entries"] == 0
+    outcomes = {item["path"]: item for item in report.runner["batteries"]}
+    example = outcomes[example_path]
+    assert example["state"] == "rejected"
+    candidate = tmp_path / example["candidate"]
+    metadata_path = tmp_path / example["candidate_metadata"]
+    candidate_source = candidate.read_text(encoding="utf-8")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert "const __jaunt_impl_double" in candidate_source
+    assert metadata["terminal"] is False
+    assert metadata["attempts_this_run"] == 1
+    assert metadata["candidate_digest"] == _digest(candidate_source)
+    assert metadata["errors"] == list(example["rejection_reasons"])
+
+
+@pytest.mark.asyncio
+async def test_runtime_rejected_no_property_candidate_keeps_exact_generator_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    example_path = "tests/__generated__/math.example.test.ts"
+
+    async def reject_example(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("typecheck_only"):
+            return {"ok": True, "mode": "typecheck", "tests": [], "diagnostics": []}
+        return {
+            "ok": False,
+            "mode": "run",
+            "tests": [
+                {
+                    "file": example_path,
+                    "tier": "example",
+                    "status": "failed",
+                    "category": "assertion",
+                }
+            ],
+            "failures": [{"category": "assertion"}],
+        }
+
+    class ExactBytesGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.example_source = ""
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            source, usage, advisories = await super().generate_request(request, **kwargs)
+            if request.target_path == example_path:
+                assert request.cache_payload.get("propertyBlock") == ""
+                source = source.rstrip("\n") + "  \t"
+                self.example_source = source
+            return source, usage, advisories
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", reject_example)
+    generator = ExactBytesGenerator()
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=generator,
+        response_cache=ResponseCache(tmp_path / ".exact-runtime-rejection-cache"),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 4
+    outcomes = {item["path"]: item for item in report.runner["batteries"]}
+    rejected = outcomes[example_path]
+    assert rejected["state"] == "rejected"
+    candidate = tmp_path / rejected["candidate"]
+    metadata = json.loads((tmp_path / rejected["candidate_metadata"]).read_text())
+    assert candidate.read_bytes() == generator.example_source.encode("utf-8")
+    assert metadata["candidate_digest"] == _digest(generator.example_source)
+
+
+@pytest.mark.asyncio
+async def test_bad_committed_baseline_retains_unrelated_candidate_for_cache_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    candidate_cache = ResponseCache(tmp_path / ".baseline-retained-candidate-cache")
+    example_path = "tests/__generated__/math.example.test.ts"
+    derived_path = "tests/__generated__/math.derived.test.ts"
+    baseline_bad = False
+
+    async def baseline_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        files = tuple(kwargs.get("files", ()))
+        overlays = kwargs.get("overlays", {})
+        if (
+            kwargs.get("typecheck_only")
+            and baseline_bad
+            and derived_path in files
+            and derived_path not in overlays
+        ):
+            return {
+                "ok": False,
+                "mode": "typecheck",
+                "tests": [],
+                "diagnostics": [
+                    {
+                        "code": "TS2322",
+                        "message": "committed baseline is type-invalid",
+                        "severity": "error",
+                        "path": derived_path,
+                    }
+                ],
+            }
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    class CountingGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            self.calls += 1
+            assert request.target_path == example_path
+            return await super().generate_request(request, **kwargs)
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", baseline_batches)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert seeded.exit_code == 0
+    (tmp_path / example_path).unlink()
+
+    baseline_bad = True
+    generator = CountingGenerator()
+    blocked = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        jobs=1,
+        generator=generator,
+        response_cache=candidate_cache,
+        worker_factory=lambda *_: worker,
+    )
+
+    assert blocked.exit_code == 3
+    assert generator.calls == 1
+    assert candidate_cache.info()["entries"] == 1
+    assert blocked.failed["typecheck"][0].code == "JAUNT_TS_TEST_TYPECHECK"
+    partial = blocked.runner["partial_landing"]
+    assert partial["accepted"] == ()
+    assert partial["rejected"] == ()
+    assert partial["retained"] == (example_path,)
+    assert partial["committed"] is False
+    assert partial["isolation"]["baseline_failure"] is True
+    payload_partial = typescript_test_payload(blocked)["targets"]["ts"]["vitest"]["partial_landing"]
+    assert payload_partial["accepted"] == ()
+    assert payload_partial["retained"] == (example_path,)
+    outcomes = {item["path"]: item for item in blocked.runner["batteries"]}
+    example = outcomes[example_path]
+    assert example["state"] == "staged"
+    assert "candidate" not in example
+    assert "cache_evicted" not in example
+    assert not (tmp_path / _rejected_test_paths(example_path)[1]).exists()
+    assert not (tmp_path / example_path).exists()
+
+    baseline_bad = False
+    recovered = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        jobs=1,
+        generator=generator,
+        response_cache=candidate_cache,
+        worker_factory=lambda *_: worker,
+    )
+
+    assert recovered.exit_code == 0
+    assert generator.calls == 1
+    assert recovered.runner["test_cost"]["api_calls"] == 0
+    assert recovered.runner["test_cost"]["cache_hits"] == 1
+    assert candidate_cache.info()["entries"] == 1
+    assert (tmp_path / example_path).is_file()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "runtime_category",
+    [None, "runner-protocol", "preflight-runner", "baseline-runner"],
+)
+async def test_partial_landing_runs_surviving_baseline_and_retains_infrastructure_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_category: str | None,
+) -> None:
+    config = _config(tmp_path)
+
+    class TwoSpecWorker(_TestSpecWorker):
+        def __init__(self, root: Path) -> None:
+            super().__init__(root)
+            self.other_spec_path = "tests/other.jaunt-test.ts"
+            (root / self.other_spec_path).write_text("// Verify another public view.\n")
+
+        async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            result = await super().request(method, params)
+            if method == "analyzeWorkspace":
+                result["testSpecs"] = [
+                    {
+                        "path": self.test_spec_path,
+                        "project": "tsconfig.test.json",
+                        "targets": ["ts:src/math#double"],
+                    },
+                    {
+                        "path": self.other_spec_path,
+                        "project": "tsconfig.test.json",
+                        "targets": ["ts:src/math#double"],
+                    },
+                ]
+            return result
+
+    worker = TwoSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    math_example = "tests/__generated__/math.example.test.ts"
+    math_derived = "tests/__generated__/math.derived.test.ts"
+    (tmp_path / math_example).unlink()
+    (tmp_path / math_derived).unlink()
+
+    class SiblingFailureGenerator(FakeGenerator):
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            if request.target_path == math_derived:
+                return (
+                    'import "../../src/__generated__/math.js";\n',
+                    TokenUsage(20, 10, "fake-ts", "fake"),
+                    (),
+                )
+            return await super().generate_request(request, **kwargs)
+
+    runtime_files: list[tuple[str, ...]] = []
+
+    async def observe_stage(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("typecheck_only"):
+            files = tuple(kwargs.get("files", ()))
+            if runtime_category == "preflight-runner" and len(files) > 1:
+                return {
+                    "ok": False,
+                    "mode": "typecheck",
+                    "tests": [],
+                    "failures": [{"category": "runner-protocol"}],
+                }
+            if runtime_category == "baseline-runner" and len(files) > 1:
+                if kwargs.get("overlays"):
+                    return {
+                        "ok": False,
+                        "mode": "typecheck",
+                        "tests": [],
+                        "diagnostics": [
+                            {
+                                "code": "TS2451",
+                                "message": "combined overlay conflict",
+                                "severity": "error",
+                            }
+                        ],
+                    }
+                return {
+                    "ok": False,
+                    "mode": "typecheck",
+                    "tests": [],
+                    "failures": [{"category": "runner"}],
+                }
+            return {"ok": True, "mode": "typecheck", "tests": [], "diagnostics": []}
+        files = tuple(kwargs.get("files", ()))
+        runtime_files.append(files)
+        if runtime_category is None:
+            return {"ok": True, "mode": "run", "tests": [], "diagnostics": []}
+        return {
+            "ok": False,
+            "mode": "run",
+            "tests": [],
+            "failures": [{"category": runtime_category}],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", observe_stage)
+    response_cache = ResponseCache(tmp_path / f".partial-stage-{runtime_category}-cache")
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        max_attempts=1,
+        generator=SiblingFailureGenerator(),
+        response_cache=response_cache,
+        worker_factory=lambda *_: worker,
+    )
+
+    assert seeded.exit_code == 0
+    assert report.exit_code == 3
+    if runtime_category in {"preflight-runner", "baseline-runner"}:
+        assert runtime_files == []
+    else:
+        assert runtime_files == [
+            (
+                math_example,
+                "tests/__generated__/other.derived.test.ts",
+                "tests/__generated__/other.example.test.ts",
+            )
+        ]
+    assert response_cache.info()["entries"] == 1
+    outcomes = {item["path"]: item for item in report.runner["batteries"]}
+    if runtime_category is None:
+        assert report.runner["partial_landing"]["accepted"] == (math_example,)
+        assert report.runner["partial_landing"]["retained"] == ()
+        assert report.runner["partial_landing"]["committed"] is True
+        assert (tmp_path / math_example).is_file()
+    else:
+        if runtime_category in {"preflight-runner", "baseline-runner"}:
+            assert report.runner["partial_landing"]["accepted"] == ()
+            assert report.runner["partial_landing"]["retained"] == (math_example,)
+            payload_partial = typescript_test_payload(report)["vitest"]["partial_landing"]
+            assert payload_partial["accepted"] == ()
+            assert payload_partial["retained"] == (math_example,)
+        else:
+            assert report.runner["partial_landing"]["accepted"] == (math_example,)
+            assert report.runner["partial_landing"]["retained"] == ()
+        assert report.runner["partial_landing"]["committed"] is False
+        assert not (tmp_path / math_example).exists()
+        assert outcomes[math_example]["state"] == "staged"
+        assert "candidate" not in outcomes[math_example]
+        assert "cache_evicted" not in outcomes[math_example]
+        failure_key = (
+            "stage-preflight"
+            if runtime_category in {"preflight-runner", "baseline-runner"}
+            else "stage-runner"
+        )
+        assert {item.code for item in report.failed[failure_key]} == {
+            "JAUNT_TS_TEST_INFRASTRUCTURE"
+        }
 
 
 @pytest.mark.asyncio
@@ -4545,6 +8110,32 @@ async def test_cross_battery_preflight_lands_only_the_compatible_subset(
     )
     assert seeded.exit_code == 0
     assert cache.info()["entries"] == 2
+    derived_path = "tests/__generated__/math.derived.test.ts"
+    derived_metadata = dict(
+        _test_header_metadata((tmp_path / derived_path).read_text(encoding="utf-8")) or {}
+    )
+    rejected_request = GenerationRequest(
+        language="ts",
+        kind="test",
+        target_path=derived_path,
+        context_files={},
+        prompt="generate",
+        cache_payload={"path": worker.test_spec_path, "tier": "derived"},
+        validator=lambda _source: [],
+        project_root=tmp_path,
+    )
+    accepted_marker = _write_rejected_test_candidate(
+        tmp_path,
+        rejected_request,
+        source_path=worker.test_spec_path,
+        tier="derived",
+        fingerprint=derived_metadata["battery_fingerprint"],
+        candidate_source="export const previouslyRejected = true;\n",
+        attempts=2,
+        errors=("previous rejection",),
+        expected_provenance=derived_metadata,
+    )
+    assert accepted_marker is not None
     for tier in ("example", "derived"):
         (tmp_path / f"tests/__generated__/math.{tier}.test.ts").unlink()
 
@@ -4574,22 +8165,24 @@ async def test_cross_battery_preflight_lands_only_the_compatible_subset(
         "jaunt.typescript.tester._run_test_batches",
         cross_battery_failure,
     )
+    fresh_cache = ResponseCache(tmp_path / ".fresh-preflight-response-cache")
     report = await run_test(
         tmp_path,
         config,
         no_build=True,
         jobs=2,
-        generator=ExplodingGenerator(),
-        response_cache=cache,
+        generator=FakeGenerator(),
+        response_cache=fresh_cache,
         worker_factory=lambda *_: worker,
     )
 
     assert report.exit_code == 3
-    assert cache.info()["entries"] == 1
+    assert fresh_cache.info()["entries"] == 1
     outcomes = {item["path"]: item for item in report.runner["batteries"]}
-    assert outcomes["tests/__generated__/math.derived.test.ts"]["state"] == "cached"
+    assert outcomes[derived_path]["state"] == "committed"
     assert outcomes["tests/__generated__/math.example.test.ts"]["state"] == "rejected"
-    assert outcomes["tests/__generated__/math.example.test.ts"]["cache_evicted"] is True
+    assert "cache_evicted" not in outcomes["tests/__generated__/math.example.test.ts"]
+    assert "candidate" in outcomes["tests/__generated__/math.example.test.ts"]
     assert outcomes["tests/__generated__/math.example.test.ts"]["rejection_reasons"] == (
         "TS2451: cross-battery declaration conflict",
     )
@@ -4599,17 +8192,99 @@ async def test_cross_battery_preflight_lands_only_the_compatible_subset(
     assert report.runner["partial_landing"]["rejected"] == (
         "tests/__generated__/math.example.test.ts",
     )
+    assert report.runner["partial_landing"]["retained"] == ()
     assert report.runner["partial_landing"]["committed"] is True
     assert not (tmp_path / "tests/__generated__/math.example.test.ts").exists()
-    assert (tmp_path / "tests/__generated__/math.derived.test.ts").is_file()
+    assert (tmp_path / derived_path).is_file()
+    assert all(not (tmp_path / path).exists() for path in accepted_marker)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("category", "expected_entries"), [("assertion", 1), ("runner", 2)])
-async def test_compatible_subset_run_evicts_only_identifiable_behavior_failure(
+async def test_mid_isolation_infrastructure_reports_only_proven_candidates_as_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    cache = ResponseCache(tmp_path / ".mid-isolation-infrastructure-cache")
+    generated_paths = (
+        "tests/__generated__/math.derived.test.ts",
+        "tests/__generated__/math.example.test.ts",
+    )
+    combined_checks = 0
+
+    async def interrupted_isolation(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal combined_checks
+        files = tuple(kwargs.get("files", ()))
+        if not kwargs.get("typecheck_only") or len(files) <= 1:
+            return {
+                "ok": True,
+                "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+                "tests": [],
+                "diagnostics": [],
+            }
+        combined_checks += 1
+        if combined_checks == 1:
+            return {
+                "ok": False,
+                "mode": "typecheck",
+                "tests": [],
+                "diagnostics": [
+                    {
+                        "code": "TS2451",
+                        "message": "combined overlay conflict",
+                        "severity": "error",
+                    }
+                ],
+            }
+        return {
+            "ok": False,
+            "mode": "typecheck",
+            "tests": [],
+            "failures": [{"category": "runner-protocol"}],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", interrupted_isolation)
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        jobs=1,
+        generator=FakeGenerator(),
+        response_cache=cache,
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 3
+    assert report.failed["typecheck"][0].code == "JAUNT_TS_TEST_INFRASTRUCTURE"
+    partial = report.runner["partial_landing"]
+    assert partial["accepted"] == (generated_paths[0],)
+    assert partial["rejected"] == ()
+    assert partial["retained"] == (generated_paths[1],)
+    assert partial["committed"] is False
+    assert partial["isolation"]["infrastructure"] is True
+    payload_partial = typescript_test_payload(report)["vitest"]["partial_landing"]
+    assert payload_partial["accepted"] == (generated_paths[0],)
+    assert payload_partial["retained"] == (generated_paths[1],)
+    assert cache.info()["entries"] == 2
+    outcomes = {item["path"]: item for item in report.runner["batteries"]}
+    assert {path: outcomes[path]["state"] for path in generated_paths} == {
+        generated_paths[0]: "staged",
+        generated_paths[1]: "staged",
+    }
+    assert all("cache_evicted" not in outcomes[path] for path in generated_paths)
+    assert all(not (tmp_path / path).exists() for path in generated_paths)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("category", "attributed", "expected_entries"),
+    [("assertion", True, 1), ("assertion", False, 1), ("runner", True, 2)],
+)
+async def test_compatible_subset_run_updates_partition_after_behavior_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     category: str,
+    attributed: bool,
     expected_entries: int,
 ) -> None:
     config = _config(tmp_path)
@@ -4641,15 +8316,20 @@ async def test_compatible_subset_run_evicts_only_identifiable_behavior_failure(
         return {
             "ok": False,
             "mode": "run",
-            "tests": [
-                {
-                    "file": files[0],
-                    "tier": "derived",
-                    "status": "failed",
-                    "category": category,
-                    "message": f"{category} failure",
-                }
-            ],
+            "tests": (
+                [
+                    {
+                        "file": files[0],
+                        "tier": "derived",
+                        "status": "failed",
+                        "category": category,
+                        "message": f"{category} failure",
+                    }
+                ]
+                if attributed
+                else []
+            ),
+            "failures": [] if attributed else [{"category": category}],
         }
 
     monkeypatch.setattr(
@@ -4669,8 +8349,11 @@ async def test_compatible_subset_run_evicts_only_identifiable_behavior_failure(
     assert report.exit_code == 3
     assert cache.info()["entries"] == expected_entries
     assert cache.get("unrelated-key") is not None
+    derived_path = "tests/__generated__/math.derived.test.ts"
+    example_path = "tests/__generated__/math.example.test.ts"
     outcomes = {item["path"]: item for item in report.runner["batteries"]}
-    failed = outcomes["tests/__generated__/math.derived.test.ts"]
+    failed = outcomes[derived_path]
+    partial = report.runner["partial_landing"]
     if category == "assertion":
         assert failed["state"] == "rejected"
         assert failed["cache_evicted"] is True
@@ -4678,19 +8361,112 @@ async def test_compatible_subset_run_evicts_only_identifiable_behavior_failure(
             "The compatible-subset Vitest run rejected this battery; "
             "its cached response was removed.",
         )
+        assert partial["accepted"] == ()
+        assert partial["rejected"] == (derived_path, example_path)
     else:
         assert failed["state"] == "staged"
         assert "cache_evicted" not in failed
         assert "rejection_reasons" not in failed
-    assert report.runner["partial_landing"]["committed"] is False
-    assert not (tmp_path / "tests/__generated__/math.derived.test.ts").exists()
+        assert partial["accepted"] == (derived_path,)
+        assert partial["rejected"] == (example_path,)
+    assert partial["retained"] == ()
+    assert partial["committed"] is False
+    payload_partial = typescript_test_payload(report)["vitest"]["partial_landing"]
+    assert payload_partial["accepted"] == partial["accepted"]
+    assert payload_partial["rejected"] == partial["rejected"]
+    assert payload_partial["retained"] == partial["retained"]
+    assert payload_partial["committed"] is False
+    assert report.generated == frozenset()
+    assert report.refrozen == frozenset()
+    assert all(not (tmp_path / path).exists() for path in (derived_path, example_path))
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "category",
-    ["collection", "runner", "runner-protocol", "timeout"],
-)
+async def test_candidate_owned_collection_failure_is_evicted_and_regenerated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    cache = ResponseCache(tmp_path / ".collection-retry-cache")
+
+    class CollectionThenValidGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls: dict[str, int] = {}
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            count = self.calls.get(request.target_path, 0) + 1
+            self.calls[request.target_path] = count
+            if request.target_path.endswith(".derived.test.ts") and count == 1:
+                return (
+                    'import { test } from "vitest";\ntest.todo("missing generated body");\n',
+                    TokenUsage(20, 10, "fake-ts", "fake"),
+                    (),
+                )
+            return await super().generate_request(request, **kwargs)
+
+    async def reject_todo(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("typecheck_only"):
+            return {"ok": True, "mode": "typecheck", "tests": [], "diagnostics": []}
+        overlays = kwargs.get("overlays", {})
+        derived_path = "tests/__generated__/math.derived.test.ts"
+        if isinstance(overlays, Mapping) and "test.todo" in str(overlays.get(derived_path, "")):
+            return {
+                "ok": False,
+                "mode": "run",
+                "tests": [
+                    {
+                        # The protected runner discloses no file/status for a
+                        # derived collection error. Its opaque case ID is the
+                        # reporter's path digest and can be mapped only against
+                        # the candidates Jaunt just requested.
+                        "caseId": _digest(derived_path)[7:23],
+                        "category": "collection",
+                    }
+                ],
+                "diagnostics": [],
+            }
+        return {"ok": True, "mode": "run", "tests": [], "diagnostics": []}
+
+    generator = CollectionThenValidGenerator()
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", reject_todo)
+    first = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=generator,
+        response_cache=cache,
+        worker_factory=lambda *_: worker,
+    )
+
+    derived_path = "tests/__generated__/math.derived.test.ts"
+    outcomes = {item["path"]: item for item in first.runner["batteries"]}
+    assert first.exit_code == 4
+    assert outcomes[derived_path]["state"] == "rejected"
+    assert outcomes[derived_path]["cache_evicted"] is True
+    assert cache.info()["entries"] == 1
+    assert not (tmp_path / derived_path).exists()
+
+    second = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=generator,
+        response_cache=cache,
+        worker_factory=lambda *_: worker,
+    )
+
+    assert second.exit_code == 0
+    assert generator.calls[derived_path] == 2
+    assert generator.calls["tests/__generated__/math.example.test.ts"] == 1
+    assert (tmp_path / derived_path).is_file()
+    assert (tmp_path / "tests/__generated__/math.example.test.ts").is_file()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("category", ["runner", "runner-protocol", "timeout"])
 async def test_runner_nonbehavioral_failures_skip_repair_and_keep_staged_candidates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4933,14 +8709,17 @@ async def test_test_modes_never_enter_implementation_repair(
     config = _config(tmp_path)
     worker = _TestSpecWorker(tmp_path)
     build_calls: list[dict[str, Any]] = []
+    runtime_calls = 0
 
     async def fake_build(*_args: Any, **kwargs: Any) -> TargetBuildReport:
         build_calls.append(dict(kwargs))
         return TargetBuildReport(language="ts", metadata={"cost": _cost(prompt=1, completion=1)})
 
     async def batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal runtime_calls
         if kwargs.get("typecheck_only"):
             return {"ok": True, "mode": "typecheck", "tests": []}
+        runtime_calls += 1
         return {
             "ok": False,
             "mode": "run",
@@ -4970,6 +8749,9 @@ async def test_test_modes_never_enter_implementation_repair(
     assert len(build_calls) == expected_build_calls
     assert all("ephemeral_prompt" not in call for call in build_calls)
     assert "repair" not in report.runner
+    if no_run:
+        assert runtime_calls == 0
+        assert build_calls[0]["validate_committed_batteries"] is False
     if no_build:
         outcomes = {item["path"]: item for item in report.runner["batteries"]}
         rejected = outcomes["tests/__generated__/math.derived.test.ts"]
@@ -4981,6 +8763,40 @@ async def test_test_modes_never_enter_implementation_repair(
         )
         assert outcomes["tests/__generated__/math.example.test.ts"]["state"] == "staged"
         assert ResponseCache(tmp_path / ".jaunt" / "cache").info()["entries"] == 1
+
+
+@pytest.mark.asyncio
+async def test_external_cost_tracker_keeps_build_and_test_phase_summaries_local(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    aggregate = CostTracker()
+    report = await run_test(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        cost_tracker=aggregate,
+        worker_factory=lambda *_: worker,
+        repo_map_enabled=False,
+        auto_skills_enabled=False,
+    )
+
+    assert report.exit_code == 0
+    assert report.runner["build"]["cost"]["api_calls"] == 1
+    assert report.runner["test_cost"]["api_calls"] == 2
+    assert report.runner["cost"]["api_calls"] == 3
+    assert aggregate.api_calls == 3
 
 
 @pytest.mark.asyncio
@@ -5454,6 +9270,662 @@ async def test_targeted_clean_scopes_artifacts_and_magic_batteries_to_requested_
 
 
 @pytest.mark.asyncio
+async def test_imported_type_context_drift_regenerates_batteries_without_api_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    worker.module["contextSource"] = _test_imported_type_context_source("id: string;")
+    original_api_digest = worker.module["apiDigest"]
+    original_api_source = worker.module["apiSource"]
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        no_run=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+
+    battery_paths = frozenset(
+        {
+            "tests/__generated__/math.example.test.ts",
+            "tests/__generated__/math.derived.test.ts",
+        }
+    )
+    assert seeded.exit_code == 0
+    assert seeded.generated == battery_paths
+    before = {
+        path: dict(_test_header_metadata((tmp_path / path).read_text(encoding="utf-8")) or {})
+        for path in battery_paths
+    }
+    assert all(metadata.get("imported_type_context_fingerprint") for metadata in before.values())
+
+    stable = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        no_run=True,
+        generator=ExplodingGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert stable.generated == frozenset()
+    assert stable.refrozen == frozenset()
+    assert stable.skipped == battery_paths
+
+    worker.module["contextSource"] = _test_imported_type_context_source(
+        "id: string; required_label: string;"
+    )
+    assert worker.module["apiDigest"] == original_api_digest
+    assert worker.module["apiSource"] == original_api_source
+    stale = await run_status(tmp_path, config, worker_factory=lambda *_: worker)
+    stale_batteries = [
+        diagnostic for diagnostic in stale.diagnostics if diagnostic.path in battery_paths
+    ]
+    assert len(stale_batteries) == 2
+    assert all(diagnostic.code == "JAUNT_TS_TEST_BATTERY_STALE" for diagnostic in stale_batteries)
+    assert all(
+        set(diagnostic.data.get("mismatches", ()))
+        == {"battery_fingerprint", "imported_type_context_fingerprint"}
+        for diagnostic in stale_batteries
+    )
+
+    class CountingGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.targets: set[str] = set()
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            self.targets.add(request.target_path)
+            return await super().generate_request(request, **kwargs)
+
+    generator = CountingGenerator()
+    regenerated = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        no_run=True,
+        generator=generator,
+        response_cache=ResponseCache(tmp_path / ".legacy-context-cache"),
+        worker_factory=lambda *_: worker,
+    )
+    assert regenerated.exit_code == 0
+    assert generator.targets == battery_paths
+    assert regenerated.generated == battery_paths
+    assert regenerated.refrozen == frozenset()
+    after = {
+        path: dict(_test_header_metadata((tmp_path / path).read_text(encoding="utf-8")) or {})
+        for path in battery_paths
+    }
+    for path in battery_paths:
+        assert after[path]["target_api_digest"] == before[path]["target_api_digest"]
+        assert (
+            after[path]["imported_type_context_fingerprint"]
+            != before[path]["imported_type_context_fingerprint"]
+        )
+        assert after[path]["battery_fingerprint"] != before[path]["battery_fingerprint"]
+
+    fresh = await run_status(tmp_path, config, worker_factory=lambda *_: worker)
+    assert not [diagnostic for diagnostic in fresh.diagnostics if diagnostic.path in battery_paths]
+
+
+@pytest.mark.asyncio
+async def test_legacy_battery_missing_imported_context_fingerprint_without_run_regenerates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    worker.module["contextSource"] = _test_imported_type_context_source("id: string;")
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        no_run=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    battery_paths = frozenset(seeded.generated)
+    for relative in battery_paths:
+        path = tmp_path / relative
+        source = path.read_text(encoding="utf-8")
+        metadata = dict(_test_header_metadata(source) or {})
+        tier = metadata["tier"]
+        source_path = metadata["source"]
+        legacy_values = {
+            key: value
+            for key, value in metadata.items()
+            if key
+            not in {
+                "tier",
+                "source",
+                "body_digest",
+                "battery_fingerprint",
+                "imported_type_context_fingerprint",
+            }
+        }
+        legacy_values["battery_fingerprint"] = _canonical_digest({"tier": tier, **legacy_values})
+        path.write_text(
+            _with_test_header(
+                _strip_test_header(source),
+                tier=tier,
+                source_path=source_path,
+                provenance=legacy_values,
+            ),
+            encoding="utf-8",
+        )
+
+    stale = await run_status(tmp_path, config, worker_factory=lambda *_: worker)
+    diagnostics = [item for item in stale.diagnostics if item.path in battery_paths]
+    assert len(diagnostics) == 2
+    assert all(
+        set(item.data.get("mismatches", ()))
+        == {"battery_fingerprint", "imported_type_context_fingerprint"}
+        for item in diagnostics
+    )
+
+    class CountingGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.targets: set[str] = set()
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            self.targets.add(request.target_path)
+            return await super().generate_request(request, **kwargs)
+
+    generator = CountingGenerator()
+    regenerated = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        no_run=True,
+        generator=generator,
+        response_cache=ResponseCache(tmp_path / ".legacy-missing-context-cache"),
+        worker_factory=lambda *_: worker,
+    )
+    assert regenerated.exit_code == 0
+    assert regenerated.generated == battery_paths
+    assert not regenerated.refrozen
+    assert generator.targets == battery_paths
+
+
+@pytest.mark.asyncio
+async def test_legacy_battery_missing_imported_context_verifies_codrift_and_refreezes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    worker = _RuntimeMutationTestWorker(tmp_path)
+    worker.module["contextSource"] = _test_imported_type_context_source("id: string;")
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    battery_paths = frozenset(seeded.generated)
+    bodies: dict[str, str] = {}
+    for relative in battery_paths:
+        path = tmp_path / relative
+        source = path.read_text(encoding="utf-8")
+        bodies[relative] = _strip_test_header(source)
+        metadata = dict(_test_header_metadata(source) or {})
+        legacy_values = {
+            key: value
+            for key, value in metadata.items()
+            if key
+            not in {
+                "tier",
+                "source",
+                "body_digest",
+                "battery_fingerprint",
+                "fixture_fingerprint",
+                "imported_type_context_fingerprint",
+            }
+        }
+        legacy_values["battery_fingerprint"] = _canonical_digest(
+            {"tier": metadata["tier"], **legacy_values}
+        )
+        path.write_text(
+            _with_test_header(
+                bodies[relative],
+                tier=metadata["tier"],
+                source_path=metadata["source"],
+                provenance=legacy_values,
+            ),
+            encoding="utf-8",
+        )
+
+    worker.module["apiDigest"] = "sha256:legacy-context-api-v2"
+    worker.module["apiSource"] = (
+        "export declare function double(value: number, label?: string): number;\n"
+    )
+    worker.api = str(worker.module["apiSource"])
+    expected_sidecar = json.loads(str(worker.module["sidecar"]))
+    expected_sidecar["apiDigest"] = worker.module["apiDigest"]
+    worker.module["sidecar"] = json.dumps(expected_sidecar, sort_keys=True) + "\n"
+    await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert ts_tester._current_target_artifact_ids(tmp_path, (worker.module,)) == frozenset(
+        {"ts:src/math"}
+    )
+    (tmp_path / "node_modules/vitest/package.json").write_text(
+        '{"name":"vitest","version":"4.2.0"}\n', encoding="utf-8"
+    )
+    runner = worker.installation.package_root / "dist/test/runner.js"
+    runner.write_text("export const legacyContextRuntime = 2;\n", encoding="utf-8")
+    from jaunt.typescript import tester as tester_module
+
+    original_prompt_text = tester_module._prompt_text
+
+    def upgraded_prompt(path: str, default_name: str) -> str:
+        return original_prompt_text(path, default_name) + "\nLegacy context prompt revision.\n"
+
+    monkeypatch.setattr(tester_module, "_prompt_text", upgraded_prompt)
+    verification_calls: list[tuple[bool, frozenset[str]]] = []
+
+    async def verified_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        verification_calls.append(
+            (
+                bool(kwargs.get("typecheck_only")),
+                frozenset(str(path) for path in kwargs.get("files", ())),
+            )
+        )
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", verified_batches)
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=ExplodingGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 0
+    assert report.refrozen == battery_paths
+    assert not report.generated
+    assert verification_calls == [
+        (True, battery_paths),
+        (False, battery_paths),
+        (True, battery_paths),
+        (False, battery_paths),
+    ]
+    for relative in battery_paths:
+        source = (tmp_path / relative).read_text(encoding="utf-8")
+        metadata = dict(_test_header_metadata(source) or {})
+        assert _strip_test_header(source) == bodies[relative]
+        assert metadata.get("imported_type_context_fingerprint")
+        assert metadata["fixture_fingerprint"] == _canonical_digest(None)
+
+    verification_calls.clear()
+    fresh = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=ExplodingGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert fresh.skipped == battery_paths
+    assert not fresh.refrozen
+    assert not fresh.generated
+    assert verification_calls == [(True, battery_paths), (False, battery_paths)]
+
+
+@pytest.mark.asyncio
+async def test_legacy_imported_context_upgrade_requires_current_target_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    worker = _RuntimeMutationTestWorker(tmp_path)
+    worker.module["contextSource"] = _test_imported_type_context_source("id: string;")
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    for relative in seeded.generated:
+        path = tmp_path / relative
+        source = path.read_text(encoding="utf-8")
+        metadata = dict(_test_header_metadata(source) or {})
+        legacy_values = {
+            key: value
+            for key, value in metadata.items()
+            if key
+            not in {
+                "tier",
+                "source",
+                "body_digest",
+                "battery_fingerprint",
+                "fixture_fingerprint",
+                "imported_type_context_fingerprint",
+            }
+        }
+        legacy_values["battery_fingerprint"] = _canonical_digest(
+            {"tier": metadata["tier"], **legacy_values}
+        )
+        path.write_text(
+            _with_test_header(
+                _strip_test_header(source),
+                tier=metadata["tier"],
+                source_path=metadata["source"],
+                provenance=legacy_values,
+            ),
+            encoding="utf-8",
+        )
+
+    # Analysis now advertises a newer API, but --no-build still exposes the
+    # previous implementation and API mirror on disk.
+    worker.module["apiDigest"] = "sha256:unbuilt-api-v2"
+    worker.module["apiSource"] = (
+        "export declare function double(value: number, label?: string): number;\n"
+    )
+
+    class CountingGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.targets: set[str] = set()
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            self.targets.add(request.target_path)
+            return await super().generate_request(request, **kwargs)
+
+    generator = CountingGenerator()
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=generator,
+        response_cache=ResponseCache(tmp_path / ".stale-target-context-cache"),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.generated == seeded.generated
+    assert not report.refrozen
+    assert generator.targets == seeded.generated
+
+
+@pytest.mark.asyncio
+async def test_current_target_artifacts_require_hashes_and_no_pending_transaction(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    expected = frozenset({"ts:src/math"})
+    assert ts_tester._current_target_artifact_ids(tmp_path, (worker.module,)) == expected
+
+    implementation = tmp_path / str(worker.module["implementationPath"])
+    original = implementation.read_bytes()
+    implementation.write_bytes(original + b"// replaced outside Jaunt\n")
+    assert not ts_tester._current_target_artifact_ids(tmp_path, (worker.module,))
+    implementation.write_bytes(original)
+    assert ts_tester._current_target_artifact_ids(tmp_path, (worker.module,)) == expected
+
+    transaction_directory = tmp_path / ".jaunt/transactions"
+    transaction_directory.mkdir(parents=True, exist_ok=True)
+    marker = transaction_directory / "ts-pending.json"
+    marker.write_text("{}\n", encoding="utf-8")
+    assert not ts_tester._current_target_artifact_ids(tmp_path, (worker.module,))
+    with pytest.raises(JauntGenerationError, match="unresolved TypeScript artifact transaction"):
+        atomic_write_manifest(
+            tmp_path,
+            (
+                _Write(
+                    path="src/__generated__/probe.ts",
+                    content="export {};\n",
+                    kind="test",
+                    module_id="ts-test:probe",
+                ),
+            ),
+        )
+    marker.unlink()
+    assert ts_tester._current_target_artifact_ids(tmp_path, (worker.module,)) == expected
+
+
+@pytest.mark.asyncio
+async def test_removed_imported_context_regenerates_despite_tooling_codrift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    worker = _RuntimeMutationTestWorker(tmp_path)
+    worker.module["contextSource"] = _test_imported_type_context_source("id: string;")
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    worker.module["contextSource"] = 'export const authored = "preserved";\n'
+    (tmp_path / "node_modules/vitest/package.json").write_text(
+        '{"name":"vitest","version":"4.2.0"}\n', encoding="utf-8"
+    )
+    (worker.installation.package_root / "dist/test/runner.js").write_text(
+        "export const removedContextRuntime = 2;\n", encoding="utf-8"
+    )
+
+    stale = await run_status(tmp_path, config, worker_factory=lambda *_: worker)
+    diagnostics = [item for item in stale.diagnostics if item.path in seeded.generated]
+    assert len(diagnostics) == 2
+    assert all(
+        "imported_type_context_fingerprint" in item.data.get("mismatches", ())
+        for item in diagnostics
+    )
+
+    class CountingGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.targets: set[str] = set()
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            self.targets.add(request.target_path)
+            return await super().generate_request(request, **kwargs)
+
+    generator = CountingGenerator()
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        no_run=True,
+        generator=generator,
+        response_cache=ResponseCache(tmp_path / ".removed-context-cache"),
+        worker_factory=lambda *_: worker,
+    )
+    assert report.generated == seeded.generated
+    assert not report.refrozen
+    assert generator.targets == seeded.generated
+
+
+@pytest.mark.asyncio
+async def test_immutable_toolchain_context_and_api_codrift_regenerates_batteries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An adopter-shaped toolchain swap stays paid when declaration context changed."""
+
+    config = _config(tmp_path)
+    worker = _RuntimeMutationTestWorker(tmp_path)
+    worker.module["contextSource"] = _test_imported_type_context_source("id: string;")
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    battery_paths = frozenset(seeded.generated)
+
+    worker.module["contextSource"] = _test_imported_type_context_source(
+        "id: string; required_label: string;"
+    )
+    worker.module["apiDigest"] = "sha256:immutable-toolchain-api-v2"
+    worker.module["apiSource"] = (
+        "export declare function double(value: number, label?: string): number;\n"
+    )
+    runner = worker.installation.package_root / "dist/test/runner.js"
+    runner.write_text("export const immutableRuntime = 2;\n", encoding="utf-8")
+    from jaunt.typescript import tester as tester_module
+
+    original_prompt_text = tester_module._prompt_text
+
+    def upgraded_prompt(path: str, default_name: str) -> str:
+        rendered = original_prompt_text(path, default_name)
+        return rendered + "\nImmutable toolchain prompt revision.\n"
+
+    monkeypatch.setattr(tester_module, "_prompt_text", upgraded_prompt)
+
+    stale = await run_status(tmp_path, config, worker_factory=lambda *_: worker)
+    battery_diagnostics = [
+        diagnostic for diagnostic in stale.diagnostics if diagnostic.path in battery_paths
+    ]
+    assert len(battery_diagnostics) == 2
+    mismatches = [set(diagnostic.data.get("mismatches", ())) for diagnostic in battery_diagnostics]
+    assert all(
+        fields
+        == {
+            "battery_fingerprint",
+            "imported_type_context_fingerprint",
+            "prompt_fingerprint",
+            "runner_fingerprint",
+            "target_api_digest",
+        }
+        for fields in mismatches
+    ), mismatches
+
+    class CountingGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.targets: set[str] = set()
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            self.targets.add(request.target_path)
+            return await super().generate_request(request, **kwargs)
+
+    generator = CountingGenerator()
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=generator,
+        response_cache=ResponseCache(tmp_path / ".immutable-toolchain-context-cache"),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 0
+    assert generator.targets == battery_paths
+    assert report.generated == battery_paths
+    assert not report.refrozen
+
+
+@pytest.mark.asyncio
 async def test_test_battery_provenance_detects_semantic_and_body_drift_without_orphaning(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -5482,9 +9954,12 @@ async def test_test_battery_provenance_detects_semantic_and_body_drift_without_o
     derived = tmp_path / "tests/__generated__/math.derived.test.ts"
     for battery in (example, derived):
         text = battery.read_text()
+        metadata = dict(_test_header_metadata(text) or {})
+        assert "imported_type_context_fingerprint" not in metadata
         for field in (
             "test_spec_digest",
             "target_api_digest",
+            "fixture_fingerprint",
             "vitest_fingerprint",
             "fast_check_fingerprint",
             "runner_fingerprint",
@@ -5681,7 +10156,7 @@ async def test_test_incrementality_refreezes_tooling_only_drift_before_running(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = _config(tmp_path)
-    worker = _TestSpecWorker(tmp_path)
+    worker = _RuntimeMutationTestWorker(tmp_path)
 
     async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
         return {
@@ -5711,8 +10186,7 @@ async def test_test_incrementality_refreezes_tooling_only_drift_before_running(
     (tmp_path / "node_modules/vitest/package.json").write_text(
         '{"name":"vitest","version":"4.2.0"}\n'
     )
-    runner = tmp_path / "dist/test/runner.js"
-    runner.parent.mkdir(parents=True)
+    runner = worker.installation.package_root / "dist/test/runner.js"
     runner.write_text("export const changedRunner = true;\n")
     phases: list[tuple[bool, bool, bool]] = []
 
@@ -5756,6 +10230,868 @@ async def test_test_incrementality_refreezes_tooling_only_drift_before_running(
         assert metadata["runner_fingerprint"] != before[path][1]["runner_fingerprint"]
         assert metadata["vitest_fingerprint"] != before[path][1]["vitest_fingerprint"]
         assert metadata["battery_fingerprint"] != before[path][1]["battery_fingerprint"]
+
+
+@pytest.mark.asyncio
+async def test_same_version_vitest_runtime_change_refreezes_battery_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    worker = _RuntimeMutationTestWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    before = {
+        path: dict(_test_header_metadata((tmp_path / path).read_text()) or {})
+        for path in seeded.generated
+    }
+
+    (tmp_path / "node_modules/vitest/dist/index.js").write_text(
+        "export const packageVersion = 'same-version-rebuilt';\n",
+        encoding="utf-8",
+    )
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=ExplodingGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 0
+    assert report.refrozen == seeded.generated
+    for path in report.refrozen:
+        after = dict(_test_header_metadata((tmp_path / path).read_text()) or {})
+        assert after["vitest_fingerprint"] != before[path]["vitest_fingerprint"]
+
+
+@pytest.mark.asyncio
+async def test_vitest_symlink_aba_aborts_battery_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    worker = _RuntimeMutationTestWorker(tmp_path)
+    owner_vitest = tmp_path / "node_modules/vitest"
+    lexical = worker.installation.package_root / "node_modules/vitest"
+    stores = tmp_path / ".package-store"
+    first = stores / "vitest-a"
+    second = stores / "vitest-b"
+    first.parent.mkdir()
+    shutil.copytree(owner_vitest, first, copy_function=shutil.copy2)
+    (first / "dist/index.js").write_text(
+        "export const packageVersion = 'runner-specific-same-version';\n",
+        encoding="utf-8",
+    )
+    shutil.copytree(first, second, copy_function=shutil.copy2)
+    lexical.parent.mkdir()
+    lexical.symlink_to(first, target_is_directory=True)
+    assert (owner_vitest / "dist/index.js").read_bytes() != (first / "dist/index.js").read_bytes()
+    runner_vitest = _module_resolved_test_dependency(
+        worker.installation.package_root / "dist/test/runner.js",
+        "vitest",
+    )
+    assert runner_vitest is not None
+    assert runner_vitest.resolve() == first.resolve()
+
+    class RetargetingGenerator(FakeGenerator):
+        changed = False
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            if not self.changed:
+                lexical.unlink()
+                lexical.symlink_to(second, target_is_directory=True)
+                self.changed = True
+            return await super().generate_request(request, **kwargs)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    with pytest.raises(
+        WorkerToolchainChangedError,
+        match="JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+    ):
+        await run_test(
+            tmp_path,
+            config,
+            no_build=True,
+            generator=RetargetingGenerator(),
+            worker_factory=lambda *_: worker,
+        )
+
+    assert not (tmp_path / "tests/__generated__/math.example.test.ts").exists()
+    assert not (tmp_path / "tests/__generated__/math.derived.test.ts").exists()
+
+
+@pytest.mark.asyncio
+async def test_vite_dependency_change_rolls_back_battery_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    vitest_manifest = tmp_path / "node_modules/vitest/package.json"
+    vitest_payload = json.loads(vitest_manifest.read_text(encoding="utf-8"))
+    vitest_payload["dependencies"] = {"vite": "^7.0.0"}
+    vitest_manifest.write_text(json.dumps(vitest_payload), encoding="utf-8")
+    vite_runtime = tmp_path / "node_modules/vite/dist/index.js"
+    vite_runtime.parent.mkdir(parents=True)
+    vite_runtime.write_text("export const viteRuntime = 1;\n", encoding="utf-8")
+    (vite_runtime.parent.parent / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "vite",
+                "version": "7.0.0",
+                "main": "./dist/index.js",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class ViteMutationWorker(_RuntimeMutationTestWorker):
+        mutated = False
+
+        def seal_runtime_identity(self) -> str:
+            if not self.mutated:
+                vite_runtime.write_text("export const viteRuntime = 2;\n", encoding="utf-8")
+                self.mutated = True
+            return super().seal_runtime_identity()
+
+    worker = ViteMutationWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    with pytest.raises(
+        WorkerToolchainChangedError,
+        match="JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+    ):
+        await run_test(
+            tmp_path,
+            config,
+            no_build=True,
+            generator=FakeGenerator(),
+            worker_factory=lambda *_: worker,
+        )
+
+    assert worker.mutated
+    assert not (tmp_path / "tests/__generated__/math.example.test.ts").exists()
+    assert not (tmp_path / "tests/__generated__/math.derived.test.ts").exists()
+    assert not tuple((tmp_path / ".jaunt/transactions").glob("*.json"))
+
+
+@pytest.mark.asyncio
+async def test_fixture_source_change_regenerates_batteries_instead_of_reheadering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    fixture = tmp_path / "tests/fixtures.ts"
+    fixture.write_text('export const clock = () => "v1";\n', encoding="utf-8")
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    paths = frozenset(seeded.generated)
+    before = {
+        path: dict(_test_header_metadata((tmp_path / path).read_text()) or {}) for path in paths
+    }
+    fixture.write_text('export const clock = () => "v2";\n', encoding="utf-8")
+
+    class CountingGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            self.calls.append(str(request.cache_payload["tier"]))
+            return await super().generate_request(request, **kwargs)
+
+    generator = CountingGenerator()
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=generator,
+        response_cache=ResponseCache(tmp_path / ".fixture-change-cache"),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 0
+    assert sorted(generator.calls) == ["derived", "example"]
+    assert report.generated == paths
+    assert not report.refrozen
+    for path in paths:
+        metadata = dict(_test_header_metadata((tmp_path / path).read_text()) or {})
+        assert metadata["fixture_fingerprint"] != before[path]["fixture_fingerprint"]
+
+
+@pytest.mark.asyncio
+async def test_asi_sensitive_fixture_whitespace_regenerates_batteries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    fixture = tmp_path / "tests/fixtures.ts"
+    fixture.write_text(
+        "export function value() { return { value: 1 } }\n",
+        encoding="utf-8",
+    )
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    before = {
+        path: dict(_test_header_metadata((tmp_path / path).read_text()) or {})
+        for path in seeded.generated
+    }
+    fixture.write_text(
+        "export function value() { return\n{ value: 1 } }\n",
+        encoding="utf-8",
+    )
+
+    class CountingGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            self.calls += 1
+            return await super().generate_request(request, **kwargs)
+
+    generator = CountingGenerator()
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=generator,
+        response_cache=ResponseCache(tmp_path / ".asi-fixture-cache"),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert generator.calls == 2
+    assert report.generated == seeded.generated
+    assert not report.refrozen
+    assert all(
+        dict(_test_header_metadata((tmp_path / path).read_text()) or {})["fixture_fingerprint"]
+        != before[path]["fixture_fingerprint"]
+        for path in seeded.generated
+    )
+
+
+@pytest.mark.asyncio
+async def test_legacy_battery_without_an_empty_fixture_fingerprint_refreezes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    paths = frozenset(seeded.generated)
+    bodies: dict[str, str] = {}
+    for relative in paths:
+        path = tmp_path / relative
+        source = path.read_text(encoding="utf-8")
+        bodies[relative] = _strip_test_header(source)
+        source = re.sub(r"(?m)^// jaunt:fixture_fingerprint=.*\n", "", source)
+        source = re.sub(
+            r"(?m)^// jaunt:battery_fingerprint=.*$",
+            "// jaunt:battery_fingerprint=sha256:" + ("0" * 64),
+            source,
+        )
+        path.write_text(source, encoding="utf-8")
+
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=ExplodingGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 0
+    assert report.refrozen == paths
+    assert not report.generated
+    for relative in paths:
+        source = (tmp_path / relative).read_text(encoding="utf-8")
+        metadata = dict(_test_header_metadata(source) or {})
+        assert _strip_test_header(source) == bodies[relative]
+        assert metadata["fixture_fingerprint"] == _canonical_digest(None)
+        assert metadata["battery_fingerprint"] != "sha256:" + ("0" * 64)
+
+
+@pytest.mark.asyncio
+async def test_legacy_battery_without_a_real_fixture_fingerprint_regenerates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    (tmp_path / "tests/fixtures.ts").write_text(
+        'export const clock = () => "v1";\n', encoding="utf-8"
+    )
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    for relative in seeded.generated:
+        path = tmp_path / relative
+        source = path.read_text(encoding="utf-8")
+        source = re.sub(r"(?m)^// jaunt:fixture_fingerprint=.*\n", "", source)
+        source = re.sub(
+            r"(?m)^// jaunt:battery_fingerprint=.*$",
+            "// jaunt:battery_fingerprint=sha256:" + ("0" * 64),
+            source,
+        )
+        path.write_text(source, encoding="utf-8")
+
+    class CountingGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            self.calls += 1
+            return await super().generate_request(request, **kwargs)
+
+    generator = CountingGenerator()
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=generator,
+        response_cache=ResponseCache(tmp_path / ".legacy-real-fixture-cache"),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 0
+    assert generator.calls == 2
+    assert report.generated == seeded.generated
+    assert not report.refrozen
+
+
+@pytest.mark.asyncio
+async def test_fixture_source_is_an_exact_battery_commit_precondition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    fixture = tmp_path / "tests/fixtures.ts"
+    fixture.write_text('export const clock = () => "v1";\n', encoding="utf-8")
+
+    class FixtureMutatingGenerator(FakeGenerator):
+        changed = False
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            if not self.changed:
+                fixture.write_text('export const clock = () => "v2";\n', encoding="utf-8")
+                self.changed = True
+            return await super().generate_request(request, **kwargs)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    with pytest.raises(JauntGenerationError, match=r"inputs changed.*tests/fixtures\.ts"):
+        await run_test(
+            tmp_path,
+            config,
+            no_build=True,
+            generator=FixtureMutatingGenerator(),
+            worker_factory=lambda *_: worker,
+        )
+
+    assert not (tmp_path / "tests/__generated__/math.example.test.ts").exists()
+    assert not (tmp_path / "tests/__generated__/math.derived.test.ts").exists()
+
+
+@pytest.mark.asyncio
+async def test_crlf_fixture_bytes_are_the_exact_commit_precondition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    fixture = tmp_path / "tests/fixtures.ts"
+    fixture.write_bytes(b'export const clock = () => "crlf";\r\n')
+    observed_fixture_sources: list[str] = []
+
+    class ObservingGenerator(FakeGenerator):
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            observed_fixture_sources.append(request.context_files["_context/fixtures.ts"])
+            return await super().generate_request(request, **kwargs)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=ObservingGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 0
+    assert report.generated == frozenset(
+        {
+            "tests/__generated__/math.example.test.ts",
+            "tests/__generated__/math.derived.test.ts",
+        }
+    )
+    assert observed_fixture_sources == [
+        'export const clock = () => "crlf";\r\n',
+        'export const clock = () => "crlf";\r\n',
+    ]
+
+
+@pytest.mark.asyncio
+async def test_vitest_config_closure_is_pinned_through_battery_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    assert config.typescript_target is not None
+    config = replace(
+        config,
+        typescript_target=replace(
+            config.typescript_target,
+            vitest_config="config/vitest.config.ts",
+        ),
+    )
+    vitest_config = tmp_path / "config/vitest.config.ts"
+    setup = tmp_path / "tests/setup.ts"
+    vitest_config.parent.mkdir()
+    vitest_config.write_bytes(
+        b'import "config/base.config";\r\n'
+        b'export default { test: { setupFiles: ["tests/setup.ts"] } }\r\n'
+    )
+    base_config = tmp_path / "config/base.config.ts"
+    base_config.write_bytes(b'import "./helpers";\r\nexport default {};\r\n')
+    helper = tmp_path / "config/helpers/index.mts"
+    helper.parent.mkdir()
+    helper.write_bytes(b'export const helperVersion = "v1";\r\n')
+    setup.write_bytes(b'export const setupVersion = "v1"\r\n')
+    shadow = tmp_path / "config/tests/setup.ts"
+    shadow.parent.mkdir()
+    shadow.write_bytes(b'export const setupVersion = "shadow"\r\n')
+    closure = ts_tester._local_config_closure(tmp_path, "config/vitest.config.ts")
+    assert "tests/setup.ts" in closure
+    assert "config/tests/setup.ts" not in closure
+    assert "config/base.config.ts" in closure
+    assert "config/helpers/index.mts" in closure
+    worker = _RuntimeMutationTestWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    before = {relative: (tmp_path / relative).read_bytes() for relative in seeded.generated}
+    (worker.installation.package_root / "dist/test/runner.js").write_text(
+        "export const configMutationRuntime = 2;\n",
+        encoding="utf-8",
+    )
+    mutated = False
+
+    async def mutate_config(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal mutated
+        if not mutated:
+            setup.write_bytes(b'export const setupVersion = "v2"\r\n')
+            mutated = True
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", mutate_config)
+    with pytest.raises(
+        JauntGenerationError,
+        match=r"(?:inputs changed.*setup\.ts|Vitest configuration changed)",
+    ):
+        await run_test(
+            tmp_path,
+            config,
+            no_build=True,
+            generator=ExplodingGenerator(),
+            worker_factory=lambda *_: worker,
+        )
+
+    assert mutated
+    assert {relative: (tmp_path / relative).read_bytes() for relative in seeded.generated} == before
+
+
+def test_vitest_config_closure_rejects_escaping_local_dependency(tmp_path: Path) -> None:
+    config = tmp_path / "vitest.config.ts"
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.ts"
+    outside.write_text("export const outside = true;\n", encoding="utf-8")
+    config.write_text(f'import "../{outside.name}";\nexport default {{}};\n', encoding="utf-8")
+
+    with pytest.raises(JauntConfigError, match="outside the workspace"):
+        ts_tester._local_config_closure(tmp_path, "vitest.config.ts")
+
+
+def test_vitest_config_snapshot_preserves_absent_candidates_and_exact_bytes(
+    tmp_path: Path,
+) -> None:
+    config_bytes = b'import "./helper";\r\nexport default {};\r\n'
+    (tmp_path / "vitest.config.ts").write_bytes(config_bytes)
+
+    closure, overlays = ts_tester._local_config_snapshot(tmp_path, "vitest.config.ts")
+
+    assert closure["helper.ts"] == MISSING_INPUT
+    assert overlays["vitest.config.ts"].encode("utf-8") == config_bytes
+
+    # This file appears after the snapshot. The disposable runner view must
+    # still execute the captured absent-candidate world, not the transient one.
+    (tmp_path / "helper.ts").write_text("throw new Error('transient');\n", encoding="utf-8")
+    deleted = tuple(path for path, digest in closure.items() if digest == MISSING_INPUT)
+    with _isolated_test_workspace(
+        tmp_path,
+        (),
+        overlays,
+        tier="derived",
+        deleted_files=deleted,
+    ) as isolated:
+        assert (isolated / "vitest.config.ts").read_bytes() == config_bytes
+        assert not (isolated / "helper.ts").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink regression")
+def test_vitest_config_closure_rejects_external_symlink_dependency(tmp_path: Path) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.ts"
+    outside.write_text("export const outside = true;\n", encoding="utf-8")
+    (tmp_path / "setup.ts").symlink_to(outside)
+    (tmp_path / "vitest.config.ts").write_text(
+        'import "./setup.ts";\nexport default {};\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(JauntConfigError, match="escapes the workspace"):
+        ts_tester._local_config_closure(tmp_path, "vitest.config.ts")
+
+
+@pytest.mark.asyncio
+async def test_nearer_fixture_creation_invalidates_prepared_battery_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+
+    class NestedTestWorker(_TestSpecWorker):
+        def __init__(self, root: Path) -> None:
+            super().__init__(root)
+            (root / self.test_spec_path).unlink()
+            self.test_spec_path = "tests/nested/math.jaunt-test.ts"
+            nested_spec = root / self.test_spec_path
+            nested_spec.parent.mkdir()
+            nested_spec.write_text("// Verify the public double function.\n", encoding="utf-8")
+
+    worker = NestedTestWorker(tmp_path)
+    (tmp_path / "tests/fixtures.ts").write_text(
+        'export const owner = "parent";\n',
+        encoding="utf-8",
+    )
+    nearer = tmp_path / "tests/nested/fixtures.ts"
+
+    class SelectionMutatingGenerator(FakeGenerator):
+        changed = False
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            if not self.changed:
+                nearer.write_text('export const owner = "nearer";\n', encoding="utf-8")
+                self.changed = True
+            return await super().generate_request(request, **kwargs)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    with pytest.raises(
+        JauntGenerationError,
+        match=r"inputs changed.*tests/nested/fixtures\.ts",
+    ):
+        await run_test(
+            tmp_path,
+            config,
+            no_build=True,
+            generator=SelectionMutatingGenerator(),
+            worker_factory=lambda *_: worker,
+        )
+
+    assert not (tmp_path / "tests/nested/__generated__/math.example.test.ts").exists()
+    assert not (tmp_path / "tests/nested/__generated__/math.derived.test.ts").exists()
+
+
+@pytest.mark.asyncio
+async def test_fixture_freshness_is_scoped_to_the_nearest_test_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+
+    class PackageTestWorker(_TestSpecWorker):
+        def __init__(self, root: Path) -> None:
+            super().__init__(root)
+            (root / self.test_spec_path).unlink()
+            self.test_spec_path = "tests/package-a/math.jaunt-test.ts"
+            spec = root / self.test_spec_path
+            spec.parent.mkdir(parents=True)
+            spec.write_text("// Verify package A's public double function.\n", encoding="utf-8")
+
+    worker = PackageTestWorker(tmp_path)
+    fixture_a = tmp_path / "tests/package-a/fixtures.ts"
+    fixture_b = tmp_path / "tests/package-b/fixtures.ts"
+    fixture_a.write_text('export const owner = "a-v1";\n', encoding="utf-8")
+    fixture_b.parent.mkdir(parents=True)
+    fixture_b.write_text('export const owner = "b-v1";\n', encoding="utf-8")
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    paths = frozenset(seeded.generated)
+    assert paths == frozenset(
+        {
+            "tests/package-a/__generated__/math.example.test.ts",
+            "tests/package-a/__generated__/math.derived.test.ts",
+        }
+    )
+
+    fixture_b.write_text('export const owner = "b-v2";\n', encoding="utf-8")
+    sibling_only = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=ExplodingGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert sibling_only.exit_code == 0
+    assert sibling_only.skipped == paths
+    assert not sibling_only.generated
+    assert not sibling_only.refrozen
+
+    class CountingGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            self.calls += 1
+            return await super().generate_request(request, **kwargs)
+
+    fixture_a.write_text('export const owner = "a-v2";\n', encoding="utf-8")
+    generator = CountingGenerator()
+    owner_change = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=generator,
+        worker_factory=lambda *_: worker,
+    )
+    assert owner_change.exit_code == 0
+    assert owner_change.generated == paths
+    assert generator.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_refreeze_keeps_rejected_marker_until_atomic_commit_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _RuntimeMutationTestWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert seeded.exit_code == 0
+    target = "tests/__generated__/math.example.test.ts"
+    metadata = dict(_test_header_metadata((tmp_path / target).read_text()) or {})
+    request = GenerationRequest(
+        language="ts",
+        kind="test",
+        target_path=target,
+        context_files={},
+        prompt="generate",
+        cache_payload={"path": worker.test_spec_path, "tier": "example"},
+        validator=lambda _source: [],
+        project_root=tmp_path,
+    )
+    marker_paths = _write_rejected_test_candidate(
+        tmp_path,
+        request,
+        source_path=worker.test_spec_path,
+        tier="example",
+        fingerprint=metadata["battery_fingerprint"],
+        candidate_source="export const rejected = true;\n",
+        attempts=1,
+        errors=("rejected",),
+        expected_provenance=metadata,
+    )
+    assert marker_paths is not None
+    runner = worker.installation.package_root / "dist/test/runner.js"
+    runner.write_text("export const changedRunner = true;\n", encoding="utf-8")
+
+    def fail_commit(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("simulated atomic commit failure")
+
+    monkeypatch.setattr("jaunt.typescript.tester.atomic_write_manifest", fail_commit)
+    with pytest.raises(RuntimeError, match="simulated atomic commit failure"):
+        await run_test(
+            tmp_path,
+            config,
+            no_build=True,
+            generator=ExplodingGenerator(),
+            worker_factory=lambda *_: worker,
+        )
+
+    assert all((tmp_path / path).is_file() for path in marker_paths)
 
 
 @pytest.mark.asyncio
@@ -5951,7 +11287,584 @@ async def test_migration_preserves_battery_reuse_proof_for_no_build_test(
 
 
 @pytest.mark.asyncio
-async def test_refrozen_build_rejects_an_unproven_battery_api_transition(
+async def test_api_only_reheader_lands_when_sibling_generation_exhausts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    seeded_cache = ResponseCache(tmp_path / ".seed-cache")
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        response_cache=seeded_cache,
+        worker_factory=lambda *_: worker,
+    )
+    assert seeded.exit_code == 0
+    example_relative = "tests/__generated__/math.example.test.ts"
+    derived_relative = "tests/__generated__/math.derived.test.ts"
+    example = tmp_path / example_relative
+    original = example.read_text(encoding="utf-8")
+    original_metadata = dict(_test_header_metadata(original) or {})
+    drifted_metadata = {
+        **original_metadata,
+        "target_api_digest": "sha256:" + "f" * 64,
+        "battery_fingerprint": "sha256:" + "e" * 64,
+    }
+    example.write_text(
+        _with_test_header(
+            _strip_test_header(original),
+            tier="example",
+            source_path="tests/math.jaunt-test.ts",
+            provenance=drifted_metadata,
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / derived_relative).unlink()
+
+    class FailingDerivedGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            tier = str(request.cache_payload["tier"])
+            self.calls.append(tier)
+            assert tier == "derived"
+            return (
+                'import "../../src/__generated__/math.js";\n',
+                TokenUsage(20, 10, "fake-ts", "fake"),
+                (),
+            )
+
+    generator = FailingDerivedGenerator()
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        max_attempts=1,
+        generator=generator,
+        response_cache=ResponseCache(tmp_path / ".fresh-cache"),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 3
+    assert generator.calls == ["derived"]
+    assert report.refrozen == frozenset({example_relative})
+    assert _strip_test_header(example.read_text(encoding="utf-8")) == _strip_test_header(original)
+    refreshed_metadata = _test_header_metadata(example.read_text(encoding="utf-8"))
+    assert refreshed_metadata is not None
+    assert refreshed_metadata["target_api_digest"] == original_metadata["target_api_digest"]
+    outcomes = {item["path"]: item for item in report.runner["batteries"]}
+    assert outcomes[example_relative]["state"] == "verified"
+    assert report.runner["partial_landing"]["accepted"] == (example_relative,)
+    assert report.runner["partial_landing"]["committed"] is True
+    assert not (tmp_path / derived_relative).exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "co_drift_field",
+    ["prompt_fingerprint", "runner_fingerprint"],
+    ids=["prompt-and-api", "runner-and-api"],
+)
+async def test_api_transition_with_safe_drift_verifies_before_run_without_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    co_drift_field: str,
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert seeded.exit_code == 0
+    example_relative = "tests/__generated__/math.example.test.ts"
+    example = tmp_path / example_relative
+    original = example.read_text(encoding="utf-8")
+    original_metadata = dict(_test_header_metadata(original) or {})
+    drifted_metadata = {
+        **original_metadata,
+        "target_api_digest": "sha256:" + "f" * 64,
+        co_drift_field: "sha256:" + "d" * 64,
+        "battery_fingerprint": "sha256:" + "e" * 64,
+    }
+    example.write_text(
+        _with_test_header(
+            _strip_test_header(original),
+            tier="example",
+            source_path=worker.test_spec_path,
+            provenance=drifted_metadata,
+        ),
+        encoding="utf-8",
+    )
+    phases: list[bool] = []
+    safety_checked = False
+
+    async def ordered_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal safety_checked
+        typecheck_only = bool(kwargs.get("typecheck_only"))
+        phases.append(typecheck_only)
+        if typecheck_only:
+            safety_checked = True
+        else:
+            assert safety_checked, "runtime verification must follow safety-aware typechecking"
+            safety_checked = False
+        return {
+            "ok": True,
+            "mode": "typecheck" if typecheck_only else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", ordered_batches)
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=ExplodingGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 0
+    assert report.generated == frozenset()
+    assert report.refrozen == frozenset({example_relative})
+    assert phases == [True, False, True, False]
+    refreshed = example.read_text(encoding="utf-8")
+    refreshed_metadata = dict(_test_header_metadata(refreshed) or {})
+    assert _strip_test_header(refreshed) == _strip_test_header(original)
+    assert refreshed_metadata["target_api_digest"] == original_metadata["target_api_digest"]
+    assert refreshed_metadata[co_drift_field] == original_metadata[co_drift_field]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content_drift_field",
+    ["policy_fingerprint", "skills_fingerprint", "fast_check_fingerprint"],
+)
+async def test_api_transition_with_content_policy_drift_still_regenerates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    content_drift_field: str,
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert seeded.exit_code == 0
+    example_relative = "tests/__generated__/math.example.test.ts"
+    example = tmp_path / example_relative
+    original = example.read_text(encoding="utf-8")
+    metadata = {
+        **dict(_test_header_metadata(original) or {}),
+        "target_api_digest": "sha256:" + "f" * 64,
+        content_drift_field: "sha256:" + "d" * 64,
+        "battery_fingerprint": "sha256:" + "e" * 64,
+    }
+    example.write_text(
+        _with_test_header(
+            _strip_test_header(original),
+            tier="example",
+            source_path=worker.test_spec_path,
+            provenance=metadata,
+        ),
+        encoding="utf-8",
+    )
+
+    class CountingGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            self.calls.append(str(request.cache_payload["tier"]))
+            return await super().generate_request(request, **kwargs)
+
+    generator = CountingGenerator()
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=generator,
+        response_cache=ResponseCache(tmp_path / f".{content_drift_field}-cache"),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 0
+    assert generator.calls == ["example"]
+    assert report.generated == frozenset({example_relative})
+    assert example_relative not in report.refrozen
+
+
+@pytest.mark.asyncio
+async def test_api_and_runner_drift_never_executes_an_unsafe_existing_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert seeded.exit_code == 0
+    example_relative = "tests/__generated__/math.example.test.ts"
+    example = tmp_path / example_relative
+    original = example.read_text(encoding="utf-8")
+    metadata = {
+        **dict(_test_header_metadata(original) or {}),
+        "target_api_digest": "sha256:" + "f" * 64,
+        "runner_fingerprint": "sha256:" + "d" * 64,
+        "battery_fingerprint": "sha256:" + "e" * 64,
+    }
+    unsafe = (
+        'declare const require: (specifier: string) => unknown;\nvoid require("node:module");\n'
+    )
+    example.write_text(
+        _with_test_header(
+            unsafe,
+            tier="example",
+            source_path=worker.test_spec_path,
+            provenance=metadata,
+        ),
+        encoding="utf-8",
+    )
+    phases: list[tuple[bool, bool]] = []
+
+    async def reject_unsafe_typecheck(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        typecheck_only = bool(kwargs.get("typecheck_only"))
+        overlays = kwargs.get("overlays", {})
+        has_unsafe_body = isinstance(overlays, Mapping) and any(
+            'require("node:module")' in str(source) for source in overlays.values()
+        )
+        phases.append((typecheck_only, has_unsafe_body))
+        if not typecheck_only:
+            assert not has_unsafe_body, "unsafe existing bytes reached runtime verification"
+        if typecheck_only and has_unsafe_body:
+            return {
+                "ok": False,
+                "mode": "typecheck",
+                "tests": [],
+                "diagnostics": [
+                    {
+                        "code": "JAUNT_TS_TEST_DYNAMIC_LOADER",
+                        "message": "dynamic loading is forbidden",
+                        "severity": "error",
+                        "path": example_relative,
+                    }
+                ],
+            }
+        return {
+            "ok": True,
+            "mode": "typecheck" if typecheck_only else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    class CountingGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            self.calls.append(str(request.cache_payload["tier"]))
+            return await super().generate_request(request, **kwargs)
+
+    monkeypatch.setattr(
+        "jaunt.typescript.tester._run_test_batches",
+        reject_unsafe_typecheck,
+    )
+    generator = CountingGenerator()
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=generator,
+        response_cache=ResponseCache(tmp_path / ".unsafe-verification-cache"),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 0
+    assert generator.calls == ["example"]
+    assert report.generated == frozenset({example_relative})
+    assert any(typecheck and unsafe_body for typecheck, unsafe_body in phases)
+    assert not any(not typecheck and unsafe_body for typecheck, unsafe_body in phases)
+    assert 'require("node:module")' not in example.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_api_only_reheader_failure_regenerates_the_battery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    example_relative = "tests/__generated__/math.example.test.ts"
+    example = tmp_path / example_relative
+    source = example.read_text(encoding="utf-8")
+    metadata = dict(_test_header_metadata(source) or {})
+    metadata.update(
+        {
+            "target_api_digest": "sha256:" + "f" * 64,
+            "prompt_fingerprint": "sha256:" + "d" * 64,
+            "battery_fingerprint": "sha256:" + "e" * 64,
+        }
+    )
+    example.write_text(
+        _with_test_header(
+            _strip_test_header(source),
+            tier="example",
+            source_path="tests/math.jaunt-test.ts",
+            provenance=metadata,
+        ),
+        encoding="utf-8",
+    )
+    status = await run_status(tmp_path, config, worker_factory=lambda *_: worker)
+    api_drift = next(
+        diagnostic
+        for diagnostic in status.diagnostics
+        if diagnostic.path == example_relative and diagnostic.code == "JAUNT_TS_TEST_BATTERY_STALE"
+    )
+    assert set(api_drift.data["mismatches"]) == {
+        "battery_fingerprint",
+        "prompt_fingerprint",
+        "target_api_digest",
+    }
+    assert "jaunt test --language ts --no-build" in api_drift.message
+    assert "without `--no-run`" in api_drift.message
+    runtime_calls = 0
+
+    async def reject_verification(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal runtime_calls
+        if kwargs.get("typecheck_only"):
+            return {"ok": True, "mode": "typecheck", "tests": [], "diagnostics": []}
+        runtime_calls += 1
+        if runtime_calls <= 2:
+            return {
+                "ok": False,
+                "mode": "run",
+                "tests": [{"path": example_relative, "ok": False}],
+                "failures": [{"category": "assertion", "path": example_relative}],
+            }
+        return {"ok": True, "mode": "run", "tests": [], "diagnostics": []}
+
+    class CountingGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            self.calls.append(str(request.cache_payload["tier"]))
+            return await super().generate_request(request, **kwargs)
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", reject_verification)
+    generator = CountingGenerator()
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=generator,
+        response_cache=ResponseCache(tmp_path / ".verification-fallback-cache"),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert seeded.exit_code == 0
+    assert report.exit_code == 0
+    assert generator.calls == ["example"]
+    assert report.generated == frozenset({example_relative})
+    assert example_relative not in report.refrozen
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("category", ["runner", "runner-protocol", "timeout", "unknown"])
+async def test_api_only_verification_infrastructure_never_queues_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    category: str,
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    example_relative = "tests/__generated__/math.example.test.ts"
+    example = tmp_path / example_relative
+    original = example.read_text(encoding="utf-8")
+    metadata = dict(_test_header_metadata(original) or {})
+    metadata.update(
+        {
+            "target_api_digest": "sha256:" + "f" * 64,
+            "battery_fingerprint": "sha256:" + "e" * 64,
+        }
+    )
+    example.write_text(
+        _with_test_header(
+            _strip_test_header(original),
+            tier="example",
+            source_path="tests/math.jaunt-test.ts",
+            provenance=metadata,
+        ),
+        encoding="utf-8",
+    )
+    drifted_source = example.read_text(encoding="utf-8")
+
+    runtime_calls = 0
+
+    async def unavailable_verifier(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal runtime_calls
+        if kwargs.get("typecheck_only"):
+            return {"ok": True, "mode": "typecheck", "tests": [], "diagnostics": []}
+        runtime_calls += 1
+        result: dict[str, Any] = {
+            "ok": False,
+            "mode": "run",
+            "tests": [],
+        }
+        if category != "unknown":
+            result["failures"] = [{"category": category}]
+        if category == "timeout":
+            result["timedOut"] = True
+        return result
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", unavailable_verifier)
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=ExplodingGenerator(),
+        response_cache=ResponseCache(tmp_path / ".verification-infrastructure-cache"),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert seeded.exit_code == 0
+    assert report.exit_code == 3
+    assert runtime_calls == 1
+    assert example.read_text(encoding="utf-8") == drifted_source
+    assert {
+        diagnostic.code for diagnostics in report.failed.values() for diagnostic in diagnostics
+    } == {"JAUNT_TS_TEST_VERIFICATION_INFRASTRUCTURE"}
+    outcomes = {item["path"]: item for item in report.runner["batteries"]}
+    assert outcomes[example_relative]["state"] == "verification-infrastructure"
+
+
+@pytest.mark.asyncio
+async def test_no_run_regenerates_api_drift_without_executing_verification(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = _config(tmp_path)
@@ -5969,39 +11882,612 @@ async def test_refrozen_build_rejects_an_unproven_battery_api_transition(
     seeded = await run_test(
         tmp_path,
         config,
+        no_build=True,
         generator=FakeGenerator(),
         worker_factory=lambda *_: worker,
     )
-    for relative in seeded.generated:
-        path = tmp_path / relative
-        source = path.read_text(encoding="utf-8")
-        metadata = dict(_test_header_metadata(source) or {})
-        metadata["target_api_digest"] = "sha256:" + "f" * 64
-        metadata["battery_fingerprint"] = "sha256:" + "e" * 64
-        path.write_text(
-            _with_test_header(
-                _strip_test_header(source),
-                tier=metadata["tier"],
-                source_path=metadata["source"],
-                provenance=metadata,
-            ),
-            encoding="utf-8",
+    example_relative = "tests/__generated__/math.example.test.ts"
+    example = tmp_path / example_relative
+    source = example.read_text(encoding="utf-8")
+    metadata = dict(_test_header_metadata(source) or {})
+    metadata.update(
+        {
+            "target_api_digest": "sha256:" + "f" * 64,
+            "battery_fingerprint": "sha256:" + "e" * 64,
+        }
+    )
+    example.write_text(
+        _with_test_header(
+            _strip_test_header(source),
+            tier="example",
+            source_path=worker.test_spec_path,
+            provenance=metadata,
+        ),
+        encoding="utf-8",
+    )
+    runtime_calls = 0
+
+    async def typecheck_only(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal runtime_calls
+        if not kwargs.get("typecheck_only"):
+            runtime_calls += 1
+            raise AssertionError("--no-run must not execute API-transition batteries")
+        return {"ok": True, "mode": "typecheck", "tests": [], "diagnostics": []}
+
+    class CountingGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            self.calls.append(str(request.cache_payload["tier"]))
+            return await super().generate_request(request, **kwargs)
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", typecheck_only)
+    generator = CountingGenerator()
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        no_run=True,
+        generator=generator,
+        response_cache=ResponseCache(tmp_path / ".no-run-api-drift-cache"),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert seeded.exit_code == 0
+    assert report.exit_code == 0
+    assert generator.calls == ["example"]
+    assert runtime_calls == 0
+    assert example_relative in report.generated
+
+
+def test_rejected_candidate_paths_bound_long_components_and_keep_full_identity(
+    tmp_path: Path,
+) -> None:
+    long_stem = "intent-" + "a" * 500
+    target_path = f"tests/__generated__/{long_stem}.example.test.tsx"
+    other_target = f"tests/__generated__/{long_stem}-other.example.test.tsx"
+    candidate_source = "export const exact = true;\n"
+    candidate_digest = _digest(candidate_source)
+    candidate_relative, metadata_relative = _rejected_test_paths(
+        target_path,
+        candidate_digest=candidate_digest,
+    )
+    other_metadata = _rejected_test_paths(other_target)[1]
+    lock_relative = metadata_relative.with_suffix(".lock")
+
+    assert metadata_relative != other_metadata
+    assert candidate_digest.removeprefix("sha256:") in candidate_relative.name
+    for relative in (candidate_relative, metadata_relative, lock_relative):
+        assert max(len(component.encode("utf-8")) for component in relative.parts) < 200
+
+    fingerprint = "sha256:" + "a" * 64
+    provenance = {
+        "test_spec_digest": "sha256:" + "b" * 64,
+        "target_api_digest": "sha256:" + "c" * 64,
+        "battery_fingerprint": fingerprint,
+    }
+    request = GenerationRequest(
+        language="ts",
+        kind="test",
+        target_path=target_path,
+        context_files={},
+        prompt="generate",
+        cache_payload={"path": "tests/long.jaunt-test.tsx", "tier": "example"},
+        validator=lambda _source: [],
+        project_root=tmp_path,
+    )
+    written = _write_rejected_test_candidate(
+        tmp_path,
+        request,
+        source_path="tests/long.jaunt-test.tsx",
+        tier="example",
+        fingerprint=fingerprint,
+        candidate_source=candidate_source,
+        attempts=1,
+        errors=("rejected",),
+        expected_provenance=provenance,
+    )
+
+    assert written == (candidate_relative.as_posix(), metadata_relative.as_posix())
+    assert (tmp_path / candidate_relative).is_file()
+    assert (tmp_path / metadata_relative).is_file()
+    assert (tmp_path / lock_relative).is_file()
+    token = _rejected_test_token(
+        tmp_path,
+        target_path,
+        expected_fingerprint=fingerprint,
+        expected_provenance=provenance,
+    )
+    assert _clear_rejected_test_candidate(
+        tmp_path,
+        target_path,
+        expected_token=token,
+    )
+
+
+def test_rejected_candidate_preserves_exact_bytes_and_cleanup_uses_snapshot_cas(
+    tmp_path: Path,
+) -> None:
+    target_path = "tests/__generated__/exact.example.test.ts"
+    fingerprint = "sha256:" + "a" * 64
+    provenance = {
+        "test_spec_digest": "sha256:" + "b" * 64,
+        "target_api_digest": "sha256:" + "c" * 64,
+        "prompt_fingerprint": "sha256:" + "d" * 64,
+        "battery_fingerprint": fingerprint,
+    }
+    request = GenerationRequest(
+        language="ts",
+        kind="test",
+        target_path=target_path,
+        context_files={},
+        prompt="generate",
+        cache_payload={"path": "tests/exact.jaunt-test.ts", "tier": "example"},
+        validator=lambda _source: [],
+        project_root=tmp_path,
+    )
+    first_source = "export const exact = 1;  \t"
+    first_paths = _write_rejected_test_candidate(
+        tmp_path,
+        request,
+        source_path="tests/exact.jaunt-test.ts",
+        tier="example",
+        fingerprint=fingerprint,
+        candidate_source=first_source,
+        attempts=1,
+        errors=("rejected",),
+        terminal=True,
+        expected_provenance=provenance,
+    )
+    assert first_paths is not None
+    first_candidate = tmp_path / first_paths[0]
+    assert first_candidate.read_bytes() == first_source.encode("utf-8")
+    first_metadata = json.loads((tmp_path / first_paths[1]).read_text(encoding="utf-8"))
+    assert first_metadata["schema"] == 2
+    assert first_metadata["candidate_digest"] == _digest(first_source)
+    assert first_metadata["expected_provenance"] == provenance
+    assert first_metadata["semantic_identity"].startswith("sha256:")
+    first_token = _rejected_test_token(
+        tmp_path,
+        target_path,
+        expected_fingerprint=fingerprint,
+        expected_provenance=provenance,
+    )
+    assert first_token is not None
+
+    second_source = "export const exact = 2;\n"
+    drifted_provenance = {
+        **provenance,
+        "prompt_fingerprint": "sha256:" + "e" * 64,
+        "battery_fingerprint": "sha256:" + "f" * 64,
+    }
+    second_paths = _write_rejected_test_candidate(
+        tmp_path,
+        request,
+        source_path="tests/exact.jaunt-test.ts",
+        tier="example",
+        fingerprint=drifted_provenance["battery_fingerprint"],
+        candidate_source=second_source,
+        attempts=1,
+        errors=("rejected again",),
+        terminal=True,
+        expected_provenance=drifted_provenance,
+    )
+    assert second_paths is not None
+    assert not _clear_rejected_test_candidate(
+        tmp_path,
+        target_path,
+        expected_token=first_token,
+    )
+    current = _rejected_test_diagnostic(
+        tmp_path,
+        target_path,
+        expected_fingerprint=drifted_provenance["battery_fingerprint"],
+        expected_provenance=drifted_provenance,
+    )
+    assert current is not None
+    assert current["candidate"] == second_paths[0]
+    assert current["consecutive_attempts"] == 2
+    second_token = _rejected_test_token(
+        tmp_path,
+        target_path,
+        expected_fingerprint=drifted_provenance["battery_fingerprint"],
+        expected_provenance=drifted_provenance,
+    )
+    assert _clear_rejected_test_candidate(
+        tmp_path,
+        target_path,
+        expected_token=second_token,
+    )
+    assert not (tmp_path / second_paths[0]).exists()
+    assert not (tmp_path / second_paths[1]).exists()
+
+
+@pytest.mark.asyncio
+async def test_imported_type_context_drift_resets_terminal_exhaustion_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    worker.module["contextSource"] = _test_imported_type_context_source("id: string;")
+    original_api_digest = worker.module["apiDigest"]
+    original_api_source = worker.module["apiSource"]
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    class RejectedGenerator(FakeGenerator):
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            return (
+                'import "../../src/__generated__/math.js";\n',
+                TokenUsage(20, 10, "fake-ts", "fake"),
+                (),
+            )
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    first = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        max_attempts=1,
+        generator=RejectedGenerator(),
+        response_cache=ResponseCache(tmp_path / ".imported-context-marker-v1"),
+        worker_factory=lambda *_: worker,
+    )
+    battery_paths = {
+        "tests/__generated__/math.example.test.ts",
+        "tests/__generated__/math.derived.test.ts",
+    }
+    example_path = "tests/__generated__/math.example.test.ts"
+    assert first.exit_code == 3
+    first_outcomes = {item["path"]: item for item in first.runner["batteries"]}
+    first_metadata = json.loads(
+        (tmp_path / first_outcomes[example_path]["candidate_metadata"]).read_text(encoding="utf-8")
+    )
+    first_context_fingerprint = first_metadata["expected_provenance"][
+        "imported_type_context_fingerprint"
+    ]
+    assert first_metadata["consecutive_attempts"] == 1
+
+    stable = await run_status(tmp_path, config, worker_factory=lambda *_: worker)
+    assert {
+        str(diagnostic.path): diagnostic.code
+        for diagnostic in stable.diagnostics
+        if diagnostic.path in battery_paths
+    } == {path: "JAUNT_TS_TEST_GENERATION_EXHAUSTED" for path in battery_paths}
+
+    worker.module["contextSource"] = _test_imported_type_context_source(
+        "id: string; required_label: string;"
+    )
+    assert worker.module["apiDigest"] == original_api_digest
+    assert worker.module["apiSource"] == original_api_source
+    drifted = await run_status(tmp_path, config, worker_factory=lambda *_: worker)
+    assert {
+        str(diagnostic.path): diagnostic.code
+        for diagnostic in drifted.diagnostics
+        if diagnostic.path in battery_paths
+    } == {path: "JAUNT_TS_TEST_BATTERY_MISSING" for path in battery_paths}
+
+    second = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        max_attempts=1,
+        generator=RejectedGenerator(),
+        response_cache=ResponseCache(tmp_path / ".imported-context-marker-v2"),
+        worker_factory=lambda *_: worker,
+    )
+    assert second.exit_code == 3
+    second_outcomes = {item["path"]: item for item in second.runner["batteries"]}
+    second_metadata = json.loads(
+        (tmp_path / second_outcomes[example_path]["candidate_metadata"]).read_text(encoding="utf-8")
+    )
+    assert second_metadata["consecutive_attempts"] == 1
+    assert (
+        second_metadata["expected_provenance"]["imported_type_context_fingerprint"]
+        != first_context_fingerprint
+    )
+
+
+@pytest.mark.asyncio
+async def test_exhausted_marker_survives_prompt_drift_but_resets_for_semantic_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    class RejectedGenerator(FakeGenerator):
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            return (
+                'import "../../src/__generated__/math.js";\n',
+                TokenUsage(20, 10, "fake-ts", "fake"),
+                (),
+            )
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert seeded.exit_code == 0
+
+    test_spec = tmp_path / worker.test_spec_path
+    exhausted_test_spec = "// A changed authored test contract that will exhaust generation.\n"
+    test_spec.write_text(exhausted_test_spec, encoding="utf-8")
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        max_attempts=1,
+        generator=RejectedGenerator(),
+        response_cache=ResponseCache(tmp_path / ".semantic-marker-cache"),
+        worker_factory=lambda *_: worker,
+    )
+    assert report.exit_code == 3
+
+    battery_paths = {
+        "tests/__generated__/math.example.test.ts",
+        "tests/__generated__/math.derived.test.ts",
+    }
+
+    def diagnostic_codes(status: TargetStatus | TargetCheckReport) -> dict[str, str]:
+        return {
+            str(diagnostic.path): diagnostic.code
+            for diagnostic in status.diagnostics
+            if diagnostic.path in battery_paths
+        }
+
+    def prompt_drifted_provenance(*args: Any, **kwargs: Any) -> Mapping[str, str]:
+        provenance = dict(_test_provenance(*args, **kwargs))
+        provenance["prompt_fingerprint"] = "sha256:" + "d" * 64
+        provenance["battery_fingerprint"] = "sha256:" + "e" * 64
+        return provenance
+
+    async def unexpected_typecheck(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("check must exclude a semantically current exhausted battery")
+
+    with monkeypatch.context() as prompt_drift:
+        prompt_drift.setattr(
+            "jaunt.typescript.tester._test_provenance",
+            prompt_drifted_provenance,
         )
-
-    expected = json.loads(worker.sidecar)
-    expected["structuralDigest"] = "sha256:toolchain-structure"
-    expected["apiDigest"] = "sha256:toolchain-api"
-    worker.module["structuralDigest"] = expected["structuralDigest"]
-    worker.module["apiDigest"] = expected["apiDigest"]
-    worker.module["sidecar"] = json.dumps(expected, sort_keys=True) + "\n"
-
-    with pytest.raises(AssertionError, match="unexpected model call"):
-        await run_test(
+        drifted = await run_status(tmp_path, config, worker_factory=lambda *_: worker)
+        prompt_drift.setattr(
+            "jaunt.typescript.tester._run_test_batches",
+            unexpected_typecheck,
+        )
+        checked = await run_check(
             tmp_path,
             config,
-            generator=ExplodingGenerator(),
+            magic_only=True,
             worker_factory=lambda *_: worker,
         )
+
+    assert diagnostic_codes(drifted) == {
+        path: "JAUNT_TS_TEST_GENERATION_EXHAUSTED" for path in battery_paths
+    }
+    assert diagnostic_codes(checked) == diagnostic_codes(drifted)
+
+    test_spec.write_text("// A different authored test contract.\n", encoding="utf-8")
+    changed_spec = await run_status(tmp_path, config, worker_factory=lambda *_: worker)
+    assert diagnostic_codes(changed_spec) == {
+        path: "JAUNT_TS_TEST_BATTERY_STALE" for path in battery_paths
+    }
+    test_spec.write_text(exhausted_test_spec, encoding="utf-8")
+
+    original_api_digest = worker.module["apiDigest"]
+    original_api_source = worker.module["apiSource"]
+    worker.module["apiDigest"] = "sha256:changed-api"
+    worker.module["apiSource"] = (
+        "/** Double a number. */\nexport declare function double(value: string): string;\n"
+    )
+    changed_api = await run_status(tmp_path, config, worker_factory=lambda *_: worker)
+    assert diagnostic_codes(changed_api) == {
+        path: "JAUNT_TS_TEST_BATTERY_STALE" for path in battery_paths
+    }
+    worker.module["apiDigest"] = original_api_digest
+    worker.module["apiSource"] = original_api_source
+
+
+@pytest.mark.asyncio
+async def test_exhausted_battery_persists_exact_candidate_and_check_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    (tmp_path / worker.test_spec_path).write_text(
+        "// Verify a changed public contract.\n", encoding="utf-8"
+    )
+    worker.module["specSource"] = (
+        'import * as jaunt from "@usejaunt/ts/spec";\n'
+        "jaunt.magicModule();\n"
+        "/** Double a number.\n"
+        " * @prop given value: fc.integer() :: double(value) equals value * 2\n"
+        " */\n"
+        "export function double(value: number): number { return jaunt.magic(); }\n"
+    )
+
+    class RejectedGenerator(FakeGenerator):
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            return (
+                'import "../../src/__generated__/math.js";\n',
+                TokenUsage(20, 10, "fake-ts", "fake"),
+                (),
+            )
+
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        max_attempts=1,
+        generator=RejectedGenerator(),
+        response_cache=ResponseCache(tmp_path / ".rejected-cache"),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 3
+    assert {
+        diagnostic.code for diagnostics in report.failed.values() for diagnostic in diagnostics
+    } == {"JAUNT_TS_TEST_GENERATION_EXHAUSTED"}
+    outcomes = {item["path"]: item for item in report.runner["batteries"]}
+    example = outcomes["tests/__generated__/math.example.test.ts"]
+    candidate = tmp_path / example["candidate"]
+    metadata_path = tmp_path / example["candidate_metadata"]
+    candidate_source = candidate.read_text(encoding="utf-8")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert 'import "../../src/__generated__/math.js"' in candidate_source
+    assert "const __jauntPropertyArbitrary_" in candidate_source
+    assert metadata["terminal"] is True
+    assert metadata["consecutive_attempts"] == 1
+    assert metadata["candidate_digest"] == _digest(candidate_source)
+
+    second = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        max_attempts=1,
+        generator=RejectedGenerator(),
+        response_cache=ResponseCache(tmp_path / ".rejected-cache-second"),
+        worker_factory=lambda *_: worker,
+    )
+    second_outcomes = {item["path"]: item for item in second.runner["batteries"]}
+    second_metadata = json.loads(
+        (
+            tmp_path
+            / second_outcomes["tests/__generated__/math.example.test.ts"]["candidate_metadata"]
+        ).read_text(encoding="utf-8")
+    )
+    assert second.exit_code == 3
+    assert second_metadata["consecutive_attempts"] == 2
+
+    (tmp_path / worker.test_spec_path).write_text(
+        "// Verify another changed public contract.\n",
+        encoding="utf-8",
+    )
+    third = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        max_attempts=1,
+        generator=RejectedGenerator(),
+        response_cache=ResponseCache(tmp_path / ".rejected-cache-third"),
+        worker_factory=lambda *_: worker,
+    )
+    third_outcomes = {item["path"]: item for item in third.runner["batteries"]}
+    marker_paths = {
+        path: (tmp_path / outcome["candidate"], tmp_path / outcome["candidate_metadata"])
+        for path, outcome in third_outcomes.items()
+    }
+    for _candidate_path, marker_path in marker_paths.values():
+        reset_metadata = json.loads(marker_path.read_text(encoding="utf-8"))
+        assert reset_metadata["consecutive_attempts"] == 1
+
+    example_path = tmp_path / "tests/__generated__/math.example.test.ts"
+    example_path.parent.mkdir(parents=True, exist_ok=True)
+    example_path.write_text(
+        _with_test_header(
+            "const invalidType: string = 1;\n",
+            tier="example",
+            source_path=worker.test_spec_path,
+            provenance={},
+        ),
+        encoding="utf-8",
+    )
+    checked_typecheck_files: list[tuple[str, ...]] = []
+
+    async def reject_type_invalid_marker(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        files = tuple(kwargs.get("files", ()))
+        if kwargs.get("typecheck_only"):
+            checked_typecheck_files.append(files)
+            if "tests/__generated__/math.example.test.ts" in files:
+                return {
+                    "ok": False,
+                    "mode": "typecheck",
+                    "tests": [],
+                    "diagnostics": [
+                        {
+                            "code": "TS2322",
+                            "message": "invalid stale exhausted battery",
+                            "severity": "error",
+                        }
+                    ],
+                }
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(
+        "jaunt.typescript.tester._run_test_batches",
+        reject_type_invalid_marker,
+    )
+    checked = await run_check(
+        tmp_path,
+        config,
+        magic_only=True,
+        worker_factory=lambda *_: worker,
+    )
+    exhausted = [
+        item for item in checked.diagnostics if item.code == "JAUNT_TS_TEST_GENERATION_EXHAUSTED"
+    ]
+    assert len(exhausted) == 2
+    assert all(item.data["consecutive_attempts"] == 1 for item in exhausted)
+    assert all(
+        "tests/__generated__/math.example.test.ts" not in files for files in checked_typecheck_files
+    )
+    assert not any(item.code == "JAUNT_TS_TEST_TYPECHECK" for item in checked.diagnostics)
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    recovered = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        response_cache=ResponseCache(tmp_path / ".rejected-cache-recovery"),
+        worker_factory=lambda *_: worker,
+    )
+    assert recovered.exit_code == 0
+    assert all(
+        not candidate_path.exists() and not metadata_path.exists()
+        for candidate_path, metadata_path in marker_paths.values()
+    )
 
 
 @pytest.mark.asyncio
@@ -6126,6 +12612,81 @@ async def test_check_carries_diagnostics_but_warnings_do_not_block(tmp_path: Pat
     rendered = "\n".join(human_lines(failure_payload))
     assert "The deterministic check failed." in rendered
     assert "stale-battery: src/math.ts#double" in rendered
+
+
+def test_check_payload_synthesizes_magic_blocker_diagnostics(tmp_path: Path) -> None:
+    report = TargetCheckReport(
+        language="ts",
+        root=tmp_path,
+        stale={"ts:src/stale": "structural"},
+        unbuilt=frozenset({"ts:src/new"}),
+        invalid={
+            "ts:src/bad": (
+                TargetDiagnostic(
+                    code="JAUNT_TS_API_DRIFT",
+                    message="The API mirror drifted.",
+                    path="src/bad.ts",
+                ),
+            )
+        },
+        orphans=(
+            TargetArtifact(
+                path=tmp_path / "src/__generated__/ghost.ts",
+                kind="implementation",
+                module_id="ts:src/ghost",
+            ),
+            TargetArtifact(
+                path=tmp_path / "tests/contract/ghost.test.ts",
+                kind="contract-battery",
+                module_id="ts-contract:ghost",
+            ),
+        ),
+        diagnostics=(
+            TargetDiagnostic(
+                code="JAUNT_TS_ADVISORY",
+                message="Review this warning.",
+                severity="warning",
+            ),
+        ),
+        exit_code=4,
+    )
+
+    payload = check_payload(report)
+
+    assert [item["code"] for item in payload["diagnostics"]] == [
+        "JAUNT_TS_ADVISORY",
+        "JAUNT_MAGIC_STALE",
+        "JAUNT_MAGIC_UNBUILT",
+        "JAUNT_TS_API_DRIFT",
+        "JAUNT_MAGIC_ORPHAN",
+    ]
+    blockers = payload["diagnostics"][1:]
+    assert [item["severity"] for item in blockers] == ["error"] * 4
+    assert [item["data"]["state"] for item in blockers] == [
+        "stale",
+        "unbuilt",
+        "invalid",
+        "orphan",
+    ]
+    assert [item["data"].get("target") for item in blockers] == [
+        "ts:src/stale",
+        "ts:src/new",
+        "ts:src/bad",
+        None,
+    ]
+    assert blockers[0]["data"]["reason"] == "structural"
+    assert blockers[-1]["path"] == "src/__generated__/ghost.ts"
+    assert not any(
+        item.get("path") == "tests/contract/ghost.test.ts" for item in payload["diagnostics"]
+    )
+    assert payload["magic"]["ts"]["orphans"] == [
+        "src/__generated__/ghost.ts",
+        "tests/contract/ghost.test.ts",
+    ]
+    assert payload["targets"]["ts"]["diagnostics"] == payload["diagnostics"]
+    rendered = "\n".join(human_lines(payload))
+    assert "JAUNT_MAGIC_STALE" in rendered
+    assert "ts:src/stale" in rendered
 
 
 @pytest.mark.asyncio

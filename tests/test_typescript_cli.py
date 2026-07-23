@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import cast
 
 from jaunt.cli import (
+    _cmd_mixed_check,
     _cmd_typescript_test_loaded,
     _cmd_mixed_status,
     _aggregate_cost_payloads,
@@ -18,9 +19,15 @@ from jaunt.cli import (
 )
 from jaunt.config import JauntConfig, load_config
 from jaunt.errors import JauntConfigError
-from jaunt.targets.base import TargetBuildReport, TargetDiagnostic, TargetTestReport
+from jaunt.targets.base import (
+    TargetBuildReport,
+    TargetCheckReport,
+    TargetDiagnostic,
+    TargetTestReport,
+)
 from jaunt.typescript.cli_bridge import (
     build_payload,
+    check_payload,
     human_lines,
     test_payload as _test_payload,
 )
@@ -71,6 +78,98 @@ def test_mixed_status_preserves_typescript_diagnostics(tmp_path: Path, monkeypat
         }
     ]
     assert payload["targets"]["ts"]["diagnostics"] == payload["diagnostics"]
+
+
+def test_check_payload_keeps_invalid_blockers_that_differ_only_by_target() -> None:
+    shared = TargetDiagnostic(
+        code="JAUNT_TS_API_DRIFT",
+        message="The generated API mirror drifted.",
+    )
+    payload = check_payload(
+        TargetCheckReport(
+            language="ts",
+            invalid={
+                "ts:src/alpha": (shared,),
+                "ts:src/beta": (shared,),
+            },
+            exit_code=4,
+        )
+    )
+
+    blockers = [item for item in payload["diagnostics"] if item["code"] == "JAUNT_TS_API_DRIFT"]
+    assert [item["data"]["target"] for item in blockers] == [
+        "ts:src/alpha",
+        "ts:src/beta",
+    ]
+
+
+def test_mixed_check_reports_language_scoped_magic_diagnostics(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from jaunt.typescript import status as status_module
+
+    monkeypatch.setattr(
+        "jaunt.cli._capture_python_json",
+        lambda _command, _args: (
+            4,
+            {
+                "command": "check",
+                "ok": False,
+                "blocked": [],
+                "checked": [],
+                "orphans": [],
+                "magic": {
+                    "fresh": [],
+                    "stale": {"pkg.specs": "prose"},
+                    "unbuilt": ["pkg.new"],
+                    "orphans": [],
+                },
+            },
+        ),
+    )
+
+    async def fake_check(*_args, **_kwargs):
+        return TargetCheckReport(
+            language="ts",
+            stale={"ts:src/slug": "structural"},
+            unbuilt=frozenset({"ts:src/new"}),
+            exit_code=4,
+        )
+
+    monkeypatch.setattr(status_module, "run_check", fake_check)
+    args = argparse.Namespace(
+        target=[],
+        magic_only=False,
+        contracts_only=False,
+        json_output=True,
+    )
+
+    assert _cmd_mixed_check(args, tmp_path, cast(JauntConfig, object())) == 4
+    payload = json.loads(capsys.readouterr().out)
+
+    assert [item["code"] for item in payload["diagnostics"]] == [
+        "JAUNT_MAGIC_STALE",
+        "JAUNT_MAGIC_UNBUILT",
+        "JAUNT_MAGIC_STALE",
+        "JAUNT_MAGIC_UNBUILT",
+    ]
+    assert [item["data"]["language"] for item in payload["diagnostics"]] == [
+        "py",
+        "py",
+        "ts",
+        "ts",
+    ]
+    assert [item["data"]["target"] for item in payload["diagnostics"]] == [
+        "py:pkg.specs",
+        "py:pkg.new",
+        "ts:src/slug",
+        "ts:src/new",
+    ]
+    assert payload["targets"]["py"]["diagnostics"] == payload["diagnostics"][:2]
+    assert payload["targets"]["ts"]["diagnostics"] == payload["diagnostics"][2:]
+    assert payload["blocked"] == []
+    assert payload["magic"]["py"]["stale"] == {"pkg.specs": "prose"}
+    assert payload["magic"]["ts"]["stale"] == {"src/slug": "structural"}
 
 
 def test_init_typescript_scaffolds_v2_without_mutating_package_json(tmp_path: Path, capsys) -> None:

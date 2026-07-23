@@ -186,22 +186,72 @@ one atomic write before the next unit is checked. If one candidate fails, valida
 independent siblings can still land; explicit Jaunt dependency-connected modules
 remain atomic.
 
+TypeScript battery generation receives `--instruction` plus persistent
+`[build].instructions` and a declaration-only view of workspace-local types imported
+by each selected target. The worker closes directly requested declarations over their
+supporting declarations, re-exports, and import aliases, while stripping runtime
+bodies and initializers. Requested chunks take priority over supporting closure inside
+the 64 KiB UTF-8 transport budget; records use delimiter-safe framing, and an omission
+marker records when lower-priority context did not fit.
+
+For cross-repository development, a symlinked `@usejaunt/ts` package is supported only
+while its built `dist/` bytes stay fixed for the command. Build it once and serialize
+later package rebuilds, or point the adopter at an immutable packed/copied install.
+Jaunt pins the resolved runtime content and reports
+`JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD` if it changes before the final commit
+boundary; the affected artifact or battery transaction is rolled back.
+
+Artifact journals move from `prepared` to `committed` only after that final runtime
+seal. After a process interruption, Jaunt automatically retires a journal when every
+path still matches the recorded before-state (nothing landed) or when a durable
+`committed` journal still matches every recorded after-state (everything landed).
+The writer holds one persistent workspace lease across the final input CAS, runtime
+guard, `prepared` publication, replacement/seal, and retirement window; generation and
+staging outside that short window remain parallel. Concurrent recovery skips a lease
+that is still held. Mixed, malformed, and legacy journals without lease metadata remain
+blocking for manual inspection; old markers cannot prove that their writer stopped or
+that the final runtime seal ran.
+
+Before a regenerated implementation is committed, Jaunt also typechecks and runs
+every compatible committed Jaunt battery that targets that module against the exact
+candidate overlay. A behavioral failure rejects the implementation and enters the
+bounded implementation retry loop; a runner/infrastructure failure stops without
+spending another model attempt. Ordinary native `*.test.ts[x]` and `*.spec.ts[x]`
+files are not part of this gate yet because Jaunt has no deterministic ownership map
+from those tests to one governed module. Keep running the repository's native suite
+as its separate project gate.
+
 Authored test intent lives in `*.jaunt-test.ts`. Generated batteries use Vitest and
 import the public facade. Example-tier failures retain normal detail. Derived-tier
 repair feedback contains only an opaque case ID and a normalized failure category.
 Collection, timeout, runner, and protocol failures are infrastructure errors and do
 not trigger an implementation repair. Example and derived generation honors
 `[test].jobs` or `--jobs`. Every live attempt first passes the protected runner's
-full-project overlay and static-loader policy; its exact diagnostics enter the
-remaining retry budget. Typecheck-only messages are bounded to 2,000 characters;
+full-project overlay and static-loader policy. Only candidate-attributable diagnostics
+enter the remaining retry budget. Runner/protocol outages stop without charging
+another attempt or evicting the live or cached candidate; a bad committed baseline
+likewise retains unrelated validated candidates for a later recovery. Typecheck-only
+messages are bounded to 2,000 characters;
 executed derived failures still expose only an opaque case ID and category. A late
-request failure also preflights and stages its valid partial set. If separately valid
-batteries conflict when combined, Jaunt finds a deterministic compatible subset, runs
-it, and commits it only when that subset is green. Conflicting paths remain
-uncommitted and the command exits `3`. A rejected cached candidate is removed before
-the next run. Plain progress reports each path and tier, while JSON includes
-`attempts`, `retry_count`, `retry_reasons`, any terminal `rejection_reasons`, and
-`cache_evicted` when a cached response was rejected.
+request failure also preflights and stages its valid partial set. That partial landing
+includes verified reheaders, so one exhausted sibling cannot leave every successfully
+validated stamp stranded. If separately valid batteries conflict when combined, Jaunt
+finds a deterministic compatible subset, runs it with the surviving committed battery
+baseline, and commits it only when that complete subset is green. Conflicting paths
+remain uncommitted and the command exits `3`.
+
+The last rejected candidate is preserved byte-for-byte under
+`.jaunt/typescript/rejected-tests/`; its neighboring JSON record names the source,
+tier, fingerprint, digest, errors, and consecutive attempt count. Terminal exhaustion
+uses `JAUNT_TS_TEST_GENERATION_EXHAUSTED`, so CI can identify one battery rather than
+waiving every stale battery. Prompt-only provenance drift keeps that code and candidate
+pointer; changing the authored test or target API resets it to ordinary staleness. A
+later success clears only the exact rejected record it observed, leaving a concurrent
+newer failure intact. Only a candidate-attributable rejection removes the matching
+cached response before the next run; infrastructure and baseline failures retain it.
+Plain progress reports each path and tier, while JSON
+includes `attempts`, `retry_count`, `retry_reasons`, candidate paths, terminal state,
+any `rejection_reasons`, and `cache_evicted` when a cached response was rejected.
 Every package that owns a configured test project must declare `vitest` directly in
 `devDependencies`; add `fast-check` there too when that package uses `@prop`. A
 hoisted installation alone is not authorization, and Jaunt checks the supported peer
@@ -407,8 +457,22 @@ tests.
 
 Fresh generated batteries are still typechecked and run, but they do not call the
 model again. A runner- or Vitest-only fingerprint change reheaders the unchanged
-battery after overlay validation and reports it as `refrozen`; contract, API, prompt,
-property, or body drift regenerates it. `jaunt test --force` always regenerates.
+battery after overlay validation and reports it as `refrozen`. When the target API
+digest and aggregate battery fingerprint changed, Jaunt verifies the committed battery
+against the current implementation and reheaders it when green, with no model call.
+Prompt, runner, and Vitest fingerprints may change in the same transition; the current
+safety scan still runs before the compiler and Vitest proof.
+Run that recovery explicitly in CI before the deterministic check:
+
+```bash
+jaunt test --language ts --no-build
+jaunt check --language ts
+```
+
+`--no-run` cannot prove the transition and therefore disables this shortcut. A failed
+compiler or behavioral verification falls back to bounded battery generation; prompt,
+fixture, property, body, and other contract drift regenerates directly. `jaunt test
+--force` always regenerates.
 
 ## Current limits
 

@@ -28,6 +28,7 @@ from jaunt.typescript.builder import (
     _module_closure_ids,
     _module_path,
     _path_hash,
+    _recover_atomic_write_manifests,
     _safe_path,
     _sha256,
     _target,
@@ -323,6 +324,10 @@ def classify_modules(
             continue
         fresh.add(module_id)
 
+    # A process can stop after durably committing every byte and its final
+    # runtime seal, but before durably unlinking the journal marker. Resolve
+    # only states whose manifest hashes prove an unambiguous outcome.
+    _recover_atomic_write_manifests(root)
     transaction_diagnostics = list(diagnostics)
     for manifest in incomplete_transaction_manifests(root):
         transaction_diagnostics.append(
@@ -635,6 +640,12 @@ async def run_check(
                 target_ids=target_ids,
             )
             generated_dir = _target(config).generated_dir
+            exhausted_battery_paths = {
+                diagnostic.path
+                for diagnostic in status.diagnostics
+                if diagnostic.code == "JAUNT_TS_TEST_GENERATION_EXHAUSTED"
+                and diagnostic.path is not None
+            }
             battery_files = tuple(
                 sorted(
                     relative
@@ -642,6 +653,7 @@ async def run_check(
                     for tier in ("example", "derived")
                     if (relative := _test_output(str(spec.get("path", "")), generated_dir, tier))
                     and _safe_path(root, relative).is_file()
+                    and relative not in exhausted_battery_paths
                 )
             )
             if battery_files:
@@ -669,6 +681,7 @@ async def run_check(
         from jaunt.typescript.contracts import (
             _MUTATION_SCHEME,
             _battery_body_digest_issue,
+            _battery_fixture_provenance_issue,
             _battery_header_metadata,
             _battery_path,
             _parse_strength_metadata,
@@ -744,6 +757,24 @@ async def run_check(
                                 {
                                     "reason": "stale-property-renderer",
                                     "expected": PROPERTY_RENDERER_SCHEME,
+                                    **record,
+                                }
+                            )
+                            continue
+                        fixture_issue = _battery_fixture_provenance_issue(
+                            root,
+                            battery,
+                            metadata,
+                        )
+                        if fixture_issue is not None:
+                            blocked.append(
+                                {
+                                    "reason": fixture_issue,
+                                    "guidance": (
+                                        "The TypeScript contract battery fixture selection no "
+                                        "longer matches its recorded provenance. Run "
+                                        "`jaunt reconcile --language ts` to regenerate it."
+                                    ),
                                     **record,
                                 }
                             )

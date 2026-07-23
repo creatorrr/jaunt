@@ -522,8 +522,47 @@ function tripleSlashDirectiveRanges(
   return ranges;
 }
 
+function sameFileConstString(
+  compiler: typeof import("@typescript/typescript6"),
+  checker: ts.TypeChecker,
+  identifier: ts.Identifier,
+): string | undefined {
+  // Resolve this use rather than its spelling: an inaccessible scope may
+  // contain a same-named const whose literal does not govern this expression.
+  const symbol = checker.getSymbolAtLocation(identifier);
+  const declarations = symbol?.declarations;
+  if (!symbol || !declarations || declarations.length !== 1) return undefined;
+  const declaration = declarations[0];
+  if (
+    !declaration ||
+    !compiler.isVariableDeclaration(declaration) ||
+    declaration.getSourceFile() !== identifier.getSourceFile() ||
+    !compiler.isIdentifier(declaration.name) ||
+    !compiler.isVariableDeclarationList(declaration.parent) ||
+    (declaration.parent.flags & compiler.NodeFlags.Const) === 0
+  ) {
+    return undefined;
+  }
+
+  let current = declaration.initializer;
+  while (
+    current &&
+    (compiler.isParenthesizedExpression(current) ||
+      compiler.isNonNullExpression(current) ||
+      compiler.isAsExpression(current) ||
+      compiler.isTypeAssertionExpression(current) ||
+      compiler.isSatisfiesExpression(current))
+  ) {
+    current = current.expression;
+  }
+  return current && compiler.isStringLiteralLike(current)
+    ? current.text
+    : undefined;
+}
+
 function staticallyKnownString(
   compiler: typeof import("@typescript/typescript6"),
+  checker: ts.TypeChecker,
   expression: ts.Expression,
   depth = 0,
 ): string | undefined {
@@ -538,12 +577,25 @@ function staticallyKnownString(
     current = current.expression;
   }
   if (compiler.isStringLiteralLike(current)) return current.text;
+  if (compiler.isIdentifier(current)) {
+    return sameFileConstString(compiler, checker, current);
+  }
   if (
     compiler.isBinaryExpression(current) &&
     current.operatorToken.kind === compiler.SyntaxKind.PlusToken
   ) {
-    const left = staticallyKnownString(compiler, current.left, depth + 1);
-    const right = staticallyKnownString(compiler, current.right, depth + 1);
+    const left = staticallyKnownString(
+      compiler,
+      checker,
+      current.left,
+      depth + 1,
+    );
+    const right = staticallyKnownString(
+      compiler,
+      checker,
+      current.right,
+      depth + 1,
+    );
     if (left === undefined || right === undefined) return undefined;
     const joined = left + right;
     return joined.length <= 256 ? joined : undefined;
@@ -553,6 +605,7 @@ function staticallyKnownString(
     for (const span of current.templateSpans) {
       const expressionValue = staticallyKnownString(
         compiler,
+        checker,
         span.expression,
         depth + 1,
       );
@@ -573,22 +626,32 @@ function staticallyKnownString(
       current.arguments.length <= 1
     ) {
       const separator = current.arguments[0]
-        ? staticallyKnownString(compiler, current.arguments[0], depth + 1)
+        ? staticallyKnownString(
+            compiler,
+            checker,
+            current.arguments[0],
+            depth + 1,
+          )
         : ",";
       if (separator === undefined) return undefined;
       const values = receiver.elements.map((element) =>
         compiler.isSpreadElement(element)
           ? undefined
-          : staticallyKnownString(compiler, element, depth + 1),
+          : staticallyKnownString(compiler, checker, element, depth + 1),
       );
       if (values.some((value) => value === undefined)) return undefined;
       const joined = (values as string[]).join(separator);
       return joined.length <= 256 ? joined : undefined;
     }
     if (current.expression.name.text === "concat") {
-      const first = staticallyKnownString(compiler, receiver, depth + 1);
+      const first = staticallyKnownString(
+        compiler,
+        checker,
+        receiver,
+        depth + 1,
+      );
       const rest = current.arguments.map((argument) =>
-        staticallyKnownString(compiler, argument, depth + 1),
+        staticallyKnownString(compiler, checker, argument, depth + 1),
       );
       if (first === undefined || rest.some((value) => value === undefined))
         return undefined;
@@ -601,19 +664,23 @@ function staticallyKnownString(
 
 function staticallyKnownPropertyName(
   compiler: typeof import("@typescript/typescript6"),
+  checker: ts.TypeChecker,
   expression: ts.Expression,
 ): string | undefined {
   // Only syntax can establish a safe property name. Checker types are not
   // evidence about runtime values because generated tests may use assertions
   // to claim that an opaque string is a harmless literal.
-  return staticallyKnownString(compiler, expression);
+  return staticallyKnownString(compiler, checker, expression);
 }
 
 function staticallySafePropertyKey(
   compiler: typeof import("@typescript/typescript6"),
+  checker: ts.TypeChecker,
   expression: ts.Expression,
 ): boolean {
-  if (staticallyKnownPropertyName(compiler, expression) !== undefined) {
+  if (
+    staticallyKnownPropertyName(compiler, checker, expression) !== undefined
+  ) {
     return true;
   }
   let current = expression;
@@ -639,6 +706,7 @@ function staticallySafePropertyKey(
 
 function directReflectCall(
   compiler: typeof import("@typescript/typescript6"),
+  checker: ts.TypeChecker,
   node: ts.Identifier,
 ):
   { readonly call: ts.CallExpression; readonly operation: string } | undefined {
@@ -653,7 +721,11 @@ function directReflectCall(
   const operation = compiler.isPropertyAccessExpression(access)
     ? access.name.text
     : access.argumentExpression
-      ? staticallyKnownPropertyName(compiler, access.argumentExpression)
+      ? staticallyKnownPropertyName(
+          compiler,
+          checker,
+          access.argumentExpression,
+        )
       : undefined;
   if (operation === undefined) return undefined;
   let outer: ts.Expression = access;
@@ -700,6 +772,7 @@ function runtimeModuleReference(
 
 function forbiddenDynamicExecutionReference(
   compiler: typeof import("@typescript/typescript6"),
+  checker: ts.TypeChecker,
   node: ts.Node,
 ): ts.Node | undefined {
   // Generated batteries have one intentionally narrow loading surface: static
@@ -715,7 +788,7 @@ function forbiddenDynamicExecutionReference(
     return node;
   }
   if (compiler.isIdentifier(node) && node.text === "Reflect") {
-    const direct = directReflectCall(compiler, node);
+    const direct = directReflectCall(compiler, checker, node);
     if (!direct) return node;
     if (FORBIDDEN_REFLECT_OPERATIONS.has(direct.operation)) {
       return direct.call.expression;
@@ -724,9 +797,9 @@ function forbiddenDynamicExecutionReference(
       const property = direct.call.arguments[1];
       if (
         !property ||
-        !staticallySafePropertyKey(compiler, property) ||
+        !staticallySafePropertyKey(compiler, checker, property) ||
         FORBIDDEN_DYNAMIC_PROPERTIES.has(
-          staticallyKnownPropertyName(compiler, property) ?? "",
+          staticallyKnownPropertyName(compiler, checker, property) ?? "",
         )
       ) {
         return property ?? direct.call;
@@ -737,7 +810,8 @@ function forbiddenDynamicExecutionReference(
     compiler.isElementAccessExpression(node) &&
     node.argumentExpression &&
     FORBIDDEN_DYNAMIC_PROPERTIES.has(
-      staticallyKnownPropertyName(compiler, node.argumentExpression) ?? "",
+      staticallyKnownPropertyName(compiler, checker, node.argumentExpression) ??
+        "",
     )
   ) {
     return node.argumentExpression;
@@ -745,7 +819,7 @@ function forbiddenDynamicExecutionReference(
   if (
     compiler.isElementAccessExpression(node) &&
     node.argumentExpression &&
-    !staticallySafePropertyKey(compiler, node.argumentExpression)
+    !staticallySafePropertyKey(compiler, checker, node.argumentExpression)
   ) {
     return node.argumentExpression;
   }
@@ -761,7 +835,7 @@ function forbiddenDynamicExecutionReference(
       (compiler.isIdentifier(node.name) ? node.name : undefined);
     const name = property
       ? compiler.isComputedPropertyName(property)
-        ? staticallyKnownPropertyName(compiler, property.expression)
+        ? staticallyKnownPropertyName(compiler, checker, property.expression)
         : compiler.isIdentifier(property) ||
             compiler.isStringLiteralLike(property)
           ? property.text
@@ -771,7 +845,7 @@ function forbiddenDynamicExecutionReference(
     if (
       property &&
       compiler.isComputedPropertyName(property) &&
-      !staticallySafePropertyKey(compiler, property.expression)
+      !staticallySafePropertyKey(compiler, checker, property.expression)
     ) {
       return property;
     }
@@ -901,6 +975,7 @@ function testModulePolicyDiagnostics(
   options: ts.CompilerOptions,
 ): readonly DiagnosticRecord[] {
   const diagnostics: DiagnosticRecord[] = [];
+  const checker = program.getTypeChecker();
   for (const relativePath of input.files) {
     const sourceFile = program.getSourceFile(resolve(input.root, relativePath));
     if (!sourceFile) continue;
@@ -973,7 +1048,11 @@ function testModulePolicyDiagnostics(
       }
     }
     function visit(node: ts.Node): void {
-      const forbidden = forbiddenDynamicExecutionReference(compiler, node);
+      const forbidden = forbiddenDynamicExecutionReference(
+        compiler,
+        checker,
+        node,
+      );
       if (forbidden) {
         diagnostics.push(
           diagnostic(

@@ -89,6 +89,24 @@ candidate with the current compiler, resolved declarations, static policy,
 public API, and consumer closure before Jaunt writes the transaction. Contract
 or dependency changes and failed validation are never restamped.
 
+The `test --no-build` step also verifies an existing battery directly when its target
+API plus aggregate battery stamp changed, including co-drift in the embedded prompt,
+protected runner, or Vitest fingerprint. The current safety scan and a green compiler
+and Vitest run reheader the unchanged body without a model call; `--no-run`
+deliberately disables that proof.
+
+TypeScript battery generation receives the configured build instructions and a
+declaration-only view of workspace-local types imported by the selected target. The
+worker closes requested declarations over supporting declarations, re-exports, and
+import aliases while stripping runtime bodies and initializers. Directly requested
+chunks take priority over supporting closure within the 64 KiB UTF-8 budget; an
+omission marker records when lower-priority context did not fit.
+
+A locally symlinked worker must remain byte-stable during each command. Serialize
+`dist/` rebuilds or use an immutable packed/copied install for adopter verification;
+Jaunt reports `JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD` and rolls back the in-flight
+transaction if the runtime changes before commit completes.
+
 Sidecars store package- and workspace-scoped semantic-environment digests. Whole
 lockfiles still participate in ordinary structural freshness, but unrelated
 lockfile entries do not define compatibility; resolved declaration inputs do.

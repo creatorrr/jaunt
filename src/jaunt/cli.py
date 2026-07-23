@@ -19,7 +19,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
 from jaunt import __version__
 from jaunt.diagnostics import (
@@ -145,7 +145,10 @@ def _add_build_generation_flags(p: argparse.ArgumentParser) -> None:
         action="append",
         default=[],
         dest="instructions",
-        help="Additional build instruction appended to the build prompt (repeatable).",
+        help=(
+            "Additional generation instruction (repeatable); TypeScript test runs pass it "
+            "to example and derived battery prompts too."
+        ),
     )
     p.add_argument(
         "--include-target-tests",
@@ -2469,7 +2472,11 @@ def _cmd_mixed_status(args: argparse.Namespace, root: Path, cfg: JauntConfig) ->
 
 
 def _cmd_mixed_check(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> int:
-    from jaunt.typescript.cli_bridge import check_payload
+    from jaunt.typescript.cli_bridge import (
+        _magic_blocker_diagnostics,
+        _merge_diagnostic_payloads,
+        check_payload,
+    )
     from jaunt.typescript.status import run_check
 
     py_code, py_payload = _capture_python_json(cmd_check, args)
@@ -2500,10 +2507,16 @@ def _cmd_mixed_check(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> 
     ts_magic = ts_magic_container.get("ts", {}) if isinstance(ts_magic_container, dict) else {}
     py_diagnostics = py_payload.get("diagnostics", [])
     ts_diagnostics = ts_payload.get("diagnostics", [])
-    combined_diagnostics = [
-        *(py_diagnostics if isinstance(py_diagnostics, list) else []),
-        *(ts_diagnostics if isinstance(ts_diagnostics, list) else []),
-    ]
+    py_enriched_diagnostics = _merge_diagnostic_payloads(
+        py_diagnostics,
+        (
+            _magic_blocker_diagnostics("py", cast("Mapping[str, Any]", py_magic))
+            if isinstance(py_magic, Mapping)
+            else []
+        ),
+    )
+    ts_enriched_diagnostics = _merge_diagnostic_payloads(ts_diagnostics)
+    combined_diagnostics = [*py_enriched_diagnostics, *ts_enriched_diagnostics]
     payload: dict[str, object] = {
         "schema_version": 2,
         "command": "check",
@@ -2523,8 +2536,8 @@ def _cmd_mixed_check(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> 
         "diagnostics": combined_diagnostics,
         "magic": {"py": py_magic, "ts": ts_magic},
         "targets": {
-            "py": {"magic": py_magic, "diagnostics": py_diagnostics},
-            "ts": {"magic": ts_magic, "diagnostics": ts_diagnostics},
+            "py": {"magic": py_magic, "diagnostics": py_enriched_diagnostics},
+            "ts": {"magic": ts_magic, "diagnostics": ts_enriched_diagnostics},
         },
     }
     _emit_mixed_payload(

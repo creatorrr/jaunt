@@ -565,6 +565,14 @@ new (makeFunction as unknown as { new (body: string): () => unknown })("return g
     "JAUNT_TS_TEST_DYNAMIC_LOADER",
   ],
   [
+    "const-bound constructor escape",
+    `const key: string = "constructor";
+const makeFunction = (() => undefined)[key];
+new (makeFunction as unknown as { new (body: string): () => unknown })("return globalThis")();
+`,
+    "JAUNT_TS_TEST_DYNAMIC_LOADER",
+  ],
+  [
     "runtime-computed constructor escape",
     `const key = "constructor".slice(0) as "constructor";
 const makeFunction = (() => undefined)[key];
@@ -688,6 +696,162 @@ void Reflect.get(root, ["pro", "cess"].join(""));
     expect(result.diagnostics).toContainEqual(
       expect.objectContaining({ code: expectedCode, path }),
     );
+  },
+);
+
+test("typecheck accepts same-file const string keys on ordinary records", async () => {
+  const workspace = createFixtureWorkspace();
+  roots.push(workspace.root);
+  const path = "tests/record-key.example.test.ts";
+  write(
+    workspace.root,
+    "tsconfig.runner.json",
+    JSON.stringify({
+      compilerOptions: {
+        target: "ES2022",
+        module: "NodeNext",
+        moduleResolution: "NodeNext",
+        strict: true,
+        noEmit: true,
+        types: [],
+      },
+      include: ["tests/**/*.ts"],
+    }),
+  );
+  const result = await runTestRunner({
+    root: workspace.root,
+    files: [path],
+    timeoutMs: 5_000,
+    redactDerived: false,
+    mode: "typecheck",
+    tsconfigPath: "tsconfig.runner.json",
+    overlays: {
+      [path]: managedTestSource(
+        "example",
+        `const rolesKey: string = "x-hasura-allowed-roles";
+const malformedRolesToken: Record<string, unknown> = { [rolesKey]: "admin" };
+const role = malformedRolesToken[rolesKey];
+const { [rolesKey]: destructuredRole } = malformedRolesToken;
+void role;
+void destructuredRole;
+`,
+      ),
+    },
+    compilerModulePath: workspace.compilerModulePath,
+  });
+
+  expect(result.ok, JSON.stringify(result.diagnostics)).toBe(true);
+  expect(result.diagnostics).toEqual([]);
+});
+
+test.each(["@typescript/typescript58", "@typescript/typescript6"] as const)(
+  "typecheck resolves the referenced same-file const under %s",
+  async (compilerPackage) => {
+    const workspace = createFixtureWorkspace({ compilerPackage });
+    roots.push(workspace.root);
+    const path = "tests/record-key.example.test.ts";
+    write(
+      workspace.root,
+      "tsconfig.runner.json",
+      JSON.stringify({
+        compilerOptions: {
+          target: "ES2022",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+          strict: true,
+          noEmit: true,
+          types: [],
+        },
+        include: ["tests/**/*.ts"],
+      }),
+    );
+    const result = await runTestRunner({
+      root: workspace.root,
+      files: [path],
+      timeoutMs: 5_000,
+      redactDerived: false,
+      mode: "typecheck",
+      tsconfigPath: "tsconfig.runner.json",
+      overlays: {
+        [path]: managedTestSource(
+          "example",
+          `const rolesKey: string = "x-hasura-allowed-roles";
+function unrelatedBinding(): string {
+  const rolesKey: string = "constructor";
+  return rolesKey;
+}
+const malformedRolesToken: Record<string, unknown> = { [rolesKey]: "admin" };
+const role = malformedRolesToken[rolesKey];
+void unrelatedBinding;
+void role;
+`,
+        ),
+      },
+      compilerModulePath: workspace.compilerModulePath,
+    });
+
+    expect(result.ok, JSON.stringify(result.diagnostics)).toBe(true);
+    expect(result.diagnostics).toEqual([]);
+  },
+);
+
+test.each(["@typescript/typescript58", "@typescript/typescript6"] as const)(
+  "typecheck rejects a const literal from an out-of-scope shadow under %s",
+  async (compilerPackage) => {
+    const workspace = createFixtureWorkspace({ compilerPackage });
+    roots.push(workspace.root);
+    const path = "tests/record-key.example.test.ts";
+    write(
+      workspace.root,
+      "tests/globals.d.ts",
+      "declare const rolesKey: string;\n",
+    );
+    write(
+      workspace.root,
+      "tsconfig.runner.json",
+      JSON.stringify({
+        compilerOptions: {
+          target: "ES2022",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+          strict: true,
+          noEmit: true,
+          types: [],
+        },
+        include: ["tests/**/*.ts"],
+      }),
+    );
+    const result = await runTestRunner({
+      root: workspace.root,
+      files: [path],
+      timeoutMs: 5_000,
+      redactDerived: false,
+      mode: "typecheck",
+      tsconfigPath: "tsconfig.runner.json",
+      overlays: {
+        [path]: managedTestSource(
+          "example",
+          `export {};
+{
+  const rolesKey: string = "x-hasura-allowed-roles";
+  void rolesKey;
+}
+const malformedRolesToken: Record<string, unknown> = {};
+const role = malformedRolesToken[rolesKey];
+void role;
+`,
+        ),
+      },
+      compilerModulePath: workspace.compilerModulePath,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.diagnostics).toEqual([
+      expect.objectContaining({
+        code: "JAUNT_TS_TEST_DYNAMIC_LOADER",
+        path,
+      }),
+    ]);
   },
 );
 

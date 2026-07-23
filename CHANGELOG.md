@@ -4,6 +4,61 @@ All notable changes to Jaunt and `@usejaunt/ts`. Generated from conventional
 commits by [git-cliff](https://git-cliff.org), with one section per published
 Python or TypeScript release.
 
+## Unreleased
+
+### Fixes
+
+- Verify API-digest-only TypeScript battery drift against the current target and
+  reheader a green committed body without a model call. Successful reheaders and
+  generated siblings now land even when another requested battery exhausts its
+  attempts; protected-runner infrastructure failures fail closed without turning
+  into paid generation or implementation retries.
+- Keep that verification path model-free when target-API drift also changes the
+  embedded prompt or protected-runner fingerprint. The current safety scan still
+  runs before Vitest; harmless computed record keys backed by a unique same-file
+  `const` string literal are accepted without weakening forbidden loader checks.
+- Run compatible committed target batteries against each regenerated implementation
+  candidate before it is accepted. Behavioral regressions consume the bounded repair
+  budget, while runner failures preserve the validated candidate for a later retry.
+  Partial-landing JSON now separates proven `accepted` paths from unclassified
+  `retained` paths when runner infrastructure or a bad baseline blocks verification.
+- Pass `--instruction` to TypeScript example and derived battery generation, supply a
+  bounded declaration-only view of workspace-local type imports (including valid
+  type-elided imports), fingerprint that exact bounded context for battery freshness
+  and rejected terminal identity, and retain each last rejected battery under
+  `.jaunt/typescript/rejected-tests/` with exact bytes and diagnostics. Repeated
+  terminal failures report
+  `JAUNT_TS_TEST_GENERATION_EXHAUSTED` for battery-specific CI handling, including
+  after prompt-only provenance drift; an authored test or target-API change clears
+  that terminal identity.
+- Pin TypeScript operations to the project-local package resolution surface, including
+  exported declarations and the protected test runner, and roll back artifact or
+  battery transactions if a symlinked development build changes before the final
+  commit boundary. Python stub formatting now resolves Ruff from the active Python
+  environment, uses stable input and output snapshots, and never reports a concurrently
+  replaced or deleted stub as fresh.
+- Emit one schema-v2 diagnostic per stale, unbuilt, invalid, or orphaned magic blocker,
+  retaining target-specific diagnostic data. Fixture source now has a battery-scoped,
+  content-bearing fingerprint and commit precondition; imported declarations use
+  delimiter-safe transport; candidate-owned collection failures enter bounded battery
+  rejection instead of being cached as infrastructure; and partial battery landings
+  clear rejection markers only after their atomic commit succeeds.
+- Keep prepared TypeScript transaction manifests whenever rollback durability cannot be
+  confirmed, including a failed directory fsync after removing a newly created
+  artifact. Transaction journals now publish a durable `committed` phase after the
+  final runtime seal, so status/check/test can retire a crash-left marker only when
+  every recorded byte still matches that phase. One persistent workspace transaction
+  lease serializes only the final CAS/guard/commit window and prevents another command
+  from retiring a live writer's marker; recovery acquires it without waiting before it
+  inspects any bytes. Legacy markers without lease metadata remain blocking because
+  they cannot prove that an old writer has stopped or that its final seal completed.
+
+### Documentation
+
+- Document direct model-free battery verification, its `--no-run` boundary, the
+  committed-battery implementation gate, rejected-candidate records, and the new
+  structured TypeScript test outcomes.
+
 ## [1.7.10 / @usejaunt/ts 0.1.1] - 2026-07-21
 
 ### Fixes

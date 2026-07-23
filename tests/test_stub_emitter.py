@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sysconfig
 import textwrap
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import pytest
 from jaunt.header import format_stub_header, parse_stub_header
 from jaunt.stub_emitter import (
     _format_stub_with_owner_config,
+    _ruff_command,
     build_stub_source,
     format_stub_best_effort,
     generated_content_digest,
@@ -714,10 +716,9 @@ def test_format_stub_best_effort_formats_when_ruff_available() -> None:
 def test_format_stub_best_effort_uses_owner_ruff_config_and_stamps_bytes(
     tmp_path: Path,
 ) -> None:
-    import shutil
     import subprocess
 
-    ruff = shutil.which("ruff")
+    ruff = _ruff_command()
     if ruff is None:
         return
     (tmp_path / "pyproject.toml").write_text(
@@ -746,7 +747,7 @@ def test_format_stub_best_effort_uses_owner_ruff_config_and_stamps_bytes(
     assert parsed["rendered_digest"] == rendered_stub_digest(formatted)
     assert stamp_stub_rendered_digest(formatted) == formatted
     check = subprocess.run(
-        [ruff, "format", "--check", str(stub_path)],
+        [*ruff, "format", "--check", str(stub_path)],
         cwd=tmp_path,
         capture_output=True,
         text=True,
@@ -767,7 +768,7 @@ def test_owner_format_isolated_without_project_config(
         assert isinstance(input_bytes, bytes)
         return subprocess.CompletedProcess(command, 0, stdout=input_bytes, stderr=b"")
 
-    monkeypatch.setattr("shutil.which", lambda _name: "/bundled/ruff")
+    monkeypatch.setattr("jaunt.stub_emitter._ruff_command", lambda: ["/bundled/ruff"])
     monkeypatch.setattr("subprocess.run", fake_run)
     stub_path = tmp_path / "src" / "pkg" / "values.pyi"
 
@@ -804,7 +805,7 @@ def test_owner_format_pins_nearest_project_config(
 
     config = tmp_path / "pyproject.toml"
     config.write_text("[tool.ruff]\nline-length = 88\n", encoding="utf-8")
-    monkeypatch.setattr("shutil.which", lambda _name: "/bundled/ruff")
+    monkeypatch.setattr("jaunt.stub_emitter._ruff_command", lambda: ["/bundled/ruff"])
     monkeypatch.setattr("subprocess.run", fake_run)
     stub_path = tmp_path / "src" / "pkg" / "values.pyi"
 
@@ -888,10 +889,35 @@ def test_stub_staleness_reacts_to_owner_ruff_config_change(tmp_path: Path) -> No
 
 
 def test_format_stub_best_effort_does_not_stamp_when_ruff_is_missing(monkeypatch) -> None:
-    monkeypatch.setattr("shutil.which", lambda _name: None)
+    monkeypatch.setattr("jaunt.stub_emitter._ruff_command", lambda: None)
 
     with pytest.raises(RuntimeError, match="ruff executable was not found"):
         format_stub_best_effort(_header() + "\ndef value() -> int: ...\n")
+
+
+def test_owner_format_uses_runtime_ruff_when_path_points_elsewhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hostile = tmp_path / "hostile-bin"
+    hostile.mkdir()
+    ambient_ruff = hostile / "ruff"
+    ambient_ruff.write_text("#!/bin/sh\nexit 91\n", encoding="utf-8")
+    ambient_ruff.chmod(0o755)
+    monkeypatch.setenv("PATH", str(hostile))
+
+    command = _ruff_command()
+    assert command is not None
+    assert Path(command[0]).parent == Path(sysconfig.get_path("scripts"))
+    assert Path(command[0]).name in {"ruff", "ruff.exe"}
+    stub_path = tmp_path / "src" / "values.pyi"
+    stub_path.parent.mkdir()
+    formatted, error = _format_stub_with_owner_config(
+        "def value( ) -> int: ...\n",
+        filename=stub_path,
+    )
+
+    assert error is None
+    assert formatted == "def value() -> int: ...\n"
 
 
 def test_normalize_python_source_formats_and_applies_unsafe_ruff_fixes() -> None:

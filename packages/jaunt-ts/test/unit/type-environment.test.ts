@@ -1,7 +1,8 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { digestCanonical } from "../../src/analyzer/canonical.js";
 import {
   groupSemanticEnvironmentRecords,
   stablePathId,
@@ -56,5 +57,42 @@ describe("type-environment path identity", () => {
       "unresolved-modules",
       "workspace:src/types.ts",
     ]);
+  });
+
+  test("groups Unicode record IDs by code units rather than locale", () => {
+    const localeCompare = vi
+      .spyOn(String.prototype, "localeCompare")
+      .mockImplementation(function (this: string, other: string): number {
+        const left = String(this);
+        const right = String(other);
+        return left < right ? 1 : left > right ? -1 : 0;
+      });
+    const grouped = (() => {
+      try {
+        return groupSemanticEnvironmentRecords([
+          { id: "workspace:src/ä.ts", digest: "sha256:workspace-umlaut" },
+          { id: "workspace:src/z.ts", digest: "sha256:workspace-z" },
+          { id: "package:demo/ä.d.ts", digest: "sha256:package-umlaut" },
+          { id: "package:demo/z.d.ts", digest: "sha256:package-z" },
+        ]);
+      } finally {
+        localeCompare.mockRestore();
+      }
+    })();
+
+    expect(grouped.map((record) => record.id)).toEqual([
+      "package:demo",
+      "workspace:src/z.ts",
+      "workspace:src/ä.ts",
+    ]);
+    expect(grouped[0]?.digest).toBe(
+      digestCanonical([
+        { id: "package:demo/z.d.ts", digest: "sha256:package-z" },
+        {
+          id: "package:demo/ä.d.ts",
+          digest: "sha256:package-umlaut",
+        },
+      ]),
+    );
   });
 });

@@ -4,6 +4,7 @@ import asyncio
 import json
 import shutil
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,7 @@ from jaunt.typescript.worker import (
     WorkerOutOfMemoryError,
     WorkerProtocolError,
     WorkerRemoteError,
+    WorkerToolchainChangedError,
     WorkerTimeoutError,
     TypeScriptWorkerError,
     resolve_worker_installation,
@@ -141,6 +143,99 @@ def test_arbitrary_worker_override_bytes_change_generation_identity(tmp_path: Pa
     assert second_generation != first_generation
 
 
+def test_worker_client_rechecks_runtime_identity_on_clean_session_exit(tmp_path: Path) -> None:
+    async def run() -> None:
+        source = _echo_worker()
+        installation = _installation(tmp_path, source)
+        client = WorkerClient(root=tmp_path, installation=installation)
+
+        with pytest.raises(
+            WorkerToolchainChangedError,
+            match="JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+        ):
+            async with client:
+                await client.initialize(_initialize_params(tmp_path))
+                installation.worker_entry.write_text(
+                    source + "\n# rebuilt while the session was active\n",
+                    encoding="utf-8",
+                )
+
+    asyncio.run(run())
+
+
+def test_worker_client_allows_identical_runtime_bytes_on_clean_session_exit(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        source = _echo_worker()
+        installation = _installation(tmp_path, source)
+        async with WorkerClient(root=tmp_path, installation=installation) as client:
+            await client.initialize(_initialize_params(tmp_path))
+            installation.worker_entry.write_text(source, encoding="utf-8")
+
+    asyncio.run(run())
+
+
+def test_worker_client_sealed_identity_skips_late_clean_exit_recheck(tmp_path: Path) -> None:
+    async def run() -> None:
+        source = _echo_worker()
+        installation = _installation(tmp_path, source)
+        async with WorkerClient(root=tmp_path, installation=installation) as client:
+            await client.initialize(_initialize_params(tmp_path))
+            client.seal_runtime_identity()
+            installation.worker_entry.write_text(
+                source + "\n# rebuilt after the final commit boundary\n",
+                encoding="utf-8",
+            )
+
+    asyncio.run(run())
+
+
+def test_worker_client_later_request_reopens_clean_exit_identity_check(tmp_path: Path) -> None:
+    async def run() -> None:
+        source = _echo_worker()
+        installation = _installation(tmp_path, source)
+        client = WorkerClient(root=tmp_path, installation=installation)
+
+        with pytest.raises(
+            WorkerToolchainChangedError,
+            match="JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+        ):
+            async with client:
+                await client.initialize(_initialize_params(tmp_path))
+                client.seal_runtime_identity()
+                await client.request("echo", {"value": 1})
+                installation.worker_entry.write_text(
+                    source + "\n# rebuilt after a later request\n",
+                    encoding="utf-8",
+                )
+
+    asyncio.run(run())
+
+
+def test_worker_client_preserves_body_error_when_runtime_changes_on_exceptional_exit(
+    tmp_path: Path,
+) -> None:
+    class BodyError(RuntimeError):
+        pass
+
+    async def run() -> None:
+        source = _echo_worker()
+        installation = _installation(tmp_path, source)
+        client = WorkerClient(root=tmp_path, installation=installation)
+
+        with pytest.raises(BodyError, match="operation failed"):
+            async with client:
+                await client.initialize(_initialize_params(tmp_path))
+                installation.worker_entry.write_text(
+                    source + "\n# rebuilt while unwinding the operation\n",
+                    encoding="utf-8",
+                )
+                raise BodyError("operation failed")
+
+    asyncio.run(run())
+
+
 def test_packaged_worker_identity_is_portable_and_scoped_to_runtime(tmp_path: Path) -> None:
     def installation_at(root: Path) -> WorkerInstallation:
         package = root / "node_modules/@usejaunt/ts"
@@ -151,6 +246,8 @@ def test_packaged_worker_identity_is_portable_and_scoped_to_runtime(tmp_path: Pa
             "dist/schema/protocol.json": '{"version": 1}\n',
             "dist/test/runner.js": "export const runner = 1;\n",
             "dist/analyzer/core.d.ts": "export declare const worker = 1;\n",
+            "dist/spec.js": "export {};\n",
+            "dist/spec.d.cts": "export declare function magic(): never;\n",
         }
         for relative, content in files.items():
             path = package / relative
@@ -161,13 +258,35 @@ def test_packaged_worker_identity_is_portable_and_scoped_to_runtime(tmp_path: Pa
                 {
                     "name": "@usejaunt/ts",
                     "version": "0.1.0-alpha.0",
-                    "exports": {"./worker": "./dist/worker/main.js"},
+                    "exports": {
+                        "./worker": "./dist/worker/main.js",
+                        "./spec": {
+                            "types": "./dist/spec.d.cts",
+                            "default": "./dist/spec.js",
+                        },
+                    },
                 }
             ),
             encoding="utf-8",
         )
-        compiler = root / "typescript.js"
-        compiler.write_text("", encoding="utf-8")
+        compiler_package = root / "node_modules/typescript"
+        compiler = compiler_package / "lib/typescript.js"
+        compiler.parent.mkdir(parents=True)
+        compiler.write_text("export const version = '6.0.2';\n", encoding="utf-8")
+        (compiler_package / "lib/lib.es2024.d.ts").write_text(
+            "interface Array<T> { readonly length: number; }\n",
+            encoding="utf-8",
+        )
+        (compiler_package / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "typescript",
+                    "version": "6.0.2",
+                    "main": "./lib/typescript.js",
+                }
+            ),
+            encoding="utf-8",
+        )
         return WorkerInstallation(
             node=sys.executable,
             worker_entry=package / "dist/worker/main.js",
@@ -188,10 +307,335 @@ def test_packaged_worker_identity_is_portable_and_scoped_to_runtime(tmp_path: Pa
     )
     assert worker_runtime_identity(source) == expected
 
+    compiler_declaration = source.compiler_module_path.parent / "lib.es2024.d.ts"
+    compiler_declaration.write_text(
+        "interface Array<T> { readonly length: number; at(index: number): T | undefined; }\n"
+    )
+    assert worker_runtime_identity(source) != expected
+    compiler_declaration.write_text("interface Array<T> { readonly length: number; }\n")
+    assert worker_runtime_identity(source) == expected
+
+    compiler_manifest = source.compiler_module_path.parent.parent / "package.json"
+    compiler_payload = json.loads(compiler_manifest.read_text(encoding="utf-8"))
+    compiler_payload["main"] = "./lib/typescript.next.js"
+    compiler_manifest.write_text(json.dumps(compiler_payload), encoding="utf-8")
+    assert worker_runtime_identity(source) != expected
+    compiler_payload["main"] = "./lib/typescript.js"
+    compiler_manifest.write_text(json.dumps(compiler_payload), encoding="utf-8")
+    assert worker_runtime_identity(source) == expected
+
     (source.package_root / "dist/analyzer/core.js").write_text(
         "export const worker = 2;\n", encoding="utf-8"
     )
     assert worker_runtime_identity(source) != expected
+    (source.package_root / "dist/analyzer/core.js").write_text(
+        "export const worker = 1;\n", encoding="utf-8"
+    )
+    assert worker_runtime_identity(source) == expected
+
+    declaration = source.package_root / "dist/spec.d.cts"
+    declaration.write_text("export declare function magic(value: string): never;\n")
+    assert worker_runtime_identity(source) != expected
+    declaration.write_text("export declare function magic(): never;\n")
+    assert worker_runtime_identity(source) == expected
+    declaration.unlink()
+    assert worker_runtime_identity(source) != expected
+    declaration.write_text("export declare function magic(): never;\n")
+    assert worker_runtime_identity(source) == expected
+
+    manifest_path = source.package_root / "package.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    original_manifest = json.dumps(manifest)
+    manifest["exports"]["./spec"]["types"] = "./dist/spec-v2.d.cts"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert worker_runtime_identity(source) != expected
+    manifest_path.write_text(original_manifest, encoding="utf-8")
+    assert worker_runtime_identity(source) == expected
+
+    client = WorkerClient(root=source.tool_owner, installation=source)
+    client.verify_runtime_identity()
+    client.pin_full_runtime_identity()
+    dist = source.package_root / "dist"
+    exact_files = {
+        path.relative_to(dist): path.read_bytes() for path in dist.rglob("*") if path.is_file()
+    }
+    shutil.rmtree(dist)
+    for relative, content in exact_files.items():
+        path = dist / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    with pytest.raises(
+        WorkerToolchainChangedError,
+        match="JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+    ):
+        client.verify_runtime_identity()
+
+
+def test_worker_client_rejects_same_byte_typescript_symlink_aba(tmp_path: Path) -> None:
+    installation = _installation(tmp_path, "console.log('worker');\n")
+    stores = tmp_path / "stores"
+
+    def compiler_store(name: str) -> Path:
+        package = stores / name
+        compiler = package / "lib/typescript.js"
+        compiler.parent.mkdir(parents=True)
+        compiler.write_text("export const version = '6.0.2';\n", encoding="utf-8")
+        (package / "lib/lib.es2024.d.ts").write_text(
+            "interface Array<T> { readonly length: number; }\n",
+            encoding="utf-8",
+        )
+        (package / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "typescript",
+                    "version": "6.0.2",
+                    "main": "./lib/typescript.js",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return package
+
+    first = compiler_store("first")
+    second = compiler_store("second")
+    lexical = tmp_path / "node_modules/typescript"
+    lexical.parent.mkdir(exist_ok=True)
+    lexical.symlink_to(first, target_is_directory=True)
+    installation = WorkerInstallation(
+        node=installation.node,
+        worker_entry=installation.worker_entry,
+        compiler_module_path=lexical / "lib/typescript.js",
+        package_root=installation.package_root,
+        tool_owner=installation.tool_owner,
+    )
+    assert worker_runtime_identity(installation) == worker_runtime_identity(
+        WorkerInstallation(
+            node=installation.node,
+            worker_entry=installation.worker_entry,
+            compiler_module_path=second / "lib/typescript.js",
+            package_root=installation.package_root,
+            tool_owner=installation.tool_owner,
+        )
+    )
+
+    client = WorkerClient(root=tmp_path, installation=installation)
+    client.verify_runtime_identity()
+    lexical.unlink()
+    lexical.symlink_to(second, target_is_directory=True)
+
+    with pytest.raises(
+        WorkerToolchainChangedError,
+        match="JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+    ):
+        client.verify_runtime_identity()
+
+
+@pytest.mark.parametrize("module_path", [False, True])
+@pytest.mark.parametrize("remove_nearer", [False, True])
+def test_package_resolution_pin_rejects_nearer_package_topology_changes(
+    tmp_path: Path,
+    *,
+    module_path: bool,
+    remove_nearer: bool,
+) -> None:
+    installation = _installation(tmp_path, "console.log('worker');\n")
+    if module_path:
+        start = tmp_path / "node_modules/@usejaunt/ts/dist/test/runner.js"
+        nearer = tmp_path / "node_modules/@usejaunt/ts/node_modules/vitest"
+        boundary = None
+    else:
+        start = tmp_path / "packages/web"
+        nearer = start / "node_modules/vitest"
+        boundary = tmp_path
+    start.parent.mkdir(parents=True, exist_ok=True)
+    if module_path:
+        start.write_text("export {};\n", encoding="utf-8")
+    else:
+        start.mkdir(exist_ok=True)
+    fallback = tmp_path / "node_modules/vitest"
+
+    def install(package: Path) -> None:
+        (package / "dist").mkdir(parents=True)
+        (package / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "vitest",
+                    "version": "4.1.10",
+                    "exports": "./dist/index.js",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (package / "dist/index.js").write_text(
+            "export const runtime = 'same-bytes';\n",
+            encoding="utf-8",
+        )
+
+    install(fallback)
+    if remove_nearer:
+        install(nearer)
+
+    client = WorkerClient(root=tmp_path, installation=installation)
+    client.pin_package_resolution_identity(
+        "Vitest test package",
+        start,
+        "vitest",
+        boundary=boundary,
+        module_path=module_path,
+        expected_name="vitest",
+    )
+
+    if remove_nearer:
+        shutil.rmtree(nearer)
+    else:
+        install(nearer)
+
+    with pytest.raises(
+        WorkerToolchainChangedError,
+        match="JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+    ):
+        client.verify_runtime_identity()
+
+    client.reset_full_runtime_identity()
+    client.verify_runtime_identity()
+
+
+@pytest.mark.parametrize(
+    "relative_runtime",
+    ["node_modules/vite/dist/index.js", "node_modules/rollup/dist/index.js"],
+)
+def test_package_resolution_closure_pins_transitive_runtime_files(
+    tmp_path: Path,
+    relative_runtime: str,
+) -> None:
+    installation = _installation(tmp_path, "console.log('worker');\n")
+
+    def install(package: str, dependencies: Mapping[str, str] | None = None) -> Path:
+        package_root = tmp_path / "node_modules" / package
+        runtime = package_root / "dist/index.js"
+        runtime.parent.mkdir(parents=True)
+        runtime.write_text(f"export const packageName = {package!r};\n", encoding="utf-8")
+        (package_root / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": package,
+                    "version": "1.0.0",
+                    "main": "./dist/index.js",
+                    "dependencies": dependencies or {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return package_root
+
+    install("vitest", {"vite": "^7.0.0"})
+    install("vite", {"rollup": "^4.0.0"})
+    install("rollup")
+    client = WorkerClient(root=tmp_path, installation=installation)
+    client.pin_package_resolution_closure(
+        "Vitest package",
+        tmp_path,
+        "vitest",
+        boundary=tmp_path,
+        expected_name="vitest",
+    )
+
+    runtime = tmp_path / relative_runtime
+    runtime.write_text("export const packageName = 'changed';\n", encoding="utf-8")
+
+    with pytest.raises(
+        WorkerToolchainChangedError,
+        match="JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+    ):
+        client.verify_runtime_identity()
+
+
+def test_package_resolution_closure_rejects_dependency_symlink_aba(tmp_path: Path) -> None:
+    installation = _installation(tmp_path, "console.log('worker');\n")
+    vitest = tmp_path / "node_modules/vitest"
+    (vitest / "dist").mkdir(parents=True)
+    (vitest / "dist/index.js").write_text("export {};\n", encoding="utf-8")
+    (vitest / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "vitest",
+                "version": "4.1.10",
+                "dependencies": {"vite": "^7.0.0"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    stores = tmp_path / ".package-store"
+
+    def vite_store(name: str) -> Path:
+        package = stores / name
+        (package / "dist").mkdir(parents=True)
+        (package / "dist/index.js").write_text("export const same = true;\n", encoding="utf-8")
+        (package / "package.json").write_text(
+            json.dumps({"name": "vite", "version": "7.0.0"}),
+            encoding="utf-8",
+        )
+        return package
+
+    first = vite_store("vite-a")
+    second = vite_store("vite-b")
+    lexical_vite = tmp_path / "node_modules/vite"
+    lexical_vite.symlink_to(first, target_is_directory=True)
+    client = WorkerClient(root=tmp_path, installation=installation)
+    client.pin_package_resolution_closure(
+        "Vitest package",
+        tmp_path,
+        "vitest",
+        boundary=tmp_path,
+        expected_name="vitest",
+    )
+
+    lexical_vite.unlink()
+    lexical_vite.symlink_to(second, target_is_directory=True)
+
+    with pytest.raises(
+        WorkerToolchainChangedError,
+        match="JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+    ):
+        client.verify_runtime_identity()
+
+
+def test_package_resolution_closure_pins_missing_optional_dependency(tmp_path: Path) -> None:
+    installation = _installation(tmp_path, "console.log('worker');\n")
+    vitest = tmp_path / "node_modules/vitest"
+    (vitest / "dist").mkdir(parents=True)
+    (vitest / "dist/index.js").write_text("export {};\n", encoding="utf-8")
+    (vitest / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "vitest",
+                "version": "4.1.10",
+                "optionalDependencies": {"optional-runtime": "^1.0.0"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = WorkerClient(root=tmp_path, installation=installation)
+    client.pin_package_resolution_closure(
+        "Vitest package",
+        tmp_path,
+        "vitest",
+        boundary=tmp_path,
+        expected_name="vitest",
+    )
+
+    optional_runtime = tmp_path / "node_modules/optional-runtime"
+    optional_runtime.mkdir()
+    (optional_runtime / "package.json").write_text(
+        json.dumps({"name": "optional-runtime", "version": "1.0.0"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        WorkerToolchainChangedError,
+        match="JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+    ):
+        client.verify_runtime_identity()
 
 
 def test_packaged_worker_identity_fails_closed_without_runtime_tree(tmp_path: Path) -> None:
@@ -203,10 +647,12 @@ def test_packaged_worker_identity_fails_closed_without_runtime_tree(tmp_path: Pa
         json.dumps({"name": "@usejaunt/ts", "version": "0.1.0-alpha.0"}),
         encoding="utf-8",
     )
+    compiler = tmp_path / "typescript.js"
+    compiler.write_text("export {};\n", encoding="utf-8")
     installation = WorkerInstallation(
         node=sys.executable,
         worker_entry=worker,
-        compiler_module_path=tmp_path / "typescript.js",
+        compiler_module_path=compiler,
         package_root=package,
         tool_owner=tmp_path,
         package_managed=True,

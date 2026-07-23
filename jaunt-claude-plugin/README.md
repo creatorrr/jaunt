@@ -51,6 +51,12 @@ For TypeScript provenance drift, the working skill previews
 only `free-recompose` actions with an empty `requires_rebuild` list can be
 applied and checked without model calls.
 
+Battery drift that includes `target_api_digest` plus `battery_fingerprint` has a
+second free route, including co-drift in the prompt, runner, or Vitest fingerprint:
+run `jaunt test --language ts --no-build` and then `jaunt check --language ts`.
+A green committed body is verified and reheadered; `--no-run` deliberately disables
+that proof.
+
 For TypeScript builds, the workflow reads `candidate_outcomes` before suggesting
 another run. Jaunt already spends the remaining attempt budget on final
 conformance repair; a failed module should not be rerun blindly. Worker heap
@@ -61,7 +67,10 @@ For TypeScript test generation, inspect `vitest.batteries` before another paid
 run (`targets.ts.vitest.batteries` in a mixed workspace). It records per-battery
 retries and final rejection reasons. A failed combined overlay can still commit
 the compatible subset listed under `vitest.partial_landing` or
-`targets.ts.vitest.partial_landing`.
+`targets.ts.vitest.partial_landing`. Terminal exhaustion preserves the exact
+candidate and metadata under `.jaunt/typescript/rejected-tests/`.
+Runner outages and a bad committed baseline retain validated live or cached
+candidates for recovery instead of spending another attempt or evicting them.
 
 The SessionStart hook reports the nearest active Jaunt workspace, including
 TypeScript unbuilt, invalid, and diagnostic state. If no parent `jaunt.toml`

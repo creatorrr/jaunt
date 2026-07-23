@@ -287,6 +287,7 @@ def test_check_default_gates_stale_magic_after_spec_edit(
     assert f"{pkg}.specs" in out["magic"]["stale"]
     assert f"{pkg}.specs" not in out["magic"]["fresh"]
     assert f"{pkg}.specs" not in out["magic"]["unbuilt"]
+    assert "diagnostics" not in out
 
 
 def test_check_magic_free_project_exits_zero(tmp_path: Path, monkeypatch, capsys) -> None:

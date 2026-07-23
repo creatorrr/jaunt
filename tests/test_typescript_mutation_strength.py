@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import re
 import signal
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -24,14 +26,17 @@ from jaunt.typescript.contracts import (
     _MUTATION_SCHEME,
     _MUTATION_TIMEOUT_SECONDS,
     _battery_body_digest_issue,
+    _battery_header_metadata,
     _battery_path,
     _parse_strength_metadata,
     _run_mutation_strength,
     _terminate_mutation_process,
     _with_header,
     _with_strength_metadata,
+    run_adopt,
     run_reconcile,
 )
+from jaunt.typescript.builder import MISSING_INPUT
 from jaunt.typescript.protocol import (
     InitializeParams,
     InitializeResult,
@@ -39,11 +44,57 @@ from jaunt.typescript.protocol import (
     WorkspaceStamp,
 )
 from jaunt.typescript.status import run_check
-from jaunt.typescript.worker import REQUIRED_WORKER_CAPABILITIES
+from jaunt.typescript.tester import _fixture_resolution_preconditions
+from jaunt.typescript.worker import REQUIRED_WORKER_CAPABILITIES, WorkerToolchainChangedError
 
 
 def _digest(value: str) -> str:
     return f"sha256:{hashlib.sha256(value.encode()).hexdigest()}"
+
+
+def _utf16_offset(value: str) -> int:
+    return len(value.encode("utf-16-le")) // 2
+
+
+def _projection_ranges(source: str, symbol: str) -> dict[str, int]:
+    declaration = source.rfind(f"export function {symbol}")
+    assert declaration >= 0
+    result = {
+        "declarationStart": _utf16_offset(source[:declaration]),
+        "declarationEnd": _utf16_offset(source),
+    }
+    docs_start = source.rfind("/**", 0, declaration)
+    if docs_start >= 0:
+        docs_end = source.find("*/", docs_start, declaration)
+        if docs_end >= 0 and not source[docs_end + 2 : declaration].strip():
+            result["docsStart"] = _utf16_offset(source[:docs_start])
+            result["docsEnd"] = _utf16_offset(source[: docs_end + 2])
+    return result
+
+
+def _with_no_fixture_provenance(
+    root: Path,
+    battery: Path,
+    source: str,
+    source_path: str,
+    source_digest: str,
+) -> str:
+    topology = _fixture_resolution_preconditions(
+        root,
+        battery.relative_to(root).as_posix(),
+    )
+    return _with_header(
+        source,
+        source_path,
+        source_digest,
+        fixture_path=MISSING_INPUT,
+        fixture_digest=MISSING_INPUT,
+        fixture_topology=json.dumps(
+            dict(sorted(topology.items())),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
 
 
 def test_default_mutation_budget_covers_typecheck_and_runner_startup() -> None:
@@ -285,10 +336,40 @@ class _ContractWorker:
                 "sourceDigest": _digest(source),
                 "symbol": "clamp",
                 "kind": "function",
+                **_projection_ranges(source, "clamp"),
             }
         if method == "findOrphans":
             return {**self._stamp(), "artifacts": []}
         raise AssertionError(method)
+
+
+class _RuntimeTrackingContractWorker(_ContractWorker):
+    def __init__(self, root: Path, *, fail_verify: bool = False) -> None:
+        super().__init__(root)
+        self.active = False
+        self.fail_verify = fail_verify
+        self.runtime_events: list[str] = []
+
+    async def __aenter__(self) -> _RuntimeTrackingContractWorker:
+        self.active = True
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        self.active = False
+
+    def pin_full_runtime_identity(self) -> None:
+        assert self.active
+        self.runtime_events.append("pin")
+
+    def verify_runtime_identity(self) -> None:
+        assert self.active
+        self.runtime_events.append("verify")
+        if self.fail_verify:
+            raise WorkerToolchainChangedError("simulated contract runtime drift")
+
+    def seal_runtime_identity(self) -> None:
+        assert self.active
+        self.runtime_events.append("seal")
 
 
 class _BatteryGenerator(GeneratorBackend):
@@ -466,6 +547,252 @@ async def test_disabled_strength_skips_mutation_and_writes_plain_battery(
 
 
 @pytest.mark.asyncio
+async def test_reconcile_rejects_vitest_config_change_after_battery_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path, strength=False)
+    assert config.typescript_target is not None
+    config = replace(
+        config,
+        typescript_target=replace(
+            config.typescript_target,
+            vitest_config="vitest.config.ts",
+        ),
+    )
+    (tmp_path / "vitest.config.ts").write_text(
+        'export default { test: { setupFiles: ["tests/setup.ts"] } };\n',
+        encoding="utf-8",
+    )
+    setup = tmp_path / "tests/setup.ts"
+    setup.write_text('export const setupVersion = "v1";\n', encoding="utf-8")
+    worker = _ContractWorker(tmp_path)
+    source = tmp_path / "src/contract.ts"
+    source_before = source.read_bytes()
+    battery = tmp_path / "tests/contract/src/contract.clamp.contract.test.ts"
+    battery.parent.mkdir(parents=True)
+    battery.write_bytes(b"old committed battery\n")
+    battery_before = battery.read_bytes()
+    mutated = False
+
+    async def mutate_after_run(*_args: Any, **kwargs: Any) -> dict[str, object]:
+        nonlocal mutated
+        if not kwargs.get("typecheck_only"):
+            setup.write_text('export const setupVersion = "v2";\n', encoding="utf-8")
+            mutated = True
+        return {"ok": True}
+
+    monkeypatch.setattr("jaunt.typescript.contracts._run_test_batches", mutate_after_run)
+    with pytest.raises(
+        JauntGenerationError,
+        match=r"(?:inputs changed.*setup\.ts|Vitest configuration changed)",
+    ):
+        await run_reconcile(
+            tmp_path,
+            config,
+            generator=_BatteryGenerator(),
+            worker_factory=lambda *_: worker,
+        )
+
+    assert mutated
+    assert source.read_bytes() == source_before
+    assert battery.read_bytes() == battery_before
+
+
+@pytest.mark.parametrize("drift", ["fixture-bytes", "nearer-selection"])
+@pytest.mark.asyncio
+async def test_reconcile_fixture_drift_aborts_the_atomic_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    drift: str,
+) -> None:
+    from jaunt.typescript import contracts as contracts_module
+
+    config = _config(tmp_path, strength=False)
+    worker = _ContractWorker(tmp_path)
+    battery = tmp_path / "tests/contract/src/contract.clamp.contract.test.ts"
+    fixture = (
+        tmp_path / "tests/contract/src/fixtures.ts"
+        if drift == "fixture-bytes"
+        else tmp_path / "tests/contract/fixtures.ts"
+    )
+    fixture.parent.mkdir(parents=True, exist_ok=True)
+    fixture_source = 'export const fixtureVersion = "one";\r\n'
+    fixture.write_bytes(fixture_source.encode())
+
+    async def green_batches(*_args: Any, **_kwargs: Any) -> dict[str, object]:
+        return {"ok": True}
+
+    real_atomic_write_manifest = contracts_module.atomic_write_manifest
+
+    def drift_before_commit(root: Path, writes: Any, **kwargs: Any) -> Any:
+        write = next(item for item in writes if item.path.endswith(".contract.test.ts"))
+        assert isinstance(write.content, str)
+        metadata = _battery_header_metadata(write.content)
+        assert metadata is not None
+        assert metadata["fixture_path"] == fixture.relative_to(tmp_path).as_posix()
+        assert metadata["fixture_digest"] == _digest(fixture_source)
+        topology = json.loads(metadata["fixture_topology"])
+        expected_inputs = kwargs["expected_inputs"]
+        assert expected_inputs[fixture.relative_to(tmp_path).as_posix()] == _digest(fixture_source)
+        if drift == "fixture-bytes":
+            assert topology["tests/contract/src/fixtures.tsx"] == MISSING_INPUT
+            fixture.write_text('export const fixtureVersion = "two";\n')
+        else:
+            nearer = tmp_path / "tests/contract/src/fixtures.ts"
+            assert topology[nearer.relative_to(tmp_path).as_posix()] == MISSING_INPUT
+            assert expected_inputs[nearer.relative_to(tmp_path).as_posix()] == MISSING_INPUT
+            nearer.parent.mkdir(parents=True, exist_ok=True)
+            nearer.write_text('export const nearerFixture = "new";\n')
+        return real_atomic_write_manifest(root, writes, **kwargs)
+
+    monkeypatch.setattr(contracts_module, "_run_test_batches", green_batches)
+    monkeypatch.setattr(contracts_module, "atomic_write_manifest", drift_before_commit)
+
+    with pytest.raises(JauntGenerationError, match="inputs changed after analysis"):
+        await run_reconcile(
+            tmp_path,
+            config,
+            generator=_BatteryGenerator(),
+            worker_factory=lambda *_: worker,
+        )
+
+    assert not battery.exists()
+
+
+@pytest.mark.asyncio
+async def test_check_reports_fixture_byte_drift_from_contract_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, strength=False)
+    worker = _ContractWorker(tmp_path)
+    fixture = tmp_path / "tests/contract/src/fixtures.ts"
+    fixture.parent.mkdir(parents=True)
+    fixture.write_text('export const fixtureVersion = "one";\n')
+
+    async def green_batches(*_args: Any, **_kwargs: Any) -> dict[str, object]:
+        return {"ok": True}
+
+    monkeypatch.setattr("jaunt.typescript.contracts._run_test_batches", green_batches)
+    report = await run_reconcile(
+        tmp_path,
+        config,
+        generator=_BatteryGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert report.ok
+
+    fixture.write_text('export const fixtureVersion = "two";\n')
+    checked = await run_check(
+        tmp_path,
+        config,
+        contracts_only=True,
+        worker_factory=lambda *_: worker,
+    )
+
+    assert checked.exit_code == 4
+    assert [item["reason"] for item in checked.blocked] == ["stale-fixture"]
+
+
+@pytest.mark.asyncio
+async def test_adopt_keeps_runtime_pinned_and_seals_inside_the_worker_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, strength=False)
+    worker = _RuntimeTrackingContractWorker(tmp_path)
+    source = tmp_path / "src/contract.ts"
+    source.write_text(
+        "/** Clamp to zero. */\n"
+        "export function clamp(value: number): number {\n"
+        "  return value < 0 ? 0 : value;\n"
+        "}\n"
+    )
+    worker.hashes["src/contract.ts"] = _digest(source.read_text())
+
+    async def green_batches(*_args: Any, **_kwargs: Any) -> dict[str, object]:
+        return {"ok": True}
+
+    monkeypatch.setattr("jaunt.typescript.contracts._run_test_batches", green_batches)
+    report = await run_adopt(
+        tmp_path,
+        config,
+        target="src/contract.ts#clamp",
+        generator=_BatteryGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.ok
+    assert worker.runtime_events == ["pin", "verify", "seal"]
+    assert not worker.active
+    assert "@jauntContract" in source.read_text()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_runtime_drift_after_validation_preserves_committed_battery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, strength=False)
+    worker = _RuntimeTrackingContractWorker(tmp_path, fail_verify=True)
+    battery = tmp_path / "tests/contract/src/contract.clamp.contract.test.ts"
+    battery.parent.mkdir(parents=True)
+    battery.write_bytes(b"old committed battery\n")
+    before = battery.read_bytes()
+
+    async def green_batches(*_args: Any, **_kwargs: Any) -> dict[str, object]:
+        return {"ok": True}
+
+    monkeypatch.setattr("jaunt.typescript.contracts._run_test_batches", green_batches)
+    with pytest.raises(WorkerToolchainChangedError, match="simulated contract runtime drift"):
+        await run_reconcile(
+            tmp_path,
+            config,
+            generator=_BatteryGenerator(),
+            worker_factory=lambda *_: worker,
+        )
+
+    assert battery.read_bytes() == before
+    assert worker.runtime_events == ["pin", "verify"]
+    assert not worker.active
+
+
+@pytest.mark.asyncio
+async def test_check_blocks_legacy_battery_without_fixture_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, strength=False)
+    worker = _ContractWorker(tmp_path)
+    source = tmp_path / "src/contract.ts"
+    battery = _battery_path(tmp_path, config, source, "clamp")
+    battery.parent.mkdir(parents=True)
+    battery.write_text(
+        _with_header(
+            'import { test } from "vitest";\ntest("legacy", () => {});\n',
+            "src/contract.ts",
+            _digest(source.read_text()),
+        )
+    )
+    runner_called = False
+
+    async def unexpected(*_args: Any, **_kwargs: Any) -> dict[str, object]:
+        nonlocal runner_called
+        runner_called = True
+        return {"ok": True}
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", unexpected)
+    report = await run_check(
+        tmp_path,
+        config,
+        contracts_only=True,
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 4
+    assert [item["reason"] for item in report.blocked] == ["missing-fixture-provenance"]
+    assert "jaunt reconcile --language ts" in str(report.blocked[0]["guidance"])
+    assert runner_called is False
+
+
+@pytest.mark.asyncio
 async def test_check_blocks_a_strength_enabled_battery_without_valid_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -475,7 +802,9 @@ async def test_check_blocks_a_strength_enabled_battery_without_valid_metadata(
     battery = _battery_path(tmp_path, config, source, "clamp")
     battery.parent.mkdir(parents=True)
     battery.write_text(
-        _with_header(
+        _with_no_fixture_provenance(
+            tmp_path,
+            battery,
             'import { test } from "vitest";\ntest("placeholder", () => {});\n',
             "src/contract.ts",
             _digest(source.read_text()),
@@ -522,7 +851,9 @@ async def test_check_rejects_contract_battery_body_provenance_before_runner(
     battery = _battery_path(tmp_path, config, source, "clamp")
     battery.parent.mkdir(parents=True)
     committed = _with_strength_metadata(
-        _with_header(
+        _with_no_fixture_provenance(
+            tmp_path,
+            battery,
             'import { expect, test } from "vitest";\n'
             'import { clamp } from "../../../src/contract.js";\n'
             'test("clamps", () => expect(clamp(-1)).toBe(0));\n',

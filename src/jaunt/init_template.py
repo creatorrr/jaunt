@@ -30,7 +30,7 @@ check_generated_imports = true
 # generated_import_allowlist = ["intentional_extra"]
 # Emit provenance-headed .pyi stubs next to each spec module (opt-out).
 emit_stubs = true
-# Add persistent extra instructions that apply to build generation.
+# Add persistent extra instructions for implementation generation and TypeScript batteries.
 # instructions = [
 #   "Prefer small composable helpers over monolithic functions.",
 # ]
@@ -96,7 +96,7 @@ async_runner = "asyncio"       # asyncio | anyio
 include_target_tests = false   # keep target test source out of build prompts
 check_generated_imports = true # reject undeclared imports in generated code
 generated_import_allowlist = [] # extra top-level imports to permit in generated code
-instructions = []              # persistent extra build-generation instructions
+instructions = []              # persistent implementation + TS battery instructions
 emit_stubs = true              # emit provenance-headed .pyi stubs (opt-out)
 
 [test]

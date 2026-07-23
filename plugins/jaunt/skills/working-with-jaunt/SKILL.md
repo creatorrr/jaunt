@@ -76,6 +76,12 @@ the build afterward.
   with the current compiler, policy, API, and consumer closure; it makes no
   model calls. Never describe `model-rebuild` or `manual-intervention` as safe
   to restamp.
+- When battery drift includes `target_api_digest` and `battery_fingerprint`,
+  run `test --language ts --no-build` followed by `check --language ts`.
+  Co-drift in the embedded prompt or runner/Vitest fingerprint still takes the
+  same model-free path. The test command safety-typechecks and runs the committed
+  body before reheadering it. Do not add `--no-run`; that removes the runtime
+  proof and forces generation.
 - A final compiler/conformance rejection is already retried inside the module's
   remaining attempt budget with the rejected source and exact diagnostics.
   Read `candidate_outcomes` in build JSON before proposing another paid run.
@@ -86,6 +92,13 @@ the build afterward.
   `targets.ts.vitest.partial_landing`); never patch or discard those generated
   batteries.
   For a rejected cache hit, confirm `cache_evicted` before rerunning unchanged.
+  Runner infrastructure and committed-baseline failures retain validated live or
+  cached candidates; do not discard them or spend another attempt to work around
+  the outage.
+  For `JAUNT_TS_TEST_GENERATION_EXHAUSTED`, inspect the exact candidate and JSON
+  metadata under `.jaunt/typescript/rejected-tests/` before spending again.
+  Prompt-only drift preserves that terminal code; a changed test contract or
+  target API resets it to ordinary staleness.
 - Treat `JAUNT_TS_CANDIDATE_SELF_IMPORT`,
   `JAUNT_TS_GENERATED_PRIVATE_IMPORT`, and optionality/nullability TS2322
   failures as spec/prompt or generator issues. Never patch the generated

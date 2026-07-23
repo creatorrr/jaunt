@@ -148,6 +148,13 @@ the current declaration environment and carries the validated API transition
 into the battery check; it does not call a model. Contract changes and failed
 validation remain rebuilds.
 
+The same test/check sequence also handles a battery whose target API and aggregate
+battery stamps changed. It remains eligible when the embedded prompt, protected
+runner, or Vitest fingerprint changed at the same time. The test command applies the
+current safety scan, typechecks, and runs the committed body against the current
+target, then reheaders it when green without calling a model. Do not add `--no-run`:
+runtime verification is the proof that makes the free reheader safe.
+
 Generated programs use ordinary imports and keep running without Jaunt installed. See
 the [TypeScript guide](https://jaunt.ing/docs/guides/typescript) for the facade layout,
 supported compiler range, and version-2 config.

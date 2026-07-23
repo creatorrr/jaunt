@@ -108,7 +108,7 @@
 - [x] Evict an identifiable cached battery when the final protected Vitest run rejects its behavior.
 - [x] Confirm the retained 30-tier landing: 28 cache hits, two fresh responses, zero model calls, and a green combined run.
 - [ ] Add a default-compatible per-intent tier selection after the stable release.
-- [ ] Trial bounded imported-type context and the stronger loader prompt in 1.7.10 / 0.1.1 without invalidating the stable recovery cache.
+- [x] Trial bounded imported-type context and the stronger loader prompt without invalidating committed battery provenance.
 - [x] Keep the first stable release to the non-cache-breaking operational fixes.
 
 ## Cycle 14 — 2026-07-15
@@ -137,6 +137,30 @@
 - [x] Exclude tagged-template text from TypeScript semantic-environment freshness.
 - [x] Preserve substitution expressions and ordinary template literals in the digest.
 - [x] Add an adopter-shaped transitive-closure regression and run the full validation suite.
-- [ ] Let CI verify a stale battery through committed or worker-proven API-transition evidence.
+- [x] Let CI verify a stale battery through committed or worker-proven API-transition evidence.
 - [ ] Attribute `target_api_digest` battery drift to the changed closure records.
 - [x] Release Jaunt 1.7.10 and `@usejaunt/ts` 0.1.1.
+
+## Cycle 17 — 2026-07-23
+
+- [x] Commit validated battery reheaders even when a sibling tier exhausts generation.
+- [x] Verify and reheader API-digest-only battery drift without a model call.
+- [x] Reject regenerated implementations that fail an already-committed target battery.
+- [x] Pass `--instruction` and resolved workspace type definitions to test generation.
+- [x] Save the last rejected battery candidate and report terminal attempt exhaustion distinctly.
+- [x] Accept unique same-file `const` string keys without weakening dynamic-loader checks.
+- [x] Preserve terminal exhaustion across prompt-only drift and reset it for test/API changes.
+- [x] Audit the intermittent TS2307 report with repeated symlinked-worker checks.
+- [x] Pin Ruff to the active Python environment and reject non-convergent stub writes.
+- [x] Emit schema-v2 diagnostics for every magic freshness blocker.
+- [x] Detect a mutable TypeScript worker runtime and keep the final check inside artifact rollback.
+- [x] Resolve computed-key constants lexically and retain concrete bases under verbatim module syntax.
+- [x] Make fixture drift content-bearing and imported-type framing delimiter-safe.
+- [x] Clear rejected-candidate state only after a successful partial landing.
+- [x] Scope fixture freshness and commit preconditions to the battery that consumes it.
+- [x] Pin the protected runner and exported package declarations through battery commit.
+- [x] Reject candidate-owned collection failures without misclassifying runner outages.
+- [x] Close concurrent stub-replacement and transaction-rollback durability races.
+- [x] Add adopter-shaped regressions and run the full repository validation suite.
+- [ ] Obtain an independent final Codex review and address every actionable finding.
+- [ ] Re-run the completed patch in the adopter dashboard workspace before release.

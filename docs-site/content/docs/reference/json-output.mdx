@@ -124,44 +124,79 @@ the configured build cost ceiling is checked before another retry begins. Mixed
 workspaces retain this map at the top level; `targets.ts.candidate_outcomes` uses
 language-local keys such as `src/detect/index`.
 
-A version-2 TypeScript test run reports one `runner.batteries` entry per example
-or derived battery:
+Before a generated implementation lands, compatible committed Jaunt batteries run
+against its overlay. If that protected runner is unavailable, the module fails with
+`JAUNT_TS_COMMITTED_BATTERY_INFRASTRUCTURE` without spending another implementation
+attempt; independent modules can still complete.
+
+A version-2 TypeScript test run reports one top-level `vitest.batteries` entry per
+example or derived battery. Mixed workspaces repeat it under
+`targets.ts.vitest.batteries`:
 
 ```json
 {
-  "runner": {
+  "vitest": {
     "jobs": 6,
     "batteries": [
       {
         "path": "tests/__generated__/detect.example.test.ts",
         "tier": "example",
-        "state": "staged",
+        "state": "failed",
         "attempts": 2,
         "retry_count": 1,
         "retry_reasons": [
           "JAUNT_TS_TEST_DYNAMIC_LOADER: generated tests must use static imports"
-        ]
+        ],
+        "candidate": ".jaunt/typescript/rejected-tests/detect-8a12.candidate.ts",
+        "candidate_metadata": ".jaunt/typescript/rejected-tests/detect-8a12.json",
+        "terminal": true
       }
     ]
   }
 }
 ```
 
+`state` can report a fresh/cache/generation phase, `verified` for a model-free API
+transition, or `verification-infrastructure` when that proof could not run. The last
+state uses `JAUNT_TS_TEST_VERIFICATION_INFRASTRUCTURE`, fails closed, and does not
+queue paid generation. Failed generation can add `candidate`, `candidate_metadata`,
+and `terminal`; terminal budget exhaustion uses the structured
+`JAUNT_TS_TEST_GENERATION_EXHAUSTED` diagnostic.
+
 The protected full-project overlay validates both live attempts and cache hits.
-When the combined overlay still fails, `runner.partial_landing` lists the
-compatible `accepted` paths, `rejected` paths, whether the accepted subset was
-committed, and its isolated runner result. A rejected battery also carries
-`rejection_reasons`. If that battery came from the response cache,
-`cache_evicted` reports whether the rejected bytes were removed. Eviction compares
-the stored source before deletion, so it does not remove a newer replacement. The
-command remains unsuccessful until every requested battery lands.
+When the combined overlay still fails, `vitest.partial_landing` lists the compatible
+`accepted` paths, incompatible `rejected` paths, unclassified `retained` paths,
+whether the accepted subset was committed, and its isolated runner result. An
+`accepted` path has been proven compatible with the committed baseline; `retained`
+means a bad baseline or runner outage interrupted that proof, so the candidate stays
+staged or cached without being committed or evicted. Accepted paths can include
+generated batteries and verified reheaders, so one exhausted sibling does not strand
+their current stamps.
+
+A rejected battery also carries `rejection_reasons`. If that battery came from the
+response cache, `cache_evicted` reports whether the rejected bytes were removed.
+Eviction compares the stored source before deletion, so it does not remove a newer
+replacement. Runner infrastructure failures retain cache entries and commit no
+affected candidate. The report can still identify an already proven prefix under
+`accepted`, with the unclassified remainder under `retained`; the interrupted set
+does not land. Independent peers from a separate green group may still land.
+
+The command remains unsuccessful until every requested battery lands.
+
+If the committed battery baseline itself fails, the command reports
+`JAUNT_TS_TEST_TYPECHECK`; `vitest.partial_landing.isolation` includes
+`baseline_failure: true` and `baseline_errors`. Unrelated candidates appear under
+`retained`, remain in the response cache, and are neither accepted, rejected, nor
+evicted.
 
 The known Codex `Selected model is at capacity` response is retried twice with
 short backoff and does not consume a candidate attempt. A successful retry adds
 `infrastructure_retries` and `infrastructure_errors` to that battery outcome. If
 all three infrastructure calls fail, the battery state is
 `infrastructure-failed`, its diagnostic code is `JAUNT_TS_TEST_INFRASTRUCTURE`,
-and the report still includes every peer battery that completed.
+and the report still includes every peer battery that completed. This outage consumes
+no candidate attempt, writes no rejected-candidate artifact, and does not evict a
+cached response.
 
 ## status
 
@@ -269,7 +304,12 @@ and exits `4`.
 
 In a version-2 TypeScript payload, `magic` is partitioned as `magic.ts` and includes
 `invalid`; `targets.ts.magic` repeats the same language-local state. Structured
-diagnostics remain available at the top level.
+diagnostics remain available at the top level and in `targets.ts.diagnostics`.
+Version-2 check diagnostics include a deterministic error for every stale,
+unbuilt, invalid, or generated-artifact orphan magic blocker; mixed checks do the
+same under each language target. The state maps remain authoritative, and
+`blocked` remains contract-only. Standalone version-1 Python payloads retain their
+existing shape without a synthesized `diagnostics` key.
 
 ## specs
 
