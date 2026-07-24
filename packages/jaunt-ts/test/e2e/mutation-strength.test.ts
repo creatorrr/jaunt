@@ -1,4 +1,10 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, resolve } from "node:path";
 import { afterEach, expect, test } from "vitest";
 import {
@@ -196,18 +202,26 @@ test("the mutation sandbox cannot read or write external files", () => {
   const permissionFlag = process.allowedNodeEnvironmentFlags.has("--permission")
     ? "--permission"
     : "--experimental-permission";
+  // macOS exposes temporary files under /var while permission checks use the
+  // physical /private/var path. Keep the payload, cwd, and grants on one
+  // canonical spelling, as the production isolated workspace does.
+  const sandboxRoot = realpathSync(workspace.root);
+  const sandboxPackageRoot = realpathSync(packageRoot);
   const permissionGuard = resolve(
-    packageRoot,
+    sandboxPackageRoot,
     "dist/test/permission_guard.cjs",
   );
   const payload = {
-    root: workspace.root,
+    root: sandboxRoot,
     sourcePath: "src/contract.ts",
     symbol: "isPositive",
     batteryFiles: ["tests/contract.derived.test.ts"],
     overlays: {},
     tsconfigPath: "tsconfig.json",
-    compilerModulePath: workspace.compilerModulePath,
+    compilerModulePath: resolve(
+      sandboxRoot,
+      "node_modules/typescript/lib/typescript.js",
+    ),
     timeoutMs: 5_000,
     globalTimeoutMs: 30_000,
     maxMutants: 1,
@@ -221,19 +235,21 @@ test("the mutation sandbox cannot read or write external files", () => {
       "--allow-worker",
       "--allow-child-process",
       `--require=${permissionGuard}`,
-      `--allow-fs-read=${workspace.root}`,
-      `--allow-fs-read=${packageRoot}`,
-      `--allow-fs-write=${workspace.root}`,
-      resolve(packageRoot, "dist/test/mutation.js"),
+      `--allow-fs-read=${sandboxRoot}`,
+      `--allow-fs-read=${sandboxPackageRoot}`,
+      `--allow-fs-write=${sandboxRoot}`,
+      resolve(sandboxPackageRoot, "dist/test/mutation.js"),
     ],
     {
-      cwd: workspace.root,
+      cwd: sandboxRoot,
       timeoutMs: 40_000,
       stdin: JSON.stringify(payload),
     },
   );
 
-  expect(result).toMatchObject({ exitCode: 0, timedOut: false });
+  const diagnostic = `${result.stdout}\n${result.stderr}`;
+  expect(result.timedOut, diagnostic).toBe(false);
+  expect(result.exitCode, diagnostic).toBe(0);
   const report = JSON.parse(result.stdout) as MutationStrengthResult;
   expect(report.complete, `${result.stdout}\n${result.stderr}`).toBe(true);
   expect(
