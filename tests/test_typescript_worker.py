@@ -2861,6 +2861,88 @@ def test_runtime_package_scanner_allows_standard_loader_runtime_plumbing(
     assert "cached-runtime-helper" in specifiers
 
 
+@pytest.mark.parametrize(
+    "wrapper",
+    [
+        "class Wrapper { require() { return load; } }",
+        "class Wrapper { get other() { return load; } }",
+        "class Wrapper { get require() { if (enabled) { return load; } } }",
+    ],
+)
+def test_runtime_package_scanner_only_allows_direct_require_getter_returns(
+    tmp_path: Path,
+    wrapper: str,
+) -> None:
+    source = (
+        'import { createRequire } from "node:module";\n'
+        "const load = createRequire(import.meta.url);\n"
+        f"{wrapper}\n"
+    )
+
+    with pytest.raises(TypeScriptWorkerError, match="passes or ambiguously uses loader alias"):
+        _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js")
+
+
+def test_create_require_scope_scan_does_not_rescan_require_getter_bodies(
+    tmp_path: Path,
+) -> None:
+    return_count = 600
+    tokens = _AccessCountingTokens(
+        [
+            ("identifier", "import"),
+            ("punctuation", "{"),
+            ("identifier", "createRequire"),
+            ("punctuation", "}"),
+            ("identifier", "from"),
+            ("string", "node:module"),
+            ("punctuation", ";"),
+            ("identifier", "const"),
+            ("identifier", "load"),
+            ("punctuation", "="),
+            ("identifier", "createRequire"),
+            ("punctuation", "("),
+            ("identifier", "import"),
+            ("punctuation", "."),
+            ("identifier", "meta"),
+            ("punctuation", "."),
+            ("identifier", "url"),
+            ("punctuation", ")"),
+            ("punctuation", ";"),
+            ("identifier", "const"),
+            ("identifier", "wrapper"),
+            ("punctuation", "="),
+            ("punctuation", "{"),
+            ("identifier", "get"),
+            ("identifier", "require"),
+            ("punctuation", "("),
+            ("punctuation", ")"),
+            ("punctuation", "{"),
+            *[
+                token
+                for _ in range(return_count)
+                for token in (
+                    ("identifier", "return"),
+                    ("identifier", "load"),
+                    ("punctuation", ";"),
+                )
+            ],
+            ("punctuation", "}"),
+            ("punctuation", "}"),
+            ("punctuation", ";"),
+        ]
+    )
+
+    assert (
+        _create_require_module_specifiers(
+            tokens,
+            source_path=tmp_path / "runtime.js",
+            shadowed_native_loaders=frozenset(),
+        )
+        == ()
+    )
+    assert tokens.indexed_items < len(tokens) * 40
+
+
 def _echo_worker() -> str:
     return f'''\
 import json

@@ -2787,6 +2787,7 @@ def _create_require_module_specifiers(
     scope_paren_open_for_close: dict[int, int] = {}
     scope_enclosing_paren_at_token: list[int] = []
     scope_brace_indices: list[int] = []
+    scope_enclosing_brace_at_token: list[int] = []
     scope_brace_open_for_close: dict[int, int] = {}
     scope_statement_braces: list[bool] = []
     scope_lexical_braces: list[bool] = []
@@ -2809,6 +2810,9 @@ def _create_require_module_specifiers(
         scope_at_token.append(scope_stack[-1])
         scope_enclosing_paren_at_token.append(
             scope_parenthesis_indices[-1] if scope_parenthesis_indices else -1
+        )
+        scope_enclosing_brace_at_token.append(
+            scope_brace_indices[-1] if scope_brace_indices else -1
         )
         scope_closed_control_before.append(scope_previous_closed_control is not None)
         closes_control: str | None = None
@@ -4029,36 +4033,16 @@ def _create_require_module_specifiers(
     def inside_require_getter(index: int) -> bool:
         """Return whether a bare loader return is from a ``get require()`` body."""
 
-        cursor = index - 1
-        depth = 0
-        block_open: int | None = None
-        while cursor >= 0:
-            value = token_value(cursor)
-            if value == "}":
-                depth += 1
-            elif value == "{":
-                if depth:
-                    depth -= 1
-                else:
-                    block_open = cursor
-                    break
-            cursor -= 1
-        if block_open is None or token_value(block_open - 1) != ")":
+        block_open = scope_enclosing_brace_at_token[index]
+        parameter_close = block_open - 1
+        if block_open < 0 or token_value(parameter_close) != ")":
             return False
-        cursor = block_open - 2
-        depth = 1
-        while cursor >= 0:
-            value = token_value(cursor)
-            if value == ")":
-                depth += 1
-            elif value == "(":
-                depth -= 1
-                if depth == 0:
-                    return tokens[cursor - 1 : cursor] == (("identifier", "require"),) and tokens[
-                        cursor - 2 : cursor - 1
-                    ] == (("identifier", "get"),)
-            cursor -= 1
-        return False
+        parameter_open = scope_paren_open_for_close.get(parameter_close)
+        return (
+            parameter_open is not None
+            and tokens[parameter_open - 1 : parameter_open] == (("identifier", "require"),)
+            and tokens[parameter_open - 2 : parameter_open - 1] == (("identifier", "get"),)
+        )
 
     def loader_call_open(index: int) -> int | None:
         if token_value(index) == "(":
