@@ -1493,6 +1493,10 @@ def test_runtime_package_scanner_hoists_var_to_the_nearest_var_scope(
         'load("parameter"); } load("outside-parameter");',
         "const scoped = (load = createRequire(import.meta.url)) => { "
         'load("parameter"); }; load("outside-parameter");',
+        "function scoped(load = createRequire(import.meta.url)): { ok: boolean } { "
+        'load("parameter"); return { ok: true }; } load("outside-parameter");',
+        "class C { scoped(load = createRequire(import.meta.url)): { ok: boolean } { "
+        'load("parameter"); return { ok: true }; } } load("outside-parameter");',
     ],
 )
 def test_runtime_package_scanner_owns_defaulted_loader_parameters_in_the_function(

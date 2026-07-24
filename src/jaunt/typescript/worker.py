@@ -2607,6 +2607,8 @@ def _create_require_module_specifiers(
     scope_control_parentheses: list[str | None] = []
     scope_parenthesis_indices: list[int] = []
     scope_paren_open_for_close: dict[int, int] = {}
+    scope_brace_indices: list[int] = []
+    scope_brace_open_for_close: dict[int, int] = {}
     scope_statement_braces: list[bool] = []
     scope_lexical_braces: list[bool] = []
     scope_prebody_overrides: dict[int, int] = {}
@@ -2633,6 +2635,7 @@ def _create_require_module_specifiers(
         opens_statement: bool | None = None
         opens_lexical_scope = False
         lexical_scope_kind: str | None = None
+        function_scope_start: int | None = None
         opens_switch_body = value == "{" and scope_previous_closed_control == "switch"
         if value == "(":
             scope_control_parentheses.append(_control_flow_parenthesis_head(scope_tokens))
@@ -2662,9 +2665,28 @@ def _create_require_module_specifiers(
                 opens_statement=opens_statement,
                 enclosing_statement_brace=enclosing_statement_brace,
             )
+            if (
+                lexical_scope_kind in {"block", "function"}
+                and scope_tokens
+                and scope_tokens[-1][1] == "}"
+                and not scope_previous_closed_statement
+            ):
+                return_type_open = scope_brace_open_for_close.get(len(scope_tokens) - 1)
+                if (
+                    return_type_open is not None
+                    and return_type_open > 0
+                    and scope_tokens[return_type_open - 1][1] == ":"
+                ):
+                    function_scope_start = _function_scope_start(
+                        scope_tokens[: return_type_open - 1],
+                        scope_paren_open_for_close,
+                    )
+                    if function_scope_start is not None:
+                        lexical_scope_kind = "function"
             opens_lexical_scope = lexical_scope_kind is not None
             scope_statement_braces.append(opens_statement)
             scope_lexical_braces.append(opens_lexical_scope)
+            scope_brace_indices.append(token_index)
             if opens_lexical_scope:
                 parent_scope = scope_stack[-1]
                 scope_start = token_index
@@ -2675,12 +2697,13 @@ def _create_require_module_specifiers(
                 ):
                     scope_start = scope_paren_open_for_close.get(len(scope_tokens) - 1, token_index)
                 elif lexical_scope_kind == "function":
-                    function_start = _function_scope_start(
-                        scope_tokens,
-                        scope_paren_open_for_close,
-                    )
-                    if function_start is not None:
-                        scope_start = function_start
+                    if function_scope_start is None:
+                        function_scope_start = _function_scope_start(
+                            scope_tokens,
+                            scope_paren_open_for_close,
+                        )
+                    if function_scope_start is not None:
+                        scope_start = function_scope_start
                 new_scope = len(scope_open)
                 scope_open.append(scope_start)
                 scope_end_exclusive.append(len(tokens))
@@ -2698,6 +2721,8 @@ def _create_require_module_specifiers(
             else:
                 scope_nonstatement_brace_indices.add(token_index)
         elif value == "}":
+            if scope_brace_indices:
+                scope_brace_open_for_close[token_index] = scope_brace_indices.pop()
             closes_statement = scope_statement_braces.pop() if scope_statement_braces else False
             closes_lexical_scope = scope_lexical_braces.pop() if scope_lexical_braces else False
             if closes_lexical_scope and len(scope_stack) > 1:
@@ -3701,10 +3726,7 @@ def _runtime_module_specifiers(source: str, *, source_path: Path) -> tuple[str, 
             # ``export const``, declarations, assignments, and object keys
             # cannot introduce a package re-export.
             return None
-        if (
-            from_index + 1 < len(tokens)
-            and tokens[from_index] == ("identifier", "from")
-        ):
+        if from_index + 1 < len(tokens) and tokens[from_index] == ("identifier", "from"):
             specifier = literal(from_index + 1)
             if specifier is not None:
                 return clause_start, from_index, specifier
