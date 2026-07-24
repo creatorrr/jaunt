@@ -128,6 +128,59 @@ def test_runtime_package_scanner_captures_static_native_load_forms(
     )
 
 
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ('import(("grouped-import"))', "grouped-import"),
+        ('require(("grouped-require"))', "grouped-require"),
+        ('module.require(("grouped-module-require"))', "grouped-module-require"),
+        ('require.call(null, ("grouped-call"))', "grouped-call"),
+        ('require.apply(null, [("grouped-apply")])', "grouped-apply"),
+        ('const load = require; load(("grouped-alias"));', "grouped-alias"),
+        (
+            'const load = module.require; load.call(null, ("grouped-alias-call"));',
+            "grouped-alias-call",
+        ),
+        (
+            'const { require: load } = module; load.apply(null, [("grouped-alias-apply")]);',
+            "grouped-alias-apply",
+        ),
+    ],
+)
+def test_runtime_package_scanner_unwraps_grouped_static_specifiers(
+    tmp_path: Path,
+    source: str,
+    expected: str,
+) -> None:
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == (expected,)
+
+
+@pytest.mark.parametrize(
+    "load",
+    [
+        'import(("partial-import") + suffix)',
+        'require("partial-ungrouped" + suffix)',
+        'require(("partial-require") + suffix)',
+        'require(("partial-comma", suffix))',
+        'module.require(("partial-module") || fallback)',
+        'require.call(null, ("partial-call") + suffix)',
+        'require.apply(null, ["partial-array", fallback])',
+        'require.apply(null, [("partial-apply"), fallback])',
+        'const load = require; load(("partial-alias") + suffix)',
+        'const load = require; load.apply(null, [("partial-alias-apply"), fallback])',
+    ],
+)
+def test_runtime_package_scanner_does_not_extract_from_composed_specifiers(
+    tmp_path: Path,
+    load: str,
+) -> None:
+    source = f'{load}; require("real-static-sibling");'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == (
+        "real-static-sibling",
+    )
+
+
 @pytest.mark.parametrize("prefix", ["", "\ufeff"])
 @pytest.mark.parametrize("terminator", ["\n", "\r", "\r\n", "\u2028", "\u2029"])
 def test_runtime_package_scanner_ignores_hashbang_text(

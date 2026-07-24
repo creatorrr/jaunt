@@ -2746,6 +2746,106 @@ class _ScopeCapabilityIndex:
         )
 
 
+def _runtime_delimiter_close_indices(
+    tokens: Sequence[tuple[str, str]],
+) -> dict[int, int]:
+    """Pair balanced runtime delimiters without interpreting their contents."""
+
+    opening_for = {")": "(", "]": "[", "}": "{"}
+    stack: list[tuple[int, str]] = []
+    close_for_open: dict[int, int] = {}
+    for index, (_kind, value) in enumerate(tokens):
+        if value in {"(", "[", "{"}:
+            stack.append((index, value))
+        elif value in opening_for and stack and stack[-1][1] == opening_for[value]:
+            open_index, _opening = stack.pop()
+            close_for_open[open_index] = index
+    return close_for_open
+
+
+def _runtime_call_argument_ranges(
+    tokens: Sequence[tuple[str, str]],
+    open_index: int,
+    close_for_open: Mapping[int, int],
+) -> tuple[tuple[int, int], ...]:
+    """Return the top-level, half-open argument ranges for one balanced call."""
+
+    if not (0 <= open_index < len(tokens)) or tokens[open_index][1] != "(":
+        return ()
+    close_index = close_for_open.get(open_index)
+    if close_index is None:
+        return ()
+    ranges: list[tuple[int, int]] = []
+    start = open_index + 1
+    cursor = start
+    while cursor < close_index:
+        value = tokens[cursor][1]
+        if value in {"(", "[", "{"}:
+            nested_close = close_for_open.get(cursor)
+            if nested_close is None or nested_close >= close_index:
+                return ()
+            cursor = nested_close + 1
+            continue
+        if value == ",":
+            ranges.append((start, cursor))
+            start = cursor + 1
+        cursor += 1
+    if start < close_index:
+        ranges.append((start, close_index))
+    return tuple(ranges)
+
+
+def _transparent_static_module_specifier(
+    tokens: Sequence[tuple[str, str]],
+    *,
+    start: int,
+    end: int,
+    close_for_open: Mapping[int, int],
+    source_path: Path,
+) -> str | None:
+    """Return one literal wrapped only in balanced grouping parentheses."""
+
+    while start < end and tokens[start][1] == "(":
+        if close_for_open.get(start) != end - 1:
+            return None
+        start += 1
+        end -= 1
+    if end != start + 1 or tokens[start][0] not in {"string", "template"}:
+        return None
+    specifier = tokens[start][1]
+    if "\\" in specifier:
+        raise TypeScriptWorkerError(
+            f"Runtime package uses an escaped module specifier in {source_path}"
+        )
+    return specifier
+
+
+def _transparent_singleton_array_module_specifier(
+    tokens: Sequence[tuple[str, str]],
+    *,
+    start: int,
+    end: int,
+    close_for_open: Mapping[int, int],
+    source_path: Path,
+) -> str | None:
+    """Return a literal from an array containing exactly one grouped value."""
+
+    while start < end and tokens[start][1] == "(":
+        if close_for_open.get(start) != end - 1:
+            return None
+        start += 1
+        end -= 1
+    if start >= end or tokens[start][1] != "[" or close_for_open.get(start) != end - 1:
+        return None
+    return _transparent_static_module_specifier(
+        tokens,
+        start=start + 1,
+        end=end - 1,
+        close_for_open=close_for_open,
+        source_path=source_path,
+    )
+
+
 def _create_require_module_specifiers(
     tokens: tuple[tuple[str, str], ...],
     *,
@@ -2966,6 +3066,7 @@ def _create_require_module_specifiers(
     scope_brace_close_for_open = {
         opening: closing for closing, opening in scope_brace_open_for_close.items()
     }
+    runtime_close_for_open = _runtime_delimiter_close_indices(tokens)
 
     def token_value(index: int) -> str:
         return tokens[index][1] if 0 <= index < len(tokens) else ""
@@ -3425,19 +3526,21 @@ def _create_require_module_specifiers(
                 binding += 1
             cursor = close + 1
 
-    def literal_call_argument(open_index: int) -> str | None:
-        argument = open_index + 1
-        if argument >= len(tokens) or tokens[argument][0] not in {"string", "template"}:
-            # Runtime packages legitimately resolve user-provided ids. The
-            # documented closure covers statically named loads; retain
-            # capability provenance but do not invent a package edge here.
+    def literal_call_argument(open_index: int, argument_index: int = 0) -> str | None:
+        arguments = _runtime_call_argument_ranges(tokens, open_index, runtime_close_for_open)
+        if argument_index >= len(arguments):
             return None
-        specifier = tokens[argument][1]
-        if "\\" in specifier:
-            raise TypeScriptWorkerError(
-                f"Runtime package uses an escaped module specifier in {source_path}"
-            )
-        return specifier
+        start, end = arguments[argument_index]
+        # Runtime packages legitimately resolve user-provided ids. The
+        # documented closure covers statically named loads; retain capability
+        # provenance but do not invent an edge from part of a composition.
+        return _transparent_static_module_specifier(
+            tokens,
+            start=start,
+            end=end,
+            close_for_open=runtime_close_for_open,
+            source_path=source_path,
+        )
 
     def node_module_value_end(index: int) -> int | None:
         cursor = index
@@ -3935,23 +4038,28 @@ def _create_require_module_specifiers(
             raise TypeScriptWorkerError(
                 f"Runtime package has an unterminated loader forwarding call: {source_path}"
             )
-        cursor = open_index + 1
-        depth = 0
-        while cursor < close:
-            value = token_value(cursor)
-            if value in {"(", "[", "{"}:
-                depth += 1
-            elif value in {")", "]", "}"}:
-                depth -= 1
-            elif value == "," and depth == 0:
-                argument = cursor + 1
-                if method == "apply" and token_value(argument) == "[":
-                    argument += 1
-                specifier = literal_call_argument(argument - 1)
-                if specifier is not None:
-                    specifiers.add(specifier)
-                break
-            cursor += 1
+        arguments = _runtime_call_argument_ranges(tokens, open_index, runtime_close_for_open)
+        if len(arguments) < 2:
+            return
+        start, end = arguments[1]
+        if method == "apply":
+            specifier = _transparent_singleton_array_module_specifier(
+                tokens,
+                start=start,
+                end=end,
+                close_for_open=runtime_close_for_open,
+                source_path=source_path,
+            )
+        else:
+            specifier = _transparent_static_module_specifier(
+                tokens,
+                start=start,
+                end=end,
+                close_for_open=runtime_close_for_open,
+                source_path=source_path,
+            )
+        if specifier is not None:
+            specifiers.add(specifier)
 
     def loader_forward_call(index: int) -> bool:
         """Accept apply/call forwarding and retain a statically named argument."""
@@ -5118,6 +5226,7 @@ def _runtime_module_specifiers(source: str, *, source_path: Path) -> tuple[str, 
     specifiers: set[str] = set()
     erased_type_imports = _erased_type_import_indices(tokens)
     shadowed_native_loaders = _shadowed_native_loader_indices(tokens)
+    runtime_close_for_open = _runtime_delimiter_close_indices(tokens)
 
     def literal(index: int) -> str | None:
         if index >= len(tokens):
@@ -5130,6 +5239,19 @@ def _runtime_module_specifiers(source: str, *, source_path: Path) -> tuple[str, 
                 f"Runtime package uses an escaped module specifier in {source_path}"
             )
         return value
+
+    def literal_call_argument(open_index: int) -> str | None:
+        arguments = _runtime_call_argument_ranges(tokens, open_index, runtime_close_for_open)
+        if not arguments:
+            return None
+        start, end = arguments[0]
+        return _transparent_static_module_specifier(
+            tokens,
+            start=start,
+            end=end,
+            close_for_open=runtime_close_for_open,
+            source_path=source_path,
+        )
 
     def named_clause_is_type_only(open_index: int, close_index: int) -> bool:
         """Return whether every named import/export carries an inline type modifier."""
@@ -5227,7 +5349,7 @@ def _runtime_module_specifiers(source: str, *, source_path: Path) -> tuple[str, 
             if index + 1 < len(tokens) and tokens[index + 1] == ("punctuation", "("):
                 if index in erased_type_imports:
                     continue
-                specifier = literal(index + 2)
+                specifier = literal_call_argument(index + 1)
                 if specifier is not None:
                     specifiers.add(specifier)
                 continue
@@ -5295,7 +5417,7 @@ def _runtime_module_specifiers(source: str, *, source_path: Path) -> tuple[str, 
             ):
                 call_index += 1
             if call_index < len(tokens) and tokens[call_index] == ("punctuation", "("):
-                specifier = literal(call_index + 1)
+                specifier = literal_call_argument(call_index)
                 if specifier is not None:
                     specifiers.add(specifier)
     specifiers.update(
