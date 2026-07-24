@@ -190,6 +190,62 @@ def test_runtime_package_scanner_unwraps_erased_typescript_specifier_syntax(
     )
 
 
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ('import("rich-import" as unknown as string)', "rich-import"),
+        (
+            'require("rich-require" satisfies { readonly length: number })',
+            "rich-require",
+        ),
+        (
+            'module.require("rich-module-require" as ((x: string) => string))',
+            "rich-module-require",
+        ),
+        (
+            'require.call(null, "rich-call" as string satisfies string)',
+            "rich-call",
+        ),
+        (
+            'require.apply(null, ["rich-apply" satisfies { readonly length: number }])',
+            "rich-apply",
+        ),
+        (
+            'const load = require; load("rich-alias" as ((x: string) => string));',
+            "rich-alias",
+        ),
+    ],
+)
+def test_runtime_package_scanner_unwraps_rich_erased_typescript_specifier_types(
+    tmp_path: Path,
+    source: str,
+    expected: str,
+) -> None:
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (expected,)
+
+
+@pytest.mark.parametrize(
+    "load",
+    [
+        'import("executable-import" as unknown as sideEffect())',
+        'require("executable-require" satisfies { readonly length: sideEffect() })',
+        'module.require("executable-module" as ((x: sideEffect()) => string))',
+        'require.call(null, "composed-call" as string || fallback)',
+        'require.apply(null, ["composed-apply" as string, fallback])',
+        'const load = require; load("executable-alias" as (sideEffect()));',
+    ],
+)
+def test_runtime_package_scanner_rejects_executable_rich_typescript_specifier_wrappers(
+    tmp_path: Path,
+    load: str,
+) -> None:
+    source = f'{load}; require("real-static-sibling");'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (
+        "real-static-sibling",
+    )
+
+
 @pytest.mark.parametrize("suffix", [".cjs", ".js", ".jsx", ".mjs"])
 @pytest.mark.parametrize(
     "load",
@@ -197,6 +253,9 @@ def test_runtime_package_scanner_unwraps_erased_typescript_specifier_syntax(
         'require(("typescript-only" as const))',
         'require(("typescript-only" satisfies string))',
         'require(("typescript-only"!))',
+        'require("typescript-only" as unknown as string)',
+        'require("typescript-only" satisfies { readonly length: number })',
+        'require("typescript-only" as ((x: string) => string))',
     ],
 )
 def test_runtime_package_scanner_does_not_erase_typescript_syntax_in_javascript(

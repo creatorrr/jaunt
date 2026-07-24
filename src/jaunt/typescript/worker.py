@@ -2814,10 +2814,17 @@ def _transparent_static_module_specifier(
 
     typescript_syntax = source_path.suffix.lower() in {".cts", ".mts", ".ts", ".tsx"}
 
-    def safe_assertion_type(type_start: int, type_end: int) -> bool:
-        """Recognize a bounded, non-executable TypeScript type expression."""
+    def safe_assertion_type_end(type_start: int, type_end: int) -> int | None:
+        """Return the end of one bounded, non-executable TypeScript type."""
 
-        prefix_operators = {"infer", "keyof", "readonly", "typeof", "unique"}
+        prefix_operators = {
+            "abstract",
+            "infer",
+            "keyof",
+            "readonly",
+            "typeof",
+            "unique",
+        }
 
         def parse_type(index: int, limit: int) -> int | None:
             cursor = parse_operand(index, limit)
@@ -2827,6 +2834,18 @@ def _transparent_static_module_specifier(
                 cursor = parse_operand(cursor + 1, limit)
                 if cursor is None:
                     return None
+            if cursor < limit and tokens[cursor] == ("identifier", "extends"):
+                constraint_end = parse_type(cursor + 1, limit)
+                if (
+                    constraint_end is None
+                    or constraint_end >= limit
+                    or tokens[constraint_end][1] != "?"
+                ):
+                    return None
+                true_end = parse_type(constraint_end + 1, limit)
+                if true_end is None or true_end >= limit or tokens[true_end][1] != ":":
+                    return None
+                return parse_type(true_end + 1, limit)
             return cursor
 
         def parse_type_arguments(index: int, limit: int) -> int | None:
@@ -2836,6 +2855,35 @@ def _transparent_static_module_specifier(
             while cursor < limit:
                 cursor = parse_type(cursor, limit)
                 if cursor is None or cursor >= limit:
+                    return None
+                if tokens[cursor][1] == ">":
+                    return cursor + 1
+                if tokens[cursor][1] != ",":
+                    return None
+                cursor += 1
+                if cursor >= limit or tokens[cursor][1] == ">":
+                    return None
+            return None
+
+        def parse_type_parameters(index: int, limit: int) -> int | None:
+            cursor = index + 1
+            if cursor >= limit or tokens[cursor][1] == ">":
+                return None
+            while cursor < limit:
+                if tokens[cursor] == ("identifier", "const"):
+                    cursor += 1
+                if cursor >= limit or tokens[cursor][0] != "identifier":
+                    return None
+                cursor += 1
+                if cursor < limit and tokens[cursor] == ("identifier", "extends"):
+                    cursor = parse_type(cursor + 1, limit)
+                    if cursor is None:
+                        return None
+                if cursor < limit and tokens[cursor][1] == "=":
+                    cursor = parse_type(cursor + 1, limit)
+                    if cursor is None:
+                        return None
+                if cursor >= limit:
                     return None
                 if tokens[cursor][1] == ">":
                     return cursor + 1
@@ -2865,6 +2913,114 @@ def _transparent_static_module_specifier(
                     return cursor
             return cursor
 
+        def parse_parameters(index: int, limit: int) -> int | None:
+            cursor = index
+            while cursor < limit:
+                if tokens[cursor][1] == "...":
+                    cursor += 1
+                if cursor >= limit or tokens[cursor][0] != "identifier":
+                    return None
+                cursor += 1
+                if cursor < limit and tokens[cursor][1] == "?":
+                    cursor += 1
+                if cursor >= limit or tokens[cursor][1] != ":":
+                    return None
+                cursor = parse_type(cursor + 1, limit)
+                if cursor is None:
+                    return None
+                if cursor == limit:
+                    return cursor
+                if tokens[cursor][1] != ",":
+                    return None
+                cursor += 1
+                if cursor == limit:
+                    return cursor
+            return cursor
+
+        def parse_function_type(index: int, limit: int) -> int | None:
+            cursor = index
+            if cursor < limit and tokens[cursor][1] == "<":
+                cursor = parse_type_parameters(cursor, limit)
+                if cursor is None:
+                    return None
+            if cursor >= limit or tokens[cursor][1] != "(":
+                return None
+            close = close_for_open.get(cursor)
+            if close is None or close >= limit:
+                return None
+            if cursor + 1 < close and parse_parameters(cursor + 1, close) != close:
+                return None
+            if close + 1 >= limit or tokens[close + 1][1] != "=>":
+                return None
+            return parse_type(close + 2, limit)
+
+        def parse_object_type(index: int, limit: int) -> int | None:
+            close = close_for_open.get(index)
+            if close is None or close >= limit:
+                return None
+            cursor = index + 1
+            while cursor < close:
+                if tokens[cursor][1] in {",", ";"}:
+                    cursor += 1
+                    continue
+                if tokens[cursor] == ("identifier", "readonly"):
+                    cursor += 1
+                if cursor >= close:
+                    return None
+
+                if tokens[cursor][1] == "(":
+                    member_end = parse_function_type(cursor, close)
+                    if member_end is None:
+                        return None
+                    cursor = member_end
+                elif tokens[cursor][1] == "<":
+                    member_end = parse_function_type(cursor, close)
+                    if member_end is None:
+                        return None
+                    cursor = member_end
+                elif tokens[cursor][1] == "[":
+                    member_close = close_for_open.get(cursor)
+                    if member_close is None or member_close >= close:
+                        return None
+                    parameter_end = parse_parameters(cursor + 1, member_close)
+                    if parameter_end != member_close:
+                        return None
+                    cursor = member_close + 1
+                    if cursor >= close or tokens[cursor][1] != ":":
+                        return None
+                    cursor = parse_type(cursor + 1, close)
+                    if cursor is None:
+                        return None
+                elif tokens[cursor][0] in {"identifier", "number", "string"}:
+                    cursor += 1
+                    if cursor < close and tokens[cursor][1] == "?":
+                        cursor += 1
+                    if cursor < close and tokens[cursor][1] == "<":
+                        cursor = parse_type_parameters(cursor, close)
+                        if cursor is None:
+                            return None
+                    if cursor < close and tokens[cursor][1] == "(":
+                        parameter_close = close_for_open.get(cursor)
+                        if parameter_close is None or parameter_close >= close:
+                            return None
+                        if (
+                            cursor + 1 < parameter_close
+                            and parse_parameters(cursor + 1, parameter_close) != parameter_close
+                        ):
+                            return None
+                        cursor = parameter_close + 1
+                    if cursor >= close or tokens[cursor][1] != ":":
+                        return None
+                    cursor = parse_type(cursor + 1, close)
+                    if cursor is None:
+                        return None
+                else:
+                    return None
+
+                if cursor < close and tokens[cursor][1] not in {",", ";"}:
+                    return None
+            return close + 1
+
         def parse_operand(index: int, limit: int) -> int | None:
             cursor = index
             while (
@@ -2881,10 +3037,23 @@ def _transparent_static_module_specifier(
                 close = close_for_open.get(cursor)
                 if close is None or close >= limit:
                     return None
-                nested_end = parse_type(cursor + 1, close)
-                if nested_end != close:
+                if close + 1 < limit and tokens[close + 1][1] == "=>":
+                    cursor = parse_function_type(cursor, limit)
+                    if cursor is None:
+                        return None
+                else:
+                    nested_end = parse_type(cursor + 1, close)
+                    if nested_end != close:
+                        return None
+                    cursor = close + 1
+            elif value == "<":
+                cursor = parse_function_type(cursor, limit)
+                if cursor is None:
                     return None
-                cursor = close + 1
+            elif value == "{":
+                cursor = parse_object_type(cursor, limit)
+                if cursor is None:
+                    return None
             elif value == "[":
                 close = close_for_open.get(cursor)
                 if close is None or close >= limit:
@@ -2933,7 +3102,9 @@ def _transparent_static_module_specifier(
                 break
             return cursor
 
-        return type_start < type_end and parse_type(type_start, type_end) == type_end
+        if type_start >= type_end:
+            return None
+        return parse_type(type_start, type_end)
 
     def transparent_typescript_expression(
         expression_start: int,
@@ -2957,18 +3128,22 @@ def _transparent_static_module_specifier(
 
         while cursor < expression_end and tokens[cursor][1] == "!":
             cursor += 1
-        if cursor == expression_end:
-            return specifier
-        if tokens[cursor] not in {
-            ("identifier", "as"),
-            ("identifier", "satisfies"),
-        }:
-            return None
-        type_end = expression_end
-        while type_end > cursor + 1 and tokens[type_end - 1][1] == "!":
-            type_end -= 1
-        if not safe_assertion_type(cursor + 1, type_end):
-            return None
+        while cursor < expression_end:
+            if tokens[cursor] not in {
+                ("identifier", "as"),
+                ("identifier", "satisfies"),
+            }:
+                return None
+            assertion_end = safe_assertion_type_end(cursor + 1, expression_end)
+            if assertion_end is None:
+                return None
+            cursor = assertion_end
+            if cursor == expression_end:
+                return specifier
+            while cursor < expression_end and tokens[cursor][1] == "!":
+                cursor += 1
+            if cursor == expression_end:
+                return specifier
         return specifier
 
     if typescript_syntax:
