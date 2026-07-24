@@ -4860,6 +4860,33 @@ def _erased_type_import_indices(
             "instanceof",
         }
     )
+    type_argument_binary_operators = frozenset(
+        {
+            "*",
+            "**",
+            "/",
+            "%",
+            "<<",
+            ">>",
+            ">>>",
+            "<=",
+            ">=",
+            "==",
+            "!=",
+            "===",
+            "!==",
+            "&",
+            "^",
+            "|",
+            "&&",
+            "||",
+            "??",
+            "in",
+            "instanceof",
+            "as",
+            "satisfies",
+        }
+    )
     asi_statement_starters = declaration_starters | {
         "async",
         "await",
@@ -4973,6 +5000,25 @@ def _erased_type_import_indices(
             return True
         return value in {"(", "[", "{", "!", "~", "+", "-", "++", "--"}
 
+    def can_follow_type_arguments_in_expression(close_index: int) -> bool:
+        """Mirror TypeScript's boundary test for ``value<Type>`` expressions."""
+
+        following_index = close_index + 1
+        if following_index >= token_count:
+            return True
+        following_kind, following = tokens[following_index]
+        if following == "(" or following_kind in {"computed-template", "template"}:
+            return True
+        # TypeScript keeps these four tokens relational/unary even though they
+        # otherwise participate in expression parsing after a completed value.
+        if following in {"<", ">", "+", "-"}:
+            return False
+        if bool(line_breaks_before[following_index]):
+            return True
+        if following in type_argument_binary_operators:
+            return True
+        return not (token_starts_expression(following_index) or following in {"#", "@", "<"})
+
     def angle_imports_are_type_syntax(
         angle: _SpeculativeTypeAngle,
         close_index: int,
@@ -5065,6 +5111,12 @@ def _erased_type_import_indices(
             # ``left < import(...) > (right)`` remains executable.
             return True
         if following == "?." and token_value(close_index + 2) == "(" and attaches_to_value:
+            return True
+        if attaches_to_value and can_follow_type_arguments_in_expression(close_index):
+            # TypeScript 4.7+ permits a value to be specialized without being
+            # called (``const narrowed = factory<Type>;``). The type arguments
+            # are erased just like those on a call. The boundary check above
+            # keeps executable relational expressions out of this case.
             return True
         return angle_starts_assertion(open_index) and token_starts_expression(close_index + 1)
 

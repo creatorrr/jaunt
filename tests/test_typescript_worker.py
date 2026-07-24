@@ -768,6 +768,42 @@ def test_runtime_package_scanner_erases_imports_in_ambiguous_type_contexts(
     assert _runtime_module_specifiers(source, source_path=tmp_path / f"runtime{suffix}") == ()
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        'const specialized = factory<import("inert-instantiation").Options>;',
+        'const grouped = (factory<import("inert-grouped-instantiation").Options>);',
+        'const active = factory<import("inert-logical-instantiation").Options> && fallback;',
+        'class Container extends (Base<import("inert-parenthesized-base").Options>) {}',
+    ],
+)
+def test_runtime_package_scanner_erases_imports_in_instantiation_expressions(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == ()
+
+
+def test_runtime_package_scanner_keeps_executable_instantiation_lookalikes(
+    tmp_path: Path,
+) -> None:
+    source = (
+        'const named = left < import("runtime-relational-name") > right;\n'
+        'const added = left < import("runtime-relational-plus") > +right;\n'
+        'const indexed = left < import("runtime-relational-array") > [right];\n'
+        'const called = left < import("runtime-relational-call").then(load) > (right);\n'
+        'const view = <View value={import("runtime-jsx-lookalike")} />;'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.tsx") == (
+        "runtime-jsx-lookalike",
+        "runtime-relational-array",
+        "runtime-relational-call",
+        "runtime-relational-name",
+        "runtime-relational-plus",
+    )
+
+
 def test_runtime_package_scanner_keeps_runtime_angle_and_heritage_expressions(
     tmp_path: Path,
 ) -> None:
