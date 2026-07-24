@@ -136,6 +136,7 @@ def test_runtime_package_scanner_captures_static_native_load_forms(
         ('module.require(("grouped-module-require"))', "grouped-module-require"),
         ('require.call(null, ("grouped-call"))', "grouped-call"),
         ('require.apply(null, [("grouped-apply")])', "grouped-apply"),
+        ('require.apply(null, [("trailing-comma-apply"),])', "trailing-comma-apply"),
         ('const load = require; load(("grouped-alias"));', "grouped-alias"),
         (
             'const load = module.require; load.call(null, ("grouped-alias-call"));',
@@ -144,6 +145,10 @@ def test_runtime_package_scanner_captures_static_native_load_forms(
         (
             'const { require: load } = module; load.apply(null, [("grouped-alias-apply")]);',
             "grouped-alias-apply",
+        ),
+        (
+            'const load = require; load.apply(null, ([("grouped-trailing-comma-apply"),]));',
+            "grouped-trailing-comma-apply",
         ),
     ],
 )
@@ -166,6 +171,10 @@ def test_runtime_package_scanner_unwraps_grouped_static_specifiers(
         'require.call(null, ("partial-call") + suffix)',
         'require.apply(null, ["partial-array", fallback])',
         'require.apply(null, [("partial-apply"), fallback])',
+        "require.apply(null, [])",
+        'require.apply(null, ["partial-array-trailing", fallback,])',
+        'require.apply(null, [...["partial-spread"],])',
+        'require.apply(null, [("partial-composed" + suffix),])',
         'const load = require; load(("partial-alias") + suffix)',
         'const load = require; load.apply(null, [("partial-alias-apply"), fallback])',
     ],

@@ -2828,7 +2828,7 @@ def _transparent_singleton_array_module_specifier(
     close_for_open: Mapping[int, int],
     source_path: Path,
 ) -> str | None:
-    """Return a literal from an array containing exactly one grouped value."""
+    """Return a literal from a singleton array, allowing grouping and a trailing comma."""
 
     while start < end and tokens[start][1] == "(":
         if close_for_open.get(start) != end - 1:
@@ -2837,10 +2837,14 @@ def _transparent_singleton_array_module_specifier(
         end -= 1
     if start >= end or tokens[start][1] != "[" or close_for_open.get(start) != end - 1:
         return None
+    element_start = start + 1
+    element_end = end - 1
+    if element_start < element_end and tokens[element_end - 1][1] == ",":
+        element_end -= 1
     return _transparent_static_module_specifier(
         tokens,
-        start=start + 1,
-        end=end - 1,
+        start=element_start,
+        end=element_end,
         close_for_open=close_for_open,
         source_path=source_path,
     )
