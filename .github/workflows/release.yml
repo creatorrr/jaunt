@@ -355,10 +355,15 @@ jobs:
             # runner resolves Jaunt's development Vitest. The packed candidate is
             # installed where users install it and resolves the fixture's locked
             # Vitest instead. Normalize that legitimate tooling-only fingerprint
-            # transition through Jaunt's model-free refreeze path, and execute the
-            # protected batteries with the exact wheel and npm candidate before
-            # asking the deterministic check gate to confirm the new headers.
-            "$jaunt_bin" test --language ts --no-build --root "$project"
+            # transition through Jaunt's model-free refreeze path before asking
+            # the deterministic check gate to confirm the new headers. The native
+            # typecheck and Vitest commands below then execute every battery under
+            # the fixture's exact locked runtime without invoking a model.
+            refreeze_report="$(
+              "$jaunt_bin" test --language ts --no-build --no-run --root "$project" --json
+            )"
+            python -c 'import json, sys; payload = json.loads(sys.argv[1]); expected = ["tests/__generated__/tokens.derived.test.ts", "tests/__generated__/tokens.example.test.ts"]; (payload.get("schema_version") == 2 and payload.get("command") == "test" and payload.get("ok") is True and payload.get("generated") == [] and payload.get("skipped") == [] and payload.get("failed") == {} and payload.get("refrozen") == expected) or sys.exit(f"Unexpected exact-candidate refreeze report: {payload}")' \
+              "$refreeze_report"
             # FIXME(exact-wheel-contract): the hosted runner intermittently
             # reports `contract-failed` when mutation strength is repeated from
             # the installed wheel. The full contract check passed above, and
