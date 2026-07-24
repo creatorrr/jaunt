@@ -988,28 +988,46 @@ def _declaration_head_can_open_body(
     return tokens[tail][0] == "identifier"
 
 
-def _brace_opens_lexical_scope(
+def _brace_lexical_scope_kind(
     tokens: Sequence[tuple[str, str]],
     *,
     opens_statement: bool,
     enclosing_statement_brace: bool | None,
-) -> bool:
-    """Recognize function, method, arrow, and static-block lexical scopes."""
+) -> str | None:
+    """Classify a brace-backed lexical scope.
 
-    if opens_statement:
-        return True
+    The distinction between ordinary blocks and function/static scopes matters
+    for ``var``: a declaration in a nested statement block belongs to the
+    nearest function or static block, while ``let`` and ``const`` remain local
+    to the brace.
+    """
+
     if not tokens:
-        return False
+        return "block" if opens_statement else None
     if tokens[-1] == ("punctuation", "=>"):
-        return True
+        return "function"
     if tokens[-1] == ("identifier", "static") and enclosing_statement_brace is True:
-        return True
+        return "static"
+    # A colon-introduced object/type literal may follow a method parameter
+    # list, but its brace is not the method implementation body.
+    if tokens[-1][1] == ":":
+        return "block"
+    if opens_statement:
+        # Type/object literals commonly follow a colon. They are not runtime
+        # declaration scopes, and avoiding a declaration-prefix scan here is
+        # essential for long interfaces containing many object-valued members.
+        declaration_head = _declaration_body_head(tokens)
+        if declaration_head == "class":
+            return "class"
+        if declaration_head == "function":
+            return "function"
+        return "block"
     expected_openings: list[str] = []
     opening_for = {")": "(", "]": "[", "}": "{", ">": "<"}
     for index in range(len(tokens) - 1, -1, -1):
         value = tokens[index][1]
         if value == ")" and not expected_openings:
-            return True
+            return "function"
         if value in opening_for:
             expected_openings.append(opening_for[value])
             continue
@@ -1018,8 +1036,58 @@ def _brace_opens_lexical_scope(
                 expected_openings.pop()
             continue
         if value in {";", "{", "}", "=", ","}:
-            return False
-    return False
+            return None
+    return None
+
+
+def _brace_opens_lexical_scope(
+    tokens: Sequence[tuple[str, str]],
+    *,
+    opens_statement: bool,
+    enclosing_statement_brace: bool | None,
+) -> bool:
+    """Recognize function, method, arrow, block, and static lexical scopes."""
+
+    return (
+        _brace_lexical_scope_kind(
+            tokens,
+            opens_statement=opens_statement,
+            enclosing_statement_brace=enclosing_statement_brace,
+        )
+        is not None
+    )
+
+
+def _function_scope_start(
+    tokens: Sequence[tuple[str, str]],
+    paren_open_for_close: Mapping[int, int],
+) -> int | None:
+    """Return the parameter-list boundary owned by an upcoming function body."""
+
+    arrow = bool(tokens and tokens[-1] == ("punctuation", "=>"))
+    cursor = len(tokens) - (2 if arrow else 1)
+    while cursor >= 0:
+        kind, value = tokens[cursor]
+        if value == ")":
+            opening = paren_open_for_close.get(cursor)
+            if opening is None:
+                cursor -= 1
+                continue
+            previous = tokens[opening - 1][1] if opening else ""
+            # Parenthesized return/function types can occur between the real
+            # parameter list and the body arrow. They are preceded by a type
+            # operator rather than a declaration/expression boundary.
+            if previous not in {":", "<", "[", "|", "&", "=>"}:
+                return opening
+            cursor = opening - 1
+            continue
+        if arrow and kind == "identifier":
+            # A single unparenthesized arrow parameter owns the body scope.
+            return max(-1, cursor - 1)
+        if value in {";", "{"}:
+            break
+        cursor -= 1
+    return None
 
 
 def _declaration_body_head(tokens: Sequence[tuple[str, str]]) -> str | None:
@@ -2523,7 +2591,7 @@ def _create_require_module_specifiers(
     """
 
     node_module_specifiers = {"module", "node:module"}
-    capabilities: dict[str, str] = {}
+    capability_names: set[str] = set()
     capability_bindings: dict[str, dict[int, tuple[int, str]]] = {}
     capability_interval_indices: dict[str, _ScopeCapabilityIndex] = {}
     safe_indices: set[int] = set()
@@ -2533,10 +2601,15 @@ def _create_require_module_specifiers(
     scope_at_token: list[int] = []
     scope_open = [-1]
     scope_end_exclusive = [len(tokens)]
+    scope_kinds = ["function"]
+    scope_var_owner = [0]
     scope_stack = [0]
     scope_control_parentheses: list[str | None] = []
+    scope_parenthesis_indices: list[int] = []
+    scope_paren_open_for_close: dict[int, int] = {}
     scope_statement_braces: list[bool] = []
     scope_lexical_braces: list[bool] = []
+    scope_prebody_overrides: dict[int, int] = {}
     scope_nonstatement_brace_indices: set[int] = set()
     scope_closed_control_before: list[bool] = []
     scope_previous_closed_control: str | None = None
@@ -2559,17 +2632,22 @@ def _create_require_module_specifiers(
         closes_lexical_scope = False
         opens_statement: bool | None = None
         opens_lexical_scope = False
+        lexical_scope_kind: str | None = None
         opens_switch_body = value == "{" and scope_previous_closed_control == "switch"
         if value == "(":
             scope_control_parentheses.append(_control_flow_parenthesis_head(scope_tokens))
+            scope_parenthesis_indices.append(token_index)
         elif value == ")":
             closes_control = scope_control_parentheses.pop() if scope_control_parentheses else None
+            if scope_parenthesis_indices:
+                scope_paren_open_for_close[token_index] = scope_parenthesis_indices.pop()
         elif value == "{":
+            enclosing_statement_brace = (
+                scope_statement_braces[-1] if scope_statement_braces else None
+            )
             opens_statement = _opens_statement_brace(
                 scope_tokens,
-                enclosing_statement_brace=(
-                    scope_statement_braces[-1] if scope_statement_braces else None
-                ),
+                enclosing_statement_brace=enclosing_statement_brace,
                 previous_closed_control_head=scope_previous_closed_control is not None,
                 previous_closed_statement_brace=scope_previous_closed_statement,
                 previous_colon_is_conditional=(
@@ -2579,19 +2657,44 @@ def _create_require_module_specifiers(
                 line_breaks_before=scope_line_breaks_before,
                 decorator_candidates=scope_decorator_candidates,
             )
-            opens_lexical_scope = _brace_opens_lexical_scope(
+            lexical_scope_kind = _brace_lexical_scope_kind(
                 scope_tokens,
                 opens_statement=opens_statement,
-                enclosing_statement_brace=(
-                    scope_statement_braces[-1] if scope_statement_braces else None
-                ),
+                enclosing_statement_brace=enclosing_statement_brace,
             )
+            opens_lexical_scope = lexical_scope_kind is not None
             scope_statement_braces.append(opens_statement)
             scope_lexical_braces.append(opens_lexical_scope)
             if opens_lexical_scope:
-                scope_open.append(token_index)
+                parent_scope = scope_stack[-1]
+                scope_start = token_index
+                if (
+                    scope_previous_closed_control == "for"
+                    and scope_tokens
+                    and scope_tokens[-1][1] == ")"
+                ):
+                    scope_start = scope_paren_open_for_close.get(len(scope_tokens) - 1, token_index)
+                elif lexical_scope_kind == "function":
+                    function_start = _function_scope_start(
+                        scope_tokens,
+                        scope_paren_open_for_close,
+                    )
+                    if function_start is not None:
+                        scope_start = function_start
+                new_scope = len(scope_open)
+                scope_open.append(scope_start)
                 scope_end_exclusive.append(len(tokens))
-                scope_stack.append(len(scope_open) - 1)
+                scope_kinds.append(lexical_scope_kind or "block")
+                scope_var_owner.append(
+                    new_scope
+                    if lexical_scope_kind in {"function", "static"}
+                    else scope_var_owner[parent_scope]
+                )
+                scope_stack.append(new_scope)
+                if scope_start < token_index:
+                    for prebody_index in range(scope_start + 1, token_index):
+                        if scope_at_token[prebody_index] == parent_scope:
+                            scope_prebody_overrides.setdefault(prebody_index, new_scope)
             else:
                 scope_nonstatement_brace_indices.add(token_index)
         elif value == "}":
@@ -2744,17 +2847,48 @@ def _create_require_module_specifiers(
             cursor += 1
         return None
 
+    def binding_declaration_kind(index: int) -> str | None:
+        """Return the lexical declaration keyword owning a simple binding."""
+
+        previous = token_value(index - 1)
+        if previous in {"const", "let", "var"}:
+            return previous
+        # Destructured aliases are separated from their declaration keyword by
+        # one pattern brace. Keep this deliberately bounded; deeper binding
+        # patterns are rejected by the provenance pass rather than guessed.
+        cursor = index - 1
+        while cursor >= 0 and index - cursor <= 8:
+            value = token_value(cursor)
+            if value == "{":
+                declaration = token_value(cursor - 1)
+                return declaration if declaration in {"const", "let", "var"} else None
+            if value in {";", "=", "}"}:
+                return None
+            cursor -= 1
+        return None
+
     def set_capability(name: str, capability: str, binding_index: int) -> bool:
-        previous = capabilities.get(name)
-        if previous is not None and previous != capability:
+        binding_scope = scope_prebody_overrides.get(
+            binding_index,
+            scope_at_token[binding_index],
+        )
+        declaration_kind = binding_declaration_kind(binding_index)
+        if declaration_kind == "var":
+            binding_scope = scope_var_owner[binding_scope]
+        if scope_kinds[binding_scope] == "class":
             raise TypeScriptWorkerError(
-                f"Runtime package ambiguously rebinds module-loading capability {name!r}: "
-                f"{source_path}"
+                f"Runtime package stores module-loading capability {name!r} in a class field; "
+                f"property-backed loaders are unsupported: {source_path}"
             )
         safe_indices.add(binding_index)
-        binding_scope = scope_at_token[binding_index]
         bindings = capability_bindings.setdefault(name, {})
         existing = bindings.get(binding_scope)
+        if existing is not None and existing[1] != capability:
+            raise TypeScriptWorkerError(
+                f"Runtime package ambiguously rebinds module-loading capability {name!r} "
+                f"within one lexical scope: {source_path}"
+            )
+        changed = existing is None or binding_index > existing[0]
         if existing is None or binding_index > existing[0]:
             bindings[binding_scope] = (binding_index, capability)
             interval_index = capability_interval_indices.get(name)
@@ -2764,10 +2898,8 @@ def _create_require_module_specifiers(
                     end=scope_end_exclusive[binding_scope],
                     capability=capability,
                 )
-        if previous is None:
-            capabilities[name] = capability
-            return True
-        return False
+        capability_names.add(name)
+        return changed
 
     def capability_at(index: int, name: str) -> str | None:
         """Return the nearest proven capability whose lexical brace owns a use."""
@@ -2777,7 +2909,7 @@ def _create_require_module_specifiers(
         bindings = capability_bindings.get(name)
         if bindings is None:
             return None
-        reference_scope = scope_at_token[index]
+        reference_scope = scope_prebody_overrides.get(index, scope_at_token[index])
         exact = bindings.get(reference_scope)
         if exact is not None:
             return exact[1]
@@ -3113,7 +3245,7 @@ def _create_require_module_specifiers(
     safe_indices.update(
         binding_index
         for name, binding_index in uninitialized_bindings.items()
-        if name in capabilities
+        if name in capability_names
     )
 
     # Any unknown reassignment of a proven capability invalidates the closure.

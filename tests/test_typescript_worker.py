@@ -1357,6 +1357,107 @@ def test_runtime_package_scanner_keeps_function_like_capabilities_lexically_scop
 
 
 @pytest.mark.parametrize(
+    ("container", "expected"),
+    [
+        (
+            'if (ok) { var load = createRequire(import.meta.url); } load("var-block");',
+            "var-block",
+        ),
+        (
+            'try { var load = createRequire(import.meta.url); } finally {} load("var-try");',
+            "var-try",
+        ),
+        (
+            "function scoped() { if (ok) { var load = createRequire(import.meta.url); } "
+            'load("var-function"); } load("outside-function");',
+            "var-function",
+        ),
+        (
+            "class C { static { if (ok) { var load = createRequire(import.meta.url); } "
+            'load("var-static"); } } load("outside-static");',
+            "var-static",
+        ),
+    ],
+)
+def test_runtime_package_scanner_hoists_var_to_the_nearest_var_scope(
+    tmp_path: Path,
+    container: str,
+    expected: str,
+) -> None:
+    source = 'import { createRequire } from "node:module"; ' + container
+
+    assert set(_runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts")) == {
+        "node:module",
+        expected,
+    }
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        "function scoped(load = createRequire(import.meta.url)) { "
+        'load("parameter"); } load("outside-parameter");',
+        "const scoped = (load = createRequire(import.meta.url)) => { "
+        'load("parameter"); }; load("outside-parameter");',
+    ],
+)
+def test_runtime_package_scanner_owns_defaulted_loader_parameters_in_the_function(
+    tmp_path: Path,
+    declaration: str,
+) -> None:
+    source = 'import { createRequire } from "node:module"; ' + declaration
+
+    assert set(_runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts")) == {
+        "node:module",
+        "parameter",
+    }
+
+
+@pytest.mark.parametrize(("keyword", "outside"), [("let", False), ("const", False), ("var", True)])
+def test_runtime_package_scanner_scopes_for_head_loader_bindings(
+    tmp_path: Path,
+    keyword: str,
+    outside: bool,
+) -> None:
+    source = (
+        'import { createRequire } from "node:module"; '
+        f"for ({keyword} load = createRequire(import.meta.url); ok;) {{ "
+        'load("inside-loop"); break; } load("outside-loop");'
+    )
+
+    expected = {"node:module", "inside-loop"}
+    if outside:
+        expected.add("outside-loop")
+    assert set(_runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts")) == expected
+
+
+def test_runtime_package_scanner_allows_disjoint_capability_kinds_with_one_name(
+    tmp_path: Path,
+) -> None:
+    source = (
+        'import { createRequire, Module } from "node:module"; '
+        '{ const x = createRequire(import.meta.url); x("loader-scope"); } '
+        "{ const x = Module; }"
+    )
+
+    assert set(_runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts")) == {
+        "loader-scope",
+        "node:module",
+    }
+
+
+def test_runtime_package_scanner_rejects_class_field_loader_storage(tmp_path: Path) -> None:
+    source = (
+        'import { createRequire } from "node:module"; '
+        "class C { load = createRequire(import.meta.url); "
+        'other = load("not-a-lexical-loader"); }'
+    )
+
+    with pytest.raises(TypeScriptWorkerError, match="class field"):
+        _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts")
+
+
+@pytest.mark.parametrize(
     "value",
     [
         '`${load("inside-template")}`',
