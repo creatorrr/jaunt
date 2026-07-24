@@ -161,6 +161,10 @@
 - [x] Pin the protected runner and exported package declarations through battery commit.
 - [x] Reject candidate-owned collection failures without misclassifying runner outages.
 - [x] Close concurrent stub-replacement and transaction-rollback durability races.
+- [x] Port PR #96's bounded runner startup diagnostics and per-battery infrastructure recovery.
+- [x] Add opt-in Codex quota waiting without weakening command-wide cost-budget aborts.
+- [x] Keep captured Vitest config overlays readable without typechecking them as roots.
 - [x] Add adopter-shaped regressions and run the full repository validation suite.
-- [ ] Obtain an independent final Codex review and address every actionable finding.
-- [ ] Re-run the completed patch in the adopter dashboard workspace before release.
+- [x] Obtain an independent final Codex review and address every actionable finding.
+- [x] Re-run the completed patch in the adopter dashboard workspace before release.
+- [ ] Merge PR #97, close superseded PR #96, and publish both 1.7.11 packages.

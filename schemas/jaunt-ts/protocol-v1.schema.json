@@ -398,7 +398,7 @@
         "capabilities": {
           "type": "array",
           "minItems": 6,
-          "maxItems": 12,
+          "maxItems": 13,
           "uniqueItems": true,
           "items": {
             "enum": [
@@ -413,7 +413,8 @@
               "scoped-validation",
               "recompose",
               "baseline-unselected",
-              "release-programs"
+              "release-programs",
+              "test-runner-overlay-roots"
             ]
           }
         }

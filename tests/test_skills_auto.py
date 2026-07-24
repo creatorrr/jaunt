@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from jaunt.config import AgentConfig, CodexConfig, LLMConfig, SkillsConfig
+from jaunt.errors import JauntBudgetExceededError, JauntQuotaGenerationError
 from jaunt.external_imports import discover_external_distributions
 from jaunt.skills_auto import _format_generated_skill_file, ensure_pypi_skills, skill_md_path
 
@@ -493,3 +496,261 @@ def test_codex_skill_generator_selected_when_agent_engine_is_codex(
     on_disk = skill_md_path(project_root=tmp_path, dist=dist).read_text(encoding="utf-8")
     assert "x-jaunt-dist" in on_disk
     assert "x" in on_disk
+
+
+def test_auto_skill_forwards_runner_and_preserves_quota_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import jaunt.skillgen as sg
+    import jaunt.skills_auto as sa
+
+    dist = "external-lib"
+    runner_seen: list[object] = []
+
+    monkeypatch.setattr(
+        sa,
+        "discover_external_distributions_with_warnings",
+        lambda *_a, **_k: ({dist: "1.2.3"}, []),
+    )
+    monkeypatch.setattr(sa, "fetch_readme", lambda *_a, **_k: ("README", "text/markdown"))
+    monkeypatch.setattr(sa, "_is_local_install", lambda _dist: False)
+
+    async def model_call_runner(call):  # noqa: ANN001
+        return await call()
+
+    class QuotaGen:
+        def __init__(self, llm, agent, codex, *, model_call_runner=None):  # noqa: ANN001
+            del llm, agent, codex
+            runner_seen.append(model_call_runner)
+
+        async def generate_skill_markdown(
+            self,
+            dist,
+            version,
+            readme,
+            readme_type,  # noqa: ANN001
+        ) -> str:
+            del dist, version, readme, readme_type
+            raise JauntQuotaGenerationError("auto-skill usage limit")
+
+    monkeypatch.setattr(sg, "CodexSkillGenerator", QuotaGen)
+
+    with pytest.raises(JauntQuotaGenerationError, match="auto-skill usage limit"):
+        asyncio.run(
+            ensure_pypi_skills(
+                project_root=tmp_path,
+                source_roots=[],
+                generated_dir="__generated__",
+                llm=LLMConfig(
+                    provider="openai",
+                    model="gpt-test",
+                    api_key_env="OPENAI_API_KEY",
+                ),
+                agent=AgentConfig(engine="codex"),
+                codex=CodexConfig(),
+                model_call_runner=model_call_runner,
+            )
+        )
+
+    assert runner_seen == [model_call_runner]
+
+
+@pytest.mark.parametrize(
+    "fatal_error",
+    [
+        JauntQuotaGenerationError("auto-skill usage limit"),
+        JauntBudgetExceededError("auto-skill cost limit"),
+    ],
+)
+def test_auto_skill_fatal_limit_cancels_sibling_before_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fatal_error: Exception,
+) -> None:
+    import jaunt.skillgen as sg
+    import jaunt.skills_auto as sa
+
+    dists = {"fatal-lib": "1.0", "slow-lib": "1.0"}
+    sibling_cancelled = False
+    sibling_completed = False
+
+    monkeypatch.setattr(
+        sa,
+        "discover_external_distributions_with_warnings",
+        lambda *_a, **_k: (dists, []),
+    )
+    monkeypatch.setattr(sa, "fetch_readme", lambda *_a, **_k: ("README", "text/markdown"))
+    monkeypatch.setattr(sa, "_is_local_install", lambda _dist: False)
+
+    class ConcurrentGen:
+        def __init__(self, llm, agent, codex):  # noqa: ANN001
+            del llm, agent, codex
+            self.sibling_started = asyncio.Event()
+
+        async def generate_skill_markdown(
+            self,
+            dist,
+            version,
+            readme,
+            readme_type,  # noqa: ANN001
+        ) -> str:
+            nonlocal sibling_cancelled, sibling_completed
+            del version, readme, readme_type
+            if dist == "fatal-lib":
+                await self.sibling_started.wait()
+                raise fatal_error
+            self.sibling_started.set()
+            try:
+                await asyncio.sleep(0.05)
+            except asyncio.CancelledError:
+                sibling_cancelled = True
+                raise
+            sibling_completed = True
+            return "SLOW SKILL"
+
+    monkeypatch.setattr(sg, "CodexSkillGenerator", ConcurrentGen)
+
+    with pytest.raises(type(fatal_error), match="auto-skill"):
+        asyncio.run(
+            ensure_pypi_skills(
+                project_root=tmp_path,
+                source_roots=[],
+                generated_dir="__generated__",
+                llm=LLMConfig(
+                    provider="openai",
+                    model="gpt-test",
+                    api_key_env="OPENAI_API_KEY",
+                ),
+                agent=AgentConfig(engine="codex"),
+            )
+        )
+
+    assert sibling_cancelled is True
+    assert sibling_completed is False
+    assert not skill_md_path(project_root=tmp_path, dist="fatal-lib").exists()
+    assert not skill_md_path(project_root=tmp_path, dist="slow-lib").exists()
+
+
+@pytest.mark.parametrize(
+    "fatal_error",
+    [
+        JauntQuotaGenerationError("auto-skill usage limit"),
+        JauntBudgetExceededError("auto-skill cost limit"),
+    ],
+)
+def test_auto_skill_fatal_limit_discards_already_completed_sibling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fatal_error: Exception,
+) -> None:
+    import jaunt.skillgen as sg
+    import jaunt.skills_auto as sa
+
+    dists = {"fatal-lib": "1.0", "fast-lib": "1.0"}
+    fast_completed = False
+
+    monkeypatch.setattr(
+        sa,
+        "discover_external_distributions_with_warnings",
+        lambda *_a, **_k: (dists, []),
+    )
+    monkeypatch.setattr(sa, "fetch_readme", lambda *_a, **_k: ("README", "text/markdown"))
+    monkeypatch.setattr(sa, "_is_local_install", lambda _dist: False)
+
+    class ConcurrentGen:
+        def __init__(self, llm, agent, codex):  # noqa: ANN001
+            del llm, agent, codex
+            self.fast_finished = asyncio.Event()
+
+        async def generate_skill_markdown(
+            self,
+            dist,
+            version,
+            readme,
+            readme_type,  # noqa: ANN001
+        ) -> str:
+            nonlocal fast_completed
+            del version, readme, readme_type
+            if dist == "fast-lib":
+                fast_completed = True
+                self.fast_finished.set()
+                return "FAST SKILL"
+            await self.fast_finished.wait()
+            raise fatal_error
+
+    monkeypatch.setattr(sg, "CodexSkillGenerator", ConcurrentGen)
+
+    with pytest.raises(type(fatal_error), match="auto-skill"):
+        asyncio.run(
+            ensure_pypi_skills(
+                project_root=tmp_path,
+                source_roots=[],
+                generated_dir="__generated__",
+                llm=LLMConfig(
+                    provider="openai",
+                    model="gpt-test",
+                    api_key_env="OPENAI_API_KEY",
+                ),
+                agent=AgentConfig(engine="codex"),
+            )
+        )
+
+    assert fast_completed is True
+    assert not skill_md_path(project_root=tmp_path, dist="fatal-lib").exists()
+    assert not skill_md_path(project_root=tmp_path, dist="fast-lib").exists()
+
+
+def test_auto_skill_ordinary_failure_still_publishes_successful_sibling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import jaunt.skillgen as sg
+    import jaunt.skills_auto as sa
+
+    dists = {"bad-lib": "1.0", "good-lib": "1.0"}
+    monkeypatch.setattr(
+        sa,
+        "discover_external_distributions_with_warnings",
+        lambda *_a, **_k: (dists, []),
+    )
+    monkeypatch.setattr(sa, "fetch_readme", lambda *_a, **_k: ("README", "text/markdown"))
+    monkeypatch.setattr(sa, "_is_local_install", lambda _dist: False)
+
+    class BestEffortGen:
+        def __init__(self, llm, agent, codex):  # noqa: ANN001
+            del llm, agent, codex
+
+        async def generate_skill_markdown(
+            self,
+            dist,
+            version,
+            readme,
+            readme_type,  # noqa: ANN001
+        ) -> str:
+            del version, readme, readme_type
+            if dist == "bad-lib":
+                raise RuntimeError("ordinary generation failure")
+            return "GOOD SKILL"
+
+    monkeypatch.setattr(sg, "CodexSkillGenerator", BestEffortGen)
+
+    result = asyncio.run(
+        ensure_pypi_skills(
+            project_root=tmp_path,
+            source_roots=[],
+            generated_dir="__generated__",
+            llm=LLMConfig(
+                provider="openai",
+                model="gpt-test",
+                api_key_env="OPENAI_API_KEY",
+            ),
+            agent=AgentConfig(engine="codex"),
+        )
+    )
+
+    assert result.generation_failures == 1
+    assert not skill_md_path(project_root=tmp_path, dist="bad-lib").exists()
+    assert "GOOD SKILL" in skill_md_path(project_root=tmp_path, dist="good-lib").read_text(
+        encoding="utf-8"
+    )

@@ -684,6 +684,391 @@ def test_run_build_does_not_clobber_absent_stub_created_at_publish_boundary(
     assert any("hand-authored specs.pyi not overwritten" in item for item in report.stub_warnings)
 
 
+def test_run_build_publishes_new_stub_when_hardlinks_are_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jaunt import builder as builder_module
+    from jaunt.stub_emitter import stub_staleness
+
+    src, spec_path, specs, spec_graph, module_specs, module_dag = _single_spec_project(tmp_path)
+    stub_path = spec_path.with_suffix(".pyi")
+    real_link = builder_module.os.link
+
+    def reject_stub_hardlinks(source, destination) -> None:
+        if Path(destination) == stub_path:
+            raise OSError(errno.EOPNOTSUPP, "simulated unsupported hardlink")
+        real_link(source, destination)
+
+    monkeypatch.setattr(builder_module.os, "link", reject_stub_hardlinks)
+
+    report = asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"pkg.specs"},
+            backend=SourceBackend("def Play(x: int) -> int:\n    return x * 2\n"),
+            jobs=1,
+            emit_stubs=True,
+        )
+    )
+
+    assert report.generated == {"pkg.specs"}
+    assert report.failed == {}
+    assert report.emitted_stubs == {"pkg.specs": str(stub_path)}
+    assert (
+        stub_staleness(
+            source_file=spec_path,
+            generated_source=(src / "pkg" / "__generated__" / "specs.py").read_text(
+                encoding="utf-8"
+            ),
+        )
+        is None
+    )
+    assert list(stub_path.parent.glob(".jaunt-stub-candidate-*")) == []
+
+
+def test_run_build_hardlink_fallback_preserves_absent_stub_create_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jaunt import builder as builder_module
+
+    src, spec_path, specs, spec_graph, module_specs, module_dag = _single_spec_project(tmp_path)
+    stub_path = spec_path.with_suffix(".pyi")
+    hand_authored = b"# won fallback create race\ndef Play(x: int) -> int: ...\n"
+    real_link = builder_module.os.link
+    real_open = builder_module.os.open
+    created_stub = False
+
+    def reject_stub_hardlinks(source, destination) -> None:
+        if Path(destination) == stub_path:
+            raise OSError(errno.EOPNOTSUPP, "simulated unsupported hardlink")
+        real_link(source, destination)
+
+    def create_before_exclusive_open(path, flags, mode=0o777):
+        nonlocal created_stub
+        if Path(path) == stub_path and flags & os.O_EXCL and not created_stub:
+            stub_path.write_bytes(hand_authored)
+            created_stub = True
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(builder_module.os, "link", reject_stub_hardlinks)
+    monkeypatch.setattr(builder_module.os, "open", create_before_exclusive_open)
+
+    report = asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"pkg.specs"},
+            backend=SourceBackend("def Play(x: int) -> int:\n    return x * 2\n"),
+            jobs=1,
+            emit_stubs=True,
+        )
+    )
+
+    assert created_stub is True
+    assert stub_path.read_bytes() == hand_authored
+    assert report.generated == {"pkg.specs"}
+    assert report.failed == {}
+    assert "pkg.specs" not in report.emitted_stubs
+    assert any("hand-authored specs.pyi not overwritten" in item for item in report.stub_warnings)
+    assert list(stub_path.parent.glob(".jaunt-stub-recovery-*")) == []
+    assert list(stub_path.parent.glob(".jaunt-stub-candidate-*")) == []
+
+
+@pytest.mark.parametrize("fault", ["write", "fsync", "close"])
+def test_run_build_hardlink_fallback_removes_failed_public_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    from jaunt import builder as builder_module
+
+    src, spec_path, specs, spec_graph, module_specs, module_dag = _single_spec_project(tmp_path)
+    stub_path = spec_path.with_suffix(".pyi")
+    real_link = builder_module.os.link
+    real_open = builder_module.os.open
+    real_write = builder_module.os.write
+    real_fsync = builder_module.os.fsync
+    real_close = builder_module.os.close
+    public_descriptor: int | None = None
+    public_write_calls = 0
+    close_faulted = False
+
+    def reject_stub_hardlinks(source, destination) -> None:
+        if Path(destination) == stub_path:
+            raise OSError(errno.EOPNOTSUPP, "simulated unsupported hardlink")
+        real_link(source, destination)
+
+    def track_public_open(path, flags, mode=0o777):
+        nonlocal public_descriptor
+        descriptor = real_open(path, flags, mode)
+        if Path(path) == stub_path and flags & os.O_EXCL:
+            public_descriptor = descriptor
+        return descriptor
+
+    def fail_public_write(descriptor, data) -> int:
+        nonlocal public_write_calls
+        if fault != "write" or descriptor != public_descriptor:
+            return real_write(descriptor, data)
+        public_write_calls += 1
+        if public_write_calls == 1:
+            return real_write(descriptor, data[: max(1, len(data) // 3)])
+        raise OSError(errno.EIO, "simulated public stub write failure")
+
+    def fail_public_fsync(descriptor) -> None:
+        if fault == "fsync" and descriptor == public_descriptor:
+            raise OSError(errno.EIO, "simulated public stub fsync failure")
+        real_fsync(descriptor)
+
+    def fail_public_close(descriptor) -> None:
+        nonlocal close_faulted
+        if fault == "close" and descriptor == public_descriptor and not close_faulted:
+            close_faulted = True
+            real_close(descriptor)
+            raise OSError(errno.EIO, "simulated public stub close failure")
+        real_close(descriptor)
+
+    monkeypatch.setattr(builder_module.os, "link", reject_stub_hardlinks)
+    monkeypatch.setattr(builder_module.os, "open", track_public_open)
+    monkeypatch.setattr(builder_module.os, "write", fail_public_write)
+    monkeypatch.setattr(builder_module.os, "fsync", fail_public_fsync)
+    monkeypatch.setattr(builder_module.os, "close", fail_public_close)
+
+    report = asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"pkg.specs"},
+            backend=SourceBackend("def Play(x: int) -> int:\n    return x * 2\n"),
+            jobs=1,
+            emit_stubs=True,
+        )
+    )
+
+    assert "pkg.specs" in report.failed
+    assert not stub_path.exists()
+    assert list(stub_path.parent.glob(".jaunt-stub-quarantine-*")) == []
+    assert list(stub_path.parent.glob(".jaunt-stub-recovery-*")) == []
+    assert list(stub_path.parent.glob(".jaunt-stub-candidate-*")) == []
+
+
+def test_run_build_hardlink_fallback_accepts_positive_short_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jaunt import builder as builder_module
+    from jaunt.stub_emitter import stub_staleness
+
+    src, spec_path, specs, spec_graph, module_specs, module_dag = _single_spec_project(tmp_path)
+    stub_path = spec_path.with_suffix(".pyi")
+    real_link = builder_module.os.link
+    real_open = builder_module.os.open
+    real_write = builder_module.os.write
+    public_descriptor: int | None = None
+    shortened = False
+
+    def reject_stub_hardlinks(source, destination) -> None:
+        if Path(destination) == stub_path:
+            raise OSError(errno.EOPNOTSUPP, "simulated unsupported hardlink")
+        real_link(source, destination)
+
+    def track_public_open(path, flags, mode=0o777):
+        nonlocal public_descriptor
+        descriptor = real_open(path, flags, mode)
+        if Path(path) == stub_path and flags & os.O_EXCL:
+            public_descriptor = descriptor
+        return descriptor
+
+    def short_public_write(descriptor, data) -> int:
+        nonlocal shortened
+        if descriptor == public_descriptor and not shortened:
+            shortened = True
+            return real_write(descriptor, data[: max(1, len(data) // 3)])
+        return real_write(descriptor, data)
+
+    monkeypatch.setattr(builder_module.os, "link", reject_stub_hardlinks)
+    monkeypatch.setattr(builder_module.os, "open", track_public_open)
+    monkeypatch.setattr(builder_module.os, "write", short_public_write)
+
+    report = asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"pkg.specs"},
+            backend=SourceBackend("def Play(x: int) -> int:\n    return x * 2\n"),
+            jobs=1,
+            emit_stubs=True,
+        )
+    )
+
+    assert shortened is True
+    assert report.failed == {}
+    assert report.emitted_stubs == {"pkg.specs": str(stub_path)}
+    assert (
+        stub_staleness(
+            source_file=spec_path,
+            generated_source=(src / "pkg" / "__generated__" / "specs.py").read_text(
+                encoding="utf-8"
+            ),
+        )
+        is None
+    )
+
+
+def test_run_build_hardlink_fallback_restores_managed_stub_after_copy_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jaunt import builder as builder_module
+
+    project, stub_path, stale_bytes = _project_with_stale_managed_stub(tmp_path)
+    src, _spec_path, specs, spec_graph, module_specs, module_dag = project
+    real_link = builder_module.os.link
+    real_open = builder_module.os.open
+    real_write = builder_module.os.write
+    public_descriptor: int | None = None
+    failed_once = False
+
+    def reject_stub_hardlinks(source, destination) -> None:
+        if Path(destination) == stub_path:
+            raise OSError(errno.EOPNOTSUPP, "simulated unsupported hardlink")
+        real_link(source, destination)
+
+    def track_public_open(path, flags, mode=0o777):
+        nonlocal public_descriptor
+        descriptor = real_open(path, flags, mode)
+        if Path(path) == stub_path and flags & os.O_EXCL:
+            public_descriptor = descriptor
+        return descriptor
+
+    def fail_first_public_copy(descriptor, data) -> int:
+        nonlocal failed_once
+        if descriptor == public_descriptor and not failed_once:
+            failed_once = True
+            real_write(descriptor, data[: max(1, len(data) // 3)])
+            raise OSError(errno.EIO, "simulated candidate copy failure")
+        return real_write(descriptor, data)
+
+    monkeypatch.setattr(builder_module.os, "link", reject_stub_hardlinks)
+    monkeypatch.setattr(builder_module.os, "open", track_public_open)
+    monkeypatch.setattr(builder_module.os, "write", fail_first_public_copy)
+
+    report = asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules=set(),
+            backend=SourceBackend("unused"),
+            jobs=1,
+            emit_stubs=True,
+        )
+    )
+
+    assert failed_once is True
+    assert "pkg.specs" in report.failed
+    assert stub_path.read_bytes() == stale_bytes
+    assert list(stub_path.parent.glob(".jaunt-stub-quarantine-*")) == []
+    assert list(stub_path.parent.glob(".jaunt-stub-recovery-*")) == []
+    assert list(stub_path.parent.glob(".jaunt-stub-candidate-*")) == []
+
+
+def test_run_build_hardlink_fallback_quarantines_concurrent_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jaunt import builder as builder_module
+
+    src, spec_path, specs, spec_graph, module_specs, module_dag = _single_spec_project(tmp_path)
+    stub_path = spec_path.with_suffix(".pyi")
+    hand_authored = b"# concurrent replacement\ndef Play(x: int) -> int: ...\n"
+    external_path = stub_path.parent / ".external-specs.pyi"
+    external_path.write_bytes(hand_authored)
+    real_link = builder_module.os.link
+    real_open = builder_module.os.open
+    real_write = builder_module.os.write
+    real_replace = builder_module.os.replace
+    public_descriptor: int | None = None
+    public_write_calls = 0
+    replacement_moved = False
+
+    def reject_stub_hardlinks(source, destination) -> None:
+        if Path(destination) == stub_path:
+            raise OSError(errno.EOPNOTSUPP, "simulated unsupported hardlink")
+        real_link(source, destination)
+
+    def track_public_open(path, flags, mode=0o777):
+        nonlocal public_descriptor
+        descriptor = real_open(path, flags, mode)
+        if Path(path) == stub_path and flags & os.O_EXCL:
+            public_descriptor = descriptor
+        return descriptor
+
+    def fail_public_write(descriptor, data) -> int:
+        nonlocal public_write_calls
+        if descriptor != public_descriptor:
+            return real_write(descriptor, data)
+        public_write_calls += 1
+        if public_write_calls == 1:
+            return real_write(descriptor, data[: max(1, len(data) // 3)])
+        raise OSError(errno.EIO, "simulated public stub write failure")
+
+    def replace_before_quarantine(source, destination) -> None:
+        nonlocal replacement_moved
+        if (
+            Path(source) == stub_path
+            and Path(destination).name.startswith(".jaunt-stub-quarantine-")
+            and not replacement_moved
+        ):
+            real_replace(external_path, stub_path)
+            replacement_moved = True
+        real_replace(source, destination)
+
+    monkeypatch.setattr(builder_module.os, "link", reject_stub_hardlinks)
+    monkeypatch.setattr(builder_module.os, "open", track_public_open)
+    monkeypatch.setattr(builder_module.os, "write", fail_public_write)
+    monkeypatch.setattr(builder_module.os, "replace", replace_before_quarantine)
+
+    report = asyncio.run(
+        run_build(
+            package_dir=src,
+            generated_dir="__generated__",
+            module_specs=module_specs,
+            specs=specs,
+            spec_graph=spec_graph,
+            module_dag=module_dag,
+            stale_modules={"pkg.specs"},
+            backend=SourceBackend("def Play(x: int) -> int:\n    return x * 2\n"),
+            jobs=1,
+            emit_stubs=True,
+        )
+    )
+
+    quarantines = list(stub_path.parent.glob(".jaunt-stub-quarantine-*"))
+    assert replacement_moved is True
+    assert "pkg.specs" in report.failed
+    assert not stub_path.exists()
+    assert len(quarantines) == 1
+    assert quarantines[0].read_bytes() == hand_authored
+    assert str(quarantines[0]) in report.failed["pkg.specs"][0]
+    assert list(stub_path.parent.glob(".jaunt-stub-recovery-*")) == []
+    assert list(stub_path.parent.glob(".jaunt-stub-candidate-*")) == []
+
+
 def test_run_build_recovers_hand_authored_write_at_managed_publish_boundary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -751,14 +1136,15 @@ def test_run_build_recovers_hand_authored_write_at_managed_publish_boundary(
     assert list(stub_path.parent.glob(".jaunt-stub-candidate-*")) == []
 
 
-@pytest.mark.parametrize("link_errno", [errno.EOPNOTSUPP, errno.ENOSPC, errno.EACCES])
-def test_run_build_restores_managed_stub_when_hardlink_publication_fails(
+@pytest.mark.parametrize("link_errno", [errno.EOPNOTSUPP, errno.ENOSYS, errno.EACCES])
+def test_run_build_publishes_managed_stub_when_hardlinks_are_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, link_errno: int
 ) -> None:
     from jaunt import builder as builder_module
+    from jaunt.stub_emitter import stub_staleness
 
     project, stub_path, stale_bytes = _project_with_stale_managed_stub(tmp_path)
-    src, _spec_path, specs, spec_graph, module_specs, module_dag = project
+    src, spec_path, specs, spec_graph, module_specs, module_dag = project
     real_link = builder_module.os.link
 
     def fail_stub_links(source, destination) -> None:
@@ -784,8 +1170,18 @@ def test_run_build_restores_managed_stub_when_hardlink_publication_fails(
     )
 
     assert report.generated == set()
-    assert "pkg.specs" in report.failed
-    assert stub_path.read_bytes() == stale_bytes
+    assert report.failed == {}
+    assert report.emitted_stubs == {"pkg.specs": str(stub_path)}
+    assert stub_path.read_bytes() != stale_bytes
+    assert (
+        stub_staleness(
+            source_file=spec_path,
+            generated_source=(src / "pkg" / "__generated__" / "specs.py").read_text(
+                encoding="utf-8"
+            ),
+        )
+        is None
+    )
     assert list(stub_path.parent.glob(".jaunt-stub-recovery-*")) == []
     assert list(stub_path.parent.glob(".jaunt-stub-candidate-*")) == []
 

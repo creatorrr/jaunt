@@ -29,5 +29,13 @@ class JauntTransientGenerationError(JauntGenerationError):
     """Raised when generation may succeed unchanged after a short retry."""
 
 
+class JauntQuotaGenerationError(JauntGenerationError):
+    """Raised when Codex reports a plan-level usage limit."""
+
+
+class JauntBudgetExceededError(JauntGenerationError):
+    """Raised when estimated generation cost exceeds the configured budget."""
+
+
 class JauntDependencyCycleError(JauntError):
     """Raised when a dependency graph contains a cycle."""

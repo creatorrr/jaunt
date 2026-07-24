@@ -53,6 +53,42 @@ def test_runner_fingerprint_tracks_exact_held_out_guard_bytes(tmp_path: Path) ->
     assert _runner_fingerprint(tmp_path, client, _initialized()) != before
 
 
+@pytest.mark.parametrize(
+    "relative",
+    (
+        "dist/test/native.node",
+        "dist/test/runtime.wasm",
+        "dist/test/extensionless-helper",
+    ),
+)
+def test_runner_fingerprint_tracks_every_shipped_runtime_file(
+    tmp_path: Path, relative: str
+) -> None:
+    client = _managed_client(tmp_path)
+    runtime = client.installation.package_root / relative
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_bytes(b"runtime-v1")
+    before = _runner_fingerprint(tmp_path, client, _initialized())
+
+    runtime.write_bytes(b"runtime-v2")
+
+    assert _runner_fingerprint(tmp_path, client, _initialized()) != before
+
+
+def test_runner_fingerprint_tracks_full_manifest_semantics_not_formatting(tmp_path: Path) -> None:
+    client = _managed_client(tmp_path)
+    manifest_path = client.installation.package_root / "package.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    before = _runner_fingerprint(tmp_path, client, _initialized())
+
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    assert _runner_fingerprint(tmp_path, client, _initialized()) == before
+
+    manifest["jauntRuntime"] = {"mode": "strict"}
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert _runner_fingerprint(tmp_path, client, _initialized()) != before
+
+
 def test_runner_fingerprint_tracks_same_version_compiler_runtime_bytes(tmp_path: Path) -> None:
     base = _managed_client(tmp_path)
     package = base.installation.package_root

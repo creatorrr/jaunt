@@ -27,6 +27,7 @@ from jaunt.typescript.builder import (
     _default_backend,
     _module_id,
     _module_path,
+    _PinnedDirectory,
     _PinnedWorkspace,
     _progress_advance,
     _progress_finish,
@@ -45,6 +46,9 @@ from jaunt.typescript.builder import (
 
 _DESIGN_TAG = "@jauntDesign"
 _DESIGN_TAG_PATTERN = re.compile(r"(?<![A-Za-z0-9_$])@jauntDesign(?![A-Za-z0-9_$])")
+_DESIGN_TRANSACTION_SCHEME = "jaunt-ts-design-transaction/1"
+_DESIGN_TRANSACTION_NAME_PATTERN = re.compile(r"design-[0-9a-f]{32}\.json")
+_DESIGN_TRANSACTION_HASH_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
 _DESIGN_DECLARATION_PATTERN = re.compile(
     r"\s*export\s+(?:declare\s+)?(?:async\s+)?"
     r"(?P<kind>function|class)\s+(?P<name>[A-Za-z_$][\w$]*)"
@@ -633,6 +637,7 @@ def _prepare_design_manifest(
     directory = root / ".jaunt" / "transactions"
     manifest = directory / f"design-{uuid.uuid4().hex}.json"
     payload = {
+        "scheme": _DESIGN_TRANSACTION_SCHEME,
         "state": "prepared",
         "operation": "design",
         "writes": [
@@ -674,15 +679,70 @@ def _prepare_design_manifest(
     return manifest
 
 
-def _complete_design_manifest(root: Path, manifest: Path) -> None:
-    """Durably retire exactly one owned design marker under the global lease."""
+def _restore_design_manifest_claim(
+    pinned_directory: _PinnedDirectory,
+    *,
+    claim_name: str,
+    manifest_name: str,
+) -> bool:
+    """Expose a claimed marker again without replacing a concurrent marker."""
+
+    try:
+        if os.name == "nt":
+            # Windows rename is non-replacing. The pinned directory handle also
+            # denies directory rename/delete while this operation is live.
+            os.rename(
+                pinned_directory.path / claim_name,
+                pinned_directory.path / manifest_name,
+            )
+        else:
+            descriptor = pinned_directory.descriptor
+            if descriptor is None:  # pragma: no cover - POSIX pinned invariant
+                raise RuntimeError("Pinned design transaction directory is closed")
+            # link(2) is an atomic no-clobber publication. Keep the private
+            # claim as a second conservative recovery marker: an uncooperative
+            # writer cannot replace the public name and make the journal vanish.
+            os.link(
+                claim_name,
+                manifest_name,
+                src_dir_fd=descriptor,
+                dst_dir_fd=descriptor,
+                follow_symlinks=False,
+            )
+        pinned_directory.fsync_required()
+    except (NotImplementedError, OSError):
+        return False
+    return True
+
+
+def _retire_design_manifest(
+    root: Path,
+    manifest: Path,
+    *,
+    path: str,
+    module_id: str,
+    before: str,
+    after: str,
+    expected_hash_key: str,
+) -> None:
+    """Retire one owned design marker only while its expected source is visible."""
 
     root = root.resolve()
     directory = root / ".jaunt" / "transactions"
     absolute_manifest = Path(os.path.abspath(manifest))
-    if absolute_manifest.parent != directory:
+    if (
+        absolute_manifest.parent != directory
+        or _DESIGN_TRANSACTION_NAME_PATTERN.fullmatch(absolute_manifest.name) is None
+    ):
         raise JauntGenerationError("Design transaction marker is outside the workspace journal")
     manifest = absolute_manifest
+    expected_before_digest = _sha256(before.encode("utf-8"))
+    expected_after_digest = _sha256(after.encode("utf-8"))
+    expected_digest = (
+        expected_before_digest if expected_hash_key == "before" else expected_after_digest
+    )
+    if expected_hash_key not in {"before", "after"}:  # pragma: no cover - internal invariant
+        raise ValueError(f"Unknown design transaction hash key: {expected_hash_key}")
     with _PinnedWorkspace(root) as workspace:
         try:
             pinned_directory = workspace.directory(directory, create=False)
@@ -706,29 +766,202 @@ def _complete_design_manifest(root: Path, manifest: Path) -> None:
                 )
             if manifest.name not in manifests:
                 raise JauntGenerationError(f"Design transaction marker is missing: {manifest.name}")
+            descriptor, claim_name = pinned_directory.create_temp(
+                prefix="design-claim-",
+                suffix=".json",
+            )
+            os.close(descriptor)
             try:
-                payload = json.loads(pinned_directory.read_bytes(manifest.name).decode("utf-8"))
-            except (OSError, UnicodeError, json.JSONDecodeError) as error:
-                raise JauntGenerationError(
-                    f"Design transaction marker is invalid: {manifest.name}"
-                ) from error
-            if not isinstance(payload, Mapping) or not (
-                payload.get("state") == "prepared" and payload.get("operation") == "design"
-            ):
-                raise JauntGenerationError(f"Design transaction marker is invalid: {manifest.name}")
-            workspace.verify_namespace()
-            if not _retire_transaction_manifest(
-                manifest,
-                payload,
-                pinned_directory=pinned_directory,
-            ):
-                raise JauntGenerationError(
-                    "Design transaction completed, but its recovery marker could not be "
-                    "durably retired"
-                )
-            workspace.verify_namespace()
+                pinned_directory.replace(manifest.name, claim_name)
+            except BaseException:
+                pinned_directory.unlink(claim_name, missing_ok=True)
+                raise
+            claim = directory / claim_name
+            payload: Mapping[str, Any] | None = None
+            claim_retired = False
+            try:
+                pinned_directory.fsync_required()
+                try:
+                    claimed_bytes = pinned_directory.read_bytes(claim_name)
+                    decoded_payload = json.loads(claimed_bytes.decode("utf-8"))
+                except (OSError, UnicodeError, json.JSONDecodeError) as error:
+                    raise JauntGenerationError(
+                        f"Design transaction marker is invalid: {manifest.name}"
+                    ) from error
+                if not isinstance(decoded_payload, Mapping) or set(decoded_payload) != {
+                    "scheme",
+                    "state",
+                    "operation",
+                    "writes",
+                }:
+                    raise JauntGenerationError(
+                        f"Design transaction marker is invalid: {manifest.name}"
+                    )
+                payload = decoded_payload
+                raw_writes = payload.get("writes")
+                if not (
+                    payload.get("scheme") == _DESIGN_TRANSACTION_SCHEME
+                    and payload.get("state") == "prepared"
+                    and payload.get("operation") == "design"
+                    and isinstance(raw_writes, list)
+                    and len(raw_writes) == 1
+                    and isinstance(raw_writes[0], Mapping)
+                ):
+                    raise JauntGenerationError(
+                        f"Design transaction marker is invalid: {manifest.name}"
+                    )
+                write = raw_writes[0]
+                if set(write) != {"path", "kind", "moduleId", "before", "after"}:
+                    raise JauntGenerationError(
+                        f"Design transaction marker is invalid: {manifest.name}"
+                    )
+                recorded_path = write.get("path")
+                recorded_module_id = write.get("moduleId")
+                before_digest = write.get("before")
+                after_digest = write.get("after")
+                if not (
+                    recorded_path == path
+                    and recorded_module_id == module_id
+                    and write.get("kind") == "design"
+                    and isinstance(before_digest, str)
+                    and _DESIGN_TRANSACTION_HASH_PATTERN.fullmatch(before_digest) is not None
+                    and before_digest == expected_before_digest
+                    and isinstance(after_digest, str)
+                    and _DESIGN_TRANSACTION_HASH_PATTERN.fullmatch(after_digest) is not None
+                    and after_digest == expected_after_digest
+                ):
+                    raise JauntGenerationError(
+                        f"Design transaction marker is invalid: {manifest.name}"
+                    )
+                if not isinstance(
+                    recorded_path, str
+                ):  # pragma: no cover - equality narrows the type
+                    raise JauntGenerationError(
+                        f"Design transaction marker is invalid: {manifest.name}"
+                    )
+                _safe_path(root, recorded_path)
+                source = root / Path(recorded_path)
+                try:
+                    source_directory = workspace.directory(source.parent, create=False)
+                except FileNotFoundError as error:
+                    raise JauntGenerationError(
+                        f"Design source changed before transaction completion: {recorded_path}; "
+                        "the recovery marker was retained"
+                    ) from error
+                current_digest = source_directory.path_hash(source.name)
+                if current_digest != expected_digest:
+                    raise JauntGenerationError(
+                        f"Design source changed before transaction completion: {recorded_path}; "
+                        "the recovery marker was retained"
+                    )
+                workspace.verify_namespace()
+                if pinned_directory.read_bytes(claim_name) != claimed_bytes:
+                    raise JauntGenerationError(
+                        "Design transaction marker changed while it was being completed"
+                    )
+                if pinned_directory.iter_names(manifest.name):
+                    raise JauntGenerationError(
+                        "A concurrent marker replaced the claimed design transaction"
+                    )
+                if not _retire_transaction_manifest(
+                    claim,
+                    payload,
+                    pinned_directory=pinned_directory,
+                    require_present=True,
+                ):
+                    raise JauntGenerationError(
+                        "Design transaction completed, but its recovery marker could not be "
+                        "durably retired"
+                    )
+                claim_retired = True
+                workspace.verify_namespace()
+                if source_directory.path_hash(source.name) != expected_digest:
+                    raise JauntGenerationError(
+                        f"Design source changed during transaction completion: {recorded_path}"
+                    )
+                concurrent_manifests = pinned_directory.iter_names("*.json")
+                if concurrent_manifests:
+                    raise JauntGenerationError(
+                        "A concurrent transaction marker appeared during design completion: "
+                        + ", ".join(concurrent_manifests)
+                    )
+            except BaseException as error:
+                recovery_claim_name = claim_name
+                if claim_retired or not pinned_directory.iter_names(claim_name):
+                    if payload is None:
+                        error.add_note(
+                            "The claimed design marker disappeared before it could be restored"
+                        )
+                        raise
+                    recovery_claim_name = f"design-recovery-{uuid.uuid4().hex}.json"
+                    try:
+                        _write_transaction_manifest(
+                            directory / recovery_claim_name,
+                            payload,
+                            pinned_directory=pinned_directory,
+                        )
+                    except OSError as restore_error:
+                        error.add_note(
+                            "The design transaction recovery marker could not be recreated: "
+                            f"{restore_error}"
+                        )
+                        raise
+                if not _restore_design_manifest_claim(
+                    pinned_directory,
+                    claim_name=recovery_claim_name,
+                    manifest_name=manifest.name,
+                ):
+                    error.add_note(
+                        "The design transaction marker was retained under its private recovery "
+                        f"name because {manifest.name} was occupied"
+                    )
+                raise
         finally:
             lease.release()
+
+
+def _complete_design_manifest(
+    root: Path,
+    manifest: Path,
+    *,
+    path: str,
+    module_id: str,
+    before: str,
+    after: str,
+) -> None:
+    """Complete an applied design only while the exact proposed bytes remain visible."""
+
+    _retire_design_manifest(
+        root,
+        manifest,
+        path=path,
+        module_id=module_id,
+        before=before,
+        after=after,
+        expected_hash_key="after",
+    )
+
+
+def _abort_design_manifest(
+    root: Path,
+    manifest: Path,
+    *,
+    path: str,
+    module_id: str,
+    before: str,
+    after: str,
+) -> None:
+    """Retire a rolled-back design only while the exact original bytes are visible."""
+
+    _retire_design_manifest(
+        root,
+        manifest,
+        path=path,
+        module_id=module_id,
+        before=before,
+        after=after,
+        expected_hash_key="before",
+    )
 
 
 async def run_design(
@@ -958,9 +1191,23 @@ async def run_design(
             # Preserve the prepared marker when rollback itself cannot complete.
             raise
         else:
-            _complete_design_manifest(root, manifest)
+            _abort_design_manifest(
+                root,
+                manifest,
+                path=relative_spec,
+                module_id=module_id,
+                before=current,
+                after=updated,
+            )
         raise
-    _complete_design_manifest(root, manifest)
+    _complete_design_manifest(
+        root,
+        manifest,
+        path=relative_spec,
+        module_id=module_id,
+        before=current,
+        after=updated,
+    )
     _discard_design_proposal(proposal_path)
     append_events(root, [JournalEvent("design", symbol_id, "applied declaration patch")])
     _progress_finish(progress)

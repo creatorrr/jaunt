@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import base64
 import binascii
 import contextlib
@@ -25,13 +26,18 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterator, cast
+from typing import Any, Iterator, NoReturn, cast
 from urllib.parse import unquote
 
 from jaunt.config import JauntConfig
 from jaunt.cache import ResponseCache
 from jaunt.cost import CostTracker
-from jaunt.errors import JauntConfigError, JauntGenerationError
+from jaunt.errors import (
+    JauntBudgetExceededError,
+    JauntConfigError,
+    JauntGenerationError,
+    JauntQuotaGenerationError,
+)
 from jaunt.generate.base import GenerationRequest, GenerationResult, GeneratorBackend, TokenUsage
 from jaunt.generate.request_cache import (
     discard_cached_generation,
@@ -93,8 +99,12 @@ from jaunt.typescript.reuse import (
     target_api_digest,
 )
 from jaunt.typescript.worker import (
-    _is_toolchain_identity_file,
-    _runtime_manifest_identity,
+    _ordered_json_identity,
+    _runtime_package_import_match,
+    _runtime_package_identity_files,
+    _runtime_package_owner,
+    _runtime_package_resolution_closure,
+    _unsafe_runtime_package_import_fragment,
     compiler_runtime_identity,
     resolve_node_package,
     runtime_package_identity,
@@ -520,11 +530,1987 @@ _LOCAL_CONFIG_EXTENSIONS = (
     ".cjs",
     ".json",
 )
+_NODE_BUILTIN_PACKAGES = frozenset(
+    {
+        "assert",
+        "async_hooks",
+        "buffer",
+        "child_process",
+        "cluster",
+        "console",
+        "constants",
+        "crypto",
+        "dgram",
+        "diagnostics_channel",
+        "dns",
+        "domain",
+        "events",
+        "fs",
+        "http",
+        "http2",
+        "https",
+        "module",
+        "net",
+        "os",
+        "path",
+        "perf_hooks",
+        "process",
+        "punycode",
+        "querystring",
+        "readline",
+        "repl",
+        "stream",
+        "string_decoder",
+        "sys",
+        "timers",
+        "tls",
+        "trace_events",
+        "tty",
+        "url",
+        "util",
+        "v8",
+        "vm",
+        "wasi",
+        "worker_threads",
+        "zlib",
+    }
+)
+_CONTROL_FLOW_PAREN_HEADS = frozenset({"catch", "for", "if", "switch", "while", "with"})
+_DECLARATION_BODY_HEADS = frozenset(
+    {"class", "enum", "function", "interface", "module", "namespace", "type"}
+)
+_DECLARATION_PREFIXES = frozenset({"abstract", "async", "const", "declare", "default", "export"})
+_REGEX_PREFIX_KEYWORDS = frozenset(
+    {
+        "await",
+        "case",
+        "default",
+        "delete",
+        "do",
+        "else",
+        "extends",
+        "in",
+        "instanceof",
+        "new",
+        "of",
+        "return",
+        "throw",
+        "typeof",
+        "void",
+        "yield",
+    }
+)
+
+
+def _identifier_precedes_regex(tokens: Sequence[tuple[str, str]]) -> bool:
+    """Return whether the final identifier requires a following expression."""
+
+    if not tokens or tokens[-1][0] != "identifier":
+        return False
+    return tokens[-1][1] in _REGEX_PREFIX_KEYWORDS and (
+        len(tokens) < 2 or tokens[-2][1] not in {".", "?."}
+    )
+
+
+def _opens_control_flow_parenthesis(tokens: Sequence[tuple[str, str]]) -> bool:
+    """Return whether the next ``(`` opens a statement-leading control head."""
+
+    if not tokens:
+        return False
+    head = len(tokens) - 1
+    if tokens[head] == ("identifier", "await") and head > 0:
+        head -= 1
+    if tokens[head][0] != "identifier" or tokens[head][1] not in _CONTROL_FLOW_PAREN_HEADS:
+        return False
+    return head == 0 or tokens[head - 1][1] not in {".", "?."}
+
+
+def _closes_control_flow_parenthesis(tokens: Sequence[tuple[str, str]], close_index: int) -> bool:
+    """Return whether one recorded ``)`` closes a control-flow head."""
+
+    if close_index < 0 or tokens[close_index][1] != ")":
+        return False
+    depth = 1
+    for index in range(close_index - 1, -1, -1):
+        value = tokens[index][1]
+        if value == ")":
+            depth += 1
+        elif value == "(":
+            depth -= 1
+            if depth == 0:
+                return _opens_control_flow_parenthesis(tokens[:index])
+    return False
+
+
+def _colon_opens_statement_block(
+    tokens: Sequence[tuple[str, str]], *, enclosing_statement_brace: bool | None
+) -> bool:
+    """Recognize a label or completed switch clause before a block."""
+
+    if not tokens or tokens[-1][1] != ":":
+        return False
+    if len(tokens) >= 2 and tokens[-2][0] == "identifier":
+        prefix = len(tokens) - 3
+        if (
+            prefix < 0
+            or tokens[prefix][1] in {";", "}"}
+            or (tokens[prefix][1] == "{" and enclosing_statement_brace is True)
+        ):
+            return True
+
+    # A case expression can contain nested object literals and ternaries. Find
+    # the clause head at this delimiter's level, then require every preceding
+    # top-level ``?`` to have consumed a ``:`` before treating this colon as
+    # the case delimiter rather than as part of the expression.
+    expected_openings: list[str] = []
+    opening_for = {")": "(", "]": "[", "}": "{"}
+    clause_index: int | None = None
+    for index in range(len(tokens) - 2, -1, -1):
+        kind, value = tokens[index]
+        if value in opening_for:
+            expected_openings.append(opening_for[value])
+            continue
+        if expected_openings:
+            if value == expected_openings[-1]:
+                expected_openings.pop()
+            continue
+        if value in {";", "{", "}"}:
+            break
+        if kind == "identifier" and value in {"case", "default"}:
+            clause_index = index
+            break
+    if clause_index is None:
+        return False
+    conditional_depth = 0
+    expected_closings: list[str] = []
+    closing_for = {"(": ")", "[": "]", "{": "}"}
+    for _kind, value in tokens[clause_index + 1 : -1]:
+        if value in closing_for:
+            expected_closings.append(closing_for[value])
+        elif expected_closings:
+            if value == expected_closings[-1]:
+                expected_closings.pop()
+        elif value == "?":
+            conditional_depth += 1
+        elif value == ":" and conditional_depth:
+            conditional_depth -= 1
+    return conditional_depth == 0
+
+
+def _can_end_statement_before_block(kind: str, value: str) -> bool:
+    """Return whether ASI may put a standalone block after this token."""
+
+    if kind in {"number", "regex", "string", "template"}:
+        return True
+    if value in {")", "]", "}", "++", "--"}:
+        return True
+    if kind != "identifier":
+        return False
+    return value not in {
+        "abstract",
+        "async",
+        "await",
+        "case",
+        "class",
+        "const",
+        "declare",
+        "default",
+        "delete",
+        "do",
+        "else",
+        "enum",
+        "export",
+        "extends",
+        "function",
+        "implements",
+        "import",
+        "in",
+        "instanceof",
+        "interface",
+        "let",
+        "module",
+        "namespace",
+        "new",
+        "of",
+        "throw",
+        "type",
+        "typeof",
+        "var",
+        "void",
+    }
+
+
+def _opens_statement_brace(
+    tokens: Sequence[tuple[str, str]],
+    *,
+    enclosing_statement_brace: bool | None,
+    previous_closed_control_head: bool,
+    previous_closed_statement_brace: bool,
+    line_break_before: bool = False,
+) -> bool:
+    """Return whether the next brace begins a statement/declaration body."""
+
+    if not tokens:
+        return True
+    kind, value = tokens[-1]
+    if value == ")" and previous_closed_control_head:
+        return True
+    if kind == "identifier" and value in {"catch", "do", "else", "finally", "try"}:
+        return True
+    if value == ";" or (value == "}" and previous_closed_statement_brace):
+        return True
+    # Two adjacent opening braces cannot form an object/property expression;
+    # the inner brace is a nested statement block (including inside an arrow
+    # or function expression body, whose outer close remains expression-like).
+    if value == "{":
+        return True
+    if value == ":" and _colon_opens_statement_block(
+        tokens, enclosing_statement_brace=enclosing_statement_brace
+    ):
+        return True
+
+    # Function and class expressions are values (and can therefore be a
+    # division operand); only declaration bodies create a statement boundary.
+    expected_openings: list[str] = []
+    opening_for = {")": "(", "]": "[", "}": "{"}
+    for index in range(len(tokens) - 1, -1, -1):
+        token_kind, token_value = tokens[index]
+        if token_value == ">" and (not expected_openings or expected_openings[-1] == "<"):
+            expected_openings.append("<")
+            continue
+        if token_value in opening_for:
+            if token_value == "}" and not expected_openings:
+                break
+            expected_openings.append(opening_for[token_value])
+            continue
+        if expected_openings:
+            if token_value == expected_openings[-1]:
+                expected_openings.pop()
+            continue
+        if token_value in {";", "{"}:
+            break
+        if token_kind != "identifier" or token_value not in _DECLARATION_BODY_HEADS:
+            continue
+        prefix = index - 1
+        while (
+            prefix >= 0
+            and tokens[prefix][0] == "identifier"
+            and tokens[prefix][1] in _DECLARATION_PREFIXES
+        ):
+            prefix -= 1
+        while prefix >= 1 and tokens[prefix - 1][1] == "@":
+            prefix -= 2
+        if (
+            prefix >= 0
+            and tokens[prefix][1] == ")"
+            and _closes_control_flow_parenthesis(tokens, prefix)
+        ):
+            return True
+        if (
+            prefix >= 0
+            and tokens[prefix][1] == ":"
+            and _colon_opens_statement_block(
+                tokens[: prefix + 1], enclosing_statement_brace=enclosing_statement_brace
+            )
+        ):
+            return True
+        return (
+            prefix < 0
+            or tokens[prefix][1] in {";", "}"}
+            or (tokens[prefix][1] == "{" and enclosing_statement_brace is True)
+            or (tokens[prefix][0] == "identifier" and tokens[prefix][1] in {"do", "else"})
+        )
+    if line_break_before and _can_end_statement_before_block(kind, value):
+        return True
+    return False
+
+
+def _typescript_lexical_regions(
+    source: str,
+) -> tuple[tuple[tuple[int, int], ...], tuple[tuple[int, int, str], ...]]:
+    """Locate comments and string-like literals without executing a config."""
+
+    comments: list[tuple[int, int]] = []
+    strings: list[tuple[int, int, str]] = []
+    index = 0
+    previous_kind = ""
+    previous_value = ""
+    significant_tokens: list[tuple[str, str]] = []
+    control_parentheses: list[bool] = []
+    statement_braces: list[bool] = []
+    previous_closed_control_head = False
+    previous_closed_statement_brace = False
+    pending_line_break = False
+
+    def record(kind: str, value: str) -> None:
+        nonlocal previous_closed_control_head, previous_closed_statement_brace
+        nonlocal pending_line_break, previous_kind, previous_value
+        closes_control_head = False
+        closes_statement_brace = False
+        if kind == "punctuation" and value == "(":
+            control_parentheses.append(_opens_control_flow_parenthesis(significant_tokens))
+        elif kind == "punctuation" and value == ")":
+            closes_control_head = control_parentheses.pop() if control_parentheses else False
+        elif kind == "punctuation" and value == "{":
+            statement_braces.append(
+                _opens_statement_brace(
+                    significant_tokens,
+                    enclosing_statement_brace=(statement_braces[-1] if statement_braces else None),
+                    previous_closed_control_head=previous_closed_control_head,
+                    previous_closed_statement_brace=previous_closed_statement_brace,
+                    line_break_before=pending_line_break,
+                )
+            )
+        elif kind == "punctuation" and value == "}":
+            closes_statement_brace = statement_braces.pop() if statement_braces else False
+        previous_closed_control_head = closes_control_head
+        previous_closed_statement_brace = closes_statement_brace
+        significant_tokens.append((kind, value))
+        previous_kind = kind
+        previous_value = value
+        pending_line_break = False
+
+    def slash_starts_regex() -> bool:
+        if not previous_kind:
+            return True
+        if previous_kind in {"number", "regex", "string"}:
+            return False
+        if previous_kind == "identifier":
+            return _identifier_precedes_regex(significant_tokens)
+        if previous_value == ")" and previous_closed_control_head:
+            return True
+        if previous_value == "}" and previous_closed_statement_brace:
+            return True
+        return previous_value not in {")", "]", "}", "++", "--"}
+
+    while index < len(source):
+        if source[index].isspace():
+            pending_line_break = pending_line_break or source[index] in "\r\n"
+            index += 1
+            continue
+        if source.startswith("//", index):
+            end = source.find("\n", index + 2)
+            end = len(source) if end < 0 else end
+            comments.append((index, end))
+            pending_line_break = pending_line_break or end < len(source)
+            index = end
+            continue
+        if source.startswith("/*", index):
+            end = source.find("*/", index + 2)
+            end = len(source) if end < 0 else end + 2
+            comments.append((index, end))
+            pending_line_break = pending_line_break or any(
+                character in "\r\n" for character in source[index:end]
+            )
+            index = end
+            continue
+        quote = source[index]
+        if quote == "/" and slash_starts_regex():
+            end = _skip_typescript_regex(source, index)
+            if end > index + 1:
+                comments.append((index, end))
+                index = end
+                record("regex", "regex")
+                continue
+        if quote not in {"'", '"', "`"}:
+            if quote.isalpha() or quote in "_$":
+                end = index + 1
+                while end < len(source) and (source[end].isalnum() or source[end] in "_$"):
+                    end += 1
+                record("identifier", source[index:end])
+                index = end
+                continue
+            if quote.isdigit():
+                end = index + 1
+                while end < len(source) and (source[end].isalnum() or source[end] in "._"):
+                    end += 1
+                record("number", source[index:end])
+                index = end
+                continue
+            pair = source[index : index + 2]
+            record("punctuation", pair if pair in {"++", "--", "?.", "=>"} else quote)
+            index += 2 if pair in {"++", "--", "?.", "=>"} else 1
+            continue
+        start = index
+        index += 1
+        escaped = False
+        while index < len(source):
+            character = source[index]
+            index += 1
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                break
+        strings.append((start, index, quote))
+        record("string", "literal")
+    return tuple(comments), tuple(strings)
+
+
+def _inside_region(index: int, regions: Sequence[tuple[int, int]]) -> bool:
+    return any(start <= index < end for start, end in regions)
+
+
+def _root_local_config_import(root: Path, specifier: str) -> bool:
+    base = root / specifier.replace("\\", "/")
+    candidates = [base]
+    if base.suffix.casefold() not in _LOCAL_CONFIG_EXTENSIONS:
+        candidates.extend(Path(f"{base}{extension}") for extension in _LOCAL_CONFIG_EXTENSIONS)
+    candidates.extend(base / f"index{extension}" for extension in _LOCAL_CONFIG_EXTENSIONS)
+    return any(candidate.is_file() for candidate in candidates)
+
+
+def _named_module_clause_is_type_only(clause: str) -> bool:
+    """Return whether every named import/export binding is explicitly type-only."""
+
+    if not clause.startswith("{") or not clause.endswith("}"):
+        return False
+    bindings = re.sub(r"/\*.*?\*/|//[^\r\n]*", " ", clause[1:-1], flags=re.DOTALL)
+    parts = [part.strip() for part in bindings.split(",") if part.strip()]
+    return bool(parts) and all(re.match(r"^type\s+(?!as\b)", part) for part in parts)
+
+
+def _config_syntax_tokens(
+    source: str,
+    *,
+    _template_depth: int = 0,
+) -> tuple[tuple[str, str], ...]:
+    """Tokenize executable config syntax without evaluating it.
+
+    Comments, regex bodies, and inert template text are ignored. Template
+    expressions are scanned recursively because they can execute imports.
+    """
+
+    if _template_depth > 64:
+        raise JauntConfigError("Vitest configuration has excessively nested templates")
+
+    tokens: list[tuple[str, str]] = []
+    cursor = 0
+    previous: tuple[str, str] | None = None
+    control_parentheses: list[bool] = []
+    statement_braces: list[bool] = []
+    previous_closed_control_head = False
+    previous_closed_statement_brace = False
+    pending_line_break = False
+
+    def append(kind: str, value: str) -> None:
+        nonlocal pending_line_break, previous
+        nonlocal previous_closed_control_head, previous_closed_statement_brace
+        closes_control_head = False
+        closes_statement_brace = False
+        if kind == "punctuation" and value == "(":
+            control_parentheses.append(_opens_control_flow_parenthesis(tokens))
+        elif kind == "punctuation" and value == ")":
+            closes_control_head = control_parentheses.pop() if control_parentheses else False
+        elif kind == "punctuation" and value == "{":
+            statement_braces.append(
+                _opens_statement_brace(
+                    tokens,
+                    enclosing_statement_brace=(statement_braces[-1] if statement_braces else None),
+                    previous_closed_control_head=previous_closed_control_head,
+                    previous_closed_statement_brace=previous_closed_statement_brace,
+                    line_break_before=pending_line_break,
+                )
+            )
+        elif kind == "punctuation" and value == "}":
+            closes_statement_brace = statement_braces.pop() if statement_braces else False
+        previous_closed_control_head = closes_control_head
+        previous_closed_statement_brace = closes_statement_brace
+        token = (kind, value)
+        tokens.append(token)
+        previous = token
+        pending_line_break = False
+
+    def slash_starts_regex() -> bool:
+        if previous is None:
+            return True
+        kind, value = previous
+        if kind in {"number", "regex", "string"}:
+            return False
+        if kind == "identifier":
+            return _identifier_precedes_regex(tokens)
+        if value == ")" and previous_closed_control_head:
+            return True
+        if value == "}" and previous_closed_statement_brace:
+            return True
+        return value not in {")", "]", "}", "++", "--"}
+
+    while cursor < len(source):
+        next_cursor = _skip_typescript_trivia(source, cursor)
+        if next_cursor != cursor:
+            pending_line_break = pending_line_break or any(
+                character in "\r\n" for character in source[cursor:next_cursor]
+            )
+            cursor = next_cursor
+            continue
+        if cursor >= len(source):
+            break
+        character = source[cursor]
+        if character in {'"', "'"}:
+            parsed = _read_typescript_string_literal(source, cursor)
+            if parsed is None:
+                raise JauntConfigError("Vitest configuration has an invalid string literal")
+            value, cursor = parsed
+            append("string", value)
+            continue
+        if character == "`":
+            parsed = _read_typescript_string_literal(source, cursor)
+            if parsed is not None:
+                value, cursor = parsed
+                append("string", value)
+                continue
+            end, expressions = _typescript_template_expressions(source, cursor)
+            if end >= len(source) and (not source or source[-1] != "`"):
+                raise JauntConfigError("Vitest configuration has an unterminated template")
+            for expression in expressions:
+                nested = _config_syntax_tokens(
+                    expression,
+                    _template_depth=_template_depth + 1,
+                )
+                tokens.extend(nested)
+                if nested:
+                    previous = nested[-1]
+                    previous_closed_control_head = False
+                    previous_closed_statement_brace = False
+            cursor = end
+            continue
+        if character == "/" and slash_starts_regex():
+            end = _skip_typescript_regex(source, cursor)
+            if end > cursor + 1:
+                cursor = end
+                previous = ("regex", "regex")
+                previous_closed_control_head = False
+                previous_closed_statement_brace = False
+                continue
+        if character.isalpha() or character in "_$":
+            end = cursor + 1
+            while end < len(source) and (source[end].isalnum() or source[end] in "_$"):
+                end += 1
+            append("identifier", source[cursor:end])
+            cursor = end
+            continue
+        if character.isdigit():
+            end = cursor + 1
+            while end < len(source) and (source[end].isalnum() or source[end] in "._"):
+                end += 1
+            append("number", source[cursor:end])
+            cursor = end
+            continue
+        pair = source[cursor : cursor + 2]
+        if pair in {"++", "--", "?.", "=>"}:
+            append("punctuation", pair)
+            cursor += 2
+            continue
+        append("punctuation", character)
+        cursor += 1
+    return tuple(tokens)
+
+
+def _config_module_specifiers(source: str) -> tuple[str, ...]:
+    """Return static module specifiers that executable config syntax can load.
+
+    The scanner deliberately recognizes only provenance-backed CommonJS loader
+    aliases.  A function merely named ``createRequire`` is not enough: its
+    binding must come from Node's ``module`` builtin.  Once a proven loader is
+    reassigned or used through an unsupported member, the config is rejected
+    instead of risking an incomplete runtime fingerprint.
+    """
+
+    tokens = _config_syntax_tokens(source)
+    specifiers: set[str] = set()
+    node_module_specifiers = {"module", "node:module"}
+    module_namespaces: set[str] = set()
+    namespace_binding_indices: set[int] = set()
+    create_require_factories: set[str] = set()
+    factory_binding_indices: set[int] = set()
+    loaders: set[str] = {"require"}
+    protected_loaders: set[str] = {"require"}
+    invalid_namespaces: set[str] = set()
+    invalid_factories: set[str] = set()
+    invalid_loaders: set[str] = set()
+    assignment_rhs_owners: dict[int, str] = {}
+    type_annotation_indices: set[int] = set()
+    exported_binding_names: set[str] = set()
+    export_capability_indices: set[int] = set()
+
+    def token_value(index: int) -> str:
+        return tokens[index][1] if 0 <= index < len(tokens) else ""
+
+    def matching_close(open_index: int, opening: str = "(", closing: str = ")") -> int | None:
+        if token_value(open_index) != opening:
+            return None
+        depth = 1
+        cursor = open_index + 1
+        while cursor < len(tokens):
+            value = token_value(cursor)
+            if value == opening:
+                depth += 1
+            elif value == closing:
+                depth -= 1
+                if depth == 0:
+                    return cursor
+            cursor += 1
+        return None
+
+    def assignment_initializer(index: int) -> tuple[int, range] | None:
+        """Return a direct assignment's RHS and any non-executing type span."""
+
+        cursor = index + 1
+        if token_value(cursor) == "=":
+            return cursor + 1, range(0)
+        if token_value(cursor) != ":":
+            return None
+        annotation_start = cursor + 1
+        cursor = annotation_start
+        closing_for = {"(": ")", "[": "]", "{": "}", "<": ">"}
+        expected_closings: list[str] = []
+        while cursor < len(tokens):
+            value = token_value(cursor)
+            if value in closing_for:
+                expected_closings.append(closing_for[value])
+            elif expected_closings and value == expected_closings[-1]:
+                expected_closings.pop()
+            elif not expected_closings and value == "=":
+                return cursor + 1, range(annotation_start, cursor)
+            elif not expected_closings and value in {";", ",", ")", "]", "}"}:
+                return None
+            cursor += 1
+        return None
+
+    def annotation_names_node_module(annotation: range) -> bool:
+        """Return whether a type span explicitly imports Node's module namespace."""
+
+        return any(
+            tokens[cursor : cursor + 4]
+            == (
+                ("identifier", "import"),
+                ("punctuation", "("),
+                ("string", specifier),
+                ("punctuation", ")"),
+            )
+            for cursor in annotation
+            for specifier in node_module_specifiers
+        )
+
+    def register_export_contexts() -> None:
+        """Record structural local exports without relying on semicolons or ASI."""
+
+        for export_index, token in enumerate(tokens):
+            if token != ("identifier", "export") or token_value(export_index - 1) in {
+                ".",
+                "?.",
+            }:
+                continue
+            start = export_index + 1
+            if token_value(start) == "type":
+                continue
+            head = token_value(start)
+            if head == "default":
+                reference = start + 1
+                if reference < len(tokens) and tokens[reference][0] == "identifier":
+                    export_capability_indices.add(reference)
+                elif token_value(reference) == "{":
+                    close = matching_close(reference, "{", "}")
+                    if close is not None:
+                        for cursor in range(reference + 1, close):
+                            if tokens[cursor][0] != "identifier":
+                                continue
+                            property_key = token_value(cursor + 1) == ":" and token_value(
+                                cursor - 1
+                            ) in {"{", ","}
+                            if not property_key:
+                                export_capability_indices.add(cursor)
+                continue
+            if head == "{":
+                close = matching_close(start, "{", "}")
+                if close is None or token_value(close + 1) == "from":
+                    continue
+                cursor = start + 1
+                while cursor < close:
+                    type_only = tokens[cursor] == ("identifier", "type")
+                    if type_only:
+                        cursor += 1
+                    if cursor < close and tokens[cursor][0] == "identifier":
+                        if not type_only:
+                            export_capability_indices.add(cursor)
+                        while cursor < close and token_value(cursor) != ",":
+                            cursor += 1
+                    cursor += 1
+                continue
+            if head in {"const", "let", "var"}:
+                binding = start + 1
+                if binding < len(tokens) and tokens[binding][0] == "identifier":
+                    exported_binding_names.add(tokens[binding][1])
+                elif token_value(binding) in {"{", "["}:
+                    closing = "}" if token_value(binding) == "{" else "]"
+                    close = matching_close(binding, token_value(binding), closing)
+                    if close is not None:
+                        for cursor in range(binding + 1, close):
+                            if tokens[cursor][0] != "identifier":
+                                continue
+                            if token_value(cursor + 1) == ":":
+                                continue
+                            exported_binding_names.add(tokens[cursor][1])
+
+    def capability_is_exported(index: int) -> bool:
+        if index not in export_capability_indices:
+            return False
+        if token_value(index + 1) in {"(", ".", "?."}:
+            # The expression exports the call/member result, not the loader
+            # capability itself. Factory calls that return a loader are still
+            # rejected by the normal unassigned-result check below.
+            return False
+        # An object key is not a reference to an in-scope capability with the
+        # same spelling. Shorthand and property values remain executable uses.
+        return not (token_value(index + 1) == ":" and token_value(index - 1) in {"{", ","})
+
+    def reject_exported_capability(index: int) -> None:
+        if capability_is_exported(index):
+            raise JauntConfigError(
+                "Vitest configuration exports a tracked module-loading capability; "
+                "exported helpers cannot be fingerprinted safely"
+            )
+
+    def literal_call_argument(open_index: int) -> str:
+        argument = open_index + 1
+        if (
+            argument >= len(tokens)
+            or tokens[argument][0] != "string"
+            or token_value(argument + 1) != ")"
+        ):
+            raise JauntConfigError(
+                "Vitest configuration uses a computed import/require specifier that cannot "
+                "be fingerprinted safely"
+            )
+        return tokens[argument][1]
+
+    def capability_has_unsafe_suffix(index: int) -> bool:
+        if index >= len(tokens):
+            return False
+        kind, value = tokens[index]
+        if kind == "identifier":
+            # Other identifiers either begin an ASI-separated statement or
+            # are the non-executing TypeScript ``as``/``satisfies`` suffix.
+            return value in {"in", "instanceof"}
+        return value not in {";", ",", ")", "]", "}"}
+
+    def static_import_clause(index: int) -> tuple[int, int, str] | None:
+        """Return ``(clause_start, from_index, specifier)`` for a static import."""
+
+        next_index = index + 1
+        if next_index >= len(tokens) or token_value(next_index) in {"(", "."}:
+            return None
+        if tokens[next_index][0] == "string":
+            return next_index, next_index, tokens[next_index][1]
+        cursor = next_index
+        while cursor < len(tokens) and token_value(cursor) != ";":
+            if (
+                tokens[cursor] == ("identifier", "from")
+                and cursor + 1 < len(tokens)
+                and tokens[cursor + 1][0] == "string"
+            ):
+                return next_index, cursor, tokens[cursor + 1][1]
+            cursor += 1
+        return None
+
+    def register_node_module_imports() -> None:
+        """Record hoisted ESM bindings from the Node module builtin."""
+
+        for index, token in enumerate(tokens):
+            if token != ("identifier", "import"):
+                continue
+            previous = token_value(index - 1)
+            if previous in {".", "?."}:
+                continue
+            clause = static_import_clause(index)
+            if clause is None:
+                # TypeScript's ``import Module = require("node:module")``.
+                if (
+                    index + 5 < len(tokens)
+                    and tokens[index + 1][0] == "identifier"
+                    and token_value(index + 2) == "="
+                    and tokens[index + 3] == ("identifier", "require")
+                    and token_value(index + 4) == "("
+                    and tokens[index + 5][0] == "string"
+                    and tokens[index + 5][1] in node_module_specifiers
+                ):
+                    module_namespaces.add(tokens[index + 1][1])
+                    namespace_binding_indices.add(index + 1)
+                continue
+            clause_start, from_index, specifier = clause
+            if specifier not in node_module_specifiers or clause_start == from_index:
+                continue
+            clause_tokens = tokens[clause_start:from_index]
+            if clause_tokens and clause_tokens[0] == ("identifier", "type"):
+                continue
+            if clause_tokens and clause_tokens[0][0] == "identifier":
+                # ``module`` has a default export containing createRequire.
+                module_namespaces.add(clause_tokens[0][1])
+                namespace_binding_indices.add(clause_start)
+            cursor = clause_start
+            while cursor < from_index:
+                if token_value(cursor) == "*" and tokens[cursor + 1 : cursor + 2] == (
+                    ("identifier", "as"),
+                ):
+                    if cursor + 2 < from_index and tokens[cursor + 2][0] == "identifier":
+                        module_namespaces.add(tokens[cursor + 2][1])
+                        namespace_binding_indices.add(cursor + 2)
+                    cursor += 3
+                    continue
+                if token_value(cursor) != "{":
+                    cursor += 1
+                    continue
+                close = matching_close(cursor, "{", "}")
+                if close is None or close > from_index:
+                    break
+                binding = cursor + 1
+                while binding < close:
+                    type_only = tokens[binding] == ("identifier", "type")
+                    if type_only:
+                        binding += 1
+                    if binding >= close or tokens[binding][0] != "identifier":
+                        binding += 1
+                        continue
+                    imported = tokens[binding][1]
+                    local = imported
+                    local_index = binding
+                    if (
+                        binding + 2 < close
+                        and tokens[binding + 1] == ("identifier", "as")
+                        and tokens[binding + 2][0] == "identifier"
+                    ):
+                        local = tokens[binding + 2][1]
+                        binding += 2
+                        local_index = binding
+                    if imported == "createRequire" and not type_only:
+                        create_require_factories.add(local)
+                        factory_binding_indices.add(local_index)
+                    binding += 1
+                cursor = close + 1
+
+    def loader_call_open(index: int) -> int | None:
+        cursor = index + 1
+        if token_value(cursor) == "?.":
+            cursor += 1
+        return cursor if token_value(cursor) == "(" else None
+
+    def loader_resolve_open(index: int) -> int | None:
+        cursor = index + 1
+        if token_value(cursor) in {".", "?."}:
+            cursor += 1
+            if tokens[cursor : cursor + 1] == (("identifier", "resolve"),):
+                cursor += 1
+                return cursor if token_value(cursor) == "(" else None
+        return None
+
+    def factory_reference_end(index: int) -> int | None:
+        if tokens[index][0] != "identifier":
+            return None
+        name = tokens[index][1]
+        if name in invalid_factories:
+            raise JauntConfigError(
+                f"Vitest configuration reassigns or ambiguously uses createRequire alias {name!r}"
+            )
+        if name in create_require_factories:
+            return index + 1
+        if name in invalid_namespaces:
+            if token_value(index + 1) in {".", "?."}:
+                raise JauntConfigError(
+                    f"Vitest configuration reassigns Node module namespace {name!r}"
+                )
+            return None
+        if name in module_namespaces and token_value(index + 1) == "[":
+            raise JauntConfigError(
+                f"Vitest configuration uses computed access on Node module namespace {name!r}"
+            )
+        if (
+            name in module_namespaces
+            and token_value(index + 1) in {".", "?."}
+            and tokens[index + 2 : index + 3] == (("identifier", "createRequire"),)
+        ):
+            return index + 3
+        return None
+
+    def node_module_value_end(index: int) -> int | None:
+        if index >= len(tokens):
+            return None
+        if tokens[index][0] == "identifier" and tokens[index][1] in module_namespaces:
+            return index + 1
+        cursor = index
+        if tokens[cursor : cursor + 1] == (("identifier", "await"),):
+            cursor += 1
+        if tokens[cursor : cursor + 1] == (("identifier", "import"),):
+            open_index = cursor + 1
+        elif tokens[cursor : cursor + 1] == (("identifier", "require"),):
+            if "require" in invalid_loaders:
+                raise JauntConfigError("Vitest configuration reassigns the require loader")
+            open_index = cursor + 1
+        elif (
+            tokens[cursor : cursor + 1] == (("identifier", "module"),)
+            and token_value(cursor + 1) in {".", "?."}
+            and tokens[cursor + 2 : cursor + 3] == (("identifier", "require"),)
+        ):
+            open_index = cursor + 3
+        else:
+            return None
+        if (
+            token_value(open_index) != "("
+            or open_index + 1 >= len(tokens)
+            or tokens[open_index + 1][0] != "string"
+        ):
+            return None
+        if tokens[open_index + 1][1] not in node_module_specifiers:
+            return None
+        close = matching_close(open_index)
+        return None if close is None else close + 1
+
+    def rhs_capability(index: int) -> tuple[str, int] | None:
+        if index >= len(tokens):
+            return None
+        factory_end = factory_reference_end(index)
+        if factory_end is not None:
+            if token_value(factory_end) != "(":
+                if capability_has_unsafe_suffix(factory_end):
+                    raise JauntConfigError(
+                        "Vitest configuration ambiguously composes a createRequire factory"
+                    )
+                return "factory", factory_end
+            close = matching_close(factory_end)
+            if close is None:
+                raise JauntConfigError(
+                    "Vitest configuration has an unterminated createRequire call"
+                )
+            return "loader", close + 1
+        namespace_end = node_module_value_end(index)
+        if namespace_end is not None:
+            return "namespace", namespace_end
+        if tokens[index][0] == "identifier":
+            name = tokens[index][1]
+            if name in invalid_loaders:
+                raise JauntConfigError(
+                    f"Vitest configuration reassigns or ambiguously uses loader alias {name!r}"
+                )
+            if name in loaders and token_value(index + 1) not in {"(", ".", "?.", "["}:
+                if capability_has_unsafe_suffix(index + 1):
+                    raise JauntConfigError(
+                        f"Vitest configuration ambiguously composes loader alias {name!r}"
+                    )
+                return "loader", index + 1
+        return None
+
+    def set_capability(name: str, capability: str) -> None:
+        if name in exported_binding_names:
+            raise JauntConfigError(
+                "Vitest configuration exports a tracked module-loading capability; "
+                "exported helpers cannot be fingerprinted safely"
+            )
+        module_namespaces.discard(name)
+        create_require_factories.discard(name)
+        loaders.discard(name)
+        protected_loaders.discard(name)
+        invalid_namespaces.discard(name)
+        invalid_factories.discard(name)
+        invalid_loaders.discard(name)
+        if capability == "namespace":
+            module_namespaces.add(name)
+        elif capability == "factory":
+            create_require_factories.add(name)
+        else:
+            loaders.add(name)
+            protected_loaders.add(name)
+
+    def invalidate_capability(name: str) -> None:
+        if name in module_namespaces or name in invalid_namespaces:
+            module_namespaces.discard(name)
+            invalid_namespaces.add(name)
+        if name in create_require_factories or name in invalid_factories:
+            create_require_factories.discard(name)
+            invalid_factories.add(name)
+        if name in loaders or name in invalid_loaders:
+            loaders.discard(name)
+            invalid_loaders.add(name)
+
+    register_export_contexts()
+    register_node_module_imports()
+
+    index = 0
+    while index < len(tokens):
+        kind, value = tokens[index]
+        if kind != "identifier":
+            index += 1
+            continue
+        if index in type_annotation_indices:
+            index += 1
+            continue
+        if (
+            value == "module"
+            and token_value(index + 1) == "["
+            and tokens[index + 2 : index + 3] == (("string", "require"),)
+            and token_value(index + 3) == "]"
+        ):
+            raise JauntConfigError(
+                "Vitest configuration uses computed access to module.require; "
+                "use direct literal module.require calls"
+            )
+        if value in {"import", "export"}:
+            previous = token_value(index - 1)
+            if previous in {".", "?."}:
+                index += 1
+                continue
+            next_index = index + 1
+            if next_index >= len(tokens):
+                break
+            next_kind, next_value = tokens[next_index]
+            if value == "import" and next_value == ".":
+                index += 1
+                continue
+            if value == "import" and next_value == "(":
+                specifiers.add(literal_call_argument(next_index))
+                index += 1
+                continue
+            if value == "import" and next_kind == "string":
+                specifiers.add(next_value)
+                index += 1
+                continue
+            if value == "export":
+                export_head = next_value
+                if export_head == "type":
+                    export_head = tokens[next_index + 1][1] if next_index + 1 < len(tokens) else ""
+                if export_head not in {"{", "*"}:
+                    # `export default`, declarations, and assignments are not
+                    # re-export clauses. Any nested dynamic load is still seen
+                    # when its own token is visited.
+                    index += 1
+                    continue
+
+            from_index: int | None = None
+            cursor = next_index
+            while cursor < len(tokens):
+                current_kind, current_value = tokens[cursor]
+                if current_value == ";":
+                    break
+                if (
+                    current_kind == "identifier"
+                    and current_value == "from"
+                    and cursor + 1 < len(tokens)
+                    and tokens[cursor + 1][0] == "string"
+                ):
+                    from_index = cursor
+                    break
+                cursor += 1
+            if from_index is None or from_index + 1 >= len(tokens):
+                index += 1
+                continue
+            _literal_kind, specifier = tokens[from_index + 1]
+            clause = tokens[next_index:from_index]
+            type_only = bool(clause and clause[0] == ("identifier", "type"))
+            if not type_only and clause and clause[0][1] == "{" and clause[-1][1] == "}":
+                type_only = _named_module_clause_is_type_only(
+                    " ".join(token_value for _token_kind, token_value in clause)
+                )
+            if not type_only:
+                if value == "export" and specifier in node_module_specifiers:
+                    raise JauntConfigError(
+                        "Vitest configuration re-exports the Node module runtime; "
+                        "module-loading capabilities cannot cross captured config files"
+                    )
+                specifiers.add(specifier)
+            index += 1
+            continue
+
+        # CommonJS destructuring from the proven Node module builtin.
+        if value in {"const", "let", "var"} and token_value(index + 1) == "{":
+            close = matching_close(index + 1, "{", "}")
+            destructuring = assignment_initializer(close) if close is not None else None
+            if close is not None and destructuring is not None:
+                initializer, annotation = destructuring
+                type_annotation_indices.update(annotation)
+                namespace_end = node_module_value_end(initializer)
+                if namespace_end is not None:
+                    cursor = index + 2
+                    while cursor < close:
+                        if tokens[cursor][0] != "identifier":
+                            cursor += 1
+                            continue
+                        imported = tokens[cursor][1]
+                        local = imported
+                        local_index = cursor
+                        if token_value(cursor + 1) == ":" and tokens[cursor + 2][0] == "identifier":
+                            local = tokens[cursor + 2][1]
+                            cursor += 2
+                            local_index = cursor
+                        if imported == "createRequire":
+                            set_capability(local, "factory")
+                            factory_binding_indices.add(local_index)
+                        cursor += 1
+                    index += 1
+                    continue
+                typed_node_module = annotation_names_node_module(annotation)
+                binds_create_require = any(
+                    tokens[cursor] == ("identifier", "createRequire")
+                    for cursor in range(index + 2, close)
+                )
+                if typed_node_module and binds_create_require:
+                    raise JauntConfigError(
+                        "Vitest configuration uses typed createRequire destructuring from an "
+                        "unproven Node module value"
+                    )
+                if (
+                    tokens[initializer][0] == "identifier"
+                    and (
+                        tokens[initializer][1] in loaders
+                        or tokens[initializer][1] in invalid_loaders
+                    )
+                    and token_value(initializer + 1) not in {"(", ".", "?.", "["}
+                ):
+                    raise JauntConfigError(
+                        "Vitest configuration destructures a tracked module loader; use direct "
+                        "literal calls so package provenance remains auditable"
+                    )
+
+        # Track exact identifier assignments and invalidate proven capabilities
+        # when they are overwritten by an unknown value.
+        member_assignment = token_value(index - 1) in {".", "?."}
+        assignment = None if member_assignment else assignment_initializer(index)
+        if assignment is not None:
+            initializer, annotation = assignment
+            type_annotation_indices.update(annotation)
+            assignment_rhs_owners[initializer] = value
+            capability = rhs_capability(initializer)
+            if capability is not None:
+                capability_kind, _end = capability
+                set_capability(value, capability_kind)
+            else:
+                invalidate_capability(value)
+
+        if value in invalid_loaders:
+            if loader_call_open(index) is not None or token_value(index + 1) in {".", "?.", "["}:
+                raise JauntConfigError(
+                    f"Vitest configuration reassigns or ambiguously uses loader alias {value!r}"
+                )
+            index += 1
+            continue
+
+        if value in loaders:
+            reject_exported_capability(index)
+            previous = token_value(index - 1)
+            module_member = (
+                index >= 2
+                and previous in {".", "?."}
+                and tokens[index - 2] == ("identifier", "module")
+            )
+            if previous in {".", "?."} and not module_member:
+                index += 1
+                continue
+            grouped_reference = (
+                previous == "("
+                and token_value(index + 1) == ")"
+                and (
+                    index < 2
+                    or tokens[index - 2][0] != "identifier"
+                    or token_value(index - 2) in {"return", "throw", "yield"}
+                )
+            )
+            if grouped_reference:
+                raise JauntConfigError(
+                    f"Vitest configuration parenthesizes loader alias {value!r}; "
+                    "use a direct literal call"
+                )
+            open_index = loader_call_open(index)
+            resolve_open = loader_resolve_open(index)
+            if resolve_open is not None:
+                specifiers.add(literal_call_argument(resolve_open))
+            elif open_index is not None:
+                specifiers.add(literal_call_argument(open_index))
+            elif token_value(index + 1) in {".", "?.", "["}:
+                raise JauntConfigError(
+                    f"Vitest configuration uses unsupported member access on loader alias {value!r}"
+                )
+            elif value in protected_loaders:
+                assignment_lhs = assignment is not None
+                propagated_rhs = assignment_rhs_owners.get(index) in loaders
+                if not assignment_lhs and not propagated_rhs:
+                    raise JauntConfigError(
+                        f"Vitest configuration passes or ambiguously uses loader alias {value!r}; "
+                        "use a direct literal call"
+                    )
+
+        factory_end = factory_reference_end(index)
+        if factory_end is not None:
+            reject_exported_capability(index)
+            if token_value(factory_end) == "(":
+                factory_close = matching_close(factory_end)
+                if factory_close is None:
+                    raise JauntConfigError(
+                        "Vitest configuration has an unterminated createRequire call"
+                    )
+                returned_loader = factory_close + 1
+                if token_value(returned_loader) == "(":
+                    specifiers.add(literal_call_argument(returned_loader))
+                elif (
+                    token_value(returned_loader) in {".", "?."}
+                    and tokens[returned_loader + 1 : returned_loader + 2]
+                    == (("identifier", "resolve"),)
+                    and token_value(returned_loader + 2) == "("
+                ):
+                    specifiers.add(literal_call_argument(returned_loader + 2))
+                else:
+                    assigned_directly = assignment_rhs_owners.get(index) in loaders
+                    if capability_has_unsafe_suffix(returned_loader) and assigned_directly:
+                        raise JauntConfigError(
+                            "Vitest configuration ambiguously composes a createRequire result"
+                        )
+                    if not assigned_directly:
+                        raise JauntConfigError(
+                            "Vitest configuration passes or conditionally stores a createRequire "
+                            "result; assign it directly before loading static literals"
+                        )
+            elif index not in factory_binding_indices:
+                assignment_lhs = assignment is not None
+                propagated_rhs = assignment_rhs_owners.get(index) in create_require_factories
+                if not assignment_lhs and not propagated_rhs:
+                    raise JauntConfigError(
+                        "Vitest configuration passes or ambiguously uses a createRequire "
+                        "factory; call or alias it directly"
+                    )
+        elif value in module_namespaces:
+            reject_exported_capability(index)
+            assignment_lhs = assignment is not None
+            propagated_rhs = assignment_rhs_owners.get(index) in module_namespaces
+            property_key = token_value(index + 1) == ":" and token_value(index - 1) in {"{", ","}
+            member_access = token_value(index + 1) in {".", "?."}
+            if not (
+                index in namespace_binding_indices
+                or assignment_lhs
+                or propagated_rhs
+                or property_key
+                or member_access
+            ):
+                raise JauntConfigError(
+                    f"Vitest configuration passes or ambiguously uses Node module namespace "
+                    f"{value!r}; use createRequire directly"
+                )
+        index += 1
+    return tuple(sorted(specifiers))
+
+
+def _config_package_imports(source: str) -> tuple[tuple[str, str], ...]:
+    """Return bare specifiers and package owners a captured config can execute."""
+
+    imports: set[tuple[str, str]] = set()
+    for specifier in _config_module_specifiers(source):
+        if specifier.startswith((".", "/", "#", "data:", "file:", "http:", "https:", "node:")):
+            continue
+        if specifier.startswith("@"):
+            parts = specifier.split("/")
+            package = "/".join(parts[:2]) if len(parts) >= 2 else specifier
+        else:
+            package = specifier.split("/", 1)[0]
+        if package and package not in _NODE_BUILTIN_PACKAGES:
+            imports.add((specifier, package))
+    return tuple(sorted(imports))
+
+
+def _config_package_import_alias(
+    root: Path,
+    importer: Path,
+    specifier: str,
+) -> tuple[str, str, tuple[str, ...], tuple[tuple[str, str], ...]]:
+    """Resolve one package ``imports`` alias without executing configuration code.
+
+    The return value is the owning manifest path and digest, confined local
+    targets relative to the workspace, and external ``(specifier, owner)``
+    targets. Every condition and array branch is retained so custom Node
+    conditions cannot select bytes outside the captured closure.
+    """
+
+    physical_root = root.resolve()
+    try:
+        current = importer.resolve(strict=True).parent
+    except OSError as exc:
+        raise JauntConfigError(
+            f"Vitest configuration import scope could not be resolved for {importer}"
+        ) from exc
+    scope: Path | None = None
+    while current == physical_root or physical_root in current.parents:
+        if (current / "package.json").is_file():
+            scope = current
+            break
+        if current == physical_root:
+            break
+        current = current.parent
+    if scope is None:
+        raise JauntConfigError(
+            f"Vitest configuration package import {specifier!r} has no owning package.json"
+        )
+    package_scope = scope
+    manifest_path = package_scope / "package.json"
+    try:
+        manifest_bytes = manifest_path.read_bytes()
+        manifest = json.loads(manifest_bytes)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise JauntConfigError(
+            f"Vitest configuration package import {specifier!r} has an unreadable package.json"
+        ) from exc
+    if not isinstance(manifest, Mapping) or not isinstance(manifest.get("imports"), Mapping):
+        raise JauntConfigError(
+            f"Vitest configuration package import {specifier!r} has no imports mapping"
+        )
+    imports = cast(Mapping[str, object], manifest["imports"])
+    own_name = manifest.get("name") if isinstance(manifest.get("name"), str) else None
+    local_targets: set[str] = set()
+    external_targets: set[tuple[str, str]] = set()
+
+    def fail(reason: str) -> NoReturn:
+        raise JauntConfigError(
+            f"Invalid Vitest configuration package import {specifier!r} in "
+            f"{manifest_path.relative_to(physical_root)}: {reason}"
+        )
+
+    def add_local_target(resolved: str) -> None:
+        if not resolved.startswith("./"):
+            fail(f"package-local target must start with './': {resolved!r}")
+        if _unsafe_runtime_package_import_fragment(resolved[2:]):
+            fail(f"unsafe package-relative target {resolved!r}")
+        target_path = Path(os.path.abspath(package_scope / resolved))
+        if target_path != package_scope and package_scope not in target_path.parents:
+            fail(f"package-relative target escapes its package: {resolved!r}")
+        try:
+            local_targets.add(target_path.relative_to(physical_root).as_posix())
+        except ValueError:
+            fail(f"package-relative target escapes the workspace: {resolved!r}")
+
+    def resolve_self_target(resolved: str) -> None:
+        """Resolve a package self-reference to its exact confined exports branches."""
+
+        assert own_name is not None
+        subpath = resolved[len(own_name) :]
+        export_key = "." if not subpath else f".{subpath}"
+        exports = manifest.get("exports")
+        if exports is None:
+            fail(f"self target {resolved!r} has no exports mapping")
+        wildcard: str | None = None
+        target: object = exports
+        if isinstance(exports, Mapping) and any(str(key).startswith(".") for key in exports):
+            if export_key in exports:
+                target = exports[export_key]
+            else:
+                patterns = [
+                    str(key)
+                    for key in exports
+                    if isinstance(key, str)
+                    and key.count("*") == 1
+                    and export_key.startswith(key.partition("*")[0])
+                    and export_key.endswith(key.partition("*")[2])
+                    and len(export_key) >= len(key) - 1
+                ]
+                patterns.sort(
+                    key=lambda key: (
+                        -(key.find("*") + 1),
+                        -len(key),
+                        key,
+                    )
+                )
+                if not patterns:
+                    fail(f"unresolved self target {resolved!r}")
+                pattern = patterns[0]
+                suffix_length = len(pattern) - pattern.find("*") - 1
+                wildcard_end = len(export_key) - suffix_length if suffix_length else len(export_key)
+                wildcard = export_key[pattern.find("*") : wildcard_end]
+                if _unsafe_runtime_package_import_fragment(wildcard):
+                    fail(f"unsafe self-target wildcard {wildcard!r}")
+                target = exports[pattern]
+        elif export_key != ".":
+            fail(f"unresolved self target {resolved!r}")
+
+        def visit_export(value: object) -> None:
+            if value is None:
+                return
+            if isinstance(value, str):
+                export_target = value
+                if wildcard is not None:
+                    export_target = value.replace("*", wildcard)
+                elif "*" in value:
+                    fail(f"self target {value!r} uses a wildcard without a pattern key")
+                add_local_target(export_target)
+                return
+            if isinstance(value, list):
+                for entry in value:
+                    visit_export(entry)
+                return
+            if isinstance(value, Mapping):
+                for condition, entry in value.items():
+                    if not isinstance(condition, str) or (
+                        condition.isdigit()
+                        and str(int(condition)) == condition
+                        and int(condition) < 2**32 - 1
+                    ):
+                        fail(f"invalid self-export condition key {condition!r}")
+                    visit_export(entry)
+                return
+            fail(f"non-string self target {value!r}")
+
+        visit_export(target)
+
+    def resolve_alias(alias: str, seen: frozenset[str]) -> None:
+        if alias in seen:
+            fail(f"cyclic alias through {alias!r}")
+        if alias == "#" or alias.endswith("/"):
+            fail(f"invalid alias {alias!r}")
+        match = _runtime_package_import_match(imports, alias)
+        if match is None:
+            fail(f"unresolved alias {alias!r}")
+        assert match is not None
+        target, wildcard, append_subpath = match
+        next_seen = seen | {alias}
+
+        def visit(value: object) -> None:
+            if value is None:
+                return
+            if isinstance(value, str):
+                if append_subpath and not value.endswith("/"):
+                    fail("trailing-slash mapping has a non-directory target")
+                resolved = value
+                if wildcard is not None:
+                    if _unsafe_runtime_package_import_fragment(wildcard):
+                        fail(f"unsafe wildcard match {wildcard!r}")
+                    resolved = (
+                        f"{value}{wildcard}" if append_subpath else value.replace("*", wildcard)
+                    )
+                elif "*" in value:
+                    fail(f"target {value!r} uses a wildcard without a pattern key")
+                if resolved.startswith("#"):
+                    resolve_alias(resolved, next_seen)
+                    return
+                if resolved.startswith("./"):
+                    add_local_target(resolved)
+                    return
+                package = _runtime_package_owner(resolved)
+                if package is None:
+                    is_builtin = resolved.startswith("node:") or resolved.split("/", 1)[0] in (
+                        _NODE_BUILTIN_PACKAGES
+                    )
+                    if not is_builtin:
+                        fail(f"invalid external target {resolved!r}")
+                    return
+                subpath = resolved[len(package) :]
+                if subpath and (
+                    not subpath.startswith("/")
+                    or _unsafe_runtime_package_import_fragment(subpath[1:])
+                ):
+                    fail(f"unsafe external target {resolved!r}")
+                if package == own_name:
+                    resolve_self_target(resolved)
+                    return
+                external_targets.add((resolved, package))
+                return
+            if isinstance(value, list):
+                for entry in value:
+                    visit(entry)
+                return
+            if isinstance(value, Mapping):
+                for condition, entry in value.items():
+                    if not isinstance(condition, str) or (
+                        condition.isdigit()
+                        and str(int(condition)) == condition
+                        and int(condition) < 2**32 - 1
+                    ):
+                        fail(f"invalid condition key {condition!r}")
+                    visit(entry)
+                return
+            fail(f"non-string target {value!r}")
+
+        visit(target)
+
+    resolve_alias(specifier, frozenset())
+    try:
+        if manifest_bytes != manifest_path.read_bytes():
+            raise JauntGenerationError(
+                "TypeScript Vitest package imports changed while their closure was captured: "
+                + manifest_path.relative_to(physical_root).as_posix()
+            )
+    except OSError as exc:
+        raise JauntConfigError(
+            f"Vitest configuration package import manifest changed or became unreadable: "
+            f"{manifest_path}"
+        ) from exc
+    return (
+        manifest_path.relative_to(physical_root).as_posix(),
+        _sha256(manifest_bytes),
+        tuple(sorted(local_targets)),
+        tuple(sorted(external_targets)),
+    )
+
+
+def _config_package_dependencies(
+    root: Path,
+    relative: str,
+    source: str,
+) -> tuple[tuple[str, str, Path], ...]:
+    """Return direct and package-import external dependencies with resolver origins."""
+
+    importer = _safe_path(root, relative)
+    dependencies = {
+        (specifier, package, importer) for specifier, package in _config_package_imports(source)
+    }
+    for specifier in _config_module_specifiers(source):
+        if not specifier.startswith("#"):
+            continue
+        manifest_relative, _digest, _locals, externals = _config_package_import_alias(
+            root, importer, specifier
+        )
+        manifest_path = _safe_path(root, manifest_relative)
+        dependencies.update(
+            (external_specifier, package, manifest_path)
+            for external_specifier, package in externals
+        )
+    return tuple(sorted(dependencies, key=lambda item: (item[1], item[0], str(item[2]))))
+
+
+def _config_package_runtime_identities(
+    root: Path,
+    config_overlays: Mapping[str, str],
+) -> Mapping[str, str]:
+    """Fingerprint directly imported config packages for cross-command freshness."""
+
+    identities: dict[str, str] = {}
+    for relative, source in sorted(config_overlays.items()):
+        for specifier, package, resolution_start in _config_package_dependencies(
+            root, relative, source
+        ):
+            try:
+                resolved = resolve_node_package(
+                    resolution_start,
+                    package,
+                    boundary=root,
+                    module_path=True,
+                )
+            except TypeScriptWorkerError as exc:
+                raise JauntConfigError(
+                    f"Vitest configuration package {package!r} imported by {relative} could "
+                    "not be resolved safely"
+                ) from exc
+            if resolved is None:
+                if _root_local_config_import(root, specifier):
+                    continue
+                raise JauntConfigError(
+                    f"Vitest configuration package {package!r} imported by {relative} is not "
+                    "installed within the workspace"
+                )
+            identities[f"{relative}:{package}"] = runtime_package_identity(resolved)
+            try:
+                closure = _runtime_package_resolution_closure(
+                    resolved,
+                    root_label=package,
+                )
+            except TypeScriptWorkerError as exc:
+                raise JauntConfigError(
+                    f"Runtime dependency closure of Vitest config package {package!r} "
+                    f"imported by {relative} could not be resolved safely"
+                ) from exc
+            for edge in closure:
+                key = f"{relative}:{edge.label}"
+                identities[key] = (
+                    MISSING_INPUT
+                    if edge.resolved_root is None
+                    else runtime_package_identity(edge.resolved_root)
+                )
+    return identities
+
+
+def _pin_vitest_config_dependency_runtimes(
+    client: object,
+    root: Path,
+    config_overlays: Mapping[str, str],
+) -> None:
+    """Hold every directly imported config package through the command seal."""
+
+    pin_closure = getattr(client, "pin_package_resolution_closure", None)
+    pin_resolution = getattr(client, "pin_package_resolution_identity", None)
+    pin_runtime = getattr(client, "pin_package_runtime_identity", None)
+    if not callable(pin_closure) and not callable(pin_resolution) and not callable(pin_runtime):
+        return
+    for relative, source in sorted(config_overlays.items()):
+        pinned_packages: set[tuple[str, Path]] = set()
+        for specifier, package, resolution_start in _config_package_dependencies(
+            root, relative, source
+        ):
+            pin_key = (package, resolution_start)
+            if pin_key in pinned_packages:
+                continue
+            resolved = resolve_node_package(
+                resolution_start,
+                package,
+                boundary=root,
+                module_path=True,
+            )
+            if resolved is None:
+                if _root_local_config_import(root, specifier):
+                    continue
+                raise JauntConfigError(
+                    f"Vitest configuration package {package!r} imported by {relative} is not "
+                    "installed within the workspace"
+                )
+            pinned_packages.add(pin_key)
+            label = f"Vitest config dependency {package} from {relative}"
+            if callable(pin_closure):
+                pin_closure(
+                    label,
+                    resolution_start,
+                    package,
+                    boundary=root,
+                    module_path=True,
+                )
+                continue
+            if callable(pin_resolution):
+                pin_resolution(
+                    label,
+                    resolution_start,
+                    package,
+                    boundary=root,
+                    module_path=True,
+                )
+                continue
+            assert callable(pin_runtime)
+            pin_runtime(label, resolved)
+
+
+def _looks_like_local_config_path(value: str) -> bool:
+    return (
+        not value.startswith(("#", "data:", "http:", "https:", "node:"))
+        and not any(character in value for character in "*?[")
+        and (
+            value.startswith(("./", "../"))
+            or "/" in value
+            or "\\" in value
+            or value.casefold() in _LOCAL_CONFIG_EXTENSIONS
+            or Path(value).suffix.casefold() in _LOCAL_CONFIG_EXTENSIONS
+        )
+    )
+
+
+def _is_vitest_path_field_value(source: str, literal_start: int) -> bool:
+    """Return whether a literal sits in a supported Vitest executable-path field."""
+
+    prefix = source[:literal_start]
+    return (
+        re.search(
+            r"\b(?:setupFiles|globalSetup)\s*:\s*(?:\[[^\]]*)?$",
+            prefix,
+            re.DOTALL,
+        )
+        is not None
+    )
+
+
+def _vitest_non_path_metadata_spans(source: str) -> tuple[tuple[int, int], ...]:
+    """Locate direct ``name`` and ``define``/``env`` metadata values.
+
+    These values may contain path-shaped strings or pure ``node:path`` calls,
+    but Vitest never executes them as setup modules.  We identify complete
+    property-value expressions so array-valued metadata is covered without
+    weakening handling of sibling executable-path fields.
+    """
+
+    comments, strings = _typescript_lexical_regions(source)
+    masked_characters = list(source)
+    for start, end in (*comments, *((start, end) for start, end, _quote in strings)):
+        for index in range(start, end):
+            if masked_characters[index] not in {"\r", "\n"}:
+                masked_characters[index] = " "
+    masked = "".join(masked_characters)
+
+    opening_for = {")": "(", "]": "[", "}": "{"}
+    stack: list[tuple[str, int]] = []
+    brace_pairs: dict[int, int] = {}
+    for index, character in enumerate(masked):
+        if character in "([{":
+            stack.append((character, index))
+            continue
+        expected = opening_for.get(character)
+        if expected is None or not stack or stack[-1][0] != expected:
+            continue
+        opening, opening_index = stack.pop()
+        if opening == "{":
+            brace_pairs[opening_index] = index
+
+    def object_properties(open_index: int, close_index: int) -> tuple[tuple[str, int, int], ...]:
+        properties: list[tuple[str, int, int]] = []
+        cursor = open_index + 1
+        while cursor < close_index:
+            while cursor < close_index and (masked[cursor].isspace() or masked[cursor] in ",;"):
+                cursor += 1
+            property_start = cursor
+            nested: list[str] = []
+            colon: int | None = None
+            while cursor < close_index:
+                character = masked[cursor]
+                if character in "([{":
+                    nested.append(character)
+                elif character in opening_for:
+                    if nested and nested[-1] == opening_for[character]:
+                        nested.pop()
+                elif not nested and character == ":":
+                    colon = cursor
+                    break
+                elif not nested and character in ",;":
+                    cursor += 1
+                    break
+                cursor += 1
+            if colon is None:
+                continue
+            key = masked[property_start:colon].strip()
+            value_start = colon + 1
+            while value_start < close_index and source[value_start].isspace():
+                value_start += 1
+            cursor = value_start
+            nested = []
+            while cursor < close_index:
+                character = masked[cursor]
+                if character in "([{":
+                    nested.append(character)
+                elif character in opening_for:
+                    if nested and nested[-1] == opening_for[character]:
+                        nested.pop()
+                elif not nested and character in ",;":
+                    break
+                cursor += 1
+            if re.fullmatch(r"[A-Za-z_$][\w$]*", key):
+                value_end = cursor
+                properties.append((key, value_start, value_end))
+            if cursor < close_index:
+                cursor += 1
+        return tuple(properties)
+
+    spans: set[tuple[int, int]] = set()
+    for open_index, close_index in brace_pairs.items():
+        for key, value_start, value_end in object_properties(open_index, close_index):
+            if key == "name":
+                spans.add((value_start, value_end))
+                continue
+            if key not in {"define", "env"} or masked[value_start : value_start + 1] != "{":
+                continue
+            metadata_close = brace_pairs.get(value_start)
+            if metadata_close is None or metadata_close > value_end:
+                continue
+            for _metadata_key, metadata_start, metadata_end in object_properties(
+                value_start, metadata_close
+            ):
+                spans.add((metadata_start, metadata_end))
+    return tuple(sorted(spans))
+
+
+_SAFE_METADATA_INTERPOLATION = re.compile(
+    r"\s*[A-Za-z_$][\w$]*(?:(?:\?\.|\.)[A-Za-z_$][\w$]*)*\s*\Z"
+)
+
+
+def _metadata_template_interpolations_are_side_effect_free(value: str) -> bool:
+    """Accept metadata interpolation only when every expression is a property read."""
+
+    expressions = tuple(re.finditer(r"\$\{([^{}]*)\}", value, re.DOTALL))
+    if not expressions:
+        return False
+    remainder = re.sub(r"\$\{[^{}]*\}", "", value, flags=re.DOTALL)
+    return "${" not in remainder and all(
+        _SAFE_METADATA_INTERPOLATION.fullmatch(match.group(1)) is not None for match in expressions
+    )
+
+
+def _static_config_path_calls(
+    source: str,
+    *,
+    config_directory: str = "",
+    metadata_spans: Sequence[tuple[int, int]] = (),
+) -> tuple[tuple[str, ...], tuple[tuple[int, int], ...]]:
+    """Reduce imported ``node:path`` join/resolve calls or reject dynamic ones."""
+
+    direct: dict[str, str] = {}
+    namespaces: set[str] = set()
+    path_module = r"[\"'](?:node:)?path[\"']"
+    comments, strings = _typescript_lexical_regions(source)
+    noncode = (*comments, *((start, end) for start, end, _quote in strings))
+
+    def add_named_bindings(bindings: str, *, alias_separator: str) -> None:
+        for raw_binding in bindings.split(","):
+            parts = re.split(alias_separator, raw_binding.strip())
+            imported = parts[0].strip()
+            local = parts[-1].strip()
+            if imported in {"join", "resolve"} and re.fullmatch(r"[A-Za-z_$][\w$]*", local):
+                direct[local] = imported
+            elif imported in {"posix", "win32"} and re.fullmatch(r"[A-Za-z_$][\w$]*", local):
+                namespaces.add(local)
+
+    for match in re.finditer(
+        rf"\bimport\s+(?:(?P<default>[A-Za-z_$][\w$]*)\s*,\s*)?"
+        rf"\{{(?P<bindings>[^}}]+)\}}\s*from\s*{path_module}",
+        source,
+        re.DOTALL,
+    ):
+        if _inside_region(match.start(), noncode):
+            continue
+        add_named_bindings(match.group("bindings"), alias_separator=r"\s+as\s+")
+        if match.group("default"):
+            namespaces.add(match.group("default"))
+    for match in re.finditer(
+        rf"\bimport\s+\*\s+as\s+(?P<name>[A-Za-z_$][\w$]*)\s+from\s*{path_module}",
+        source,
+    ):
+        if not _inside_region(match.start(), noncode):
+            namespaces.add(match.group("name"))
+    for match in re.finditer(
+        rf"\bimport\s+(?P<name>[A-Za-z_$][\w$]*)\s+from\s*{path_module}",
+        source,
+    ):
+        if not _inside_region(match.start(), noncode):
+            namespaces.add(match.group("name"))
+
+    for match in re.finditer(
+        rf"\b(?:const|let|var)\s+(?P<binding>\{{[^}}]+\}}|[A-Za-z_$][\w$]*)\s*=\s*"
+        rf"require\(\s*{path_module}\s*\)",
+        source,
+    ):
+        if _inside_region(match.start(), noncode):
+            continue
+        binding = match.group("binding")
+        if binding.startswith("{"):
+            add_named_bindings(binding[1:-1], alias_separator=r"\s*:\s*")
+        else:
+            namespaces.add(binding)
+    for match in re.finditer(
+        rf"\b(?:const|let|var)\s+(?P<name>[A-Za-z_$][\w$]*)\s*=\s*"
+        rf"require\(\s*{path_module}\s*\)\s*\.\s*"
+        rf"(?P<member>join|resolve|posix|win32)\b",
+        source,
+    ):
+        if not _inside_region(match.start(), noncode):
+            member = match.group("member")
+            if member in {"join", "resolve"}:
+                direct[match.group("name")] = member
+            else:
+                namespaces.add(match.group("name"))
+    for match in re.finditer(
+        rf"\bimport\s+(?P<name>[A-Za-z_$][\w$]*)\s*=\s*require\(\s*{path_module}\s*\)",
+        source,
+    ):
+        if not _inside_region(match.start(), noncode):
+            namespaces.add(match.group("name"))
+
+    callees: dict[str, str] = dict(direct)
+    for namespace in namespaces:
+        callees[f"{namespace}.join"] = "join"
+        callees[f"{namespace}.resolve"] = "resolve"
+        callees[f"{namespace}.posix.join"] = "join"
+        callees[f"{namespace}.posix.resolve"] = "resolve"
+        callees[f"{namespace}.win32.join"] = "join"
+        callees[f"{namespace}.win32.resolve"] = "resolve"
+    if not callees:
+        return (), ()
+
+    callee_names: list[str] = list(callees)
+    call_pattern = re.compile(
+        r"(?<![\w$.])(?P<callee>"
+        + "|".join(
+            re.escape(callee)
+            for callee in sorted(callee_names, key=lambda value: len(value), reverse=True)
+        )
+        + r")\s*\("
+    )
+    values: list[str] = []
+    spans: list[tuple[int, int]] = []
+    for match in call_pattern.finditer(source):
+        if _inside_region(match.start(), noncode) or _inside_region(match.start(), metadata_spans):
+            continue
+        open_index = source.find("(", match.start("callee"))
+        index = open_index + 1
+        depth = 1
+        quote: str | None = None
+        escaped = False
+        while index < len(source) and depth:
+            character = source[index]
+            if quote is not None:
+                if escaped:
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == quote:
+                    quote = None
+            elif character in {"'", '"', "`"}:
+                quote = character
+            elif character == "(":
+                depth += 1
+            elif character == ")":
+                depth -= 1
+            index += 1
+        if depth:
+            raise JauntConfigError("Vitest configuration has an unterminated path helper call")
+        arguments = source[open_index + 1 : index - 1]
+        raw_parts: list[str] = []
+        part_start = 0
+        nested_depth = 0
+        argument_quote: str | None = None
+        argument_escaped = False
+        for argument_index, character in enumerate(arguments):
+            if argument_quote is not None:
+                if argument_escaped:
+                    argument_escaped = False
+                elif character == "\\":
+                    argument_escaped = True
+                elif character == argument_quote:
+                    argument_quote = None
+                continue
+            if character in {"'", '"', "`"}:
+                argument_quote = character
+            elif character in "([{":
+                nested_depth += 1
+            elif character in ")]}":
+                nested_depth -= 1
+            elif character == "," and nested_depth == 0:
+                raw_parts.append(arguments[part_start:argument_index].strip())
+                part_start = argument_index + 1
+        raw_parts.append(arguments[part_start:].strip())
+        if not raw_parts or any(not part for part in raw_parts):
+            callee = match.group("callee")
+            raise JauntConfigError(
+                "Vitest configuration uses a computed path that cannot be captured safely: "
+                + callee
+            )
+        parts: list[str] = []
+        for raw_part in raw_parts:
+            if raw_part in {"__dirname", "import.meta.dirname"}:
+                parts.append(config_directory)
+                continue
+            if raw_part == "process.cwd()":
+                parts.append("")
+                continue
+            if raw_part.startswith("`") and raw_part.endswith("`") and "${" not in raw_part:
+                parts.append(raw_part[1:-1])
+                continue
+            try:
+                part = ast.literal_eval(raw_part)
+            except (SyntaxError, ValueError) as exc:
+                callee = match.group("callee")
+                raise JauntConfigError(
+                    "Vitest configuration uses a computed path that cannot be captured safely: "
+                    + callee
+                ) from exc
+            if not isinstance(part, str):
+                raise JauntConfigError("Vitest configuration path arguments must be strings")
+            parts.append(part)
+        combined = posixpath.normpath(posixpath.join(*[part.replace("\\", "/") for part in parts]))
+        if callees[match.group("callee")] == "resolve" and combined.startswith("/"):
+            raise JauntConfigError("Vitest configuration resolves a path outside the workspace")
+        values.append(combined)
+        spans.append((open_index + 1, index - 1))
+    return tuple(values), tuple(spans)
 
 
 def _local_config_snapshot(
     root: Path,
     initial: str,
+    *,
+    client: object | None = None,
 ) -> tuple[Mapping[str, str], Mapping[str, str]]:
     """Capture a confined Vitest config closure as exact hashes and overlays."""
 
@@ -566,24 +2552,86 @@ def _local_config_snapshot(
                 + relative
             )
         overlays[relative] = source
-        quoted_values = re.findall(r"[\"'](?P<path>[^\"'\r\n]+)[\"']", source)
-        specifiers = [
-            value
-            for value in quoted_values
-            if not value.startswith(("data:", "http:", "https:", "node:"))
-            and (
-                value.startswith(("./", "../"))
-                or "/" in value
-                or "\\" in value
-                or Path(value).suffix
-                in {".cjs", ".cts", ".js", ".json", ".mjs", ".mts", ".ts", ".tsx"}
+        config_directory = path.parent.relative_to(root).as_posix()
+        metadata_spans = _vitest_non_path_metadata_spans(source)
+        computed_values, computed_spans = _static_config_path_calls(
+            source,
+            config_directory="" if config_directory == "." else config_directory,
+            metadata_spans=metadata_spans,
+        )
+        executable_specifiers = _config_module_specifiers(source)
+        alias_local_values: list[str] = []
+        for specifier in executable_specifiers:
+            if not specifier.startswith("#"):
+                continue
+            manifest_relative, manifest_digest, local_targets, _externals = (
+                _config_package_import_alias(root, path, specifier)
             )
+            previous_manifest_digest = hashes.setdefault(manifest_relative, manifest_digest)
+            if previous_manifest_digest != manifest_digest:
+                raise JauntGenerationError(
+                    "TypeScript Vitest package imports changed while their closure was "
+                    f"captured: {manifest_relative}"
+                )
+            alias_local_values.extend(local_targets)
+        comment_regions, string_regions = _typescript_lexical_regions(source)
+        quoted_values: list[str] = []
+        for start, end, quote in string_regions:
+            if _inside_region(start, comment_regions) or any(
+                span_start <= start and end <= span_end for span_start, span_end in computed_spans
+            ):
+                continue
+            literal = source[start:end]
+            if quote == "`":
+                value = literal[1:-1]
+                if "${" in value:
+                    if (
+                        not _is_vitest_path_field_value(source, start)
+                        and _inside_region(start, metadata_spans)
+                        and _metadata_template_interpolations_are_side_effect_free(value)
+                    ):
+                        continue
+                    raise JauntConfigError(
+                        "Vitest configuration uses an interpolated path or unresolved computed "
+                        "value that cannot be captured safely"
+                    )
+                if _inside_region(start, metadata_spans):
+                    continue
+                quoted_values.append(value)
+                continue
+            try:
+                value = ast.literal_eval(literal)
+            except (SyntaxError, ValueError):
+                value = literal[1:-1]
+            if isinstance(value, str):
+                if _inside_region(start, metadata_spans):
+                    continue
+                left = source[:start].rstrip()
+                right = source[end:].lstrip()
+                if _looks_like_local_config_path(value) and (
+                    left.endswith("+") or right.startswith("+")
+                ):
+                    raise JauntConfigError(
+                        "Vitest configuration uses a concatenated path that cannot be captured "
+                        "safely"
+                    )
+                quoted_values.append(value)
+        specifiers = [
+            (value, computed)
+            for values, computed in (
+                (quoted_values, False),
+                (executable_specifiers, False),
+                (computed_values, True),
+                (alias_local_values, True),
+            )
+            for value in values
+            if _looks_like_local_config_path(value) or _root_local_config_import(root, value)
         ]
-        for specifier in specifiers:
+        for specifier, computed in specifiers:
             normalized = specifier.replace("\\", "/")
             bases = (
                 (path.parent / normalized,)
-                if normalized.startswith(("./", "../"))
+                if not computed and normalized.startswith(("./", "../"))
                 else (root / normalized,)
             )
             candidates: list[Path] = []
@@ -645,7 +2693,10 @@ def _local_config_snapshot(
                 confined = _safe_path(root, relative_candidate.as_posix())
                 if confined.is_file():
                     pending.append(confined)
-    return dict(sorted(hashes.items())), dict(sorted(overlays.items()))
+    captured = dict(sorted(hashes.items())), dict(sorted(overlays.items()))
+    if client is not None:
+        _pin_vitest_config_dependency_runtimes(client, root, captured[1])
+    return captured
 
 
 def _local_config_closure(root: Path, initial: str) -> Mapping[str, str]:
@@ -809,16 +2860,11 @@ def _runner_runtime_snapshot(
                     f"Installed @usejaunt/ts has no runtime directory at {dist}"
                 )
             return ()
-        try:
-            paths = {
-                path.resolve(strict=True)
-                for path in dist.rglob("*")
-                if path.is_file() and _is_toolchain_identity_file(path)
-            }
-        except OSError as exc:
-            raise TypeScriptWorkerError(
-                f"Could not enumerate @usejaunt/ts test-runner runtime under {dist}: {exc}"
-            ) from exc
+        paths = {
+            path
+            for path in _runtime_package_identity_files(physical_root)
+            if path.relative_to(physical_root).parts[:1] == ("dist",)
+        }
         if any(path != physical_root and physical_root not in path.parents for path in paths):
             raise TypeScriptWorkerError("@usejaunt/ts test-runner runtime file escapes its package")
         missing = [
@@ -843,7 +2889,7 @@ def _runner_runtime_snapshot(
             for path in required
         }
         if isinstance(manifest, Mapping):
-            files["package.json"] = _canonical_digest(_runtime_manifest_identity(manifest))
+            files["package.json"] = _canonical_digest(_ordered_json_identity(manifest))
         return files
 
     files = digest_files()
@@ -1023,9 +3069,14 @@ def _test_provenance(
             project = _owner_project_for_source(root, config, workspace, path)
         owner = _test_package_owner(root, workspace, project)
         vitest_runtime_identity = _test_dependency_runtime_identity(root, owner, "vitest")
-    config_digest: object = (
-        _local_config_closure(root, target.vitest_config) if target.vitest_config else "default"
-    )
+    if target.vitest_config:
+        config_closure, config_overlays = _local_config_snapshot(root, target.vitest_config)
+        config_digest: object = {
+            "files": config_closure,
+            "packages": _config_package_runtime_identities(root, config_overlays),
+        }
+    else:
+        config_digest = "default"
     # Invocation-only ``--instruction`` values guide a paid repair attempt but
     # are not a committed behavioral input. Canonical config instructions still
     # flow through the default request and therefore remain provenance-bearing.
@@ -1503,14 +3554,23 @@ def _clear_rejected_test_candidate(
         return True
 
 
-def _is_verifiable_api_transition(mismatches: set[str]) -> bool:
+def _is_verifiable_api_transition(
+    mismatches: set[str],
+    *,
+    additional_allowed: set[str] | frozenset[str] = frozenset(),
+) -> bool:
     """Recognize drift that the safety-first committed-body check can prove."""
 
     required = {"target_api_digest", "battery_fingerprint"}
     # The prompt embeds target contract/API context, so a real API transition
     # can legitimately change it. Runner/Vitest drift is reheader-safe, but the
     # active runner still safety-typechecks the old body before it can execute.
-    allowed = required | set(_TEST_REHEADER_FINGERPRINTS) | {"prompt_fingerprint"}
+    allowed = (
+        required
+        | set(_TEST_REHEADER_FINGERPRINTS)
+        | {"prompt_fingerprint"}
+        | set(additional_allowed)
+    )
     return required.issubset(mismatches) and mismatches.issubset(allowed)
 
 
@@ -1754,7 +3814,14 @@ def _existing_test_battery_action(
                 provenance=provenance,
             ),
         )
-    api_proof_matches = metadata.get("target_api_digest") in proven_previous_api_digests
+    # A persisted implementation/API transition proves that the target bytes
+    # are current, not that an older battery still asserts the right behavior.
+    # Reuse it only when this command will execute the resulting battery;
+    # ``--no-run`` must regenerate instead of publishing an unexecuted reheader.
+    api_proof_matches = (
+        allow_verified_api_transition
+        and metadata.get("target_api_digest") in proven_previous_api_digests
+    )
     if api_proof_matches:
         allowed_tooling.add("target_api_digest")
     allowed = allowed_tooling | {"battery_fingerprint"}
@@ -1763,7 +3830,10 @@ def _existing_test_battery_action(
         or "battery_fingerprint" not in mismatches
         or not mismatches.issubset(allowed)
     ):
-        if allow_verified_api_transition and _is_verifiable_api_transition(mismatches):
+        if allow_verified_api_transition and _is_verifiable_api_transition(
+            mismatches,
+            additional_allowed=allowed_tooling,
+        ):
             return (
                 "verify",
                 _with_test_header(
@@ -1868,6 +3938,111 @@ def _read_typescript_string_literal(source: str, start: int) -> tuple[str, int] 
 def _typescript_template_expressions(source: str, start: int) -> tuple[int, tuple[str, ...]]:
     """Return executable ``${...}`` bodies while ignoring inert template text."""
 
+    def expression_end(expression_start: int) -> tuple[int, tuple[str, ...]]:
+        cursor = expression_start
+        depth = 1
+        nested_expressions: list[str] = []
+        expression_tokens: list[tuple[str, str]] = []
+        control_parentheses: list[bool] = []
+        statement_braces: list[bool] = []
+        previous_closed_control_head = False
+        previous_closed_statement_brace = False
+        pending_line_break = False
+
+        def record(kind: str, value: str) -> None:
+            nonlocal pending_line_break
+            nonlocal previous_closed_control_head, previous_closed_statement_brace
+            closes_control_head = False
+            closes_statement_brace = False
+            if kind == "punctuation" and value == "(":
+                control_parentheses.append(_opens_control_flow_parenthesis(expression_tokens))
+            elif kind == "punctuation" and value == ")":
+                closes_control_head = control_parentheses.pop() if control_parentheses else False
+            elif kind == "punctuation" and value == "{":
+                statement_braces.append(
+                    _opens_statement_brace(
+                        expression_tokens,
+                        enclosing_statement_brace=(
+                            statement_braces[-1] if statement_braces else None
+                        ),
+                        previous_closed_control_head=previous_closed_control_head,
+                        previous_closed_statement_brace=previous_closed_statement_brace,
+                        line_break_before=pending_line_break,
+                    )
+                )
+            elif kind == "punctuation" and value == "}":
+                closes_statement_brace = statement_braces.pop() if statement_braces else False
+            previous_closed_control_head = closes_control_head
+            previous_closed_statement_brace = closes_statement_brace
+            expression_tokens.append((kind, value))
+            pending_line_break = False
+
+        def slash_starts_regex() -> bool:
+            if not expression_tokens:
+                return True
+            kind, value = expression_tokens[-1]
+            if kind in {"number", "regex", "string", "template"}:
+                return False
+            if kind == "identifier":
+                return _identifier_precedes_regex(expression_tokens)
+            if value == ")" and previous_closed_control_head:
+                return True
+            if value == "}" and previous_closed_statement_brace:
+                return True
+            return value not in {")", "]", "}", "++", "--"}
+
+        while cursor < len(source) and depth:
+            next_cursor = _skip_typescript_trivia(source, cursor)
+            if next_cursor != cursor:
+                pending_line_break = pending_line_break or any(
+                    character in "\r\n" for character in source[cursor:next_cursor]
+                )
+                cursor = next_cursor
+                continue
+            character = source[cursor]
+            if character in {'"', "'"}:
+                parsed = _read_typescript_string_literal(source, cursor)
+                cursor = parsed[1] if parsed is not None else cursor + 1
+                record("string", "literal")
+                continue
+            if character == "`":
+                cursor, nested = _typescript_template_expressions(source, cursor)
+                nested_expressions.extend(nested)
+                record("template", "literal")
+                continue
+            if character == "/" and slash_starts_regex():
+                end = _skip_typescript_regex(source, cursor)
+                if end > cursor + 1:
+                    cursor = end
+                    record("regex", "regex")
+                    continue
+            if character.isalpha() or character in "_$":
+                end = cursor + 1
+                while end < len(source) and (source[end].isalnum() or source[end] in "_$"):
+                    end += 1
+                record("identifier", source[cursor:end])
+                cursor = end
+                continue
+            if character.isdigit():
+                end = cursor + 1
+                while end < len(source) and (source[end].isalnum() or source[end] in "._"):
+                    end += 1
+                record("number", source[cursor:end])
+                cursor = end
+                continue
+            if character == "{":
+                depth += 1
+            elif character == "}":
+                depth -= 1
+                if depth == 0:
+                    nested_expressions.append(source[expression_start:cursor])
+                    return cursor + 1, tuple(nested_expressions)
+            pair = source[cursor : cursor + 2]
+            punctuation = pair if pair in {"++", "--", "=>", "?."} else character
+            record("punctuation", punctuation)
+            cursor += len(punctuation)
+        return len(source), tuple(nested_expressions)
+
     expressions: list[str] = []
     cursor = start + 1
     while cursor < len(source):
@@ -1880,50 +4055,8 @@ def _typescript_template_expressions(source: str, start: int) -> tuple[int, tupl
             cursor += 1
             continue
         expression_start = cursor + 2
-        cursor = expression_start
-        depth = 1
-        previous_significant = ""
-        while cursor < len(source) and depth:
-            next_cursor = _skip_typescript_trivia(source, cursor)
-            if next_cursor != cursor:
-                cursor = next_cursor
-                continue
-            character = source[cursor]
-            if character in {'"', "'"}:
-                parsed = _read_typescript_string_literal(source, cursor)
-                cursor = parsed[1] if parsed is not None else cursor + 1
-                previous_significant = "literal"
-                continue
-            if character == "`":
-                cursor, nested = _typescript_template_expressions(source, cursor)
-                expressions.extend(nested)
-                previous_significant = "literal"
-                continue
-            if character == "/" and (
-                not previous_significant
-                or previous_significant in "=(:,[!&|?{;"
-                or previous_significant in {"case", "return", "throw"}
-            ):
-                cursor = _skip_typescript_regex(source, cursor)
-                previous_significant = "literal"
-                continue
-            if character == "{":
-                depth += 1
-            elif character == "}":
-                depth -= 1
-                if depth == 0:
-                    expressions.append(source[expression_start:cursor])
-                    cursor += 1
-                    break
-            if character.isalpha() or character in "_$":
-                end = cursor + 1
-                while end < len(source) and (source[end].isalnum() or source[end] in "_$"):
-                    end += 1
-                previous_significant = source[cursor:end]
-                cursor = end
-            else:
-                previous_significant = character
-                cursor += 1
+        cursor, nested = expression_end(expression_start)
+        expressions.extend(nested)
     return len(source), tuple(expressions)
 
 
@@ -1958,6 +4091,7 @@ def _static_typescript_module_references(source: str) -> tuple[str, ...]:
     references: list[str] = []
     cursor = 0
     previous_significant = ""
+    previous_identifier_is_member = False
     while cursor < len(source):
         next_cursor = _skip_typescript_trivia(source, cursor)
         if next_cursor != cursor:
@@ -1968,20 +4102,25 @@ def _static_typescript_module_references(source: str) -> tuple[str, ...]:
             parsed = _read_typescript_string_literal(source, cursor)
             cursor = parsed[1] if parsed is not None else cursor + 1
             previous_significant = "literal"
+            previous_identifier_is_member = False
             continue
         if character == "`":
             cursor, expressions = _typescript_template_expressions(source, cursor)
             for expression in expressions:
                 references.extend(_static_typescript_module_references(expression))
             previous_significant = "literal"
+            previous_identifier_is_member = False
             continue
         if character == "/" and (
             not previous_significant
             or previous_significant in "=(:,[!&|?{;"
-            or previous_significant in {"case", "return", "throw"}
+            or (
+                previous_significant in _REGEX_PREFIX_KEYWORDS and not previous_identifier_is_member
+            )
         ):
             cursor = _skip_typescript_regex(source, cursor)
             previous_significant = "literal"
+            previous_identifier_is_member = False
             continue
         if character.isalpha() or character in "_$":
             end = cursor + 1
@@ -2017,10 +4156,12 @@ def _static_typescript_module_references(source: str) -> tuple[str, ...]:
                 parsed = _read_typescript_string_literal(source, argument)
                 if parsed is not None:
                     references.append(parsed[0])
+            previous_identifier_is_member = previous_significant == "."
             previous_significant = identifier
             cursor = end
             continue
         previous_significant = character
+        previous_identifier_is_member = False
         cursor += 1
     return tuple(dict.fromkeys(references))
 
@@ -2760,10 +4901,20 @@ def _test_battery_diagnostics(
                     if distinct is not None
                     else " stale"
                 )
+                migration_safe_fields = (
+                    {"fixture_fingerprint"}
+                    if metadata is not None
+                    and "fixture_fingerprint" not in metadata
+                    and expected.get("fixture_fingerprint") == _canonical_digest(None)
+                    else set()
+                )
                 remedy = (
                     "run `jaunt test --language ts --no-build` without `--no-run`, then "
                     "rerun `jaunt check`."
-                    if _is_verifiable_api_transition(mismatch_fields)
+                    if _is_verifiable_api_transition(
+                        mismatch_fields,
+                        additional_allowed=migration_safe_fields,
+                    )
                     else "run `jaunt test --language ts`."
                 )
                 diagnostics.append(
@@ -3109,6 +5260,25 @@ def _safe_runner_category(value: object) -> bool:
     return isinstance(value, str) and value in _RUNNER_CATEGORIES
 
 
+def _runner_startup_failure(item: object) -> str | None:
+    """Return the one message-bearing record the protected runner may expose."""
+
+    if not isinstance(item, Mapping):
+        return None
+    record = cast(Mapping[object, object], item)
+    if set(record) != {"caseId", "category", "message"}:
+        return None
+    message = record["message"]
+    if (
+        record["caseId"] != "opaque-runner-failure"
+        or record["category"] != "runner"
+        or not isinstance(message, str)
+        or len(message) > _MAX_PROTECTED_DIAGNOSTIC_MESSAGE_CHARS
+    ):
+        return None
+    return message
+
+
 def _safe_runner_diagnostic(item: object) -> bool:
     if not isinstance(item, Mapping):
         return False
@@ -3145,6 +5315,8 @@ def _redaction_surface_valid(result: Mapping[str, Any]) -> bool:
             return False
         if str(item.get("tier", "derived")) == "example":
             continue
+        if "message" in item and "tier" not in item and _runner_startup_failure(item) is None:
+            return False
         case_id = item.get("caseId")
         category = item.get("category")
         if case_id is not None and not _safe_runner_case_id(case_id):
@@ -3209,6 +5381,9 @@ def _valid_runner_dto(
         if not isinstance(item, Mapping):
             return False
         keys = set(item)
+        if expected_mode == "run" and _runner_startup_failure(item) is not None:
+            failed = True
+            continue
         if redact_derived and keys == protected_derived_allowed:
             if not _safe_runner_case_id(item.get("caseId")) or not _safe_runner_category(
                 item.get("category")
@@ -3304,6 +5479,9 @@ def _runner_surfaces(result: Mapping[str, Any]) -> tuple[list[object], list[obje
                 if str(item.get("tier", "derived")) == "example":
                     allowed.append(item)
                     continue
+                if _runner_startup_failure(item) is not None:
+                    allowed.append(item)
+                    continue
                 public_keys = {"caseId", "category"}
                 allowed.append({name: item[name] for name in public_keys if name in item})
                 sensitive.append(
@@ -3353,6 +5531,8 @@ def _assert_no_held_out_leak(
                     "Protected runner output failed the held-out shape assertion"
                 )
             if item.get("tier") == "example":
+                continue
+            if _runner_startup_failure(item) is not None:
                 continue
             if not set(item).issubset({"caseId", "category"}):
                 raise _HeldOutLeakError(
@@ -3428,6 +5608,16 @@ def _redact_runner_result(result: Mapping[str, Any], *, enabled: bool) -> dict[s
             tier = str(test.get("tier", "derived"))
             if tier == "example":
                 redacted.append(dict(test))
+                continue
+            startup_message = _runner_startup_failure(test)
+            if startup_message is not None:
+                redacted.append(
+                    {
+                        "caseId": "opaque-runner-failure",
+                        "category": "runner",
+                        "message": startup_message,
+                    }
+                )
                 continue
             public = {key: str(test[key]) for key in ("caseId", "category") if key in test}
             if public:
@@ -4440,6 +6630,7 @@ async def _run_test_runner(
     *,
     files: Sequence[str],
     overlays: Mapping[str, str] | None = None,
+    root_overlay_paths: Sequence[str] | None = None,
     redact_derived: bool = True,
     typecheck_only: bool = False,
     declaration_emit: bool = False,
@@ -4525,6 +6716,8 @@ async def _run_test_runner(
         "compilerModulePath": str(compiler_module_path),
         "generatedDir": target.generated_dir,
     }
+    if root_overlay_paths is not None:
+        payload["rootOverlayPaths"] = list(dict.fromkeys(root_overlay_paths))
     if tier is not None:
         payload["tier"] = tier
     if deleted_files:
@@ -4777,6 +6970,7 @@ async def _run_test_batches(
     config_snapshot: tuple[Mapping[str, str], Mapping[str, str]] | None = None,
 ) -> Mapping[str, Any]:
     effective_overlays = dict(overlays or {})
+    validation_overlay_roots = set(effective_overlays)
     deleted_files: tuple[str, ...] = ()
     if config_snapshot is not None:
         config_closure, config_overlays = config_snapshot
@@ -4786,6 +6980,7 @@ async def _run_test_batches(
                 raise JauntGenerationError(
                     "TypeScript validation overlays conflict with captured Vitest input: " + path
                 )
+        validation_overlay_roots.difference_update(config_overlays)
         deleted_files = tuple(
             sorted(
                 path
@@ -4793,6 +6988,7 @@ async def _run_test_batches(
                 if digest == MISSING_INPUT and path not in effective_overlays
             )
         )
+        _pin_vitest_config_dependency_runtimes(client, root, config_overlays)
     grouped = _group_test_files(
         root,
         config,
@@ -4828,6 +7024,9 @@ async def _run_test_batches(
                 config,
                 files=project_files,
                 overlays=batch_overlays,
+                root_overlay_paths=tuple(
+                    path for path in batch_overlays if path in validation_overlay_roots
+                ),
                 redact_derived=redact_derived,
                 typecheck_only=True,
                 deleted_files=deleted_files,
@@ -4987,7 +7186,9 @@ async def _validate_committed_target_batteries(
     _pin_test_runtime_identity(client)
     target = _target(config)
     config_closure, config_overlays = (
-        _local_config_snapshot(root, target.vitest_config) if target.vitest_config else ({}, {})
+        _local_config_snapshot(root, target.vitest_config, client=client)
+        if target.vitest_config
+        else ({}, {})
     )
     owners = dict(_workspace_test_file_owners(root, config, analysis.workspace))
     files: list[str] = []
@@ -5138,6 +7339,15 @@ def _runner_validation_errors(result: Mapping[str, Any]) -> list[str]:
     """Render protected-runner diagnostics as actionable generator feedback."""
 
     errors: list[str] = []
+    raw_tests = result.get("tests", [])
+    if isinstance(raw_tests, list):
+        for item in raw_tests:
+            startup_message = _runner_startup_failure(item)
+            if startup_message is not None:
+                errors.append(
+                    "Vitest runner startup failed"
+                    + (": " + startup_message if startup_message else " without an error message")
+                )
     raw_diagnostics = result.get("diagnostics", [])
     if isinstance(raw_diagnostics, list):
         for item in raw_diagnostics:
@@ -5175,6 +7385,7 @@ async def run_test(
     no_redact_derived: bool = False,
     force: bool = False,
     generator: GeneratorBackend | None = None,
+    generator_factory: Callable[[], GeneratorBackend] | None = None,
     cost_tracker: CostTracker | None = None,
     response_cache: ResponseCache | None = None,
     progress: object | None = None,
@@ -5192,6 +7403,8 @@ async def run_test(
 ) -> TargetTestReport:
     """Generate typed Vitest batteries and run them through the protected runner."""
 
+    if generator is not None and generator_factory is not None:
+        raise JauntConfigError("Pass either generator or generator_factory, not both")
     root = root.resolve()
     _recover_atomic_write_manifests(root)
     if response_cache is None:
@@ -5235,11 +7448,29 @@ async def run_test(
         )
         npm_skill_metadata = npm_skills.metadata()
 
+    aggregate_cost = cost_tracker or CostTracker(max_cost=config.llm.max_cost_per_build)
+
     def phase_cost_tracker() -> CostTracker:
-        if cost_tracker is None:
-            return CostTracker(max_cost=config.llm.max_cost_per_build)
-        child = getattr(cost_tracker, "child", None)
-        return child() if callable(child) else _ForwardingPhaseCostTracker(cost_tracker)
+        child = getattr(aggregate_cost, "child", None)
+        return child() if callable(child) else _ForwardingPhaseCostTracker(aggregate_cost)
+
+    def merged_operation_cost(*summaries: Mapping[str, Any]) -> Mapping[str, object]:
+        if cost_tracker is not None and not callable(getattr(cost_tracker, "child", None)):
+            return cost_tracker.summary_dict()
+        return _cost_summary(*summaries)
+
+    # Resolve one backend only when a build or battery actually needs generation.
+    # The cached resolver preserves one quota-wait budget across both phases while
+    # keeping clean/no-work commands independent of Codex construction.
+    backend = generator
+
+    def model_backend() -> GeneratorBackend:
+        nonlocal backend
+        if backend is None:
+            backend = (
+                generator_factory() if generator_factory is not None else _default_backend(config)
+            )
+        return backend
 
     if not no_build:
         _progress_reset(progress)
@@ -5251,6 +7482,7 @@ async def run_test(
                 target_ids=target_ids,
                 force=force,
                 generator=generator,
+                generator_factory=model_backend if generator is None else None,
                 cost_tracker=build_phase_cost,
                 response_cache=response_cache,
                 progress=progress,
@@ -5276,6 +7508,7 @@ async def run_test(
                 target_ids=target_ids,
                 force=force,
                 generator=generator,
+                generator_factory=model_backend if generator is None else None,
                 cost_tracker=build_phase_cost,
                 response_cache=response_cache,
                 progress=progress,
@@ -5304,7 +7537,6 @@ async def run_test(
                 exit_code=build.exit_code,
             )
 
-    backend = generator or _default_backend(config)
     cost = phase_cost_tracker()
     overlays: dict[str, str] = {}
     planned_generated: set[str] = set()
@@ -5360,7 +7592,7 @@ async def run_test(
         for request, result, fingerprint, path, tier in pending_cache_writes:
             store_generation_result(
                 response_cache,
-                backend,
+                model_backend(),
                 request,
                 result,
                 generation_fingerprint=fingerprint,
@@ -5400,7 +7632,7 @@ async def run_test(
             )
         )
         pinned_vitest_config_snapshot = (
-            _local_config_snapshot(root, target_config.vitest_config)
+            _local_config_snapshot(root, target_config.vitest_config, client=client)
             if target_config.vitest_config
             else ({}, {})
         )
@@ -5828,7 +8060,7 @@ async def run_test(
 
                 try:
                     result = await generate_request_cached(
-                        backend,
+                        model_backend(),
                         validated_request,
                         max_attempts=max_attempts,
                         generation_fingerprint=cache_fingerprint,
@@ -5840,6 +8072,8 @@ async def run_test(
                         cached_validator=validate_cached_source,
                         store=False,
                     )
+                except (JauntBudgetExceededError, JauntQuotaGenerationError):
+                    raise
                 except _CommittedBatteryInfrastructureError as error:
                     usage = (
                         TokenUsage(
@@ -5867,11 +8101,20 @@ async def run_test(
                     if result.source is not None and result.attempts > 0:
                         store_generation_result(
                             response_cache,
-                            backend,
+                            model_backend(),
                             validated_request,
                             replace(result, errors=[]),
                             generation_fingerprint=cache_fingerprint,
                         )
+                except JauntGenerationError as error:
+                    message = str(error)
+                    result = GenerationResult(
+                        attempts=0,
+                        source=None,
+                        errors=[message],
+                        infrastructure_errors=(message,),
+                        infrastructure_exhausted=True,
+                    )
             return (
                 spec_path,
                 validated_request,
@@ -6016,11 +8259,17 @@ async def run_test(
                 _progress_phase(progress, request.target_path, state, tier)
                 _progress_advance(progress, request.target_path, ok=True)
         finally:
-            unfinished = [task for task in tasks if not task.done()]
-            for task in unfinished:
-                task.cancel()
-            if unfinished:
-                await asyncio.gather(*unfinished, return_exceptions=True)
+            # A fatal result may arrive after one or more sibling tasks have
+            # already failed.  Draining only pending tasks leaves those done
+            # exceptions unobserved and emits ``Task exception was never
+            # retrieved`` after the command returns.  Cancel pending work, but
+            # gather every task so the first awaited exception remains the
+            # public failure while all sibling outcomes are consumed.
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
 
         files = tuple(
             sorted(
@@ -6203,11 +8452,70 @@ async def run_test(
                     if cached is not None:
                         battery_outcomes[path]["cache_evicted"] = discard_cached_generation(
                             response_cache,
-                            backend,
+                            model_backend(),
                             request,
                             generation_fingerprint=fingerprint,
                             expected_source=source,
                         )
+
+        async def run_surviving_batteries(
+            candidate_paths: Sequence[str],
+            candidate_files: Sequence[str],
+            *,
+            rejection_reasons: Callable[[Mapping[str, Any]], tuple[str, ...]],
+        ) -> tuple[
+            tuple[str, ...],
+            tuple[str, ...],
+            Mapping[str, str],
+            tuple[str, ...],
+            Mapping[str, Any],
+        ]:
+            """Reject attributable runtime failures, then prove the survivors.
+
+            Each failed iteration must remove at least one candidate before the
+            next run. An unattributed/protocol failure stops the loop without
+            publishing the still-staged survivors.
+            """
+
+            current_paths = tuple(candidate_paths)
+            current_files = tuple(candidate_files)
+            current_overlays = {path: overlays[path] for path in current_paths}
+            rejected: list[str] = []
+            result: Mapping[str, Any] = {"ok": True, "skipped": True}
+            while current_paths:
+                result = await _run_test_batches(
+                    client,
+                    root,
+                    config,
+                    analysis.workspace,
+                    files=current_files,
+                    explicit_owners=test_owners,
+                    overlays=current_overlays,
+                    redact_derived=not no_redact_derived,
+                    config_snapshot=pinned_vitest_config_snapshot,
+                )
+                if bool(result.get("ok", False)):
+                    break
+                failed_paths = _runner_candidate_rejection_paths(result, current_paths)
+                if not failed_paths:
+                    break
+                failed_set = set(failed_paths)
+                reasons = rejection_reasons(result)
+                reject_batteries(
+                    failed_paths,
+                    {path: reasons for path in failed_paths},
+                )
+                rejected.extend(failed_paths)
+                current_paths = tuple(path for path in current_paths if path not in failed_set)
+                current_files = tuple(path for path in current_files if path not in failed_set)
+                current_overlays = {path: overlays[path] for path in current_paths}
+            return (
+                current_paths,
+                current_files,
+                current_overlays,
+                tuple(dict.fromkeys(rejected)),
+                result,
+            )
 
         if failed:
             stage_preflight: Mapping[str, Any] = {"ok": True, "skipped": True}
@@ -6296,43 +8604,30 @@ async def run_test(
                 else {"ok": True, "skipped": True}
             )
             if accepted_overlays and not no_run and not stage_preflight_blocked:
-                stage_runner = await _run_test_batches(
-                    client,
-                    root,
-                    config,
-                    analysis.workspace,
-                    files=surviving_stage_files,
-                    explicit_owners=test_owners,
-                    overlays=accepted_overlays,
-                    redact_derived=not no_redact_derived,
-                    config_snapshot=pinned_vitest_config_snapshot,
+                (
+                    accepted_paths,
+                    surviving_stage_files,
+                    accepted_overlays,
+                    runtime_rejected,
+                    stage_runner,
+                ) = await run_surviving_batteries(
+                    accepted_paths,
+                    surviving_stage_files,
+                    rejection_reasons=lambda result: tuple(_runner_validation_errors(result)),
                 )
-                if not bool(stage_runner.get("ok", False)):
-                    runtime_rejected = _runner_candidate_rejection_paths(
-                        stage_runner,
-                        accepted_paths,
-                    )
-                    if runtime_rejected:
-                        runtime_reasons = tuple(_runner_validation_errors(stage_runner))
-                        reject_batteries(
-                            runtime_rejected,
-                            {path: runtime_reasons for path in runtime_rejected},
-                        )
-                        accepted.difference_update(runtime_rejected)
-                        accepted_paths = tuple(path for path in accepted_paths if path in accepted)
-                        rejected_paths = tuple(sorted({*rejected_paths, *runtime_rejected}))
-                        accepted_overlays = {path: overlays[path] for path in accepted_paths}
-                    else:
-                        failed["stage-runner"] = (
-                            TargetDiagnostic(
-                                code="JAUNT_TS_TEST_INFRASTRUCTURE",
-                                message=(
-                                    "The surviving TypeScript battery set could not be executed; "
-                                    "validated candidates were retained in the response cache and "
-                                    "were not committed."
-                                ),
+                accepted = set(accepted_paths)
+                rejected_paths = tuple(sorted({*rejected_paths, *runtime_rejected}))
+                if not bool(stage_runner.get("ok", False)) and accepted_paths:
+                    failed["stage-runner"] = (
+                        TargetDiagnostic(
+                            code="JAUNT_TS_TEST_INFRASTRUCTURE",
+                            message=(
+                                "The surviving TypeScript battery set could not be executed; "
+                                "validated candidates were retained in the response cache and "
+                                "were not committed."
                             ),
-                        )
+                        ),
+                    )
 
             cacheable_paths = accepted | set(retained_paths)
             pending_cache_writes[:] = [
@@ -6396,11 +8691,7 @@ async def run_test(
                         )
             _progress_finish(progress)
             test_cost = cost.summary_dict()
-            merged_cost = (
-                cost_tracker.summary_dict()
-                if cost_tracker is not None and not callable(getattr(cost_tracker, "child", None))
-                else _cost_summary(build_cost, test_cost)
-            )
+            merged_cost = merged_operation_cost(build_cost, test_cost)
             return TargetTestReport(
                 language="ts",
                 generated=frozenset(generated),
@@ -6489,41 +8780,26 @@ async def run_test(
                 else {"ok": True, "skipped": True}
             )
             if not no_run and not preflight_blocked and accepted_overlays and accepted_files:
-                partial_runner = await _run_test_batches(
-                    client,
-                    root,
-                    config,
-                    analysis.workspace,
-                    files=accepted_files,
-                    explicit_owners=test_owners,
-                    overlays=accepted_overlays,
-                    redact_derived=not no_redact_derived,
-                    config_snapshot=pinned_vitest_config_snapshot,
-                )
-            failed_partial_paths = (
-                _runner_candidate_rejection_paths(partial_runner, accepted_paths)
-                if not bool(partial_runner.get("ok", False))
-                else ()
-            )
-            if failed_partial_paths:
-                reject_batteries(
+                (
+                    accepted_paths,
+                    accepted_files,
+                    accepted_overlays,
                     failed_partial_paths,
-                    {
-                        path: (
-                            "The compatible-subset Vitest run rejected this battery; "
-                            "its cached response was removed.",
-                        )
-                        for path in failed_partial_paths
-                    },
+                    partial_runner,
+                ) = await run_surviving_batteries(
+                    accepted_paths,
+                    accepted_files,
+                    rejection_reasons=lambda _result: (
+                        "The compatible-subset Vitest run rejected this battery; "
+                        "its cached response was removed.",
+                    ),
                 )
-                failed_partial = set(failed_partial_paths)
-                accepted.difference_update(failed_partial)
-                accepted_paths = tuple(path for path in accepted_paths if path in accepted)
+                accepted = set(accepted_paths)
                 rejected_paths = tuple(sorted({*rejected_paths, *failed_partial_paths}))
+                failed_partial = set(failed_partial_paths)
                 retained_paths = tuple(
                     path for path in retained_paths if path not in failed_partial
                 )
-                accepted_overlays = {path: overlays[path] for path in accepted_paths}
             partial_committed = bool(accepted_overlays) and bool(partial_runner.get("ok", False))
             committed_generated = planned_generated.intersection(accepted)
             committed_refrozen = planned_refrozen.intersection(accepted)
@@ -6583,11 +8859,7 @@ async def run_test(
                         )
             _progress_finish(progress)
             test_cost = cost.summary_dict()
-            merged_cost = (
-                cost_tracker.summary_dict()
-                if cost_tracker is not None and not callable(getattr(cost_tracker, "child", None))
-                else _cost_summary(build_cost, test_cost)
-            )
+            merged_cost = merged_operation_cost(build_cost, test_cost)
             return TargetTestReport(
                 language="ts",
                 generated=frozenset(generated),
@@ -6829,7 +9101,7 @@ async def run_test(
                     config,
                     target_ids=repair_targets,
                     force=True,
-                    generator=generator,
+                    generator=model_backend(),
                     cost_tracker=repair_phase_cost,
                     response_cache=ResponseCache(repair_root / ".jaunt" / "cache"),
                     progress=progress,
@@ -6957,10 +9229,7 @@ async def run_test(
     else:
         commit_test_outputs()
     test_cost = cost.summary_dict()
-    if cost_tracker is not None and not callable(getattr(cost_tracker, "child", None)):
-        merged_cost = cost_tracker.summary_dict()
-    else:
-        merged_cost = _cost_summary(build_cost, test_cost, repair_cost)
+    merged_cost = merged_operation_cost(build_cost, test_cost, repair_cost)
     runner_metadata: dict[str, Any] = {
         **runner,
         "cost": merged_cost,

@@ -10,6 +10,7 @@ import asyncio
 import glob
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -17,7 +18,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
@@ -29,10 +30,12 @@ from jaunt.diagnostics import (
 )
 from jaunt.dotenv import load_dotenv_into_environ
 from jaunt.errors import (
+    JauntBudgetExceededError,
     JauntConfigError,
     JauntDependencyCycleError,
     JauntDiscoveryError,
     JauntGenerationError,
+    JauntQuotaGenerationError,
 )
 from jaunt.init_template import (
     INIT_SPEC_TEMPLATE,
@@ -177,6 +180,16 @@ def _add_build_generation_flags(p: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_quota_wait_flag(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--quota-wait",
+        type=_nonnegative_float,
+        default=None,
+        metavar="MINUTES",
+        help=("Command-wide wait budget for Codex plan-level usage limits (default: config or 0)."),
+    )
+
+
 def _positive_float(value: str) -> float:
     try:
         parsed = float(value)
@@ -192,8 +205,8 @@ def _nonnegative_float(value: str) -> float:
         parsed = float(value)
     except ValueError as e:
         raise argparse.ArgumentTypeError("must be a number") from e
-    if parsed < 0:
-        raise argparse.ArgumentTypeError("must be greater than or equal to 0")
+    if not math.isfinite(parsed) or parsed < 0:
+        raise argparse.ArgumentTypeError("must be finite and greater than or equal to 0")
     return parsed
 
 
@@ -206,6 +219,7 @@ def _build_parser() -> argparse.ArgumentParser:
     build_p = subparsers.add_parser("build", help="Generate code for magic specs.")
     _add_common_flags(build_p)
     _add_build_generation_flags(build_p)
+    _add_quota_wait_flag(build_p)
     build_p.add_argument(
         "--no-repo-map", action="store_true", help="Disable repo-map injection for this build."
     )
@@ -220,6 +234,7 @@ def _build_parser() -> argparse.ArgumentParser:
     test_p = subparsers.add_parser("test", help="Generate tests and run the target test runner.")
     _add_common_flags(test_p)
     _add_build_generation_flags(test_p)
+    _add_quota_wait_flag(test_p)
     test_p.add_argument("--no-build", action="store_true", help="Skip `jaunt build`.")
     test_p.add_argument("--no-run", action="store_true", help="Skip running pytest or Vitest.")
     test_p.add_argument(
@@ -828,6 +843,9 @@ def _load_config(args: argparse.Namespace) -> tuple[Path, JauntConfig]:
 
     assert root is not None
     cfg = load_config(root=root, config_path=config_path)
+    quota_wait = getattr(args, "quota_wait", None)
+    if quota_wait is not None:
+        cfg = replace(cfg, codex=replace(cfg.codex, quota_wait_minutes=quota_wait))
     return root, cfg
 
 
@@ -956,6 +974,7 @@ def _cmd_typescript_build_loaded(args: argparse.Namespace, root: Path, cfg: Jaun
     from jaunt.typescript.cli_bridge import build_payload
 
     json_mode = _is_json_mode(args)
+    cost_tracker = _command_cost_tracker(args, cfg, "ts")
     progress = _make_progress(
         args,
         label="ts build",
@@ -970,11 +989,19 @@ def _cmd_typescript_build_loaded(args: argparse.Namespace, root: Path, cfg: Jaun
                 cfg,
                 target_ids=_typescript_target_ids(args),
                 force=bool(getattr(args, "force", False)),
+                generator_factory=lambda: _command_backend(args, cfg, "ts"),
+                cost_tracker=cost_tracker,
                 response_cache=_typescript_response_cache(args, root),
                 jobs=getattr(args, "jobs", None),
                 build_instructions=_effective_build_instructions(cfg, args),
                 semantic_gate_enabled=(
                     False if bool(getattr(args, "no_semantic_gate", False)) else None
+                ),
+                semantic_gate_exec=_command_semantic_exec(
+                    args,
+                    cfg,
+                    language="ts",
+                    charge_usage=False,
                 ),
                 repo_map_enabled=bool(cfg.context.repo_map)
                 and not bool(getattr(args, "no_repo_map", False)),
@@ -997,6 +1024,7 @@ def _cmd_typescript_test_loaded(args: argparse.Namespace, root: Path, cfg: Jaunt
     from jaunt.typescript.tester import run_test
 
     json_mode = _is_json_mode(args)
+    cost_tracker = _command_cost_tracker(args, cfg, "ts")
     progress = _make_progress(
         args,
         label="ts test",
@@ -1014,11 +1042,19 @@ def _cmd_typescript_test_loaded(args: argparse.Namespace, root: Path, cfg: Jaunt
                 no_run=bool(getattr(args, "no_run", False)),
                 no_redact_derived=bool(getattr(args, "no_redact_derived", False)),
                 force=bool(getattr(args, "force", False)),
+                generator_factory=lambda: _command_backend(args, cfg, "ts"),
+                cost_tracker=cost_tracker,
                 response_cache=_typescript_response_cache(args, root),
                 jobs=getattr(args, "jobs", None),
                 build_instructions=_effective_build_instructions(cfg, args),
                 semantic_gate_enabled=(
                     False if bool(getattr(args, "no_semantic_gate", False)) else None
+                ),
+                semantic_gate_exec=_command_semantic_exec(
+                    args,
+                    cfg,
+                    language="ts",
+                    charge_usage=False,
                 ),
                 repo_map_enabled=bool(cfg.context.repo_map)
                 and not bool(getattr(args, "no_repo_map", False)),
@@ -1359,6 +1395,7 @@ def _mixed_runtime_args(
     child._mixed_runtime = MixedTargetRuntime(
         jobs=jobs,
         max_cost=cfg.llm.max_cost_per_build,
+        quota_wait_minutes=cfg.codex.quota_wait_minutes,
     )
     return child
 
@@ -1906,7 +1943,7 @@ def _cmd_mixed_build(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> 
                             cfg,
                             target_ids=target_ids,
                             force=bool(getattr(args, "force", False)),
-                            generator=_command_backend(mixed_args, cfg, "ts"),
+                            generator_factory=lambda: _command_backend(mixed_args, cfg, "ts"),
                             cost_tracker=_command_cost_tracker(mixed_args, cfg, "ts"),
                             response_cache=_typescript_response_cache(mixed_args, root),
                             jobs=getattr(args, "jobs", None),
@@ -1916,6 +1953,7 @@ def _cmd_mixed_build(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> 
                             ),
                             semantic_gate_exec=_command_semantic_exec(
                                 mixed_args,
+                                cfg,
                                 language="ts",
                                 charge_usage=False,
                             ),
@@ -2055,7 +2093,7 @@ def _cmd_mixed_test(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> i
                             no_run=bool(getattr(args, "no_run", False)),
                             no_redact_derived=bool(getattr(args, "no_redact_derived", False)),
                             force=bool(getattr(args, "force", False)),
-                            generator=_command_backend(mixed_args, cfg, "ts"),
+                            generator_factory=lambda: _command_backend(mixed_args, cfg, "ts"),
                             cost_tracker=_command_cost_tracker(mixed_args, cfg, "ts"),
                             response_cache=_typescript_response_cache(mixed_args, root),
                             jobs=getattr(args, "jobs", None),
@@ -2065,6 +2103,7 @@ def _cmd_mixed_test(args: argparse.Namespace, root: Path, cfg: JauntConfig) -> i
                             ),
                             semantic_gate_exec=_command_semantic_exec(
                                 mixed_args,
+                                cfg,
                                 language="ts",
                                 charge_usage=False,
                             ),
@@ -2151,6 +2190,7 @@ def _mixed_reconcile_payload(
     typescript_payload: dict[str, object],
     *,
     exit_code: int,
+    aggregate_cost: dict[str, object] | None = None,
 ) -> dict[str, object]:
     py_reconciled_raw = python_payload.get("reconciled", [])
     py_reconciled = py_reconciled_raw if isinstance(py_reconciled_raw, list) else []
@@ -2172,6 +2212,7 @@ def _mixed_reconcile_payload(
     if not isinstance(ts_target, dict):
         ts_target = {}
     ts_usage = typescript_payload.get("usage")
+    ts_cost = typescript_payload.get("cost")
     ts_ok = bool(typescript_payload.get("ok", False))
     ts_target = {
         **ts_target,
@@ -2180,6 +2221,8 @@ def _mixed_reconcile_payload(
     }
     if isinstance(ts_usage, dict):
         ts_target = {**ts_target, "usage": ts_usage}
+    if isinstance(ts_cost, dict):
+        ts_target = {**ts_target, "cost": ts_cost}
     py_target: dict[str, object] = {
         "ok": bool(python_payload.get("ok", False)),
         "skipped": bool(python_payload.get("skipped", False)),
@@ -2202,11 +2245,14 @@ def _mixed_reconcile_payload(
         "diagnostics": ts_diagnostics if isinstance(ts_diagnostics, list) else [],
         "targets": {"py": py_target, "ts": ts_target},
     }
-    if isinstance(ts_usage, dict):
-        payload["usage"] = ts_usage
-    aggregate_cost = _aggregate_cost_payloads(py_cost, ts_usage)
-    if aggregate_cost:
-        payload["cost"] = aggregate_cost
+    command_cost = aggregate_cost or _aggregate_cost_payloads(py_cost, ts_cost)
+    if command_cost:
+        payload["cost"] = command_cost
+        # Reconcile exposed ``usage`` before mixed commands gained a canonical
+        # command-wide ``cost`` field. Keep that alias, but make it command-wide
+        # rather than the previous TypeScript-only subtotal.
+        if isinstance(ts_usage, dict):
+            payload["usage"] = command_cost
     strength = typescript_payload.get("strength")
     if isinstance(strength, dict):
         payload["strength"] = strength
@@ -2363,13 +2409,21 @@ def _cmd_mixed_reconcile(args: argparse.Namespace, root: Path, cfg: JauntConfig)
         }
     py_payload["cost"] = mixed_args._mixed_runtime.summary("py")
     ts_payload = lifecycle_payload(ts_report)
-    ts_payload["usage"] = mixed_args._mixed_runtime.summary("ts")
+    ts_cost = mixed_args._mixed_runtime.summary("ts")
+    ts_payload["cost"] = ts_cost
+    # Preserve the existing reconcile usage alias for standalone/mixed clients.
+    ts_payload["usage"] = ts_cost
     if ts_skipped:
         raw_targets = ts_payload.get("targets")
         if isinstance(raw_targets, dict) and isinstance(raw_targets.get("ts"), dict):
             cast("dict[str, object]", raw_targets["ts"])["skipped"] = True
     exit_code = _merge_exit_codes(py_code, ts_report.exit_code)
-    payload = _mixed_reconcile_payload(py_payload, ts_payload, exit_code=exit_code)
+    payload = _mixed_reconcile_payload(
+        py_payload,
+        ts_payload,
+        exit_code=exit_code,
+        aggregate_cost=mixed_args._mixed_runtime.summary(),
+    )
     _emit_mixed_reconcile_payload(
         payload,
         args=args,
@@ -2750,12 +2804,25 @@ def _command_backend(
     cfg: JauntConfig,
     language: Literal["py", "ts"],
 ) -> GeneratorBackend:
-    """Return the normal backend or the command's shared mixed-target wrapper."""
+    """Return one backend per language for the lifetime of this command's args.
+
+    The same namespace flows through Python ``test`` build/test phases and is
+    shallow-copied for workspace owners, so caching here preserves one quota-wait
+    budget without changing owner-specific artifact routing. A new CLI command gets
+    a new namespace (and the public entry points clear any stale test-injected cache).
+    """
 
     runtime = getattr(args, "_mixed_runtime", None)
-    if runtime is None:
-        return _build_backend(cfg)
-    return runtime.backend(language, lambda: _build_backend(cfg))
+    if runtime is not None:
+        return runtime.backend(language, lambda: _build_backend(cfg))
+
+    backends = getattr(args, "_command_backends", None)
+    if not isinstance(backends, dict):
+        backends = {}
+        args._command_backends = backends
+    if language not in backends:
+        backends[language] = _build_backend(cfg)
+    return cast("GeneratorBackend", backends[language])
 
 
 def _command_cost_tracker(
@@ -2763,14 +2830,29 @@ def _command_cost_tracker(
     cfg: JauntConfig,
     language: Literal["py", "ts"],
 ) -> CostTracker:
-    """Return a phase tracker charged to the mixed command's shared ledger."""
+    """Return one cost ledger for this command and language.
+
+    Mixed commands retain their process-wide runtime ledger. Pure commands cache a
+    single ``CostTracker`` on the shared args namespace so auxiliary model calls,
+    build/test phases, workspace owners, and repair passes all enforce one ceiling
+    and contribute to one summary.
+    """
 
     runtime = getattr(args, "_mixed_runtime", None)
     if runtime is not None:
         return runtime.cost_tracker(language)
     from jaunt.cost import CostTracker
 
+    command_trackers = getattr(args, "_command_cost_trackers", None)
+    if not isinstance(command_trackers, dict):
+        command_trackers = {}
+        args._command_cost_trackers = command_trackers
+    existing = command_trackers.get(language)
+    if isinstance(existing, CostTracker):
+        return existing
+
     tracker = CostTracker(max_cost=cfg.llm.max_cost_per_build)
+    command_trackers[language] = tracker
     trackers = getattr(args, f"_cost_trackers_{language}", None)
     if isinstance(trackers, list):
         trackers.append(tracker)
@@ -2778,6 +2860,13 @@ def _command_cost_tracker(
 
 
 def _recorded_cost_summary(args: argparse.Namespace, language: Literal["py", "ts"]):
+    from jaunt.cost import CostTracker
+
+    command_trackers = getattr(args, "_command_cost_trackers", None)
+    if isinstance(command_trackers, dict):
+        tracker = command_trackers.get(language)
+        if isinstance(tracker, CostTracker):
+            return tracker.summary_dict()
     trackers = getattr(args, f"_cost_trackers_{language}", [])
     if not isinstance(trackers, list):
         return {}
@@ -2816,7 +2905,7 @@ def _command_cost_summary(
     runtime = getattr(args, "_mixed_runtime", None)
     if runtime is not None:
         return cast("dict[str, object]", runtime.summary(language))
-    return tracker.summary_dict()
+    return _recorded_cost_summary(args, language) or tracker.summary_dict()
 
 
 def _cost_by_module(tracker: CostTracker) -> dict[str, _ModuleCost]:
@@ -2856,34 +2945,79 @@ def _cost_by_module(tracker: CostTracker) -> dict[str, _ModuleCost]:
     return {module: out[module] for module in sorted(out)}
 
 
-def _check_shared_command_budget(
+def _command_model_call_runner(
     args: argparse.Namespace,
+    cfg: JauntConfig,
+    *,
     language: Literal["py", "ts"],
-) -> None:
+    usage_label: str | None = None,
+):
+    """Compose command-wide quota retry with the mixed concurrency/cost boundary."""
+
     runtime = getattr(args, "_mixed_runtime", None)
-    if runtime is not None:
-        runtime.cost_tracker(language).check_budget()
+    tracker = _command_cost_tracker(args, cfg, language) if usage_label else None
+
+    async def run(call):
+        if tracker is not None:
+            tracker.check_budget()
+        # Keep Codex construction lazy. Callers create runners while preparing
+        # deterministic work, including paths that later discover there is no
+        # model work to do. The command cache still guarantees that every actual
+        # call shares one backend/quota ledger.
+        backend = _command_backend(args, cfg, language)
+
+        async def invoke():
+            if runtime is not None:
+                return await runtime.run_call(call)
+            return await call()
+
+        result = await backend.run_with_quota_retry(invoke)
+        if tracker is not None and usage_label is not None:
+            usage_input = getattr(result, "usage_input", None)
+            usage_output = getattr(result, "usage_output", None)
+            if isinstance(usage_input, int) and isinstance(usage_output, int):
+                from jaunt.generate.base import TokenUsage
+
+                tracker.record(
+                    usage_label,
+                    TokenUsage(
+                        prompt_tokens=usage_input,
+                        completion_tokens=usage_output,
+                        model=str(getattr(backend, "model_name", "")),
+                        provider="codex",
+                        cached_prompt_tokens=getattr(result, "usage_cached", None) or 0,
+                    ),
+                )
+                tracker.check_budget()
+        return result
+
+    return run
 
 
 def _command_semantic_exec(
     args: argparse.Namespace,
+    cfg: JauntConfig,
     *,
     language: Literal["py", "ts"] = "py",
     charge_usage: bool = True,
 ):
-    """Gate direct semantic-judge calls under the mixed model-call limit."""
-
-    runtime = getattr(args, "_mixed_runtime", None)
-    if runtime is None:
-        return None
+    """Run semantic-judge calls inside the command's quota/concurrency boundary."""
 
     from jaunt.generate.codex_backend import run_codex_exec
 
-    tracker = runtime.cost_tracker(language)
+    runner = _command_model_call_runner(
+        args,
+        cfg,
+        language=language,
+        usage_label=None,
+    )
+    tracker = _command_cost_tracker(args, cfg, language) if charge_usage else None
 
     async def run_limited(**kwargs):
-        result = await runtime.run_call(run_codex_exec, **kwargs)
-        if charge_usage:
+        if tracker is not None:
+            tracker.check_budget()
+        result = await runner(lambda: run_codex_exec(**kwargs))
+        if tracker is not None:
             usage_input = getattr(result, "usage_input", None)
             usage_output = getattr(result, "usage_output", None)
             if isinstance(usage_input, int) and isinstance(usage_output, int):
@@ -2899,6 +3033,7 @@ def _command_semantic_exec(
                         cached_prompt_tokens=getattr(result, "usage_cached", None) or 0,
                     ),
                 )
+                tracker.check_budget()
         return result
 
     return run_limited
@@ -4137,11 +4272,11 @@ def _cmd_init_typescript(*, root: Path, toml_path: Path, json_mode: bool) -> int
 
     if (root / "pnpm-lock.yaml").exists():
         install_command = (
-            "pnpm add -D @usejaunt/ts@^0.1.0 'typescript@^5.9' vitest fast-check @types/node"
+            "pnpm add -D @usejaunt/ts@^0.1.2 'typescript@^5.9' vitest fast-check @types/node"
         )
     else:
         install_command = (
-            "npm install -D @usejaunt/ts@^0.1.0 'typescript@^5.9' vitest fast-check @types/node"
+            "npm install -D @usejaunt/ts@^0.1.2 'typescript@^5.9' vitest fast-check @types/node"
         )
     if json_mode:
         _emit_json(
@@ -5639,7 +5774,10 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
             backend = _backend_box[0]
 
             async def _complete(system: str, user: str) -> str:
-                text, usage = await backend.complete_text_with_usage(system=system, user=user)
+                text, usage = await backend.complete_text_with_usage_and_quota_retry(
+                    system=system,
+                    user=user,
+                )
                 if usage is not None:
                     cost_tracker.record(f"contract:{func_name}", usage)
                     cost_tracker.check_budget()
@@ -6629,39 +6767,15 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
 
         workspace = resolve_workspace(root, cfg)
         source_dirs = list(workspace.source_roots)
+        # Create the command ledger before auxiliary model work. Backend creation
+        # stays lazy so deterministic preflights and no-spec exits do not require
+        # Codex; the command backend cache still joins every actual model call.
+        cost_tracker = _command_cost_tracker(args, cfg, "py")
 
         builtin_on = bool(cfg.skills.builtin) and not bool(
             getattr(args, "no_builtin_skills", False)
         )
         builtin_skill_names = tuple(cfg.skills.builtin_skills) if builtin_on else ()
-        auto_skills_on = bool(cfg.skills.auto) and not bool(getattr(args, "no_auto_skills", False))
-        if auto_skills_on and getattr(args, "_mixed_runtime", None) is not None:
-            # Auto-skill elaboration owns its own Codex executor and predates
-            # command-level runtime injection.  Defer missing/updated skills in
-            # mixed mode rather than letting those calls escape the shared jobs
-            # and budget boundary.  Existing seeded skills remain available.
-            _eprint(
-                "warn: deferred automatic PyPI skill generation for this mixed-target "
-                "command; run `jaunt build --language py` to refresh external-library skills"
-            )
-        elif auto_skills_on:
-            try:
-                from jaunt import skills_auto
-
-                skills_res = await skills_auto.ensure_pypi_skills(
-                    project_root=root,
-                    source_roots=[d for d in source_dirs if d.exists()],
-                    generated_dir=cfg.paths.generated_dir,
-                    llm=cfg.llm,
-                    agent=cfg.agent,
-                    codex=cfg.codex,
-                    skills=cfg.skills,
-                )
-                for w in skills_res.warnings:
-                    _eprint(f"warn: {w}")
-            except Exception as e:  # noqa: BLE001 - best-effort; never block build
-                _eprint(f"warn: failed ensuring external library skills: {type(e).__name__}: {e}")
-
         repo_map_block = ""
         if cfg.context.repo_map and not bool(getattr(args, "no_repo_map", False)):
             from jaunt.repo_context import api as rc_api
@@ -6689,12 +6803,6 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                     cfg=cfg,
                     today=_today(),
                 )
-
-        from jaunt.skill_seed import skills_fingerprint
-
-        build_skills_digest = skills_fingerprint(
-            project_root=root, builtin_names=builtin_skill_names
-        )
 
         _prepend_sys_path([*source_dirs, root])
 
@@ -6745,11 +6853,47 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                 + ", ".join(" -> ".join(str(s) for s in c) for c in cycles)
             )
 
+        # External skill generation can call Codex and write the skills workspace,
+        # so keep it behind every deterministic no-spec and graph preflight. The
+        # digest must follow generation so newly written skill bytes participate in
+        # this build's freshness fingerprint.
+        auto_skills_on = bool(cfg.skills.auto) and not bool(getattr(args, "no_auto_skills", False))
+        if auto_skills_on:
+            try:
+                from jaunt import skills_auto
+
+                skills_res = await skills_auto.ensure_pypi_skills(
+                    project_root=root,
+                    source_roots=[d for d in source_dirs if d.exists()],
+                    generated_dir=cfg.paths.generated_dir,
+                    llm=cfg.llm,
+                    agent=cfg.agent,
+                    codex=cfg.codex,
+                    skills=cfg.skills,
+                    model_call_runner=_command_model_call_runner(
+                        args,
+                        cfg,
+                        language="py",
+                        usage_label="auto-skill",
+                    ),
+                )
+                for w in skills_res.warnings:
+                    _eprint(f"warn: {w}")
+            except (JauntBudgetExceededError, JauntQuotaGenerationError):
+                raise
+            except Exception as e:  # noqa: BLE001 - best-effort; never block build
+                _eprint(f"warn: failed ensuring external library skills: {type(e).__name__}: {e}")
+
+        from jaunt.skill_seed import skills_fingerprint
+
+        build_skills_digest = skills_fingerprint(
+            project_root=root, builtin_names=builtin_skill_names
+        )
+
         module_specs = registry.get_specs_by_module("magic")
 
-        # Created up front so a (best-effort) project-overview model call is charged
-        # against the same budget/summary as the per-module build calls below.
-        cost_tracker = _command_cost_tracker(args, cfg, "py")
+        # Past the no-spec exit: model-backed overview, semantic gating, and
+        # implementation generation all reuse this command backend.
         backend = _command_backend(args, cfg, "py")
 
         overview_block = ""
@@ -6901,12 +7045,12 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                 cfg=cfg.semantic_gate,
                 gate_enabled=cfg.semantic_gate.enabled
                 and not bool(getattr(args, "no_semantic_gate", False)),
-                run_exec=_command_semantic_exec(args),
+                run_exec=_command_semantic_exec(args, cfg),
                 module_output_bases=workspace.output_bases,
             )
-            # The Python semantic gate predates cost reporting.  Mixed commands
-            # charge its direct Codex usage to the outer ledger, then enforce
-            # that shared ceiling here even though the gate itself fails closed.
+            # The gate fails closed on ordinary judge errors, so enforce the
+            # command ledger here as well as at the call boundary before any
+            # fallback implementation generation can begin.
             cost_tracker.check_budget()
             refrozen_modules = set(plan.refrozen)
             expanded_stale = set(plan.rebuild)
@@ -7101,6 +7245,10 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
 
 
 def cmd_build(args: argparse.Namespace) -> int:
+    args._command_backends = {}
+    args._command_cost_trackers = {}
+    args._cost_trackers_py = []
+    args._cost_trackers_ts = []
     context = _typescript_command_context(args)
     if context is not None:
         root, cfg, mode = context
@@ -7110,7 +7258,6 @@ def cmd_build(args: argparse.Namespace) -> int:
             return _cmd_typescript_build_loaded(args, root, cfg)
         if mode == "mixed":
             return _cmd_mixed_build(args, root, cfg)
-    args._cost_trackers_py = []
     try:
         return asyncio.run(_cmd_build_async(args))
     except KeyboardInterrupt:
@@ -7136,6 +7283,7 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             )
         include_target_tests = _effective_include_target_tests(cfg, args)
         build_instructions = _effective_build_instructions(cfg, args)
+        cost_tracker = _command_cost_tracker(args, cfg, "py")
 
         # Fail fast BEFORE spending any tokens (build or test generation) when
         # pytest will be needed to run the generated tests but is not installed.
@@ -7468,9 +7616,9 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
                 test_roots=existing_test_dirs,
                 gate_enabled=cfg.semantic_gate.enabled
                 and not bool(getattr(args, "no_semantic_gate", False)),
-                run_exec=_command_semantic_exec(args),
+                run_exec=_command_semantic_exec(args, cfg),
             )
-            _check_shared_command_budget(args, "py")
+            cost_tracker.check_budget()
             test_refrozen_modules = set(test_plan.refrozen)
             stale = set(test_plan.rebuild)
 
@@ -7482,7 +7630,9 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
         cache_dir = root / ".jaunt" / "cache"
         no_cache = bool(getattr(args, "no_cache", False))
         response_cache = ResponseCache(cache_dir, enabled=not no_cache)
-        cost_tracker = _command_cost_tracker(args, cfg, "py")
+        # Keep backend construction behind pytest availability and target-owner
+        # no-work exits. Earlier semantic calls resolve the same cached backend
+        # lazily only when they actually need Codex.
         backend = _command_backend(args, cfg, "py")
 
         build_generation_fingerprint = generation_fingerprint(
@@ -7675,6 +7825,10 @@ async def _cmd_test_workspace_async(args: argparse.Namespace) -> int:
         output = captured.getvalue()
         if _is_json_mode(args):
             payload = _last_json_object(output) or {}
+            # Every owner shares the command ledger. Keep the cumulative total
+            # only at the command root so successive owner snapshots are not
+            # mistaken for independent costs and summed more than once.
+            payload.pop("cost", None)
             owner_results.append(
                 {
                     "owner": str(owner.relative_to(root)),
@@ -7718,13 +7872,6 @@ async def _cmd_test_workspace_async(args: argparse.Namespace) -> int:
                     **cast("dict[str, object]", raw_pytest),
                 }
             )
-        owner_cost = _aggregate_cost_payloads(
-            *[
-                cast("dict[str, object]", owner_result.get("result", {})).get("cost")
-                for owner_result in owner_results
-                if isinstance(owner_result.get("result"), dict)
-            ]
-        )
         payload: dict[str, object] = {
             "command": "test",
             "ok": rc == EXIT_OK,
@@ -7732,8 +7879,9 @@ async def _cmd_test_workspace_async(args: argparse.Namespace) -> int:
             "owners": owner_results,
             "pytest": pytest_results,
         }
-        if owner_cost:
-            payload["cost"] = owner_cost
+        command_cost = _recorded_cost_summary(args, "py")
+        if bool(command_cost.get("api_calls")) or bool(command_cost.get("cache_hits")):
+            payload["cost"] = command_cost
         if args.target and not any_selected:
             payload["pytest"] = [
                 {
@@ -7769,6 +7917,10 @@ async def _cmd_test_workspace_async(args: argparse.Namespace) -> int:
 
 
 def cmd_test(args: argparse.Namespace) -> int:
+    args._command_backends = {}
+    args._command_cost_trackers = {}
+    args._cost_trackers_py = []
+    args._cost_trackers_ts = []
     context = _typescript_command_context(args)
     if context is not None:
         root, cfg, mode = context
@@ -7778,7 +7930,6 @@ def cmd_test(args: argparse.Namespace) -> int:
             return _cmd_typescript_test_loaded(args, root, cfg)
         if mode == "mixed":
             return _cmd_mixed_test(args, root, cfg)
-    args._cost_trackers_py = []
     try:
         return asyncio.run(_cmd_test_workspace_async(args))
     except KeyboardInterrupt:

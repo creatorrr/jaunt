@@ -9,7 +9,7 @@ TypeScript facade, and the emitted JavaScript has no Jaunt runtime dependency.
 
 <Callout type="info">
   The stable npm line requires Jaunt 1.7.9 or later and installs its project-local
-  worker as `@usejaunt/ts@^0.1.0`. The worker protocol remains a versioned internal
+  worker as `@usejaunt/ts@^0.1.2`. The worker protocol remains a versioned internal
   draft; preview upgrades with `jaunt migrate --language ts` before applying them.
 </Callout>
 
@@ -33,7 +33,7 @@ cd jaunt-ts-quickstart
 uvx jaunt init --language ts
 npm init -y
 npm pkg set type=module
-npm install -D @usejaunt/ts@^0.1.0 'typescript@^5.9' vitest fast-check @types/node
+npm install -D @usejaunt/ts@^0.1.2 'typescript@^5.9' vitest fast-check @types/node
 codex login
 ```
 

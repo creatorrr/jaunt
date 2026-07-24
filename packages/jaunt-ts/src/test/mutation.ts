@@ -55,6 +55,7 @@ export interface MutationStrengthInput {
   readonly timeoutMs: number;
   readonly globalTimeoutMs: number;
   readonly maxMutants?: number;
+  readonly permissionSandbox?: boolean;
 }
 
 export interface MutationStrengthResult {
@@ -263,6 +264,12 @@ function parseInput(value: unknown): MutationStrengthInput {
   ) {
     throw new Error("vitestConfigPath must be a string");
   }
+  if (
+    input.permissionSandbox !== undefined &&
+    typeof input.permissionSandbox !== "boolean"
+  ) {
+    throw new Error("permissionSandbox must be boolean");
+  }
 
   const root = resolve(input.root as string);
   const paths = [
@@ -293,7 +300,36 @@ function parseInput(value: unknown): MutationStrengthInput {
     ...(typeof input.maxMutants === "number"
       ? { maxMutants: input.maxMutants }
       : {}),
+    ...(input.permissionSandbox === true ? { permissionSandbox: true } : {}),
   };
+}
+
+function mutantPermissionArgs(input: MutationStrengthInput): string[] {
+  if (!input.permissionSandbox) return [];
+  const args = process.execArgv.filter(
+    (value) =>
+      value === "--permission" ||
+      value === "--experimental-permission" ||
+      value === "--allow-addons" ||
+      value === "--allow-worker" ||
+      value.startsWith("--allow-fs-read=") ||
+      value.startsWith("--allow-fs-write=") ||
+      value.startsWith("--require="),
+  );
+  if (
+    !args.some(
+      (value) =>
+        value === "--permission" || value === "--experimental-permission",
+    ) ||
+    !args.some((value) => value.startsWith("--allow-fs-read=")) ||
+    !args.some((value) => value.startsWith("--allow-fs-write=")) ||
+    !args.some((value) => value.startsWith("--require="))
+  ) {
+    throw new Error("mutation permission sandbox is incomplete");
+  }
+  // The trusted coordinator receives --allow-child-process so it can schedule
+  // mutants. Generated batteries never inherit that escape hatch.
+  return args;
 }
 
 function mutationRoot(
@@ -511,6 +547,7 @@ async function defaultExecutor(
     timeoutMs,
     redactDerived: true,
     declarationEmit: false,
+    tier: "derived",
     overlays: {
       ...input.overlays,
       [input.sourcePath]: mutation.source,
@@ -520,10 +557,15 @@ async function defaultExecutor(
     ...(input.vitestConfigPath
       ? { vitestConfigPath: input.vitestConfigPath }
       : {}),
+    ...(input.permissionSandbox ? { permissionSandbox: true } : {}),
   };
   return runMutationProcess(
     process.execPath,
-    [fileURLToPath(import.meta.url), "--mutant"],
+    [
+      ...mutantPermissionArgs(input),
+      fileURLToPath(import.meta.url),
+      "--mutant",
+    ],
     {
       cwd: input.root,
       timeoutMs,

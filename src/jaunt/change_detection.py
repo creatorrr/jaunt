@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import jaunt
+from jaunt.errors import JauntQuotaGenerationError
 from jaunt.registry import SpecEntry
 from jaunt.spec_ref import SpecRef
 
@@ -151,6 +152,11 @@ async def gate_prose(
         if final_message.strip() == "EQUIVALENT":
             return "EQUIVALENT"
         return "MEANINGFUL"
+    except JauntQuotaGenerationError:
+        # A terminal usage limit is not evidence that the contract changed.
+        # Preserve the command's exhausted quota result instead of scheduling
+        # a full implementation rebuild that will encounter the same limit.
+        raise
     except Exception:
         return "MEANINGFUL"
 

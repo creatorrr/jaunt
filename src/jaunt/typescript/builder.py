@@ -33,7 +33,7 @@ import jaunt
 from jaunt.cache import ResponseCache
 from jaunt.config import JauntConfig
 from jaunt.cost import CostTracker
-from jaunt.errors import JauntConfigError, JauntGenerationError
+from jaunt.errors import JauntConfigError, JauntGenerationError, JauntQuotaGenerationError
 from jaunt.generate.base import GenerationRequest, GenerationResult, GeneratorBackend, TokenUsage
 from jaunt.generate.codex_backend import CodexBackend
 from jaunt.generate.codex_backend import run_codex_exec
@@ -379,9 +379,11 @@ def _windows_open_pinned_path(
 ) -> int:
     """Open one Windows entry without following a reparse point.
 
-    Directory handles deliberately omit ``FILE_SHARE_DELETE``. Keeping the root
-    and every descendant handle alive therefore prevents a junction/symlink swap
-    while path-based Win32 publication is in progress.
+    Directory handles share writes because Windows rename opens the target
+    directory for ``FILE_WRITE_DATA``. They deliberately omit
+    ``FILE_SHARE_DELETE``: keeping the root and every descendant handle alive
+    therefore still prevents a junction/symlink swap while path-based Win32
+    publication is in progress.
     """
 
     import ctypes
@@ -690,6 +692,7 @@ class _PinnedWorkspace:
                 windows_handle=_windows_open_pinned_path(
                     self.root,
                     directory=True,
+                    share_write=True,
                     blocking=blocking,
                 ),
                 blocking=blocking,
@@ -812,6 +815,7 @@ class _PinnedWorkspace:
                     windows_handle=_windows_open_pinned_path(
                         current_path,
                         directory=True,
+                        share_write=True,
                         blocking=self.blocking,
                     ),
                     blocking=self.blocking,
@@ -1042,14 +1046,20 @@ def _retire_transaction_manifest(
     payload: Mapping[str, Any],
     *,
     pinned_directory: _PinnedDirectory | None = None,
+    require_present: bool = False,
 ) -> bool:
     """Durably remove a marker, restoring it when the directory sync fails."""
 
     try:
         if pinned_directory is None:
-            manifest.unlink(missing_ok=True)
+            if require_present:
+                manifest.unlink()
+            else:
+                manifest.unlink(missing_ok=True)
         else:
-            pinned_directory.unlink(manifest.name, missing_ok=True)
+            removed = pinned_directory.unlink(manifest.name, missing_ok=not require_present)
+            if require_present and not removed:  # pragma: no cover - defensive
+                return False
     except OSError:
         return False
     try:
@@ -2546,6 +2556,12 @@ async def _gate_prose_change(
                     reasoning_effort=config.semantic_gate.reasoning_effort,
                     ignore_user_config=True,
                 )
+        except JauntQuotaGenerationError:
+            # Usage-limit exhaustion is not evidence that the prose changed.
+            # The caller's command-wide quota policy has already retried the
+            # judge, so preserve that terminal error instead of paying for a
+            # full implementation rebuild that will hit the same limit.
+            raise
         except Exception:
             return False
         usage_input = getattr(result, "usage_input", None)
@@ -2623,6 +2639,7 @@ async def run_build_in_session(
     target_ids: Sequence[str] = (),
     force: bool = False,
     generator: GeneratorBackend | None = None,
+    generator_factory: Callable[[], GeneratorBackend] | None = None,
     cost_tracker: CostTracker | None = None,
     response_cache: ResponseCache | None = None,
     progress: object | None = None,
@@ -2648,14 +2665,40 @@ async def run_build_in_session(
 
     from jaunt.typescript.status import classify_modules
 
+    if generator is not None and generator_factory is not None:
+        raise JauntConfigError("Pass either generator or generator_factory, not both")
     root = root.resolve()
     if response_cache is None:
         response_cache = ResponseCache(root / ".jaunt" / "cache")
     effective_jobs = config.build.jobs if jobs is None else jobs
     if effective_jobs < 1:
         raise JauntConfigError("TypeScript build jobs must be >= 1")
-    backend = generator or _default_backend(config)
     cost = cost_tracker or CostTracker(max_cost=config.llm.max_cost_per_build)
+
+    backend = generator
+
+    def model_backend() -> GeneratorBackend:
+        nonlocal backend
+        if backend is None:
+            backend = (
+                generator_factory() if generator_factory is not None else _default_backend(config)
+            )
+        return backend
+
+    def default_semantic_gate_exec(module_id: str) -> Callable[..., Awaitable[Any]]:
+        async def run(**kwargs: Any) -> Any:
+            return await model_backend().run_with_quota_retry(
+                lambda: run_codex_exec(**kwargs),
+                progress=lambda stage, detail: _progress_phase(
+                    progress,
+                    module_id,
+                    stage,
+                    detail,
+                ),
+            )
+
+        return run
+
     effective_builtin_skills = (
         tuple(builtin_skill_names)
         if builtin_skill_names is not None
@@ -2710,6 +2753,10 @@ async def run_build_in_session(
             "TypeScript declarations still require reviewable design; run "
             "`jaunt design --target <module#symbol>` first: " + ", ".join(sorted(pending_designs))
         )
+    # Prose semantic gates are model calls too. Reject dependency cycles before
+    # judging any stale prose, then retain the later selected ordering pass for
+    # deterministic scheduling.
+    _topological_modules(analysis.modules)
     output_preconditions = _artifact_preconditions(root, analysis.modules)
     status = classify_modules(root, analysis.modules)
     gate_enabled = (
@@ -2729,7 +2776,11 @@ async def run_build_in_session(
                 module,
                 config,
                 cost=cost,
-                run_exec=semantic_gate_exec,
+                run_exec=(
+                    semantic_gate_exec
+                    if semantic_gate_exec is not None
+                    else default_semantic_gate_exec(module_id)
+                ),
             ):
                 refrozen.add(module_id)
         elif not force and module_id in status.invalid:
@@ -2794,7 +2845,7 @@ async def run_build_in_session(
             config,
             analysis.modules,
             repo_map_block=repo_map_block,
-            backend=backend,
+            backend=model_backend(),
             cost_tracker=cost,
             enabled=overview_enabled,
         )
@@ -2827,6 +2878,7 @@ async def run_build_in_session(
         tuple[str, ...],
     ]:
         module = by_id[module_id]
+        active_backend = model_backend()
 
         async def candidate_validator(source: str) -> list[str]:
             proposed = {**candidate_dependencies(module_id), module_id: source}
@@ -2903,7 +2955,7 @@ async def run_build_in_session(
 
             try:
                 result = await generate_request_cached(
-                    backend,
+                    active_backend,
                     request,
                     max_attempts=max_attempts,
                     generation_fingerprint=request_fingerprint,
@@ -2940,7 +2992,7 @@ async def run_build_in_session(
                 if result.source is not None and result.attempts > 0:
                     store_generation_result(
                         response_cache,
-                        backend,
+                        active_backend,
                         request,
                         replace(result, errors=[]),
                         generation_fingerprint=request_fingerprint,
@@ -3205,7 +3257,7 @@ async def run_build_in_session(
                     _progress_phase(progress, item, stage, detail)
 
                 try:
-                    repaired = await backend.generate_request_with_retry(
+                    repaired = await model_backend().generate_request_with_retry(
                         repair_request,
                         max_attempts=1,
                         initial_error_context=[
@@ -3260,7 +3312,7 @@ async def run_build_in_session(
                     for module_id in sorted(unit_candidates):
                         store_generation_result(
                             response_cache,
-                            backend,
+                            model_backend(),
                             requests[module_id],
                             GenerationResult(
                                 attempts=candidate_attempts.get(module_id, 0),
@@ -3376,7 +3428,7 @@ async def run_build_in_session(
         for module_id in sorted(unit_candidates):
             store_generation_result(
                 None if force else response_cache,
-                backend,
+                model_backend(),
                 requests[module_id],
                 GenerationResult(
                     attempts=candidate_attempts.get(module_id, 0),
@@ -3499,6 +3551,7 @@ async def run_build(
     target_ids: Sequence[str] = (),
     force: bool = False,
     generator: GeneratorBackend | None = None,
+    generator_factory: Callable[[], GeneratorBackend] | None = None,
     cost_tracker: CostTracker | None = None,
     response_cache: ResponseCache | None = None,
     progress: object | None = None,
@@ -3519,6 +3572,8 @@ async def run_build(
 ) -> TargetBuildReport:
     """Generate reserved TypeScript bindings, validate overlays, and commit them."""
 
+    if generator is not None and generator_factory is not None:
+        raise JauntConfigError("Pass either generator or generator_factory, not both")
     root = root.resolve()
     effective_instructions = (
         tuple(build_instructions)
@@ -3581,6 +3636,7 @@ async def run_build(
             target_ids=target_ids,
             force=force,
             generator=generator,
+            generator_factory=generator_factory,
             cost_tracker=cost_tracker,
             response_cache=response_cache,
             progress=progress,

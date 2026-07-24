@@ -7,6 +7,7 @@ import {
   readFile,
   rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -41,10 +42,12 @@ function absoluteFileDependency(path) {
   return specifier;
 }
 
-function run(command, args, cwd) {
+function run(command, args, cwd, options = {}) {
   return execFileSync(command, args, {
     cwd,
     encoding: "utf8",
+    ...(options.input === undefined ? {} : { input: options.input }),
+    ...(options.timeout === undefined ? {} : { timeout: options.timeout }),
     env: {
       ...process.env,
       npm_config_audit: "false",
@@ -52,6 +55,21 @@ function run(command, args, cwd) {
       npm_config_loglevel: "error",
     },
   });
+}
+
+async function linkLocalPeer(project, name) {
+  const source = resolve(packageRoot, "node_modules", name);
+  const target = resolve(project, "node_modules", name);
+  await access(source);
+  try {
+    await access(target);
+  } catch {
+    await symlink(
+      source,
+      target,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+  }
 }
 
 async function request(child, lines, id, method, params = {}) {
@@ -196,6 +214,10 @@ export function slugify(value: string): string { return jaunt.magic(); }
     [...npm.args, "install", "--ignore-scripts", "--legacy-peer-deps"],
     project,
   );
+  // The mutation coordinator imports Vitest through its optional peer. Link the
+  // already-installed development peer so this clean-consumer smoke stays
+  // deterministic and never reaches the registry for test-only dependencies.
+  await linkLocalPeer(project, "vitest");
 
   const installedPackage = JSON.parse(
     await readFile(
@@ -360,11 +382,123 @@ export function slugify(value: string): string { return jaunt.magic(); }
   await assert.rejects(access(resolve(project, "dist/slug/index.jaunt.d.ts")));
 
   const installedPackagePath = resolve(project, "node_modules/@usejaunt/ts");
+  const mutationPath = resolve(installedPackagePath, "dist/test/mutation.js");
+  const mutationReport = JSON.parse(
+    run(process.execPath, [mutationPath], project, {
+      input: JSON.stringify({
+        root: project,
+        sourcePath: "src/index.ts",
+        symbol: "__jaunt_pack_smoke_missing_symbol__",
+        batteryFiles: [],
+        overlays: {},
+        tsconfigPath: "tsconfig.json",
+        compilerModulePath: resolve(
+          project,
+          "node_modules/typescript/lib/typescript.js",
+        ),
+        timeoutMs: 1_000,
+        globalTimeoutMs: 3_000,
+        maxMutants: 1,
+      }),
+      timeout: 10_000,
+    }),
+  );
+  assert.deepEqual(
+    {
+      protocol: mutationReport.protocol,
+      sourcePath: mutationReport.sourcePath,
+      symbol: mutationReport.symbol,
+      concurrency: mutationReport.concurrency,
+      complete: mutationReport.complete,
+      killed: mutationReport.killed,
+      survived: mutationReport.survived,
+      excluded: mutationReport.excluded?.map(({ outcome, reason }) => ({
+        outcome,
+        reason,
+      })),
+      score: mutationReport.score,
+    },
+    {
+      protocol: "jaunt-ts-mutation/1",
+      sourcePath: "src/index.ts",
+      symbol: "__jaunt_pack_smoke_missing_symbol__",
+      concurrency: 1,
+      complete: true,
+      killed: [],
+      survived: [],
+      excluded: [{ outcome: "excluded", reason: "no-mutable-site" }],
+      score: {
+        killed: 0,
+        applicable: 0,
+        survived: 0,
+        excluded: 1,
+        ratio: null,
+      },
+    },
+    "installed mutation coordinator must return its deterministic protocol",
+  );
+
+  const permissionFlag = process.allowedNodeEnvironmentFlags.has("--permission")
+    ? "--permission"
+    : process.allowedNodeEnvironmentFlags.has("--experimental-permission")
+      ? "--experimental-permission"
+      : null;
+  assert.notEqual(
+    permissionFlag,
+    null,
+    "supported Node versions must expose the permission model",
+  );
+  const permissionGuardPath = resolve(
+    installedPackagePath,
+    "dist/test/permission_guard.cjs",
+  );
+  const workerProbe = `
+const { parentPort } = require("node:worker_threads");
+parentPort.postMessage({
+  installed:
+    globalThis[Symbol.for("@usejaunt/ts/permission-guard-installed")] === true,
+  nodeOptions: process.env.NODE_OPTIONS ?? "",
+});
+`;
+  const permissionProbe = `
+const { Worker } = require("node:worker_threads");
+if (!globalThis[Symbol.for("@usejaunt/ts/permission-guard-installed")]) {
+  throw new Error("permission guard was not loaded in the coordinator");
+}
+const worker = new Worker(${JSON.stringify(workerProbe)}, {
+  eval: true,
+  env: { ...process.env, NODE_OPTIONS: "--inspect=127.0.0.1:0" },
+});
+worker.once("message", (message) => {
+  if (!message.installed || message.nodeOptions.includes("--inspect")) {
+    throw new Error(\`permission guard did not sanitize the worker: \${JSON.stringify(message)}\`);
+  }
+  process.stdout.write("permission-guard-ok\\n");
+});
+worker.once("error", (error) => {
+  throw error;
+});
+`;
+  const permissionOutput = run(
+    process.execPath,
+    [
+      permissionFlag,
+      "--allow-worker",
+      `--allow-fs-read=${installedPackagePath}`,
+      `--require=${permissionGuardPath}`,
+      "--eval",
+      permissionProbe,
+    ],
+    project,
+    { timeout: 10_000 },
+  );
+  assert.equal(permissionOutput, "permission-guard-ok\n");
+
   await rename(installedPackagePath, `${installedPackagePath}.disabled`);
   run(process.execPath, [resolve(project, "dist/index.js")], project);
 
   process.stdout.write(
-    "verified clean npm-tarball install, generated consumer, and runtime isolation\n",
+    "verified clean npm-tarball install, generated consumer, internal runners, and runtime isolation\n",
   );
 } finally {
   worker?.stdin.end();

@@ -116,3 +116,131 @@ test("@prop: strict positivity excludes zero", () => {
   expect(report.score.killed).toBe(report.score.applicable);
   expect(readFileSync(source)).toEqual(before);
 }, 45_000);
+
+test("mutant batteries cannot read or write outside the protected workspace", async () => {
+  const workspace = createFixtureWorkspace();
+  roots.push(workspace.root);
+  const sentinel = `${workspace.root}.sentinel`;
+  roots.push(sentinel);
+  writeFileSync(sentinel, "outside secret\n");
+  write(workspace.root, "pnpm-workspace.yaml", "packages: []\n");
+  write(
+    workspace.root,
+    "tsconfig.json",
+    `${JSON.stringify(
+      {
+        compilerOptions: {
+          target: "ES2022",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+          strict: true,
+          noEmit: true,
+        },
+        include: ["src/contract.ts", "src/read-outside.ts", "tests/**/*.ts"],
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  write(
+    workspace.root,
+    "src/contract.ts",
+    `/** Return whether a value is positive. @jauntContract */
+export function isPositive(value: number): boolean {
+  return value > 0;
+}
+`,
+  );
+  write(
+    workspace.root,
+    "src/read-outside.ts",
+    `declare const process: {
+  execPath: string;
+  getBuiltinModule(name: "node:fs"): {
+    readFileSync(path: string, encoding: string): string;
+    writeFileSync(path: string, content: string): void;
+  };
+  getBuiltinModule(name: "node:child_process"): {
+    spawnSync(command: string, args: readonly string[]): unknown;
+  };
+};
+
+export function readOutside(path: string): string {
+  return process.getBuiltinModule("node:fs").readFileSync(path, "utf8");
+}
+
+export function writeOutside(path: string): void {
+  process.getBuiltinModule("node:fs").writeFileSync(path, "tampered\\n");
+}
+
+export function spawnOutside(): void {
+  process
+    .getBuiltinModule("node:child_process")
+    .spawnSync(process.execPath, ["--version"]);
+}
+`,
+  );
+  write(
+    workspace.root,
+    "tests/contract.derived.test.ts",
+    `import { expect, test } from "vitest";
+import { readOutside, spawnOutside, writeOutside } from "../src/read-outside.js";
+
+test("the mutation sandbox cannot read or write external files", () => {
+  expect(() => readOutside(${JSON.stringify(sentinel)})).toThrow();
+  expect(() => writeOutside(${JSON.stringify(sentinel)})).toThrow();
+  expect(() => spawnOutside()).toThrow();
+});
+`,
+  );
+  const permissionFlag = process.allowedNodeEnvironmentFlags.has("--permission")
+    ? "--permission"
+    : "--experimental-permission";
+  const permissionGuard = resolve(
+    packageRoot,
+    "dist/test/permission_guard.cjs",
+  );
+  const payload = {
+    root: workspace.root,
+    sourcePath: "src/contract.ts",
+    symbol: "isPositive",
+    batteryFiles: ["tests/contract.derived.test.ts"],
+    overlays: {},
+    tsconfigPath: "tsconfig.json",
+    compilerModulePath: workspace.compilerModulePath,
+    timeoutMs: 5_000,
+    globalTimeoutMs: 30_000,
+    maxMutants: 1,
+    permissionSandbox: true,
+  };
+  const result = await runMutationProcess(
+    process.execPath,
+    [
+      permissionFlag,
+      "--allow-addons",
+      "--allow-worker",
+      "--allow-child-process",
+      `--require=${permissionGuard}`,
+      `--allow-fs-read=${workspace.root}`,
+      `--allow-fs-read=${packageRoot}`,
+      `--allow-fs-write=${workspace.root}`,
+      resolve(packageRoot, "dist/test/mutation.js"),
+    ],
+    {
+      cwd: workspace.root,
+      timeoutMs: 40_000,
+      stdin: JSON.stringify(payload),
+    },
+  );
+
+  expect(result).toMatchObject({ exitCode: 0, timedOut: false });
+  const report = JSON.parse(result.stdout) as MutationStrengthResult;
+  expect(report.complete, `${result.stdout}\n${result.stderr}`).toBe(true);
+  expect(
+    report.score.applicable,
+    `${result.stdout}\n${result.stderr}`,
+  ).toBeGreaterThan(0);
+  expect(report.score.killed).toBe(0);
+  expect(report.score.survived).toBe(report.score.applicable);
+  expect(readFileSync(sentinel, "utf8")).toBe("outside secret\n");
+}, 45_000);

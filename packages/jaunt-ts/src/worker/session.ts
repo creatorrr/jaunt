@@ -751,6 +751,7 @@ export class AnalyzerSession {
         "recompose",
         "baseline-unselected",
         "release-programs",
+        "test-runner-overlay-roots",
       ],
     };
   }

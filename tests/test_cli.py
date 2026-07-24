@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import jaunt.cli
 
 
@@ -17,6 +19,7 @@ def test_parse_build_defaults() -> None:
     assert ns.instructions == []
     assert ns.include_target_tests is None
     assert ns.no_builtin_skills is False
+    assert ns.quota_wait is None
 
 
 def test_parse_build_flags() -> None:
@@ -42,6 +45,8 @@ def test_parse_build_flags() -> None:
             "Prefer helpers.",
             "--include-target-tests",
             "--no-builtin-skills",
+            "--quota-wait",
+            "2.5",
         ]
     )
     assert ns.command == "build"
@@ -56,6 +61,7 @@ def test_parse_build_flags() -> None:
     assert ns.instructions == ["Prefer helpers."]
     assert ns.include_target_tests is True
     assert ns.no_builtin_skills is True
+    assert ns.quota_wait == 2.5
 
 
 def test_parse_test_defaults() -> None:
@@ -69,6 +75,7 @@ def test_parse_test_defaults() -> None:
     assert ns.instructions == []
     assert ns.include_target_tests is None
     assert ns.no_builtin_skills is False
+    assert ns.quota_wait is None
 
 
 def test_parse_test_flags() -> None:
@@ -87,6 +94,8 @@ def test_parse_test_flags() -> None:
             "--pytest-args=-k",
             "--pytest-args",
             "foo",
+            "--quota-wait",
+            "7",
         ]
     )
     assert ns.command == "test"
@@ -98,6 +107,20 @@ def test_parse_test_flags() -> None:
     assert ns.instructions == ["Stay close to the spec."]
     assert ns.include_target_tests is False
     assert ns.no_builtin_skills is True
+    assert ns.quota_wait == 7.0
+
+
+def test_quota_wait_cli_overrides_config(tmp_path: Path) -> None:
+    (tmp_path / "jaunt.toml").write_text(
+        "version = 1\n\n[codex]\nquota_wait_minutes = 1\n",
+        encoding="utf-8",
+    )
+    args = jaunt.cli.parse_args(["build", "--root", str(tmp_path), "--quota-wait", "3.5"])
+
+    root, config = jaunt.cli._load_config(args)
+
+    assert root == tmp_path
+    assert config.codex.quota_wait_minutes == 3.5
 
 
 def test_parse_eval_defaults() -> None:

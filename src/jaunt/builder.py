@@ -2094,6 +2094,134 @@ async def run_build(
                     stub_bytes, managed = state
                     return "hand-authored" if stub_bytes is not None and not managed else "retry"
 
+                def _create_stub_exclusive(
+                    source_path: Path,
+                    source_bytes: bytes,
+                    destination_path: Path = stub_path,
+                ) -> None:
+                    """Create a stub path without replacing an external writer's path.
+
+                    Prefer an atomic hard link to the already-fsynced source. Some
+                    otherwise writable filesystems reject hard links, so fall back to
+                    an exclusive create and exact, fsynced copy. ``O_EXCL`` preserves
+                    the same no-overwrite boundary for both publication paths.
+                    """
+
+                    try:
+                        os.link(source_path, destination_path)
+                        return
+                    except FileExistsError:
+                        raise
+                    except OSError:
+                        pass
+
+                    def _quarantine_failed_copy(
+                        created_identity: tuple[int, int] | None,
+                    ) -> tuple[Path | None, OSError | None]:
+                        """Remove only the failed copy created by this invocation.
+
+                        A path-based identity check alone leaves a stat/unlink race in
+                        which an external replacement can be deleted. Move the public
+                        name atomically to a private adjacent path first, then inspect
+                        the inode that was actually moved. An external replacement that
+                        wins either side of the move is preserved at its public name or
+                        at the returned quarantine path.
+                        """
+
+                        try:
+                            current = destination_path.lstat()
+                        except FileNotFoundError:
+                            return None, None
+                        except OSError as error:
+                            return destination_path, error
+                        if (
+                            created_identity is not None
+                            and (
+                                current.st_dev,
+                                current.st_ino,
+                            )
+                            != created_identity
+                        ):
+                            return destination_path, None
+
+                        quarantine_fd = -1
+                        quarantine_path: Path | None = None
+                        try:
+                            quarantine_fd, quarantine_name = tempfile.mkstemp(
+                                dir=str(destination_path.parent),
+                                prefix=".jaunt-stub-quarantine-",
+                                suffix=".pyi",
+                            )
+                            quarantine_path = Path(quarantine_name)
+                            os.close(quarantine_fd)
+                            quarantine_fd = -1
+                            os.replace(destination_path, quarantine_path)
+                        except FileNotFoundError:
+                            if quarantine_path is not None:
+                                quarantine_path.unlink(missing_ok=True)
+                            return None, None
+                        except OSError as error:
+                            if quarantine_fd >= 0:
+                                try:
+                                    os.close(quarantine_fd)
+                                except OSError:
+                                    pass
+                            if quarantine_path is not None:
+                                quarantine_path.unlink(missing_ok=True)
+                            return destination_path, error
+
+                        try:
+                            moved = quarantine_path.lstat()
+                        except OSError as error:
+                            return quarantine_path, error
+                        if created_identity is None:
+                            # fstat itself failed, so retain rather than guessing
+                            # whether these bytes belong to this publisher.
+                            return quarantine_path, None
+                        if (moved.st_dev, moved.st_ino) != created_identity:
+                            # A foreign replacement landed after the first identity
+                            # check. Keep the bytes at the private path and report it.
+                            return quarantine_path, None
+                        try:
+                            quarantine_path.unlink()
+                        except OSError as error:
+                            return quarantine_path, error
+                        return None, None
+
+                    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+                    descriptor = os.open(destination_path, flags, 0o600)
+                    copy_error: OSError | None = None
+                    created_identity: tuple[int, int] | None = None
+                    try:
+                        created = os.fstat(descriptor)
+                        created_identity = (created.st_dev, created.st_ino)
+                        remaining = memoryview(source_bytes)
+                        while remaining:
+                            written = os.write(descriptor, remaining)
+                            if written <= 0:
+                                raise OSError(
+                                    errno.EIO,
+                                    "short write while publishing emitted stub",
+                                )
+                            remaining = remaining[written:]
+                        os.fsync(descriptor)
+                    except OSError as error:
+                        copy_error = error
+                    finally:
+                        try:
+                            os.close(descriptor)
+                        except OSError as error:
+                            if copy_error is None:
+                                copy_error = error
+                    if copy_error is not None:
+                        preserved_path, cleanup_error = _quarantine_failed_copy(created_identity)
+                        details = str(copy_error)
+                        if preserved_path is not None:
+                            details += f"; bytes preserved at {preserved_path}"
+                        if cleanup_error is not None:
+                            details += f"; failed-copy cleanup also failed: {cleanup_error}"
+                        raise OSError(copy_error.errno or errno.EIO, details) from copy_error
+
                 def _restore_displaced_stub(
                     recovery_path: Path,
                     displaced_state: tuple[bytes | None, bool],
@@ -2127,39 +2255,15 @@ async def run_build(
                         return _public_conflict(public_state)
 
                     try:
-                        os.link(recovery_path, current_stub_path)
-                    except FileExistsError:
-                        return _public_conflict(_read_stub_state())
-                    except OSError:
-                        pass
-                    else:
-                        return _classify_stub_conflict(displaced_state), False, None
-
-                    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
-                    try:
-                        descriptor = os.open(current_stub_path, flags, 0o600)
+                        _create_stub_exclusive(
+                            recovery_path,
+                            displaced_bytes or b"",
+                            current_stub_path,
+                        )
                     except FileExistsError:
                         return _public_conflict(_read_stub_state())
                     except OSError as error:
                         return _classify_stub_conflict(displaced_state), True, error
-
-                    copy_error: OSError | None = None
-                    try:
-                        remaining = memoryview(displaced_bytes or b"")
-                        while remaining:
-                            written = os.write(descriptor, remaining)
-                            if written <= 0:
-                                raise OSError(errno.EIO, "short write while restoring emitted stub")
-                            remaining = remaining[written:]
-                        os.fsync(descriptor)
-                    except OSError as error:
-                        copy_error = error
-                    finally:
-                        os.close(descriptor)
-                    if copy_error is not None:
-                        # The exclusive path may contain a partial copy. Keep both it
-                        # and the complete recovery artifact for explicit resolution.
-                        return _classify_stub_conflict(displaced_state), True, copy_error
 
                     restored_state = _read_stub_state()
                     if restored_state == displaced_state:
@@ -2176,11 +2280,12 @@ async def run_build(
                     """Publish without clobbering a path that changed after rendering.
 
                     The advisory lock serializes Jaunt publishers. Missing targets use
-                    hard-link create-if-absent. Existing managed targets are moved to a
+                    hard-link create-if-absent, or an exclusive-create copy when hard
+                    links are unavailable. Existing managed targets are moved to a
                     private recovery path and verified there before the candidate is
-                    linked into the now-empty public path. Path-based external creates
-                    and replacements do not need to honor the lock: their path wins,
-                    and displaced non-Jaunt bytes are restored or retained at the
+                    published into the now-empty public path. Path-based external
+                    creates and replacements do not need to honor the lock: their path
+                    wins, and displaced non-Jaunt bytes are restored or retained at the
                     reported recovery path.
                     """
 
@@ -2208,7 +2313,11 @@ async def run_build(
 
                             if prior_state[0] is None:
                                 try:
-                                    os.link(candidate_path, current_stub_path)
+                                    _create_stub_exclusive(
+                                        candidate_path,
+                                        candidate,
+                                        current_stub_path,
+                                    )
                                 except FileExistsError:
                                     conflict = _read_stub_state()
                                     return _classify_stub_conflict(conflict), None
@@ -2251,7 +2360,11 @@ async def run_build(
                                     return state, None
 
                                 try:
-                                    os.link(candidate_path, current_stub_path)
+                                    _create_stub_exclusive(
+                                        candidate_path,
+                                        candidate,
+                                        current_stub_path,
+                                    )
                                 except FileExistsError:
                                     state, keep_recovery, restore_error = _restore_displaced_stub(
                                         recovery_path, displaced_state

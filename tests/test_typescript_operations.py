@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gc
 import hashlib
 import json
 import os
@@ -24,8 +25,10 @@ from jaunt.cache import CacheEntry, ResponseCache
 from jaunt.config import JauntConfig, load_config
 from jaunt.cost import CostTracker
 from jaunt.errors import (
+    JauntBudgetExceededError,
     JauntConfigError,
     JauntGenerationError,
+    JauntQuotaGenerationError,
     JauntTransientGenerationError,
 )
 from jaunt.generate.base import (
@@ -43,6 +46,7 @@ from jaunt.targets.base import (
     TargetStatus,
 )
 from jaunt.typescript import builder as ts_builder
+from jaunt.typescript import design as ts_design
 from jaunt.typescript import tester as ts_tester
 from jaunt.typescript.builder import (
     MISSING_INPUT,
@@ -84,6 +88,7 @@ from jaunt.typescript.contracts import (
     run_eject,
 )
 from jaunt.typescript.design import (
+    _abort_design_manifest,
     _complete_design_manifest,
     _design_output_errors,
     _design_ranges,
@@ -118,6 +123,7 @@ from jaunt.typescript.tester import (
     _rejected_test_paths,
     _rejected_test_token,
     _runner_fingerprint,
+    _runner_validation_errors,
     _run_test_runner,
     _static_test_validation,
     _strip_test_header,
@@ -1145,6 +1151,33 @@ require(selected);
     assert _static_test_validation(source) == []
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        r'const value = new /ignored import("..\/src\/__generated__\/ghost.js")/'
+        r'.constructor("actual");',
+        r'export default /require("..\/src\/__generated__\/ghost.js")/;',
+        r'class Runner extends /require("..\/src\/__generated__\/ghost.js")/'
+        r".constructor {}",
+        r'const rendered = `${new /require("..\/src\/__generated__\/ghost.js")/'
+        r'.constructor("actual")}`;',
+    ],
+)
+def test_static_test_validation_ignores_regex_after_expression_prefix_keyword(
+    source: str,
+) -> None:
+    assert _static_test_validation(source) == []
+
+
+@pytest.mark.parametrize("member", ["target.new", "target?.default", "target.extends"])
+def test_static_test_validation_keeps_division_after_keyword_named_member(member: str) -> None:
+    source = f'const ratio = {member} / require("../src/__generated__/value.js") / divisor;\n'
+
+    assert _static_test_validation(source) == [
+        "generated tests must import the public facade, not private generated files"
+    ]
+
+
 def test_static_test_validation_honors_custom_generated_directory() -> None:
     errors = _static_test_validation(
         'const hidden = require("../src/machine/value.js");\n',
@@ -2040,6 +2073,102 @@ async def test_build_validates_candidate_before_atomic_write(tmp_path: Path) -> 
 
     status = await run_status(tmp_path, config, worker_factory=lambda *_: worker)
     assert status.fresh == frozenset({"ts:src/math"})
+
+
+@pytest.mark.asyncio
+async def test_fresh_build_does_not_construct_default_generator(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    initial_worker = FakeWorker(tmp_path)
+    initial = await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: initial_worker,
+    )
+    assert initial.exit_code == 0
+
+    factory_calls = 0
+
+    def unexpected_generator() -> GeneratorBackend:
+        nonlocal factory_calls
+        factory_calls += 1
+        raise AssertionError("a fresh TypeScript build must not construct a generator")
+
+    fresh_worker = FakeWorker(tmp_path)
+    fresh = await run_build(
+        tmp_path,
+        config,
+        generator_factory=unexpected_generator,
+        worker_factory=lambda *_: fresh_worker,
+    )
+
+    assert fresh.exit_code == 0
+    assert fresh.skipped == frozenset({"ts:src/math"})
+    assert factory_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_build_rejects_cycle_before_semantic_gate_or_generator(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+
+    class CyclicWorker(FakeWorker):
+        def __init__(self, root: Path) -> None:
+            super().__init__(root)
+            first = {
+                **self.module,
+                "dependencies": ["ts:src/other#other"],
+            }
+            second = {
+                **self.module,
+                "moduleId": "ts:src/other",
+                "specPath": "src/other.jaunt.ts",
+                "facadePath": "src/other.ts",
+                "apiMirrorPath": "src/__generated__/other.api.ts",
+                "implementationPath": "src/__generated__/other.ts",
+                "sidecarPath": "src/__generated__/other.jaunt.json",
+                "dependencies": ["ts:src/math#double"],
+                "symbols": [{"name": "other", "kind": "function"}],
+            }
+            self.modules = [first, second]
+
+        async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            if method == "analyzeWorkspace":
+                self.requests.append((method, params))
+                return {
+                    **self._stamp(),
+                    "projects": [{"id": "tsconfig.json"}],
+                    "routes": [
+                        {"moduleId": module["moduleId"], "packageOwner": "."}
+                        for module in self.modules
+                    ],
+                    "specs": [{"moduleId": module["moduleId"]} for module in self.modules],
+                    "testSpecs": [],
+                    "contracts": [],
+                    "diagnostics": [],
+                }
+            if method == "analyzeContracts":
+                self.requests.append((method, params))
+                return {**self._stamp(), "modules": self.modules}
+            return await super().request(method, params)
+
+    async def unexpected_semantic_gate(**_kwargs: Any) -> object:
+        raise AssertionError("cycle detection must precede semantic model calls")
+
+    def unexpected_generator() -> GeneratorBackend:
+        raise AssertionError("cycle detection must precede generator construction")
+
+    with pytest.raises(JauntConfigError, match="TypeScript dependency cycle"):
+        await run_build(
+            tmp_path,
+            config,
+            generator_factory=unexpected_generator,
+            semantic_gate_exec=unexpected_semantic_gate,
+            worker_factory=lambda *_: CyclicWorker(tmp_path),
+        )
 
 
 @pytest.mark.asyncio
@@ -4130,6 +4259,97 @@ async def test_equivalent_prose_is_refrozen_after_semantic_gate(
 
 
 @pytest.mark.asyncio
+async def test_direct_build_shares_quota_wait_between_semantic_gate_and_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    config = replace(config, codex=replace(config.codex, quota_wait_minutes=1.5))
+    worker = FakeWorker(tmp_path)
+    initial = await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert initial.exit_code == 0
+
+    current_sidecar = json.loads(worker.sidecar)
+    current_symbols = [
+        {
+            "name": "double",
+            "kind": "function",
+            "docs": "Return the input multiplied by two.",
+        }
+    ]
+    current_sidecar.update(
+        {
+            "symbols": current_symbols,
+            "proseDigest": "sha256:reworded",
+            "apiDigest": "sha256:reworded-api",
+        }
+    )
+    worker.module.update(
+        {
+            "symbols": current_symbols,
+            "proseDigest": "sha256:reworded",
+            "apiDigest": "sha256:reworded-api",
+            "sidecar": json.dumps(current_sidecar, sort_keys=True) + "\n",
+        }
+    )
+
+    semantic_calls = 0
+    sleeps: list[float] = []
+
+    async def judge(**_kwargs: Any) -> SimpleNamespace:
+        nonlocal semantic_calls
+        semantic_calls += 1
+        if semantic_calls == 1:
+            raise JauntQuotaGenerationError("semantic usage limit")
+        return SimpleNamespace(
+            final_message="MEANINGFUL",
+            usage_input=2,
+            usage_output=1,
+            usage_cached=0,
+        )
+
+    async def no_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    class QuotaGenerationBackend(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        @property
+        def quota_wait_minutes(self) -> float:
+            return 1.5
+
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            self.calls += 1
+            if self.calls == 1:
+                raise JauntQuotaGenerationError("generation usage limit")
+            return await super().generate_request(request, **kwargs)
+
+    backend = QuotaGenerationBackend()
+    monkeypatch.setattr("jaunt.typescript.builder.run_codex_exec", judge)
+    monkeypatch.setattr("jaunt.generate.base.asyncio.sleep", no_sleep)
+
+    report = await run_build(
+        tmp_path,
+        config,
+        generator=backend,
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 0
+    assert report.generated == frozenset({"ts:src/math"})
+    assert semantic_calls == 2
+    assert backend.calls == 2
+    assert sleeps == [60.0, 30.0]
+
+
+@pytest.mark.asyncio
 async def test_context_docs_prose_change_requires_semantic_judgment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4815,7 +5035,17 @@ def test_design_marker_creation_waits_for_an_atomic_publisher_lease(tmp_path: Pa
 
     assert output.read_text(encoding="utf-8") == "new\n"
     assert manifest.is_file()
-    _complete_design_manifest(tmp_path, manifest)
+    source = tmp_path / "src/math.jaunt.ts"
+    source.parent.mkdir()
+    source.write_text("after\n", encoding="utf-8")
+    _complete_design_manifest(
+        tmp_path,
+        manifest,
+        path="src/math.jaunt.ts",
+        module_id="ts:src/math",
+        before="before\n",
+        after="after\n",
+    )
 
 
 def test_design_marker_retirement_waits_for_the_global_transaction_lease(
@@ -4828,6 +5058,9 @@ def test_design_marker_retirement_waits_for_the_global_transaction_lease(
         before="before\n",
         after="after\n",
     )
+    source = tmp_path / "src/math.jaunt.ts"
+    source.parent.mkdir()
+    source.write_text("after\n", encoding="utf-8")
     directory = tmp_path / ".jaunt/transactions"
     holder_ready = threading.Event()
     release_holder = threading.Event()
@@ -4851,7 +5084,14 @@ def test_design_marker_retirement_waits_for_the_global_transaction_lease(
 
     def complete_design() -> None:
         completion_started.set()
-        _complete_design_manifest(tmp_path, manifest)
+        _complete_design_manifest(
+            tmp_path,
+            manifest,
+            path="src/math.jaunt.ts",
+            module_id="ts:src/math",
+            before="before\n",
+            after="after\n",
+        )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         holder = executor.submit(hold_lease)
@@ -4895,14 +5135,282 @@ def test_design_marker_lifecycle_blocks_every_foreign_transaction_marker(
         before="before\n",
         after="after\n",
     )
+    source = tmp_path / "src/math.jaunt.ts"
+    source.parent.mkdir()
+    source.write_text("after\n", encoding="utf-8")
     foreign.write_text("{}\n", encoding="utf-8")
     with pytest.raises(JauntGenerationError, match="legacy.json"):
-        _complete_design_manifest(tmp_path, manifest)
+        _complete_design_manifest(
+            tmp_path,
+            manifest,
+            path="src/math.jaunt.ts",
+            module_id="ts:src/math",
+            before="before\n",
+            after="after\n",
+        )
     assert manifest.is_file()
 
     foreign.unlink()
-    _complete_design_manifest(tmp_path, manifest)
+    _complete_design_manifest(
+        tmp_path,
+        manifest,
+        path="src/math.jaunt.ts",
+        module_id="ts:src/math",
+        before="before\n",
+        after="after\n",
+    )
     assert not manifest.exists()
+
+
+def test_design_completion_rejects_a_replaced_marker_identity(tmp_path: Path) -> None:
+    manifest = _prepare_design_manifest(
+        tmp_path,
+        path="src/math.jaunt.ts",
+        module_id="ts:src/math",
+        before="before\n",
+        after="after\n",
+    )
+    source = tmp_path / "src/math.jaunt.ts"
+    source.parent.mkdir()
+    source.write_text("after\n", encoding="utf-8")
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["writes"][0]["moduleId"] = "ts:src/replacement"
+    manifest.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    with pytest.raises(JauntGenerationError, match="marker is invalid"):
+        _complete_design_manifest(
+            tmp_path,
+            manifest,
+            path="src/math.jaunt.ts",
+            module_id="ts:src/math",
+            before="before\n",
+            after="after\n",
+        )
+
+    assert manifest.is_file()
+    assert source.read_text(encoding="utf-8") == "after\n"
+
+
+def test_design_completion_authenticates_both_recorded_digests(tmp_path: Path) -> None:
+    manifest = _prepare_design_manifest(
+        tmp_path,
+        path="src/math.jaunt.ts",
+        module_id="ts:src/math",
+        before="before\n",
+        after="after\n",
+    )
+    source = tmp_path / "src/math.jaunt.ts"
+    source.parent.mkdir()
+    source.write_text("after\n", encoding="utf-8")
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["writes"][0]["before"] = _digest("forged original\n")
+    manifest.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    with pytest.raises(JauntGenerationError, match="marker is invalid"):
+        _complete_design_manifest(
+            tmp_path,
+            manifest,
+            path="src/math.jaunt.ts",
+            module_id="ts:src/math",
+            before="before\n",
+            after="after\n",
+        )
+
+    assert manifest.is_file()
+
+
+def test_design_abort_authenticates_both_recorded_digests(tmp_path: Path) -> None:
+    manifest = _prepare_design_manifest(
+        tmp_path,
+        path="src/math.jaunt.ts",
+        module_id="ts:src/math",
+        before="before\n",
+        after="after\n",
+    )
+    source = tmp_path / "src/math.jaunt.ts"
+    source.parent.mkdir()
+    source.write_text("before\n", encoding="utf-8")
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["writes"][0]["after"] = _digest("forged proposal\n")
+    manifest.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    with pytest.raises(JauntGenerationError, match="marker is invalid"):
+        _abort_design_manifest(
+            tmp_path,
+            manifest,
+            path="src/math.jaunt.ts",
+            module_id="ts:src/math",
+            before="before\n",
+            after="after\n",
+        )
+
+    assert manifest.is_file()
+
+
+def test_design_completion_claim_never_clobbers_a_concurrent_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _prepare_design_manifest(
+        tmp_path,
+        path="src/math.jaunt.ts",
+        module_id="ts:src/math",
+        before="before\n",
+        after="after\n",
+    )
+    source = tmp_path / "src/math.jaunt.ts"
+    source.parent.mkdir()
+    source.write_text("after\n", encoding="utf-8")
+    foreign_bytes = b'{"operation":"foreign"}\n'
+    original_retire = ts_design._retire_transaction_manifest
+    retired_names: list[str] = []
+
+    def replace_public_marker_before_claim_retirement(
+        claim: Path,
+        payload: Mapping[str, Any],
+        **kwargs: Any,
+    ) -> bool:
+        retired_names.append(claim.name)
+        manifest.write_bytes(foreign_bytes)
+        return original_retire(claim, payload, **kwargs)
+
+    monkeypatch.setattr(
+        ts_design,
+        "_retire_transaction_manifest",
+        replace_public_marker_before_claim_retirement,
+    )
+
+    with pytest.raises(JauntGenerationError, match="concurrent transaction marker appeared"):
+        _complete_design_manifest(
+            tmp_path,
+            manifest,
+            path="src/math.jaunt.ts",
+            module_id="ts:src/math",
+            before="before\n",
+            after="after\n",
+        )
+
+    assert retired_names and retired_names[0].startswith("design-claim-")
+    assert manifest.read_bytes() == foreign_bytes
+    recovery_markers = tuple((tmp_path / ".jaunt/transactions").glob("design-recovery-*.json"))
+    assert len(recovery_markers) == 1
+    assert json.loads(recovery_markers[0].read_text(encoding="utf-8"))["operation"] == "design"
+
+
+def test_design_completion_fails_closed_when_the_private_claim_disappears(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _prepare_design_manifest(
+        tmp_path,
+        path="src/math.jaunt.ts",
+        module_id="ts:src/math",
+        before="before\n",
+        after="after\n",
+    )
+    source = tmp_path / "src/math.jaunt.ts"
+    source.parent.mkdir()
+    source.write_text("after\n", encoding="utf-8")
+    original_retire = ts_design._retire_transaction_manifest
+
+    def remove_claim_before_retirement(
+        claim: Path,
+        payload: Mapping[str, Any],
+        **kwargs: Any,
+    ) -> bool:
+        claim.unlink()
+        return original_retire(claim, payload, **kwargs)
+
+    monkeypatch.setattr(
+        ts_design,
+        "_retire_transaction_manifest",
+        remove_claim_before_retirement,
+    )
+
+    with pytest.raises(JauntGenerationError, match="could not be durably retired"):
+        _complete_design_manifest(
+            tmp_path,
+            manifest,
+            path="src/math.jaunt.ts",
+            module_id="ts:src/math",
+            before="before\n",
+            after="after\n",
+        )
+
+    assert json.loads(manifest.read_text(encoding="utf-8"))["operation"] == "design"
+    assert tuple((tmp_path / ".jaunt/transactions").glob("*.json"))
+
+
+def test_windows_design_claim_restore_is_non_clobbering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    directory = tmp_path / ".jaunt/transactions"
+    directory.mkdir(parents=True)
+    claim = directory / "design-claim-owned.json"
+    public = directory / "design-owned.json"
+    claim.write_text('{"operation":"design"}\n', encoding="utf-8")
+    public.write_text('{"operation":"foreign"}\n', encoding="utf-8")
+    original_rename = os.rename
+
+    def windows_non_replacing_rename(source: Path, destination: Path) -> None:
+        if destination.exists():
+            raise FileExistsError(destination)
+        original_rename(source, destination)
+
+    monkeypatch.setattr(ts_design.os, "name", "nt")
+    monkeypatch.setattr(ts_design.os, "rename", windows_non_replacing_rename)
+    monkeypatch.setattr(ts_builder, "_windows_flush_pinned_handle", lambda *_args: None)
+    pinned = ts_builder._PinnedDirectory(path=directory, windows_handle=object())
+
+    assert not ts_design._restore_design_manifest_claim(
+        pinned,
+        claim_name=claim.name,
+        manifest_name=public.name,
+    )
+    assert json.loads(public.read_text(encoding="utf-8"))["operation"] == "foreign"
+    assert claim.is_file()
+
+    public.unlink()
+    assert ts_design._restore_design_manifest_claim(
+        pinned,
+        claim_name=claim.name,
+        manifest_name=public.name,
+    )
+    assert json.loads(public.read_text(encoding="utf-8"))["operation"] == "design"
+    assert not claim.exists()
+
+
+def test_design_completion_retains_marker_after_an_editor_replaces_validated_source(
+    tmp_path: Path,
+) -> None:
+    manifest = _prepare_design_manifest(
+        tmp_path,
+        path="src/math.jaunt.ts",
+        module_id="ts:src/math",
+        before="before\n",
+        after="after\n",
+    )
+    source = tmp_path / "src/math.jaunt.ts"
+    source.parent.mkdir()
+    source.write_text("after\n", encoding="utf-8")
+    # This is the exact source the fresh TypeScript validation accepted. An
+    # editor then wins the race before the transaction can be completed.
+    assert _digest(source.read_text(encoding="utf-8")) == _digest("after\n")
+    source.write_text("editor replacement\n", encoding="utf-8")
+
+    with pytest.raises(JauntGenerationError, match="changed before transaction completion"):
+        _complete_design_manifest(
+            tmp_path,
+            manifest,
+            path="src/math.jaunt.ts",
+            module_id="ts:src/math",
+            before="before\n",
+            after="after\n",
+        )
+
+    assert manifest.is_file()
+    assert source.read_text(encoding="utf-8") == "editor replacement\n"
 
 
 @pytest.mark.asyncio
@@ -5808,6 +6316,69 @@ def test_protected_runner_dto_keeps_aggregate_success_with_no_derived_records() 
     assert not _valid_runner_dto(successful, expected_mode="run", redact_derived=False)
 
 
+@pytest.mark.parametrize("redact_derived", [True, False])
+def test_runner_startup_failure_preserves_only_bounded_actionable_detail(
+    redact_derived: bool,
+) -> None:
+    message = "failed to load vitest config\nError: missing plugin"
+    result = {
+        "ok": False,
+        "mode": "run",
+        "diagnostics": [],
+        "tests": [
+            {
+                "caseId": "opaque-runner-failure",
+                "category": "runner",
+                "message": message,
+            }
+        ],
+        "captured": {"stdout": "", "stderr": ""},
+    }
+
+    assert _valid_runner_dto(
+        result,
+        expected_mode="run",
+        redact_derived=redact_derived,
+    )
+    assert _redact_runner_result(result, enabled=True)["tests"] == result["tests"]
+    assert _runner_validation_errors(result) == ["Vitest runner startup failed: " + message]
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {
+            "caseId": "0123456789abcdef",
+            "category": "runner",
+            "message": "not the reserved startup record",
+        },
+        {
+            "caseId": "opaque-runner-failure",
+            "category": "assertion",
+            "message": "not a runner failure",
+        },
+        {
+            "caseId": "opaque-runner-failure",
+            "category": "runner",
+            "message": "x" * 2_001,
+        },
+    ],
+)
+def test_runner_dto_rejects_other_message_bearing_protected_records(
+    record: dict[str, str],
+) -> None:
+    result = {
+        "ok": False,
+        "mode": "run",
+        "diagnostics": [],
+        "tests": [record],
+        "captured": {"stdout": "", "stderr": ""},
+    }
+
+    assert not _valid_runner_dto(result, expected_mode="run", redact_derived=True)
+    assert not _valid_runner_dto(result, expected_mode="run", redact_derived=False)
+
+
 @pytest.mark.parametrize(
     "source",
     [
@@ -6158,6 +6729,133 @@ async def test_protected_typecheck_runner_returns_bounded_exact_diagnostics(
             "column": 7,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_typecheck_batches_keep_config_snapshot_out_of_overlay_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    battery = "tests/__generated__/math.example.test.ts"
+    candidate = "src/__generated__/math.ts"
+    config_path = "vitest.config.ts"
+    workspace = {
+        "projects": [
+            {
+                "id": "tsconfig.test.json",
+                "configPath": "tsconfig.test.json",
+                "role": "test",
+                "rootFiles": [battery],
+            }
+        ]
+    }
+    captured: list[dict[str, Any]] = []
+
+    async def runner(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        captured.append(kwargs)
+        return {
+            "ok": True,
+            "mode": "typecheck",
+            "diagnostics": [],
+            "tests": [],
+            "captured": {"stdout": "", "stderr": ""},
+        }
+
+    monkeypatch.setattr(ts_tester, "_run_test_runner", runner)
+    monkeypatch.setattr(
+        ts_tester,
+        "_validate_test_owner_dependencies",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        ts_tester,
+        "_pin_test_dependency_runtimes",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        ts_tester,
+        "_pin_vitest_config_dependency_runtimes",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = await ts_tester._run_test_batches(
+        object(),
+        tmp_path,
+        config,
+        workspace,
+        files=(battery,),
+        overlays={
+            battery: "export {};\n",
+            candidate: "export const value = 1;\n",
+            config_path: "const invalidConfig: string = 1;\n",
+        },
+        typecheck_only=True,
+        config_snapshot=(
+            {config_path: "sha256:config"},
+            {config_path: "const invalidConfig: string = 1;\n"},
+        ),
+    )
+
+    assert result["ok"] is True
+    assert len(captured) == 1
+    assert set(captured[0]["overlays"]) == {battery, candidate, config_path}
+    assert set(captured[0]["root_overlay_paths"]) == {battery, candidate}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("redact_derived", [True, False])
+async def test_runner_startup_failure_survives_child_protocol(
+    tmp_path: Path,
+    redact_derived: bool,
+) -> None:
+    config = _config(tmp_path)
+    package_root = tmp_path / "tooling"
+    runner = package_root / "dist/test/runner.js"
+    runner.parent.mkdir(parents=True)
+    detail = "startVitest exploded\nError: startVitest exploded\n" + ("stack-frame\n" * 100)
+    result = {
+        "ok": False,
+        "mode": "run",
+        "diagnostics": [],
+        "tests": [
+            {
+                "caseId": "opaque-runner-failure",
+                "category": "runner",
+                "message": detail,
+            }
+        ],
+        "captured": {"stdout": "", "stderr": ""},
+    }
+    runner.write_text(
+        "import sys\nsys.stdin.read()\n"
+        f"sys.stdout.write({json.dumps(json.dumps(result))})\n"
+        "raise SystemExit(1)\n",
+        encoding="utf-8",
+    )
+    compiler = tmp_path / "typescript.js"
+    compiler.write_text("", encoding="utf-8")
+    client = SimpleNamespace(
+        installation=SimpleNamespace(
+            node=sys.executable,
+            package_root=package_root,
+            compiler_module_path=compiler,
+        )
+    )
+
+    protected = await _run_test_runner(
+        client,
+        tmp_path,
+        config,
+        files=(),
+        redact_derived=redact_derived,
+        timeout=2,
+    )
+
+    assert protected["ok"] is False
+    assert protected["exitCode"] == 1
+    assert protected["tests"] == result["tests"]
+    assert _runner_validation_errors(protected) == ["Vitest runner startup failed: " + detail]
 
 
 @pytest.mark.asyncio
@@ -6821,6 +7519,9 @@ async def test_failed_vitest_run_repairs_once_with_protected_feedback_and_reruns
     monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", batches)
     monkeypatch.setattr("jaunt.typescript.tester.append_events", append_after_commit)
     monkeypatch.setattr(ts_tester, "_clear_rejected_test_candidate", track_cleanup)
+    default_backend = FakeGenerator()
+    monkeypatch.setattr(ts_tester, "_default_backend", lambda _config: default_backend)
+    requested_generator = None if failure_mode == "none" else FakeGenerator()
     mutated_expected_input = False
     if failure_mode == "input-drift":
         original_verify = ts_tester._verify_test_runtime_identity
@@ -6875,7 +7576,7 @@ async def test_failed_vitest_run_repairs_once_with_protected_feedback_and_reruns
             await run_test(
                 tmp_path,
                 config,
-                generator=FakeGenerator(),
+                generator=requested_generator,
                 worker_factory=lambda *_: worker,
                 progress=progress,
             )
@@ -6887,7 +7588,7 @@ async def test_failed_vitest_run_repairs_once_with_protected_feedback_and_reruns
             await run_test(
                 tmp_path,
                 config,
-                generator=FakeGenerator(),
+                generator=requested_generator,
                 worker_factory=lambda *_: worker,
                 progress=progress,
             )
@@ -6910,7 +7611,7 @@ async def test_failed_vitest_run_repairs_once_with_protected_feedback_and_reruns
     report = await run_test(
         tmp_path,
         config,
-        generator=FakeGenerator(),
+        generator=requested_generator,
         worker_factory=lambda *_: worker,
         progress=progress,
     )
@@ -6921,6 +7622,10 @@ async def test_failed_vitest_run_repairs_once_with_protected_feedback_and_reruns
     assert build_calls[1]["progress"] is progress
     assert build_calls[0]["finish_progress"] is False
     assert build_calls[1]["finish_progress"] is False
+    assert build_calls[0]["generator"] is None
+    assert callable(build_calls[0]["generator_factory"])
+    assert build_calls[0]["generator_factory"]() is default_backend
+    assert build_calls[1]["generator"] is default_backend
     assert build_calls[1]["force"] is True
     assert build_calls[1]["max_attempts"] == 1
     assert build_calls[1]["target_ids"] == ("ts:src/math",)
@@ -7543,6 +8248,172 @@ async def test_capacity_exhaustion_reports_failed_battery_and_preserves_complete
 
 
 @pytest.mark.asyncio
+async def test_generation_infrastructure_failure_preserves_completed_peer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    cache = ResponseCache(tmp_path / ".ordinary-infrastructure-cache")
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "diagnostics": [],
+            "tests": [],
+        }
+
+    class InfrastructureGenerator(FakeGenerator):
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def generate_request(
+            self,
+            request: GenerationRequest,
+            **kwargs: Any,
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            tier = str(request.cache_payload["tier"])
+            self.calls.append(tier)
+            if tier == "example":
+                raise JauntGenerationError("simulated provider protocol failure")
+            return await super().generate_request(request, **kwargs)
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    generator = InfrastructureGenerator()
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        jobs=1,
+        generator=generator,
+        response_cache=cache,
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 3
+    assert generator.calls == ["example", "derived"]
+    failure = report.failed["tests/math.jaunt-test.ts#example"][0]
+    assert failure.code == "JAUNT_TS_TEST_INFRASTRUCTURE"
+    assert "simulated provider protocol failure" in failure.message
+    outcomes = {item["tier"]: item for item in report.runner["batteries"]}
+    assert outcomes["example"]["state"] == "infrastructure-failed"
+    assert outcomes["example"]["attempts"] == 0
+    assert outcomes["example"]["infrastructure_errors"] == ("simulated provider protocol failure",)
+    assert outcomes["derived"]["state"] == "committed"
+    assert (tmp_path / "tests/__generated__/math.derived.test.ts").is_file()
+    assert cache.info()["entries"] == 1
+
+    payload = typescript_test_payload(report)
+    assert payload["failed"]["tests/math.jaunt-test.ts#example"][0]["code"] == (
+        "JAUNT_TS_TEST_INFRASTRUCTURE"
+    )
+    payload_outcomes = {item["tier"]: item for item in payload["vitest"]["batteries"]}
+    assert payload_outcomes["example"]["state"] == "infrastructure-failed"
+    summary = "\n".join(human_lines(payload))
+    assert "tests/math.jaunt-test.ts#example" in summary
+    assert "JAUNT_TS_TEST_INFRASTRUCTURE: simulated provider protocol failure" in summary
+
+
+@pytest.mark.asyncio
+async def test_terminal_quota_exhaustion_aborts_test_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    cache = ResponseCache(tmp_path / ".quota-exhaustion-cache")
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "diagnostics": [],
+            "tests": [],
+        }
+
+    class QuotaGenerator(FakeGenerator):
+        async def generate_request(
+            self,
+            request: GenerationRequest,
+            **kwargs: Any,
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            raise JauntQuotaGenerationError(
+                f"terminal {request.cache_payload['tier']} test-generation quota"
+            )
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    with pytest.raises(JauntQuotaGenerationError, match="terminal .* test-generation quota"):
+        await run_test(
+            tmp_path,
+            config,
+            no_build=True,
+            jobs=1,
+            generator=QuotaGenerator(),
+            response_cache=cache,
+            worker_factory=lambda *_: worker,
+        )
+
+    assert not (tmp_path / "tests/__generated__/math.example.test.ts").exists()
+    assert not (tmp_path / "tests/__generated__/math.derived.test.ts").exists()
+    assert cache.info()["entries"] == 0
+
+
+@pytest.mark.asyncio
+async def test_budget_abort_drains_already_failed_sibling_tasks(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    ready = asyncio.Event()
+    started = 0
+    loop = asyncio.get_running_loop()
+    previous_handler = loop.get_exception_handler()
+    unhandled: list[dict[str, object]] = []
+
+    class ConcurrentFailureGenerator(FakeGenerator):
+        async def generate_request(
+            self, request: GenerationRequest, **_kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            nonlocal started
+            started += 1
+            if started == 2:
+                ready.set()
+            await ready.wait()
+            raise JauntBudgetExceededError(
+                f"simulated {request.cache_payload['tier']} generation failure"
+            )
+
+    def capture_unhandled(_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        unhandled.append(dict(context))
+
+    loop.set_exception_handler(capture_unhandled)
+    try:
+        with pytest.raises(JauntBudgetExceededError, match="simulated .* generation failure"):
+            await run_test(
+                tmp_path,
+                config,
+                no_build=True,
+                jobs=2,
+                generator=ConcurrentFailureGenerator(),
+                response_cache=ResponseCache(tmp_path / ".test-response-cache"),
+                worker_factory=lambda *_: worker,
+            )
+        # Force task finalizers while this loop's handler is still installed.
+        # Before the all-task drain, the already-done sibling reports here.
+        for _ in range(2):
+            gc.collect()
+            await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+    assert started == 2
+    assert not [
+        context
+        for context in unhandled
+        if context.get("message") == "Task exception was never retrieved"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_late_generation_failure_resumes_from_staged_battery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -8080,6 +8951,233 @@ async def test_partial_landing_runs_surviving_baseline_and_retains_infrastructur
         assert {item.code for item in report.failed[failure_key]} == {
             "JAUNT_TS_TEST_INFRASTRUCTURE"
         }
+
+
+@pytest.mark.asyncio
+async def test_generation_failure_reruns_and_lands_runtime_survivors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+
+    class TwoSpecWorker(_TestSpecWorker):
+        def __init__(self, root: Path) -> None:
+            super().__init__(root)
+            self.other_spec_path = "tests/other.jaunt-test.ts"
+            (root / self.other_spec_path).write_text("// Verify another public view.\n")
+
+        async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            result = await super().request(method, params)
+            if method == "analyzeWorkspace":
+                result["testSpecs"] = [
+                    {
+                        "path": self.test_spec_path,
+                        "project": "tsconfig.test.json",
+                        "targets": ["ts:src/math#double"],
+                    },
+                    {
+                        "path": self.other_spec_path,
+                        "project": "tsconfig.test.json",
+                        "targets": ["ts:src/math#double"],
+                    },
+                ]
+            return result
+
+    worker = TwoSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert seeded.exit_code == 0
+
+    generated_paths = tuple(
+        f"tests/__generated__/{stem}.{tier}.test.ts"
+        for stem in ("math", "other")
+        for tier in ("derived", "example")
+    )
+    for path in generated_paths:
+        (tmp_path / path).unlink()
+    generation_failed = "tests/__generated__/math.derived.test.ts"
+    runtime_failed = "tests/__generated__/math.example.test.ts"
+    survivors = (
+        "tests/__generated__/other.derived.test.ts",
+        "tests/__generated__/other.example.test.ts",
+    )
+
+    class OneGenerationFailure(FakeGenerator):
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            if request.target_path == generation_failed:
+                return (
+                    'import "../../src/__generated__/math.js";\n',
+                    TokenUsage(20, 10, "fake-ts", "fake"),
+                    (),
+                )
+            return await super().generate_request(request, **kwargs)
+
+    runtime_runs: list[tuple[str, ...]] = []
+
+    async def fail_one_then_pass(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        files = tuple(kwargs.get("files", ()))
+        if kwargs.get("typecheck_only"):
+            return {"ok": True, "mode": "typecheck", "tests": [], "diagnostics": []}
+        runtime_runs.append(files)
+        if len(runtime_runs) == 1:
+            return {
+                "ok": False,
+                "mode": "run",
+                "tests": [
+                    {
+                        "file": runtime_failed,
+                        "tier": "example",
+                        "status": "failed",
+                        "category": "assertion",
+                        "message": "candidate-owned assertion",
+                    }
+                ],
+                "failures": [],
+            }
+        return {"ok": True, "mode": "run", "tests": [], "diagnostics": []}
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", fail_one_then_pass)
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        max_attempts=1,
+        generator=OneGenerationFailure(),
+        response_cache=ResponseCache(tmp_path / ".stage-runtime-survivors-cache"),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 3
+    assert runtime_runs == [
+        (runtime_failed, *survivors),
+        survivors,
+    ]
+    partial = report.runner["partial_landing"]
+    assert partial["accepted"] == survivors
+    assert partial["rejected"] == (runtime_failed,)
+    assert partial["committed"] is True
+    assert all((tmp_path / path).is_file() for path in survivors)
+    assert not (tmp_path / generation_failed).exists()
+    assert not (tmp_path / runtime_failed).exists()
+    outcomes = {item["path"]: item for item in report.runner["batteries"]}
+    assert all(outcomes[path]["state"] == "committed" for path in survivors)
+    assert outcomes[runtime_failed]["state"] == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_preflight_isolation_reruns_and_lands_runtime_survivors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+
+    class TwoSpecWorker(_TestSpecWorker):
+        def __init__(self, root: Path) -> None:
+            super().__init__(root)
+            self.other_spec_path = "tests/other.jaunt-test.ts"
+            (root / self.other_spec_path).write_text("// Verify another public view.\n")
+
+        async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            result = await super().request(method, params)
+            if method == "analyzeWorkspace":
+                result["testSpecs"] = [
+                    {
+                        "path": self.test_spec_path,
+                        "project": "tsconfig.test.json",
+                        "targets": ["ts:src/math#double"],
+                    },
+                    {
+                        "path": self.other_spec_path,
+                        "project": "tsconfig.test.json",
+                        "targets": ["ts:src/math#double"],
+                    },
+                ]
+            return result
+
+    worker = TwoSpecWorker(tmp_path)
+    generated_paths = tuple(
+        f"tests/__generated__/{stem}.{tier}.test.ts"
+        for stem in ("math", "other")
+        for tier in ("derived", "example")
+    )
+    runtime_failed = generated_paths[0]
+    survivors = generated_paths[1:]
+    preflight_failed = False
+    runtime_runs: list[tuple[str, ...]] = []
+
+    async def isolate_then_fail_one(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal preflight_failed
+        files = tuple(kwargs.get("files", ()))
+        if kwargs.get("typecheck_only"):
+            if len(files) == len(generated_paths) and not preflight_failed:
+                preflight_failed = True
+                return {
+                    "ok": False,
+                    "mode": "typecheck",
+                    "tests": [],
+                    "diagnostics": [
+                        {
+                            "code": "TS2451",
+                            "message": "combined overlay conflict",
+                            "severity": "error",
+                        }
+                    ],
+                }
+            return {"ok": True, "mode": "typecheck", "tests": [], "diagnostics": []}
+        runtime_runs.append(files)
+        if len(runtime_runs) == 1:
+            return {
+                "ok": False,
+                "mode": "run",
+                "tests": [
+                    {
+                        "file": runtime_failed,
+                        "tier": "derived",
+                        "status": "failed",
+                        "category": "assertion",
+                        "message": "candidate-owned assertion",
+                    }
+                ],
+                "failures": [],
+            }
+        return {"ok": True, "mode": "run", "tests": [], "diagnostics": []}
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", isolate_then_fail_one)
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        response_cache=ResponseCache(tmp_path / ".preflight-runtime-survivors-cache"),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 3
+    assert runtime_runs == [generated_paths, survivors]
+    partial = report.runner["partial_landing"]
+    assert partial["accepted"] == survivors
+    assert partial["rejected"] == (runtime_failed,)
+    assert partial["committed"] is True
+    assert all((tmp_path / path).is_file() for path in survivors)
+    assert not (tmp_path / runtime_failed).exists()
+    outcomes = {item["path"]: item for item in report.runner["batteries"]}
+    assert all(outcomes[path]["state"] == "committed" for path in survivors)
+    assert outcomes[runtime_failed]["state"] == "rejected"
 
 
 @pytest.mark.asyncio
@@ -8800,6 +9898,43 @@ async def test_external_cost_tracker_keeps_build_and_test_phase_summaries_local(
 
 
 @pytest.mark.asyncio
+async def test_test_default_cost_budget_is_command_wide_across_build_and_batteries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    config = replace(config, llm=replace(config.llm, max_cost_per_build=0.00025))
+    worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    class PricedGenerator(FakeGenerator):
+        async def generate_request(
+            self, request: GenerationRequest, **kwargs: Any
+        ) -> tuple[str, TokenUsage, tuple[str, ...]]:
+            source, _usage, advisories = await super().generate_request(request, **kwargs)
+            return source, TokenUsage(20, 10, "gpt-5.6-sol", "codex"), advisories
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+
+    with pytest.raises(JauntBudgetExceededError, match="exceeds budget"):
+        await run_test(
+            tmp_path,
+            config,
+            generator=PricedGenerator(),
+            worker_factory=lambda *_: worker,
+            jobs=1,
+            repo_map_enabled=False,
+            auto_skills_enabled=False,
+        )
+
+
+@pytest.mark.asyncio
 async def test_test_without_specs_or_batteries_is_green_and_skipped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -8809,11 +9944,15 @@ async def test_test_without_specs_or_batteries_is_green_and_skipped(
     async def unexpected_runner(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         raise AssertionError("empty test selection must not start Vitest")
 
+    def unexpected_generator() -> GeneratorBackend:
+        raise AssertionError("empty test selection must not construct a generator")
+
     monkeypatch.setattr("jaunt.typescript.tester._run_test_runner", unexpected_runner)
     report = await run_test(
         tmp_path,
         config,
         no_build=True,
+        generator_factory=unexpected_generator,
         worker_factory=lambda *_: worker,
     )
 
@@ -10592,6 +11731,89 @@ async def test_legacy_battery_without_an_empty_fixture_fingerprint_refreezes(
 
 
 @pytest.mark.asyncio
+async def test_legacy_empty_fixture_can_verify_with_api_and_tooling_transition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    old_api_digest = "sha256:" + ("1" * 64)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    paths = frozenset(seeded.generated)
+    bodies: dict[str, str] = {}
+    for relative in paths:
+        path = tmp_path / relative
+        source = path.read_text(encoding="utf-8")
+        bodies[relative] = _strip_test_header(source)
+        source = re.sub(r"(?m)^// jaunt:fixture_fingerprint=.*\n", "", source)
+        for field, value in {
+            "target_api_digest": old_api_digest,
+            "prompt_fingerprint": "sha256:" + ("2" * 64),
+            "runner_fingerprint": "sha256:" + ("3" * 64),
+            "vitest_fingerprint": "sha256:" + ("4" * 64),
+            "battery_fingerprint": "sha256:" + ("5" * 64),
+        }.items():
+            source = re.sub(
+                rf"(?m)^// jaunt:{field}=.*$",
+                f"// jaunt:{field}={value}",
+                source,
+            )
+        path.write_text(source, encoding="utf-8")
+
+    monkeypatch.setattr(
+        "jaunt.typescript.tester.proven_previous_target_api_digests",
+        lambda *_args, **_kwargs: frozenset({old_api_digest}),
+    )
+    original_action = ts_tester._existing_test_battery_action
+
+    def require_verification(*args: Any, **kwargs: Any) -> tuple[str, str | None]:
+        action = original_action(*args, **kwargs)
+        assert action[0] == "verify", action[0]
+        return action
+
+    monkeypatch.setattr(ts_tester, "_existing_test_battery_action", require_verification)
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=ExplodingGenerator(),
+        response_cache=ResponseCache(tmp_path / ".legacy-empty-api-cache"),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 0
+    assert report.refrozen == paths
+    assert not report.generated
+    for relative in paths:
+        source = (tmp_path / relative).read_text(encoding="utf-8")
+        metadata = dict(_test_header_metadata(source) or {})
+        assert _strip_test_header(source) == bodies[relative]
+        assert metadata["fixture_fingerprint"] == _canonical_digest(None)
+        assert metadata["target_api_digest"] != old_api_digest
+
+
+@pytest.mark.asyncio
 async def test_legacy_battery_without_a_real_fixture_fingerprint_regenerates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -10847,12 +12069,15 @@ def test_vitest_config_closure_rejects_escaping_local_dependency(tmp_path: Path)
 def test_vitest_config_snapshot_preserves_absent_candidates_and_exact_bytes(
     tmp_path: Path,
 ) -> None:
-    config_bytes = b'import "./helper";\r\nexport default {};\r\n'
+    config_bytes = (
+        b'import "./helper";\r\nexport default { test: { include: ["tests/**/*.test.ts"] } };\r\n'
+    )
     (tmp_path / "vitest.config.ts").write_bytes(config_bytes)
 
     closure, overlays = ts_tester._local_config_snapshot(tmp_path, "vitest.config.ts")
 
     assert closure["helper.ts"] == MISSING_INPUT
+    assert "tests/**/*.test.ts" not in closure
     assert overlays["vitest.config.ts"].encode("utf-8") == config_bytes
 
     # This file appears after the snapshot. The disposable runner view must
@@ -10868,6 +12093,1203 @@ def test_vitest_config_snapshot_preserves_absent_candidates_and_exact_bytes(
     ) as isolated:
         assert (isolated / "vitest.config.ts").read_bytes() == config_bytes
         assert not (isolated / "helper.ts").exists()
+
+
+def test_vitest_config_snapshot_reduces_static_node_path_helpers(tmp_path: Path) -> None:
+    (tmp_path / "vitest.config.ts").write_text(
+        'import { join as pathJoin } from "node:path";\n'
+        'export default { test: { setupFiles: [pathJoin("config", "setup.ts")] } };\n',
+        encoding="utf-8",
+    )
+    setup = tmp_path / "config/setup.ts"
+    setup.parent.mkdir()
+    setup.write_text("export const setup = true;\n", encoding="utf-8")
+
+    closure, _overlays = ts_tester._local_config_snapshot(tmp_path, "vitest.config.ts")
+
+    assert "config/setup.ts" in closure
+    assert "setup.ts" not in closure
+
+
+@pytest.mark.parametrize(
+    "binding, call",
+    [
+        ('import path, { resolve as pathResolve } from "node:path";', "pathResolve"),
+        ('import {\n  join as pathJoin,\n} from "node:path";', "pathJoin"),
+        ('const { join: pathJoin } = require("path");', "pathJoin"),
+        ('const path = require("node:path");', "path.join"),
+        ('const pathJoin = require("node:path").join;', "pathJoin"),
+        ('import path = require("node:path");', "path.join"),
+        ('import path from "node:path";', "path.posix.join"),
+        ('import { posix as platformPath } from "node:path";', "platformPath.join"),
+        ('const platformPath = require("node:path").win32;', "platformPath.join"),
+    ],
+)
+def test_vitest_config_snapshot_reduces_common_node_path_import_forms(
+    tmp_path: Path,
+    binding: str,
+    call: str,
+) -> None:
+    (tmp_path / "vitest.config.ts").write_text(
+        f"{binding}\n"
+        f'export default {{ test: {{ setupFiles: [{call}("config", "setup.ts")] }} }};\n',
+        encoding="utf-8",
+    )
+    setup = tmp_path / "config/setup.ts"
+    setup.parent.mkdir()
+    setup.write_text("export const setup = true;\n", encoding="utf-8")
+
+    closure, _overlays = ts_tester._local_config_snapshot(tmp_path, "vitest.config.ts")
+
+    assert "config/setup.ts" in closure
+    assert "setup.ts" not in closure
+
+
+def test_vitest_config_computed_paths_are_normalized_from_the_workspace_root(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config/vitest.config.ts"
+    config.parent.mkdir()
+    config.write_text(
+        'import { join } from "node:path";\n'
+        'export default { test: { setupFiles: [join("./configdir", "setup.ts")] } };\n',
+        encoding="utf-8",
+    )
+    setup = tmp_path / "configdir/setup.ts"
+    setup.parent.mkdir()
+    setup.write_text("export const setup = true;\n", encoding="utf-8")
+
+    closure, _overlays = ts_tester._local_config_snapshot(
+        tmp_path,
+        "config/vitest.config.ts",
+    )
+
+    assert "configdir/setup.ts" in closure
+    assert "config/configdir/setup.ts" not in closure
+
+
+@pytest.mark.parametrize(
+    ("expression", "config_path", "expected"),
+    [
+        ("resolve(__dirname, `setup.ts`)", "config/vitest.config.ts", "config/setup.ts"),
+        (
+            'resolve(import.meta.dirname, "setup.ts")',
+            "config/vitest.config.ts",
+            "config/setup.ts",
+        ),
+        ('resolve(process.cwd(), "setup.ts")', "config/vitest.config.ts", "setup.ts"),
+        ('join("config", `setup.ts`)', "vitest.config.ts", "config/setup.ts"),
+    ],
+)
+def test_vitest_config_snapshot_reduces_known_static_path_bases(
+    tmp_path: Path,
+    expression: str,
+    config_path: str,
+    expected: str,
+) -> None:
+    config = tmp_path / config_path
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        'import { join, resolve } from "node:path";\n'
+        f"export default {{ test: {{ setupFiles: [{expression}] }} }};\n",
+        encoding="utf-8",
+    )
+    setup = tmp_path / expected
+    setup.parent.mkdir(parents=True, exist_ok=True)
+    setup.write_text("export const setup = true;\n", encoding="utf-8")
+
+    closure, _overlays = ts_tester._local_config_snapshot(tmp_path, config_path)
+
+    assert expected in closure
+
+
+def test_vitest_config_path_scanner_ignores_comments_and_string_bodies(tmp_path: Path) -> None:
+    (tmp_path / "vitest.config.ts").write_text(
+        'import { join } from "node:path";\n'
+        '// old: join("config", process.env.SETUP)\n'
+        "const documentation = 'join(\"config\", process.env.SETUP)';\n"
+        'export default { test: { setupFiles: [join("config", "setup.ts")] } };\n',
+        encoding="utf-8",
+    )
+    setup = tmp_path / "config/setup.ts"
+    setup.parent.mkdir()
+    setup.write_text("export const setup = true;\n", encoding="utf-8")
+
+    closure, _overlays = ts_tester._local_config_snapshot(tmp_path, "vitest.config.ts")
+
+    assert "config/setup.ts" in closure
+
+
+def test_vitest_config_snapshot_captures_static_template_literal_paths(tmp_path: Path) -> None:
+    (tmp_path / "vitest.config.ts").write_text(
+        "export default { test: { setupFiles: [`./setup.ts`] } };\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "setup.ts").write_text("export const setup = true;\n", encoding="utf-8")
+
+    closure, _overlays = ts_tester._local_config_snapshot(tmp_path, "vitest.config.ts")
+
+    assert "setup.ts" in closure
+
+
+def test_vitest_config_snapshot_rejects_interpolated_template_paths(tmp_path: Path) -> None:
+    (tmp_path / "vitest.config.ts").write_text(
+        "const name = 'setup';\nexport default { test: { setupFiles: [`./${name}.ts`] } };\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(JauntConfigError, match="interpolated path"):
+        ts_tester._local_config_snapshot(tmp_path, "vitest.config.ts")
+
+
+def test_vitest_config_snapshot_allows_non_path_interpolated_metadata(tmp_path: Path) -> None:
+    (tmp_path / "vitest.config.ts").write_text(
+        "const mode = 'fast';\n"
+        "export default { test: { name: `unit-${mode}-${process.env.MODE}` } };\n",
+        encoding="utf-8",
+    )
+
+    closure, _overlays = ts_tester._local_config_snapshot(tmp_path, "vitest.config.ts")
+
+    assert tuple(closure) == ("vitest.config.ts",)
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        '(await import("vite-plugin-example")).default',
+        'readFileSync("./test-name.txt", "utf8")',
+    ],
+)
+def test_vitest_config_snapshot_rejects_effectful_metadata_interpolation(
+    tmp_path: Path,
+    expression: str,
+) -> None:
+    (tmp_path / "vitest.config.ts").write_text(
+        f"export default {{ test: {{ name: `unit-${{{expression}}}` }} }};\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(JauntConfigError, match="unresolved computed value"):
+        ts_tester._local_config_snapshot(tmp_path, "vitest.config.ts")
+
+
+def test_vitest_config_snapshot_rejects_ambiguously_composed_interpolated_paths(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "vitest.config.ts").write_text(
+        "const setup = `${process.env.SETUP}`;\n"
+        "export default { test: { setupFiles: [setup] } };\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(JauntConfigError, match="unresolved computed value"):
+        ts_tester._local_config_snapshot(tmp_path, "vitest.config.ts")
+
+
+def test_vitest_config_snapshot_rejects_concatenated_paths(tmp_path: Path) -> None:
+    (tmp_path / "vitest.config.ts").write_text(
+        "const name = 'setup';\n"
+        "export default { test: { setupFiles: ['./config/' + name + '.ts'] } };\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(JauntConfigError, match="concatenated path"):
+        ts_tester._local_config_snapshot(tmp_path, "vitest.config.ts")
+
+
+def test_vitest_config_imported_packages_are_fingerprinted_and_pinned(tmp_path: Path) -> None:
+    config = tmp_path / "vitest.config.ts"
+    config.write_text(
+        'import path from "node:path";\n'
+        'import plugin from "vite-plugin-example";\n'
+        'export * from "vite-plugin-example";\n'
+        "void import(`vite-plugin-example`);\n"
+        'import "./setup.ts";\n'
+        "export default { plugins: [plugin()], root: path.resolve('.') };\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "setup.ts").write_text("export {};\n", encoding="utf-8")
+    package = tmp_path / "node_modules/vite-plugin-example"
+    runtime = package / "dist/index.js"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("export default () => ({});\n", encoding="utf-8")
+    (package / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "vite-plugin-example",
+                "version": "1.0.0",
+                "type": "module",
+                "main": "./dist/index.js",
+                "dependencies": {"vite-plugin-dependency": "1.0.0"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    dependency = tmp_path / "node_modules/vite-plugin-dependency"
+    dependency.mkdir()
+    dependency_runtime = dependency / "index.js"
+    dependency_runtime.write_text("export const value = 1;\n", encoding="utf-8")
+    (dependency / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "vite-plugin-dependency",
+                "version": "1.0.0",
+                "type": "module",
+                "main": "./index.js",
+            }
+        ),
+        encoding="utf-8",
+    )
+    closure, overlays = ts_tester._local_config_snapshot(tmp_path, "vitest.config.ts")
+
+    before = ts_tester._config_package_runtime_identities(tmp_path, overlays)
+    dependency_runtime.write_text("export const value = 2;\n", encoding="utf-8")
+    after = ts_tester._config_package_runtime_identities(tmp_path, overlays)
+
+    assert "setup.ts" in closure
+    assert tuple(before) == (
+        "vitest.config.ts:vite-plugin-example",
+        "vitest.config.ts:vite-plugin-example>vite-plugin-dependency",
+    )
+    assert before != after
+
+    calls: list[tuple[tuple[object, ...], Mapping[str, object]]] = []
+
+    class Client:
+        def pin_package_resolution_closure(self, *args: object, **kwargs: object) -> None:
+            calls.append((args, kwargs))
+
+    ts_tester._pin_vitest_config_dependency_runtimes(Client(), tmp_path, overlays)
+
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args[:3] == (
+        "Vitest config dependency vite-plugin-example from vitest.config.ts",
+        config,
+        "vite-plugin-example",
+    )
+    assert kwargs == {
+        "boundary": tmp_path,
+        "module_path": True,
+    }
+
+
+def test_vitest_config_snapshot_captures_package_import_local_branches_and_manifest(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "config").mkdir()
+    for name in ("exact", "node", "default", "first", "fallback", "self"):
+        (tmp_path / f"config/{name}.ts").write_text(
+            f"export const value = {name!r};\n",
+            encoding="utf-8",
+        )
+    manifest = {
+        "name": "workspace",
+        "exports": {"./self/*": "./config/*.ts"},
+        "imports": {
+            "#exact/*": "./config/*.ts",
+            "#conditional": {
+                "node": "./config/node.ts",
+                "default": "./config/default.ts",
+            },
+            "#array": ["./config/first.ts", "./config/fallback.ts"],
+            "#self/*": "workspace/self/*",
+        },
+    }
+    manifest_path = tmp_path / "package.json"
+    manifest_path.write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    (tmp_path / "vitest.config.ts").write_text(
+        'import "#exact/exact";\nimport "#conditional";\nimport "#array";\n'
+        'import "#self/self";\nexport default {};\n',
+        encoding="utf-8",
+    )
+
+    before, overlays = ts_tester._local_config_snapshot(tmp_path, "vitest.config.ts")
+    (tmp_path / "config/exact.ts").write_text(
+        "export const value = 'changed';\n",
+        encoding="utf-8",
+    )
+    after, _ = ts_tester._local_config_snapshot(tmp_path, "vitest.config.ts")
+    manifest["imports"]["#exact/*"] = "./config/fallback.ts"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    after_manifest, _ = ts_tester._local_config_snapshot(tmp_path, "vitest.config.ts")
+
+    assert set(overlays) == {
+        "config/default.ts",
+        "config/exact.ts",
+        "config/fallback.ts",
+        "config/first.ts",
+        "config/node.ts",
+        "config/self.ts",
+        "vitest.config.ts",
+    }
+    assert "package.json" in before
+    assert before != after
+    assert after != after_manifest
+
+
+def test_vitest_config_package_import_external_branches_are_fingerprinted_and_sealed(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "workspace",
+                "imports": {
+                    "#helper/*": {
+                        "node": ["helper-a/*", "helper-b"],
+                        "default": "helper-default",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "vitest.config.ts").write_text(
+        'import "#helper/feature";\nexport default {};\n',
+        encoding="utf-8",
+    )
+    helper_runtimes: dict[str, Path] = {}
+    for package in ("helper-a", "helper-b", "helper-default"):
+        package_root = tmp_path / "node_modules" / package
+        package_root.mkdir(parents=True)
+        runtime = package_root / "index.js"
+        runtime.write_text("export const value = 1;\n", encoding="utf-8")
+        (package_root / "package.json").write_text(
+            json.dumps({"name": package, "version": "1.0.0", "main": "./index.js"}),
+            encoding="utf-8",
+        )
+        helper_runtimes[package] = runtime
+    _closure, overlays = ts_tester._local_config_snapshot(tmp_path, "vitest.config.ts")
+
+    before = ts_tester._config_package_runtime_identities(tmp_path, overlays)
+    helper_runtimes["helper-a"].write_text("export const value = 2;\n", encoding="utf-8")
+    after = ts_tester._config_package_runtime_identities(tmp_path, overlays)
+
+    assert set(before) == {
+        "vitest.config.ts:helper-a",
+        "vitest.config.ts:helper-b",
+        "vitest.config.ts:helper-default",
+    }
+    assert before != after
+
+    (tmp_path / "src").mkdir()
+    worker = _RuntimeMutationWorker(tmp_path)
+    ts_tester._pin_vitest_config_dependency_runtimes(worker, tmp_path, overlays)
+    helper_runtimes["helper-b"].write_text("export const value = 3;\n", encoding="utf-8")
+    with pytest.raises(
+        WorkerToolchainChangedError,
+        match="JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+    ):
+        worker.seal_runtime_identity()
+
+
+@pytest.mark.parametrize(
+    ("imports", "message"),
+    [
+        ({}, "unresolved alias"),
+        ({"#helper": "./../outside.ts"}, "unsafe package-relative target"),
+    ],
+)
+def test_vitest_config_snapshot_rejects_invalid_package_import_alias(
+    tmp_path: Path,
+    imports: Mapping[str, object],
+    message: str,
+) -> None:
+    (tmp_path / "package.json").write_text(
+        json.dumps({"name": "workspace", "imports": imports}),
+        encoding="utf-8",
+    )
+    (tmp_path / "vitest.config.ts").write_text(
+        'import "#helper";\nexport default {};\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(JauntConfigError, match=message):
+        ts_tester._local_config_snapshot(tmp_path, "vitest.config.ts")
+
+
+@pytest.mark.parametrize(
+    ("plugin_relative", "plugin_source"),
+    [
+        (
+            "dist/index.cjs",
+            'module.exports = require("hoisted-runtime-helper");\n',
+        ),
+        (
+            "dist/index.mjs",
+            'import { createRequire } from "node:module";\n'
+            "const load = createRequire(import.meta.url);\n"
+            'export default load("hoisted-runtime-helper");\n',
+        ),
+    ],
+)
+def test_vitest_config_runtime_identity_tracks_undeclared_static_helper_bytes(
+    tmp_path: Path,
+    plugin_relative: str,
+    plugin_source: str,
+) -> None:
+    (tmp_path / "vitest.config.ts").write_text(
+        'import plugin from "vite-plugin-example";\nexport default { plugins: [plugin()] };\n',
+        encoding="utf-8",
+    )
+    plugin = tmp_path / "node_modules/vite-plugin-example"
+    plugin_runtime = plugin / plugin_relative
+    plugin_runtime.parent.mkdir(parents=True)
+    plugin_runtime.write_text(plugin_source, encoding="utf-8")
+    (plugin / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "vite-plugin-example",
+                "version": "1.0.0",
+                "main": f"./{plugin_relative}",
+            }
+        ),
+        encoding="utf-8",
+    )
+    helper = tmp_path / "node_modules/hoisted-runtime-helper"
+    helper.mkdir()
+    helper_runtime = helper / "index.js"
+    helper_runtime.write_text("export const value = 1;\n", encoding="utf-8")
+    (helper / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "hoisted-runtime-helper",
+                "version": "1.0.0",
+                "main": "./index.js",
+            }
+        ),
+        encoding="utf-8",
+    )
+    _closure, overlays = ts_tester._local_config_snapshot(tmp_path, "vitest.config.ts")
+
+    before = ts_tester._config_package_runtime_identities(tmp_path, overlays)
+    helper_runtime.write_text("export const value = 2;\n", encoding="utf-8")
+    after = ts_tester._config_package_runtime_identities(tmp_path, overlays)
+
+    assert "vitest.config.ts:vite-plugin-example>hoisted-runtime-helper" in before
+    assert before != after
+
+
+def test_vitest_config_runtime_identity_records_absent_undeclared_static_helper(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "vitest.config.ts").write_text(
+        'import "vite-plugin-example";\nexport default {};\n',
+        encoding="utf-8",
+    )
+    plugin = tmp_path / "node_modules/vite-plugin-example"
+    plugin_runtime = plugin / "dist/index.js"
+    plugin_runtime.parent.mkdir(parents=True)
+    plugin_runtime.write_text(
+        'export const load = () => import("optional-hoisted-helper");\n',
+        encoding="utf-8",
+    )
+    (plugin / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "vite-plugin-example",
+                "version": "1.0.0",
+                "type": "module",
+                "main": "./dist/index.js",
+            }
+        ),
+        encoding="utf-8",
+    )
+    _closure, overlays = ts_tester._local_config_snapshot(tmp_path, "vitest.config.ts")
+
+    identities = ts_tester._config_package_runtime_identities(tmp_path, overlays)
+
+    assert (
+        identities["vitest.config.ts:vite-plugin-example>optional-hoisted-helper"] == MISSING_INPUT
+    )
+
+
+def test_vitest_config_package_scanner_excludes_type_only_imports() -> None:
+    source = """
+import type DefaultType from "type-default";
+export type * from "type-export";
+import { type First, type Second as Alias } from "type-named";
+export { type Third } from "type-reexport";
+import { type Fourth, runtimeValue } from "runtime-mixed";
+export { type Fifth, runtimeValue as exposed } from "runtime-export";
+import { type as runtimeNamedType } from "runtime-named-type";
+"""
+
+    assert ts_tester._config_package_imports(source) == (
+        ("runtime-export", "runtime-export"),
+        ("runtime-mixed", "runtime-mixed"),
+        ("runtime-named-type", "runtime-named-type"),
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'const packageName = "vite-plugin-example"; void import(packageName);',
+        'const suffix = "example"; void import("vite-plugin-" + suffix);',
+        'const packageName = "vite-plugin-example"; require(packageName);',
+        'const suffix = "example"; require("vite-plugin-" + suffix);',
+        'const packageName = "vite-plugin-example"; require.resolve(packageName);',
+        'const packageName = "vite-plugin-example"; module.require(packageName);',
+    ],
+)
+def test_vitest_config_package_scanner_rejects_computed_loads(source: str) -> None:
+    with pytest.raises(JauntConfigError, match="computed import/require specifier"):
+        ts_tester._config_package_imports(source)
+
+
+def test_vitest_config_package_scanner_accepts_commented_literal_dynamic_import() -> None:
+    assert ts_tester._config_package_imports(
+        'void import(/* @vite-ignore */ "vite-plugin-example");'
+    ) == (("vite-plugin-example", "vite-plugin-example"),)
+
+
+@pytest.mark.parametrize(
+    ("source", "specifier"),
+    [
+        ('const pattern = /"/; import plugin from "vite-plugin-example";', "vite-plugin-example"),
+        ('import/* legal trivia */ plugin from "vite-plugin-example";', "vite-plugin-example"),
+        ('const plugin = `${await import("vite-plugin-example")}`;', "vite-plugin-example"),
+        ('const plugin = `${require("vite-plugin-example")}`;', "vite-plugin-example"),
+        (
+            'module.exports={test:{setupFiles:[require.resolve("vite-plugin-example/setup")]}};',
+            "vite-plugin-example/setup",
+        ),
+        (
+            'module/* trivia */.require/* trivia */("vite-plugin-example");',
+            "vite-plugin-example",
+        ),
+    ],
+)
+def test_vitest_config_package_scanner_covers_executable_lexical_forms(
+    source: str, specifier: str
+) -> None:
+    assert ts_tester._config_package_imports(source) == ((specifier, "vite-plugin-example"),)
+
+
+def test_vitest_config_package_scanner_ignores_regex_and_template_text() -> None:
+    source = r"""
+const quoted = /import fake from "fake-package"/;
+const called = /require\("other-package"\)/;
+const inert = `import("template-package")`;
+"""
+
+    assert ts_tester._config_package_imports(source) == ()
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        'const value = new /ignored import("missing-import") '
+        'require("missing-require")/.constructor("actual");',
+        'export default /ignored import("missing-import") require("missing-require")/;',
+        'class Runner extends /ignored import("missing-import") '
+        'require("missing-require")/.constructor {}',
+        'const rendered = `${new /ignored import("missing-import") '
+        'require("missing-require")/.constructor("actual")}`;',
+    ],
+)
+def test_vitest_config_package_scanner_ignores_regex_after_expression_prefix_keyword(
+    prefix: str,
+) -> None:
+    source = f'{prefix}\nimport("real-plugin");\n'
+
+    assert ts_tester._config_package_imports(source) == (("real-plugin", "real-plugin"),)
+
+
+@pytest.mark.parametrize("member", ["target.new", "target?.default", "target.extends"])
+def test_vitest_config_package_scanner_keeps_division_after_keyword_named_member(
+    member: str,
+) -> None:
+    source = f'const ratio = {member} / require("real-divisor") / divisor;\n'
+
+    assert ts_tester._config_package_imports(source) == (("real-divisor", "real-divisor"),)
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        'const value = new /ignored "ghost.ts"/.constructor;',
+        'export default /ignored "ghost.ts"/;',
+        'class Runner extends /ignored "ghost.ts"/.constructor {}',
+    ],
+)
+def test_typescript_lexical_regions_ignore_strings_in_expression_prefix_regex(
+    prefix: str,
+) -> None:
+    source = f'{prefix}\nconst actual = "actual";\n'
+
+    _comments, strings = ts_tester._typescript_lexical_regions(source)
+
+    assert tuple(source[start:end] for start, end, _quote in strings) == ('"actual"',)
+
+
+@pytest.mark.parametrize(
+    "control_head",
+    [
+        "if (ok)",
+        "if ((ok && check()))",
+        "while (ok)",
+        "for (; ok; step())",
+        "with (scope)",
+    ],
+)
+def test_vitest_config_package_scanner_ignores_regex_after_control_flow_head(
+    control_head: str,
+) -> None:
+    source = (
+        'import { createRequire } from "node:module";\n'
+        f'{control_head} /import("missing-import") require("missing-require") '
+        'createRequire(import.meta.url)("missing-create-require")/.test(value);\n'
+        'import("real-plugin");\n'
+    )
+
+    assert ts_tester._config_package_imports(source) == (("real-plugin", "real-plugin"),)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "{ run(); }",
+        "label: { run(); }",
+        "if (ok) { run(); }",
+        "if (ok) { run(); } else { recover(); }",
+        "switch (value) { default: run(); }",
+        "try { run(); } catch { recover(); }",
+        "try { run(); } catch (error) { recover(error); } finally { finish(); }",
+        "do { run(); } while (again);",
+        "function run() {}",
+        "function run({ value } = {}) {}",
+        "class Runner {}",
+        "class Runner extends mixin({}) {}",
+        "namespace Runtime {}",
+        "enum Mode { Active }",
+        "interface Options {}",
+        "abstract class AbstractRunner {}",
+        "declare class AmbientRunner {}",
+        "class GenericRunner<T extends {}> {}",
+        "function genericRun<T extends {}>() {}",
+    ],
+)
+def test_vitest_config_package_scanner_ignores_regex_after_statement_brace(
+    statement: str,
+) -> None:
+    source = (
+        f'{statement} /import("missing-import") require("missing-require")/.test(value);\n'
+        'import("real-plugin");\n'
+    )
+
+    assert ts_tester._config_package_imports(source) == (("real-plugin", "real-plugin"),)
+
+
+def test_vitest_config_package_scanner_tracks_statement_brace_regex_inside_template() -> None:
+    source = (
+        'const rendered = `${(() => { if (ok) {} /} import("missing-template")/.test(value); '
+        'return import("real-template"); })()}`;\n'
+    )
+
+    assert ts_tester._config_package_imports(source) == (("real-template", "real-template"),)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        (
+            'function outer() { {} /import("missing-import") '
+            'require("missing-require")/.test(value); }'
+        ),
+        (
+            'switch (value) { case 1: {} /import("missing-import") '
+            'require("missing-require")/.test(value); }'
+        ),
+        (
+            'function stopped() { return\n{} /import("missing-import") '
+            'require("missing-require")/.test(value); }'
+        ),
+        'const value = 1\n{} /import("missing-import") require("missing-require")/.test(value);',
+        'type Runtime = {}\n/import("missing-import") require("missing-require")/.test(value);',
+    ],
+)
+def test_vitest_config_package_scanner_ignores_regex_after_nested_or_asi_block(
+    source: str,
+) -> None:
+    source += '\nimport("real-plugin");\n'
+
+    assert ts_tester._config_package_imports(source) == (("real-plugin", "real-plugin"),)
+
+
+def test_vitest_config_package_scanner_tracks_nested_block_regex_inside_template() -> None:
+    source = (
+        'const rendered = `${(() => { {} /} import("missing-template")/.test(value); '
+        'return import("real-template"); })()}`;\n'
+    )
+
+    assert ts_tester._config_package_imports(source) == (("real-template", "real-template"),)
+
+
+@pytest.mark.parametrize("expression", ["{}", "function () {}", "class {}", "(() => {})"])
+def test_vitest_config_package_scanner_keeps_division_after_braced_expression(
+    expression: str,
+) -> None:
+    source = f'const ratio = {expression} / require("real-divisor");\n'
+
+    assert ts_tester._config_package_imports(source) == (("real-divisor", "real-divisor"),)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'const value = { nested: {} / require("real-divisor") };',
+        'const value = class extends (class {}) {} / require("real-divisor");',
+        '({ value } = {}) / require("real-divisor");',
+        'function ratio() { return {} / require("real-divisor"); }',
+    ],
+)
+def test_vitest_config_package_scanner_preserves_nested_braced_expression_division(
+    source: str,
+) -> None:
+    assert ts_tester._config_package_imports(source) == (("real-divisor", "real-divisor"),)
+
+
+def test_vitest_config_package_scanner_keeps_division_adjacent_loads_executable() -> None:
+    source = (
+        "const ratio = (total) / divisor;\n"
+        'import("real-import");\n'
+        'const adjusted = ratio / require("real-require");\n'
+    )
+
+    assert ts_tester._config_package_imports(source) == (
+        ("real-import", "real-import"),
+        ("real-require", "real-require"),
+    )
+
+
+def test_vitest_config_package_scanner_distinguishes_nested_control_head_division() -> None:
+    source = 'if ((total) / require("real-divisor")) /import("missing-plugin")/.test(value);\n'
+
+    assert ts_tester._config_package_imports(source) == (("real-divisor", "real-divisor"),)
+
+
+def test_vitest_config_snapshot_ignores_regex_paths_after_control_flow_head(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "setup.ts").write_text("export {};\n", encoding="utf-8")
+    (tmp_path / "vitest.config.ts").write_text(
+        'if (ok) /require\\(".\\/setup.ts"\\)/.test(value);\nexport default {};\n',
+        encoding="utf-8",
+    )
+
+    closure, _overlays = ts_tester._local_config_snapshot(tmp_path, "vitest.config.ts")
+
+    assert tuple(closure) == ("vitest.config.ts",)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "{ run(); }",
+        "label: { run(); }",
+        "if (ok) { run(); }",
+        "try { run(); } catch { recover(); }",
+        "function run() {}",
+        "class Runner {}",
+    ],
+)
+def test_vitest_config_snapshot_ignores_regex_paths_after_statement_brace(
+    tmp_path: Path,
+    statement: str,
+) -> None:
+    (tmp_path / "setup.ts").write_text("export {};\n", encoding="utf-8")
+    (tmp_path / "vitest.config.ts").write_text(
+        f'{statement} /require\\(".\\/setup.ts"\\)/.test(value);\nexport default {{}};\n',
+        encoding="utf-8",
+    )
+
+    closure, _overlays = ts_tester._local_config_snapshot(tmp_path, "vitest.config.ts")
+
+    assert tuple(closure) == ("vitest.config.ts",)
+
+
+def test_vitest_config_snapshot_ignores_path_shaped_metadata_values(tmp_path: Path) -> None:
+    (tmp_path / "setup.ts").write_text("export {};\n", encoding="utf-8")
+    (tmp_path / "vitest.config.ts").write_text(
+        'import { join } from "node:path";\n'
+        "export default {\n"
+        '  define: { API_BASE: join("/", "api"), '
+        'ASSET_PATHS: ["assets/v1", "assets/v2"], '
+        'MANIFEST: "config.json", VERSIONED: `/api/${process.env.VERSION}` },\n'
+        '  env: { SERVICE_PATH: join("/", "service/v1") },\n'
+        '  test: { name: join("unit", "api"), setupFiles: ["./setup.ts"] },\n'
+        "};\n",
+        encoding="utf-8",
+    )
+
+    closure, _overlays = ts_tester._local_config_snapshot(tmp_path, "vitest.config.ts")
+
+    assert tuple(closure) == ("setup.ts", "vitest.config.ts")
+
+
+def test_vitest_config_metadata_does_not_hide_executable_local_loads(tmp_path: Path) -> None:
+    (tmp_path / "setup.ts").write_text("export {};\n", encoding="utf-8")
+    (tmp_path / "vitest.config.ts").write_text(
+        'export default { define: { SETUP: require("./setup") } };\n',
+        encoding="utf-8",
+    )
+
+    closure, _overlays = ts_tester._local_config_snapshot(tmp_path, "vitest.config.ts")
+
+    assert "setup.ts" in closure
+
+
+def test_vitest_config_absolute_setup_path_still_fails_confinement(tmp_path: Path) -> None:
+    (tmp_path / "vitest.config.ts").write_text(
+        'export default { test: { setupFiles: ["/outside.ts"] } };\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(JauntConfigError, match="outside the workspace"):
+        ts_tester._local_config_snapshot(tmp_path, "vitest.config.ts")
+
+
+@pytest.mark.parametrize(
+    ("source", "specifier", "package"),
+    [
+        (
+            'import { createRequire } from "node:module";\n'
+            "const load = createRequire(import.meta.url);\n"
+            'load("vite-plugin-example");',
+            "vite-plugin-example",
+            "vite-plugin-example",
+        ),
+        (
+            'import { createRequire as makeRequire } from "module";\n'
+            "const load = makeRequire(import.meta.url);\n"
+            'load.resolve("@scope/plugin/config");',
+            "@scope/plugin/config",
+            "@scope/plugin",
+        ),
+        (
+            'import * as moduleApi from "node:module";\n'
+            "const load = moduleApi.createRequire(import.meta.url);\n"
+            'load("vite-plugin-namespace");',
+            "vite-plugin-namespace",
+            "vite-plugin-namespace",
+        ),
+        (
+            'const { createRequire: makeRequire } = require("node:module");\n'
+            "const load = makeRequire(import.meta.url);\n"
+            'load("vite-plugin-cjs");',
+            "vite-plugin-cjs",
+            "vite-plugin-cjs",
+        ),
+        (
+            'import { createRequire } from "node:module";\n'
+            "const load = createRequire(import.meta.url);\n"
+            "const again = load;\n"
+            'again("vite-plugin-alias");',
+            "vite-plugin-alias",
+            "vite-plugin-alias",
+        ),
+        (
+            'import { createRequire } from "node:module";\n'
+            "const load = createRequire(import.meta.url);\n"
+            'const rendered = `${load("vite-plugin-template")}`;',
+            "vite-plugin-template",
+            "vite-plugin-template",
+        ),
+        (
+            'import { createRequire } from "node:module";\n'
+            "const load: ReturnType<typeof createRequire> = createRequire(import.meta.url);\n"
+            'load("vite-plugin-typed");',
+            "vite-plugin-typed",
+            "vite-plugin-typed",
+        ),
+        (
+            'import { createRequire } from "node:module";\n'
+            "const load = createRequire(import.meta.url);\n"
+            "const again: NodeRequire = load;\n"
+            'again("vite-plugin-typed-alias");',
+            "vite-plugin-typed-alias",
+            "vite-plugin-typed-alias",
+        ),
+        (
+            'import { createRequire } from "node:module";\n'
+            "const make: typeof createRequire = createRequire;\n"
+            "const load = make(import.meta.url);\n"
+            'load("vite-plugin-typed-factory");',
+            "vite-plugin-typed-factory",
+            "vite-plugin-typed-factory",
+        ),
+        (
+            'const { createRequire }: typeof import("node:module") = '
+            'await import("node:module");\n'
+            "const load = createRequire(import.meta.url);\n"
+            'load("vite-plugin-typed-destructuring");',
+            "vite-plugin-typed-destructuring",
+            "vite-plugin-typed-destructuring",
+        ),
+    ],
+)
+def test_vitest_config_package_scanner_tracks_create_require_loaders(
+    source: str,
+    specifier: str,
+    package: str,
+) -> None:
+    assert ts_tester._config_package_imports(source) == ((specifier, package),)
+
+
+def test_vitest_config_snapshot_tracks_create_require_local_loads(tmp_path: Path) -> None:
+    (tmp_path / "setup.ts").write_text("export {};\n", encoding="utf-8")
+    (tmp_path / "vitest.config.ts").write_text(
+        'import { createRequire as makeRequire } from "node:module";\n'
+        "const load = makeRequire(import.meta.url);\n"
+        'load("./setup");\n'
+        "export default {};\n",
+        encoding="utf-8",
+    )
+
+    closure, _overlays = ts_tester._local_config_snapshot(tmp_path, "vitest.config.ts")
+
+    assert "setup.ts" in closure
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        "load(packageName)",
+        "load.resolve(packageName)",
+        'load("vite-plugin-" + packageName)',
+        'load.resolve("vite-plugin-" + packageName)',
+    ],
+)
+def test_vitest_config_create_require_loader_rejects_computed_specifiers(call: str) -> None:
+    source = (
+        'import { createRequire } from "node:module";\n'
+        "const load = createRequire(import.meta.url);\n"
+        'const packageName = "vite-plugin-example";\n'
+        f"{call};\n"
+    )
+
+    with pytest.raises(JauntConfigError, match="computed import/require specifier"):
+        ts_tester._config_package_imports(source)
+
+
+@pytest.mark.parametrize(
+    ("suffix", "message"),
+    [
+        ('load = customLoad; load("vite-plugin-example");', "reassigns"),
+        ('load.call(null, "vite-plugin-example");', "unsupported member"),
+        ('load["resolve"]("vite-plugin-example");', "unsupported member"),
+        ("consume(load);", "ambiguously uses loader"),
+    ],
+)
+def test_vitest_config_create_require_loader_rejects_unsupported_uses(
+    suffix: str,
+    message: str,
+) -> None:
+    source = (
+        'import { createRequire } from "node:module";\n'
+        "let load = createRequire(import.meta.url);\n"
+        f"{suffix}\n"
+    )
+
+    with pytest.raises(JauntConfigError, match=message):
+        ts_tester._config_package_imports(source)
+
+
+def test_vitest_config_create_require_loader_rejects_conditional_capture() -> None:
+    source = (
+        'import { createRequire } from "node:module";\n'
+        "const load = enabled ? createRequire(import.meta.url) : customLoad;\n"
+        'load("vite-plugin-example");\n'
+    )
+
+    with pytest.raises(JauntConfigError, match="conditionally stores a createRequire result"):
+        ts_tester._config_package_imports(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'import { createRequire } from "node:module"; consume(createRequire);',
+        'import { createRequire } from "node:module"; createRequire.bind(null);',
+        'import { createRequire } from "node:module"; '
+        "const make = createRequire.bind(null); make(import.meta.url);",
+        'import * as moduleApi from "node:module"; '
+        'moduleApi["createRequire"](import.meta.url)("vite-plugin-example");',
+    ],
+)
+def test_vitest_config_create_require_factory_rejects_unsupported_uses(source: str) -> None:
+    with pytest.raises(JauntConfigError, match="createRequire|computed access"):
+        ts_tester._config_package_imports(source)
+
+
+def test_vitest_config_package_scanner_rejects_unproven_typed_destructuring() -> None:
+    source = (
+        'const { createRequire }: typeof import("node:module") = moduleLike;\n'
+        "const load = createRequire(import.meta.url);\n"
+        'load("vite-plugin-example");\n'
+    )
+
+    with pytest.raises(JauntConfigError, match="typed createRequire destructuring"):
+        ts_tester._config_package_imports(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'import { createRequire } from "node:module";\n'
+        "export const load = createRequire(import.meta.url);",
+        'import { createRequire } from "node:module";\n'
+        "const load = createRequire(import.meta.url);\n"
+        "export { load };",
+        'import { createRequire } from "node:module";\nexport default createRequire;',
+        'import * as moduleApi from "node:module";\nexport default { moduleApi };',
+        'export const moduleApi = await import("node:module");',
+    ],
+)
+def test_vitest_config_package_scanner_rejects_exported_loader_capabilities(
+    source: str,
+) -> None:
+    with pytest.raises(JauntConfigError, match="exports a tracked module-loading capability"):
+        ts_tester._config_package_imports(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'export { createRequire as make } from "node:module";',
+        'export * from "node:module";',
+        'export * as moduleApi from "node:module";',
+        'export { default as moduleApi } from "module";',
+    ],
+)
+def test_vitest_config_package_scanner_rejects_node_module_runtime_reexports(
+    source: str,
+) -> None:
+    with pytest.raises(JauntConfigError, match="re-exports the Node module runtime"):
+        ts_tester._config_package_imports(source)
+
+
+def test_vitest_config_export_scan_does_not_claim_later_asi_statements() -> None:
+    source = (
+        "export const ordinary = 1\n"
+        'import { createRequire } from "node:module"\n'
+        "const load = createRequire(import.meta.url)\n"
+        'load("vite-plugin-example")\n'
+    )
+
+    assert ts_tester._config_package_imports(source) == (
+        ("vite-plugin-example", "vite-plugin-example"),
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        '(require)("vite-plugin-example");',
+        'const load = (require);\nload("vite-plugin-example");',
+        "consume(require);",
+        "const holder = { require };",
+        'module["require"]("vite-plugin-example");',
+        'import { createRequire } from "node:module";\n'
+        "holder.load = createRequire(import.meta.url);\n"
+        'holder.load("vite-plugin-example");',
+        'import { createRequire } from "node:module";\n'
+        "const holder = { load: createRequire(import.meta.url) };",
+        'import * as moduleApi from "node:module";\nconst holder = { moduleApi };',
+    ],
+)
+def test_vitest_config_package_scanner_rejects_obscured_loader_capabilities(
+    source: str,
+) -> None:
+    with pytest.raises(JauntConfigError):
+        ts_tester._config_package_imports(source)
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "createRequire(import.meta.url) || customLoad",
+        "load || customLoad",
+    ],
+)
+def test_vitest_config_create_require_rejects_composed_capabilities(expression: str) -> None:
+    source = (
+        'import { createRequire } from "node:module";\n'
+        "const load = createRequire(import.meta.url);\n"
+        f"const composed = {expression};\n"
+        'composed("vite-plugin-example");\n'
+    )
+
+    with pytest.raises(JauntConfigError, match="ambiguously composes"):
+        ts_tester._config_package_imports(source)
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (
+            "const createRequire = () => (value: string) => value;\n"
+            "const load = createRequire();\n"
+            'load("not-a-package-load");',
+            (),
+        ),
+        (
+            'import { createRequire as makeRequire } from "not-node-module";\n'
+            "const load = makeRequire(import.meta.url);\n"
+            'load("not-a-package-load");',
+            (("not-node-module", "not-node-module"),),
+        ),
+        (
+            "const moduleApi = { createRequire: () => (value: string) => value };\n"
+            "const load = moduleApi.createRequire();\n"
+            'load("not-a-package-load");',
+            (),
+        ),
+        (
+            'import type { createRequire } from "node:module";\n'
+            "const load = createRequire(import.meta.url);\n"
+            'load("not-a-package-load");',
+            (),
+        ),
+    ],
+)
+def test_vitest_config_package_scanner_does_not_trust_create_require_by_name(
+    source: str,
+    expected: tuple[tuple[str, str], ...],
+) -> None:
+    assert ts_tester._config_package_imports(source) == expected
+
+
+def test_vitest_config_snapshot_does_not_let_regex_quotes_hide_local_imports(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "setup.ts").write_text("export {};\n", encoding="utf-8")
+    (tmp_path / "vitest.config.ts").write_text(
+        'const pattern = /"/;\nimport "./setup.ts";\nexport default { pattern };\n',
+        encoding="utf-8",
+    )
+
+    closure, _overlays = ts_tester._local_config_snapshot(tmp_path, "vitest.config.ts")
+
+    assert "setup.ts" in closure
+
+
+def test_vitest_config_snapshot_rejects_dynamic_node_path_helpers(tmp_path: Path) -> None:
+    (tmp_path / "vitest.config.ts").write_text(
+        'import { join } from "node:path";\n'
+        'export default { test: { setupFiles: [join("config", process.env.SETUP)] } };\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(JauntConfigError, match="computed path that cannot be captured safely"):
+        ts_tester._local_config_snapshot(tmp_path, "vitest.config.ts")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink regression")
@@ -11924,6 +14346,10 @@ async def test_no_run_regenerates_api_drift_without_executing_verification(
             self.calls.append(str(request.cache_payload["tier"]))
             return await super().generate_request(request, **kwargs)
 
+    monkeypatch.setattr(
+        "jaunt.typescript.tester.proven_previous_target_api_digests",
+        lambda *_args, **_kwargs: frozenset({metadata["target_api_digest"]}),
+    )
     monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", typecheck_only)
     generator = CountingGenerator()
     report = await run_test(

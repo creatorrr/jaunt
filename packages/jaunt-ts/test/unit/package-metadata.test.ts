@@ -18,7 +18,7 @@ test("the stable package publishes through npm latest", () => {
     publishConfig?: { access?: unknown; tag?: unknown };
   };
 
-  expect(manifest.version).toBe("0.1.1");
+  expect(manifest.version).toBe("0.1.2");
   expect(manifest.homepage).toBe("https://jaunt.ing/docs/guides/typescript");
   expect(manifest.publishConfig).toEqual({ access: "public", tag: "latest" });
 });

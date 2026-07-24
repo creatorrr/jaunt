@@ -6,9 +6,19 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from jaunt.errors import JauntQuotaGenerationError
+from jaunt.generate.base import (
+    GenerationRequest,
+    GenerationResult,
+    GeneratorBackend,
+    ModuleSpecContext,
+)
 from jaunt.repo_context.overview import (
     build_project_docs_block,
     load_or_build_overview,
+    project_overview_block_for_build,
     project_spec_digest,
 )
 from jaunt.registry import SpecEntry
@@ -330,3 +340,107 @@ def test_overview_records_usage_against_cost_tracker(tmp_path: Path) -> None:
     assert tracker.api_calls == 1
     assert tracker.total_prompt_tokens == 100
     assert tracker.total_completion_tokens == 20
+
+
+def test_overview_and_generation_share_one_quota_wait_ledger(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+
+    class BudgetedBackend(GeneratorBackend):
+        overview_calls = 0
+        generation_calls = 0
+
+        @property
+        def quota_wait_minutes(self) -> float:
+            return 1.5
+
+        async def generate_module(
+            self,
+            ctx: ModuleSpecContext,
+            *,
+            extra_error_context: list[str] | None = None,
+        ):
+            del ctx, extra_error_context
+            return "def generated():\n    return True\n", None
+
+        async def complete_text(self, *, system: str, user: str) -> str:
+            del system, user
+            self.overview_calls += 1
+            if self.overview_calls == 1:
+                raise JauntQuotaGenerationError("overview usage limit")
+            return "Overview prose."
+
+        async def generate_request(
+            self,
+            request: GenerationRequest,
+            *,
+            extra_error_context: list[str] | None = None,
+        ):
+            del request, extra_error_context
+            self.generation_calls += 1
+            if self.generation_calls == 1:
+                raise JauntQuotaGenerationError("generation usage limit")
+            return "export const generated = true;\n", None
+
+    async def no_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    async def run() -> tuple[str, GenerationResult]:
+        backend = BudgetedBackend()
+        overview = await load_or_build_overview(
+            backend,
+            repo_map_block="map",
+            project_docs="docs",
+            digest="digest",
+            state_dir=tmp_path / ".jaunt_state",
+            enabled=True,
+            prompts=_stub_prompts(),
+        )
+        request = GenerationRequest(
+            language="ts",
+            kind="build",
+            target_path="src/generated.ts",
+            context_files={},
+            prompt="Generate.",
+            cache_payload={},
+            validator=lambda _source: [],
+        )
+        generated = await backend.generate_request_with_retry(request)
+        assert backend.overview_calls == 2
+        assert backend.generation_calls == 2
+        return overview, generated
+
+    monkeypatch.setattr("jaunt.generate.base.asyncio.sleep", no_sleep)
+    overview, generated = asyncio.run(run())
+
+    assert overview == "Overview prose."
+    assert generated.errors == []
+    assert generated.attempts == 1
+    assert sleeps == [60.0, 30.0]
+
+
+def test_project_overview_does_not_swallow_exhausted_quota(tmp_path: Path) -> None:
+    class QuotaBackend:
+        async def complete_text_with_usage_and_quota_retry(
+            self, *, system: str, user: str
+        ) -> tuple[str, None]:
+            del system, user
+            raise JauntQuotaGenerationError("overview usage limit")
+
+    cfg = SimpleNamespace(
+        context=SimpleNamespace(overview=True, max_chars=1_000),
+        prompts=_stub_prompts(),
+    )
+
+    with pytest.raises(JauntQuotaGenerationError, match="overview usage limit"):
+        asyncio.run(
+            project_overview_block_for_build(
+                root=tmp_path,
+                cfg=cfg,
+                module_specs={},
+                repo_map_block="map",
+                backend=QuotaBackend(),
+            )
+        )

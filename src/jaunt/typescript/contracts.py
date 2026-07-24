@@ -54,12 +54,14 @@ from jaunt.typescript.provenance import (
 )
 from jaunt.typescript.tester import (
     _async_export_names,
+    _bubblewrap_executable,
     _fixture_for_path,
     _fixture_names,
     _fixture_resolution_preconditions,
     _generated_test_files,
     _implicit_class_test_specs,
     _local_config_snapshot,
+    _node_permission_flag,
     _owner_project_for_source,
     _pin_test_runtime_identity,
     _runner_fingerprint,
@@ -842,7 +844,9 @@ def _mutation_runner_path(client: object) -> Path:
             path = worker_entry.parent.parent / "test" / "mutation.js"
     if not path.is_file():
         raise JauntConfigError(f"Installed @usejaunt/ts has no mutation runner at {path}")
-    return path
+    # Node compares argv[1] with import.meta.url before entering coordinator
+    # mode. Resolve package-manager links so those identities agree.
+    return path.resolve(strict=True)
 
 
 def _mutation_count(value: object, field_name: str) -> int:
@@ -983,6 +987,38 @@ async def _terminate_mutation_process(process: Any, *, platform: str | None = No
         await process.wait()
 
 
+def _external_mutation_workspace_links(root: Path) -> tuple[tuple[Path, Path], ...]:
+    """Return links in ``root`` whose resolved targets cross its boundary."""
+
+    root = root.resolve()
+    external: list[tuple[Path, Path]] = []
+    walk_errors: list[OSError] = []
+    for directory, directories, files in os.walk(
+        root,
+        topdown=True,
+        followlinks=False,
+        onerror=walk_errors.append,
+    ):
+        for name in (*directories, *files):
+            candidate = Path(directory) / name
+            if not candidate.is_symlink():
+                continue
+            try:
+                physical = candidate.resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise JauntConfigError(
+                    "The disposable TypeScript mutation workspace contains an invalid link: "
+                    + candidate.relative_to(root).as_posix()
+                ) from exc
+            if physical != root and root not in physical.parents:
+                external.append((candidate, physical))
+    if walk_errors:
+        raise JauntConfigError(
+            "Could not inspect the disposable TypeScript mutation workspace for unsafe links"
+        ) from walk_errors[0]
+    return tuple(sorted(external, key=lambda item: item[0].as_posix()))
+
+
 async def _run_mutation_strength(
     client: object,
     root: Path,
@@ -994,6 +1030,8 @@ async def _run_mutation_strength(
     owner_project: str,
     overlays: Mapping[str, str],
     config_snapshot: tuple[Mapping[str, str], Mapping[str, str]] | None = None,
+    _compiler_module_path: Path | None = None,
+    _isolated_from: Path | None = None,
     timeout: float = _MUTATION_TIMEOUT_SECONDS,
     global_timeout: float = _MUTATION_GLOBAL_TIMEOUT_SECONDS,
 ) -> Mapping[str, Any]:
@@ -1022,6 +1060,18 @@ async def _run_mutation_strength(
             tier="derived",
             deleted_files=deleted_files,
         ) as isolated_root:
+            installation = getattr(client, "installation", None)
+            compiler = getattr(installation, "compiler_module_path", None)
+            if not isinstance(compiler, Path):
+                raise JauntConfigError("The TypeScript worker installation is incomplete")
+            try:
+                compiler_relative = Path(os.path.abspath(compiler)).relative_to(
+                    Path(os.path.abspath(root))
+                )
+            except ValueError as exc:
+                raise JauntConfigError(
+                    "The project-local TypeScript compiler is outside the contract workspace"
+                ) from exc
             return await _run_mutation_strength(
                 client,
                 isolated_root,
@@ -1031,6 +1081,8 @@ async def _run_mutation_strength(
                 battery_file=battery_file,
                 owner_project=owner_project,
                 overlays={},
+                _compiler_module_path=isolated_root / compiler_relative,
+                _isolated_from=root,
                 timeout=timeout,
                 global_timeout=global_timeout,
             )
@@ -1040,12 +1092,35 @@ async def _run_mutation_strength(
         raise JauntConfigError("No [target.ts] is configured")
     installation = getattr(client, "installation", None)
     node = getattr(installation, "node", None)
-    compiler = getattr(installation, "compiler_module_path", None)
+    compiler = _compiler_module_path or getattr(installation, "compiler_module_path", None)
     if not isinstance(node, str) or not isinstance(compiler, Path):
         raise JauntConfigError("The TypeScript worker installation is incomplete")
     mutation_runner = _mutation_runner_path(client)
+    runner_root = root.resolve()
+
+    def sandbox_path(path: Path) -> Path:
+        """Map original-workspace files into the disposable view."""
+
+        lexical = Path(os.path.abspath(path))
+        if lexical == runner_root or runner_root in lexical.parents:
+            return lexical
+        physical = path.resolve(strict=True)
+        if _isolated_from is None:
+            return physical
+        source = _isolated_from.resolve()
+        with contextlib.suppress(ValueError):
+            mapped = runner_root / physical.relative_to(source)
+            if mapped.exists():
+                return mapped
+        return physical
+
+    compiler = sandbox_path(compiler)
+    mutation_runner = sandbox_path(mutation_runner)
+    node_path = Path(node)
+    if node_path.is_absolute():
+        node = str(sandbox_path(node_path))
     payload: dict[str, object] = {
-        "root": str(root),
+        "root": str(runner_root),
         "sourcePath": source_path,
         "symbol": symbol,
         "batteryFiles": [battery_file],
@@ -1057,18 +1132,115 @@ async def _run_mutation_strength(
     }
     if target.vitest_config:
         payload["vitestConfigPath"] = target.vitest_config
+    environment = worker_environment()
+    command = [node]
+    if _isolated_from is not None:
+        permission_guard = mutation_runner.parent / "permission_guard.cjs"
+        if not permission_guard.is_file():
+            raise JauntConfigError(
+                "Installed @usejaunt/ts is missing its mutation permission guard"
+            )
+
+        readable = {runner_root, mutation_runner.parent, compiler.parent}
+        installation_package = getattr(installation, "package_root", None)
+        if isinstance(installation_package, Path):
+            readable.add(sandbox_path(installation_package))
+        # TypeScript loads sibling libraries and package metadata relative to
+        # lib/typescript.js. Keep that complete package readable even when a
+        # package manager resolves it outside the disposable tree.
+        if compiler.parent.name == "lib":
+            readable.add(compiler.parent.parent)
+        external_links = _external_mutation_workspace_links(runner_root)
+        bubblewrap = _bubblewrap_executable(environment)
+        if external_links and bubblewrap is None:
+            shown = ", ".join(
+                candidate.relative_to(runner_root).as_posix()
+                for candidate, _physical in external_links[:5]
+            )
+            remainder = len(external_links) - 5
+            if remainder > 0:
+                shown += f" (and {remainder} more)"
+            raise JauntConfigError(
+                "TypeScript contract mutation strength cannot safely use Node's permission "
+                "fallback because the disposable workspace contains links outside its root: "
+                f"{shown}. Install bubblewrap on Linux, replace the external package links "
+                "with local files, or set [contract] strength = false."
+            )
+        for _candidate, physical in external_links:
+            for parent in (physical, *physical.parents):
+                if parent.name == "node_modules":
+                    readable.add(parent)
+                    break
+        minimal_readable = tuple(
+            sorted(
+                path
+                for path in readable
+                if not any(
+                    path != ancestor and path.is_relative_to(ancestor) for ancestor in readable
+                )
+            )
+        )
+        permission_args = [
+            _node_permission_flag(node),
+            "--allow-addons",
+            "--allow-worker",
+            # Only the trusted coordinator may launch mutant subprocesses.
+            # mutation.ts deliberately omits this flag from every child.
+            "--allow-child-process",
+            f"--require={permission_guard}",
+            *(f"--allow-fs-read={path}" for path in minimal_readable),
+            f"--allow-fs-write={runner_root}",
+        ]
+        if bubblewrap is not None:
+            source = _isolated_from.resolve()
+            command = [
+                bubblewrap,
+                "--die-with-parent",
+                "--new-session",
+                "--unshare-pid",
+                "--unshare-net",
+                "--ro-bind",
+                "/",
+                "/",
+                "--proc",
+                "/proc",
+                "--dev-bind",
+                "/dev",
+                "/dev",
+                "--bind",
+                str(runner_root),
+                str(runner_root),
+                "--bind",
+                str(runner_root),
+                str(source),
+                "--chdir",
+                str(runner_root),
+                node,
+            ]
+        command.extend(permission_args)
+        payload["permissionSandbox"] = True
+        source_text = str(_isolated_from.resolve())
+        for key, value in tuple(environment.items()):
+            if key != "PATH" and source_text in value:
+                environment.pop(key, None)
+        environment["PATH"] = os.pathsep.join(
+            entry
+            for entry in environment.get("PATH", "").split(os.pathsep)
+            if entry and source_text not in os.path.abspath(entry)
+        )
+        environment["PWD"] = str(runner_root)
+    command.append(str(mutation_runner))
     process = await asyncio.create_subprocess_exec(
-        node,
-        str(mutation_runner),
-        cwd=str(root),
-        env=worker_environment(),
+        *command,
+        cwd=str(runner_root),
+        env=environment,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         start_new_session=os.name == "posix",
     )
     try:
-        stdout, _stderr = await asyncio.wait_for(
+        stdout, stderr = await asyncio.wait_for(
             process.communicate(json.dumps(payload, sort_keys=True).encode("utf-8")),
             timeout=global_timeout + 10.0,
         )
@@ -1079,7 +1251,15 @@ async def _run_mutation_strength(
         await asyncio.shield(_terminate_mutation_process(process))
         raise
     if process.returncode != 0 or len(stdout) > _MUTATION_MAX_OUTPUT_BYTES or not stdout.strip():
-        raise JauntGenerationError("TypeScript contract mutation runner failed")
+        detail = stderr.decode("utf-8", errors="replace").strip()[:2000]
+        summary = (
+            f"exit={process.returncode}, stdout_bytes={len(stdout)}, "
+            f"limit={_MUTATION_MAX_OUTPUT_BYTES}"
+        )
+        raise JauntGenerationError(
+            f"TypeScript contract mutation runner failed ({summary})"
+            + (f": {detail}" if detail else "")
+        )
     try:
         result = json.loads(stdout)
     except (UnicodeError, json.JSONDecodeError) as error:
@@ -1367,7 +1547,7 @@ async def run_adopt(
         pinned_runner_fingerprint = _runner_fingerprint(root, client, initialized)
         _pin_test_runtime_identity(client)
         pinned_vitest_config_snapshot = (
-            _local_config_snapshot(root, target_config.vitest_config)
+            _local_config_snapshot(root, target_config.vitest_config, client=client)
             if target_config.vitest_config
             else ({}, {})
         )
@@ -1640,7 +1820,7 @@ async def run_reconcile(
         pinned_runner_fingerprint = _runner_fingerprint(root, client, initialized)
         _pin_test_runtime_identity(client)
         pinned_vitest_config_snapshot = (
-            _local_config_snapshot(root, target_config.vitest_config)
+            _local_config_snapshot(root, target_config.vitest_config, client=client)
             if target_config.vitest_config
             else ({}, {})
         )

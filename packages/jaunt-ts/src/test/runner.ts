@@ -11,7 +11,14 @@ import {
   rmdirSync,
   unlinkSync,
 } from "node:fs";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import {
+  dirname,
+  extname,
+  isAbsolute,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type ts from "@typescript/typescript6";
 import { startVitest } from "vitest/node";
@@ -33,7 +40,10 @@ import {
 export const RUNNER_PROTOCOL = "jaunt-ts-test-runner/1" as const;
 export const MAX_RUNNER_INPUT_BYTES = 16 * 1024 * 1024;
 export const MAX_CAPTURED_STREAM_BYTES = 64 * 1024;
+export const MAX_RUNNER_STARTUP_ERROR_CHARS = 2_000;
 const TRUNCATION_MARKER = "\n[jaunt: captured output truncated]\n";
+const STARTUP_ERROR_TRUNCATION_MARKER =
+  "\n[jaunt: runner startup error truncated]";
 
 export interface TestRunnerInput {
   readonly root: string;
@@ -50,6 +60,7 @@ export interface TestRunnerInput {
   readonly deletedFiles?: readonly string[];
   readonly packageRoot?: string;
   readonly overlays?: Readonly<Record<string, string>>;
+  readonly rootOverlayPaths?: readonly string[];
   readonly compilerModulePath?: string;
   readonly generatedDir?: string;
   readonly permissionSandbox?: boolean;
@@ -69,6 +80,7 @@ export interface TestRunnerOutput {
 export interface ProtectedDerivedTestResultRecord {
   readonly caseId: string;
   readonly category: FailureCategory;
+  readonly message?: string;
 }
 
 export type RunnerTestResultRecord =
@@ -91,6 +103,7 @@ export function projectTestResults(
 
 export function redactedRunnerFailure(
   mode: "typecheck" | "run",
+  startupError?: string,
 ): TestRunnerOutput {
   return {
     ok: false,
@@ -100,10 +113,21 @@ export function redactedRunnerFailure(
       {
         caseId: "opaque-runner-failure",
         category: "runner",
+        ...(startupError === undefined ? {} : { message: startupError }),
       },
     ],
     captured: { stdout: "", stderr: "" },
   };
+}
+
+function runnerStartupError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const stack = error instanceof Error ? error.stack : undefined;
+  const rendered = [message, stack].filter(Boolean).join("\n");
+  if (rendered.length <= MAX_RUNNER_STARTUP_ERROR_CHARS) return rendered;
+  const limit =
+    MAX_RUNNER_STARTUP_ERROR_CHARS - STARTUP_ERROR_TRUNCATION_MARKER.length;
+  return rendered.slice(0, limit) + STARTUP_ERROR_TRUNCATION_MARKER;
 }
 
 function redactTypecheckResult(result: TestRunnerOutput): TestRunnerOutput {
@@ -170,6 +194,24 @@ function parseInput(value: unknown): TestRunnerInput {
   if (overlays !== undefined) {
     for (const path of Object.keys(overlays))
       assertWithinRoot(root, resolve(root, path));
+  }
+  if (
+    input.rootOverlayPaths !== undefined &&
+    (!Array.isArray(input.rootOverlayPaths) ||
+      input.rootOverlayPaths.some((path) => typeof path !== "string"))
+  ) {
+    throw new Error("rootOverlayPaths must be an array of strings");
+  }
+  const overlayPaths = new Set(
+    Object.keys((overlays as Record<string, string> | undefined) ?? {}).map(
+      (path) => resolve(root, path),
+    ),
+  );
+  for (const path of (input.rootOverlayPaths as string[] | undefined) ?? []) {
+    const resolved = assertWithinRoot(root, resolve(root, path));
+    if (!overlayPaths.has(resolved)) {
+      throw new Error("rootOverlayPaths entries must identify an overlay");
+    }
   }
   if (typeof input.configPath === "string") {
     assertWithinRoot(root, resolve(root, input.configPath));
@@ -268,6 +310,9 @@ function parseInput(value: unknown): TestRunnerInput {
     ...(overlays === undefined
       ? {}
       : { overlays: overlays as Record<string, string> }),
+    ...(Array.isArray(input.rootOverlayPaths)
+      ? { rootOverlayPaths: input.rootOverlayPaths as string[] }
+      : {}),
   };
 }
 
@@ -1174,6 +1219,26 @@ async function typecheck(input: TestRunnerInput): Promise<TestRunnerOutput> {
       : {}),
   };
   const base = compiler.createCompilerHost(options, true);
+  const overlayScriptKind = (path: string): ts.ScriptKind => {
+    switch (extname(path).toLowerCase()) {
+      case ".json":
+        return compiler.ScriptKind.JSON;
+      case ".js":
+      case ".mjs":
+      case ".cjs":
+        return compiler.ScriptKind.JS;
+      case ".jsx":
+        return compiler.ScriptKind.JSX;
+      case ".tsx":
+        return compiler.ScriptKind.TSX;
+      case ".ts":
+      case ".mts":
+      case ".cts":
+        return compiler.ScriptKind.TS;
+      default:
+        return compiler.ScriptKind.Unknown;
+    }
+  };
   const host: ts.CompilerHost = {
     ...base,
     fileExists: (path) =>
@@ -1193,16 +1258,18 @@ async function typecheck(input: TestRunnerInput): Promise<TestRunnerOutput> {
             source,
             target,
             true,
-            path.endsWith(".tsx")
-              ? compiler.ScriptKind.TSX
-              : compiler.ScriptKind.TS,
+            overlayScriptKind(path),
           );
     },
   };
   const roots = [
     ...parsed.fileNames,
     ...input.files.map((path) => resolve(input.root, path)),
-    ...(input.normalEmit === true ? [] : overlays.keys()),
+    ...(input.normalEmit === true
+      ? []
+      : input.rootOverlayPaths === undefined
+        ? overlays.keys()
+        : input.rootOverlayPaths.map((path) => resolve(input.root, path))),
   ].filter((path) => !deleted.has(resolve(path)));
   const program = compiler.createProgram({
     rootNames: [...new Set(roots)],
@@ -1488,48 +1555,57 @@ async function run(input: TestRunnerInput): Promise<TestRunnerOutput> {
     stderrTruncated ||= captured.truncated;
     return true;
   }) as typeof process.stderr.write;
+  let startupError: string | undefined;
   try {
     const sourceResolver = await projectSourceResolver(input);
-    const instance = await startVitest(
-      "test",
-      input.files.map((path) => resolve(input.root, path)),
-      {
-        root: input.root,
-        run: true,
-        watch: false,
-        passWithNoTests: false,
-        reporters: [reporter],
-        include: [...input.files],
-        testTimeout: input.timeoutMs,
-        hookTimeout: input.timeoutMs,
-        ...(input.tier ? { pool: "threads" as const } : {}),
-        config: input.vitestConfigPath
-          ? resolve(input.root, input.vitestConfigPath)
-          : false,
-      },
-      {
-        cacheDir: resolve(input.root, ".jaunt-vitest-cache"),
-        server: { fs: { allow: [input.root], strict: true } },
-        plugins: [
-          ...(sourceResolver ? [sourceResolver] : []),
-          {
-            name: "jaunt-test-overlays",
-            enforce: "pre",
-            load(id: string) {
-              return (
-                overlayAbsolute.get(comparableEntryPath(id.split("?")[0]!)) ??
-                null
-              );
+    let instance: Awaited<ReturnType<typeof startVitest>> | undefined;
+    try {
+      instance = await startVitest(
+        "test",
+        input.files.map((path) => resolve(input.root, path)),
+        {
+          root: input.root,
+          run: true,
+          watch: false,
+          passWithNoTests: false,
+          reporters: [reporter],
+          include: [...input.files],
+          testTimeout: input.timeoutMs,
+          hookTimeout: input.timeoutMs,
+          ...(input.tier ? { pool: "threads" as const } : {}),
+          config: input.vitestConfigPath
+            ? resolve(input.root, input.vitestConfigPath)
+            : false,
+        },
+        {
+          cacheDir: resolve(input.root, ".jaunt-vitest-cache"),
+          server: { fs: { allow: [input.root], strict: true } },
+          plugins: [
+            ...(sourceResolver ? [sourceResolver] : []),
+            {
+              name: "jaunt-test-overlays",
+              enforce: "pre",
+              load(id: string) {
+                return (
+                  overlayAbsolute.get(comparableEntryPath(id.split("?")[0]!)) ??
+                  null
+                );
+              },
             },
-          },
-        ],
-      },
-    );
+          ],
+        },
+      );
+    } catch (error) {
+      startupError = runnerStartupError(error);
+    }
     await instance?.close();
   } finally {
     process.stdout.write = originalOut;
     process.stderr.write = originalErr;
     removeOverlayPlaceholders(placeholders);
+  }
+  if (startupError !== undefined) {
+    return redactedRunnerFailure("run", startupError);
   }
   const ok =
     reporter.results.length > 0 &&

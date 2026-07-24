@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import sys
 from collections.abc import Mapping
@@ -12,6 +13,8 @@ import pytest
 from jaunt.typescript.config import TypeScriptTargetConfig
 from jaunt.typescript.protocol import PROTOCOL_VERSION, InitializeParams
 from jaunt.typescript.worker import (
+    _runtime_module_specifiers,
+    _runtime_package_resolution_closure,
     REQUIRED_WORKER_CAPABILITIES,
     WorkerClient,
     WorkerCrashedError,
@@ -23,6 +26,8 @@ from jaunt.typescript.worker import (
     WorkerTimeoutError,
     TypeScriptWorkerError,
     resolve_worker_installation,
+    runtime_package_identity,
+    toolchain_session_identity,
     worker_generation_fingerprint,
     worker_environment,
     worker_runtime_identity,
@@ -41,6 +46,426 @@ def _installation(tmp_path: Path, source: str) -> WorkerInstallation:
         package_root=tmp_path,
         tool_owner=tmp_path,
     )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'import "hoisted-runtime-helper";',
+        'void import("hoisted-runtime-helper");',
+        'module.exports = require("hoisted-runtime-helper");',
+        'const helper = require.resolve("hoisted-runtime-helper");',
+    ],
+)
+def test_runtime_package_scanner_captures_static_native_load_forms(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "index.js") == (
+        "hoisted-runtime-helper",
+    )
+
+
+def test_runtime_package_scanner_handles_regex_inside_template_expression(
+    tmp_path: Path,
+) -> None:
+    source = (
+        'const printed = `"${value.replaceAll(/"|\\\\/g, "\\\\$&")}"`;\n'
+        'module.exports = require("hoisted-runtime-helper");\n'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "pretty-format.js") == (
+        "hoisted-runtime-helper",
+    )
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        'const value = new /ignored import("missing-import") '
+        'require("missing-require")/.constructor("actual");',
+        'export default /ignored import("missing-import") require("missing-require")/;',
+        'class Runner extends /ignored import("missing-import") '
+        'require("missing-require")/.constructor {}',
+        'const rendered = `${new /ignored import("missing-import") '
+        'require("missing-require")/.constructor("actual")}`;',
+    ],
+)
+def test_runtime_package_scanner_ignores_regex_after_expression_prefix_keyword(
+    tmp_path: Path,
+    prefix: str,
+) -> None:
+    source = f'{prefix}\nimport("real-import");\n'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == (
+        "real-import",
+    )
+
+
+@pytest.mark.parametrize("member", ["target.new", "target?.default", "target.extends"])
+def test_runtime_package_scanner_keeps_division_after_keyword_named_member(
+    tmp_path: Path,
+    member: str,
+) -> None:
+    source = f'const ratio = {member} / require("real-divisor") / divisor;\n'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == (
+        "real-divisor",
+    )
+
+
+@pytest.mark.parametrize(
+    "control_head",
+    [
+        "if (ok)",
+        "while (ok)",
+        "for (; ok; step())",
+        "switch (value)",
+        "catch (error)",
+    ],
+)
+def test_runtime_package_scanner_ignores_regex_after_control_flow_head(
+    tmp_path: Path,
+    control_head: str,
+) -> None:
+    source = (
+        f'{control_head}/import("missing-import") require("missing-require")/.test(value);\n'
+        'import("real-import");\n'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == (
+        "real-import",
+    )
+
+
+def test_runtime_package_scanner_tracks_control_flow_regex_inside_template_expression(
+    tmp_path: Path,
+) -> None:
+    source = (
+        'const rendered = `${(() => { if (ok)/} import("missing-template")/.test(value); '
+        'return import("real-template"); })()}`;\n'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == (
+        "real-template",
+    )
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "{ run(); }",
+        "label: { run(); }",
+        "if (ok) { run(); }",
+        "if (ok) { run(); } else { recover(); }",
+        "switch (value) { default: run(); }",
+        "try { run(); } catch { recover(); }",
+        "try { run(); } catch (error) { recover(error); } finally { finish(); }",
+        "do { run(); } while (again);",
+        "function run() {}",
+        "function run({ value } = {}) {}",
+        "class Runner {}",
+        "class Runner extends mixin({}) {}",
+    ],
+)
+def test_runtime_package_scanner_ignores_regex_after_statement_brace(
+    tmp_path: Path,
+    statement: str,
+) -> None:
+    source = (
+        f'{statement} /import("missing-import") require("missing-require")/.test(value);\n'
+        'import("real-import");\n'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == (
+        "real-import",
+    )
+
+
+def test_runtime_package_scanner_tracks_statement_brace_regex_inside_template_expression(
+    tmp_path: Path,
+) -> None:
+    source = (
+        'const rendered = `${(() => { if (ok) {} /} import("missing-template")/.test(value); '
+        'return import("real-template"); })()}`;\n'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == (
+        "real-template",
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        (
+            'function outer() { {} /import("missing-import") '
+            'require("missing-require")/.test(value); }'
+        ),
+        (
+            'switch (value) { case 1: {} /import("missing-import") '
+            'require("missing-require")/.test(value); }'
+        ),
+        (
+            'function stopped() { return\n{} /import("missing-import") '
+            'require("missing-require")/.test(value); }'
+        ),
+        'const value = 1\n{} /import("missing-import") require("missing-require")/.test(value);',
+    ],
+)
+def test_runtime_package_scanner_ignores_regex_after_nested_or_asi_block(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    source += '\nimport("real-import");\n'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == (
+        "real-import",
+    )
+
+
+def test_runtime_package_scanner_tracks_nested_block_regex_inside_template_expression(
+    tmp_path: Path,
+) -> None:
+    source = (
+        'const rendered = `${(() => { {} /} import("missing-template")/.test(value); '
+        'return import("real-template"); })()}`;\n'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == (
+        "real-template",
+    )
+
+
+@pytest.mark.parametrize(
+    "statement",
+    ["label: function run() {}", "if (ok) function run() {}"],
+)
+def test_runtime_package_scanner_ignores_regex_after_annex_b_function_declaration(
+    tmp_path: Path,
+    statement: str,
+) -> None:
+    source = (
+        f'{statement} /import("missing-import") require("missing-require")/.test(value);\n'
+        'require("real-require");\n'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.cjs") == (
+        "real-require",
+    )
+
+
+@pytest.mark.parametrize("expression", ["{}", "function () {}", "class {}", "(() => {})"])
+def test_runtime_package_scanner_keeps_division_after_braced_expression_executable(
+    tmp_path: Path,
+    expression: str,
+) -> None:
+    source = f'const ratio = {expression} / require("real-divisor");\n'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == (
+        "real-divisor",
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'const value = { nested: {} / require("real-divisor") };',
+        'const value = class extends (class {}) {} / require("real-divisor");',
+        '({ value } = {}) / require("real-divisor");',
+        'function ratio() { return {} / require("real-divisor"); }',
+    ],
+)
+def test_runtime_package_scanner_preserves_nested_braced_expression_division(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == (
+        "real-divisor",
+    )
+
+
+def test_runtime_package_scanner_keeps_division_adjacent_loads_executable(
+    tmp_path: Path,
+) -> None:
+    source = (
+        "const ratio = (left + right) / divisor;\n"
+        'import("real-import");\n'
+        'const adjusted = ratio / require("real-require");\n'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == (
+        "real-import",
+        "real-require",
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'import { createRequire } from "node:module";\n'
+        "const load = createRequire(import.meta.url);\n"
+        'load("hoisted-runtime-helper");',
+        'import { createRequire as makeRequire } from "module";\n'
+        "const factory = makeRequire;\n"
+        "const load = factory(import.meta.url);\n"
+        "const alias = load;\n"
+        'alias.resolve("hoisted-runtime-helper");',
+        'import * as nodeModule from "node:module";\n'
+        'nodeModule.createRequire(import.meta.url)("hoisted-runtime-helper");',
+        'import nodeModule from "node:module";\n'
+        "const load = nodeModule.createRequire(import.meta.url);\n"
+        'load("hoisted-runtime-helper");',
+        'const { createRequire: makeRequire } = require("node:module");\n'
+        "const load = makeRequire(__filename);\n"
+        'load("hoisted-runtime-helper");',
+        'const nodeModule = require("module");\n'
+        "const load = nodeModule.createRequire(__filename);\n"
+        'load.resolve("hoisted-runtime-helper");',
+        'import { Module } from "node:module";\n'
+        'Module.createRequire(import.meta.url)("hoisted-runtime-helper");',
+        'const { Module } = require("node:module");\n'
+        'Module.createRequire(__filename)("hoisted-runtime-helper");',
+        'const { createRequire } = await import("node:module");\n'
+        'createRequire(import.meta.url)("hoisted-runtime-helper");',
+        'const nodeModule = await import("node:module");\n'
+        "const load = nodeModule.createRequire(import.meta.url);\n"
+        'load("hoisted-runtime-helper");',
+        'require("node:module").createRequire(__filename)("hoisted-runtime-helper");',
+        '(await import("node:module")).createRequire(import.meta.url)("hoisted-runtime-helper");',
+    ],
+)
+def test_runtime_package_scanner_tracks_proven_create_require_forms(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    specifiers = _runtime_module_specifiers(source, source_path=tmp_path / "plugin.js")
+
+    assert "hoisted-runtime-helper" in specifiers
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "function createRequire() { return () => null; }\n"
+        "const load = createRequire();\n"
+        'load("hoisted-runtime-helper");',
+        'import { createRequire } from "not-node-module";\n'
+        "const load = createRequire(import.meta.url);\n"
+        'load("hoisted-runtime-helper");',
+        'import * as nodeModule from "not-node-module";\n'
+        "const load = nodeModule.createRequire(import.meta.url);\n"
+        'load("hoisted-runtime-helper");',
+    ],
+)
+def test_runtime_package_scanner_does_not_trust_create_require_by_name(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    specifiers = _runtime_module_specifiers(source, source_path=tmp_path / "plugin.js")
+
+    assert "hoisted-runtime-helper" not in specifiers
+
+
+@pytest.mark.parametrize(
+    "use",
+    [
+        "consume(load);",
+        "load = replacement;",
+        'load["resolve"]("hoisted-runtime-helper");',
+        "function leakLoader() { return load; }",
+    ],
+)
+def test_runtime_package_scanner_rejects_ambiguous_proven_loader_uses(
+    tmp_path: Path,
+    use: str,
+) -> None:
+    source = (
+        'import { createRequire } from "node:module";\n'
+        "let load = createRequire(import.meta.url);\n"
+        f"{use}\n"
+    )
+
+    with pytest.raises(TypeScriptWorkerError, match="module-loading|loader alias|specifier"):
+        _runtime_module_specifiers(source, source_path=tmp_path / "plugin.js")
+
+
+def test_runtime_package_scanner_allows_opaque_calls_but_keeps_static_siblings(
+    tmp_path: Path,
+) -> None:
+    source = (
+        'import { createRequire } from "node:module";\n'
+        "const load = createRequire(import.meta.url);\n"
+        "load(packageName);\n"
+        "load.resolve(dependency, { paths: [root] });\n"
+        'load("hoisted-runtime-helper");\n'
+    )
+
+    specifiers = _runtime_module_specifiers(source, source_path=tmp_path / "plugin.js")
+
+    assert "hoisted-runtime-helper" in specifiers
+
+
+def test_runtime_package_scanner_allows_bundled_loader_export_and_forwarding(
+    tmp_path: Path,
+) -> None:
+    source = (
+        'import { createRequire } from "node:module";\n'
+        "const require = createRequire(import.meta.url);\n"
+        "const bundled = ((fallback) => typeof require < 'u' ? require : "
+        "typeof Proxy < 'u' ? new Proxy(fallback, { get: (_target, name) => "
+        "(typeof require < 'u' ? require : fallback)[name] }) : fallback)"
+        "(function (...args) { return require.apply(this, args); });\n"
+        'bundled("hoisted-runtime-helper");\n'
+        "bundled(runtimeSelectedPackage);\n"
+        'require.call(null, "forwarded-runtime-helper");\n'
+        "require.apply(null, runtimeArguments);\n"
+        "export { require as bundledRequire };\n"
+    )
+
+    specifiers = _runtime_module_specifiers(source, source_path=tmp_path / "plugin.js")
+
+    assert "hoisted-runtime-helper" in specifiers
+    assert "forwarded-runtime-helper" in specifiers
+    assert "runtimeSelectedPackage" not in specifiers
+
+
+def test_runtime_package_scanner_allows_factory_loader_in_runtime_options(
+    tmp_path: Path,
+) -> None:
+    source = (
+        'import * as nodeModule from "node:module";\n'
+        "const options = { require: nodeModule.createRequire(runtimeHref) };\n"
+        'nodeModule.createRequire(import.meta.url)("hoisted-runtime-helper");\n'
+    )
+
+    specifiers = _runtime_module_specifiers(source, source_path=tmp_path / "plugin.js")
+
+    assert "hoisted-runtime-helper" in specifiers
+
+
+def test_runtime_package_scanner_allows_standard_loader_runtime_plumbing(
+    tmp_path: Path,
+) -> None:
+    source = (
+        'import nodeModule, { createRequire } from "node:module";\n'
+        "const load = createRequire(import.meta.url);\n"
+        'load.extensions[".css"] = () => {};\n'
+        "load.resolve.paths;\n"
+        "let cached;\n"
+        "cached ??= nodeModule.createRequire(import.meta.url);\n"
+        "cache.set(this, cached);\n"
+        'cache.get(this)("cached-runtime-helper");\n'
+        "class Wrapper {\n"
+        "  get require() { return cached; }\n"
+        "  createRequire(url) { return this.other(url); }\n"
+        "}\n"
+    )
+
+    specifiers = _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js")
+
+    assert "node:module" in specifiers
+    assert "cached-runtime-helper" in specifiers
 
 
 def _echo_worker() -> str:
@@ -242,9 +667,13 @@ def test_packaged_worker_identity_is_portable_and_scoped_to_runtime(tmp_path: Pa
         files = {
             "dist/worker/main.js": "import '../analyzer/core.js';\n",
             "dist/analyzer/core.js": "export const worker = 1;\n",
+            "dist/analyzer/helper": "#!/usr/bin/env node\n",
+            "dist/analyzer/kernel.wasm": "wasm-runtime-v1\n",
+            "dist/analyzer/native.node": "native-runtime-v1\n",
             "dist/protocol/messages.js": "export const protocol = 1;\n",
             "dist/schema/protocol.json": '{"version": 1}\n',
             "dist/test/runner.js": "export const runner = 1;\n",
+            "dist/test/runner-addon.node": "test-native-v1\n",
             "dist/analyzer/core.d.ts": "export declare const worker = 1;\n",
             "dist/spec.js": "export {};\n",
             "dist/spec.d.cts": "export declare function magic(): never;\n",
@@ -307,6 +736,30 @@ def test_packaged_worker_identity_is_portable_and_scoped_to_runtime(tmp_path: Pa
     )
     assert worker_runtime_identity(source) == expected
 
+    full_expected = worker_runtime_identity(installed, include_test=True)
+    test_native = installed.package_root / "dist/test/runner-addon.node"
+    full_session = toolchain_session_identity(installed, include_test=True)
+    test_native.write_text("test-native-v2\n", encoding="utf-8")
+    assert worker_runtime_identity(installed) == expected
+    assert worker_runtime_identity(installed, include_test=True) != full_expected
+    assert toolchain_session_identity(installed, include_test=True) != full_session
+    test_native.write_text("test-native-v1\n", encoding="utf-8")
+    assert worker_runtime_identity(installed, include_test=True) == full_expected
+
+    for relative in (
+        "dist/analyzer/helper",
+        "dist/analyzer/kernel.wasm",
+        "dist/analyzer/native.node",
+    ):
+        runtime = source.package_root / relative
+        original = runtime.read_bytes()
+        session_expected = toolchain_session_identity(source, include_test=False)
+        runtime.write_bytes(original + b"changed")
+        assert worker_runtime_identity(source) != expected
+        assert toolchain_session_identity(source, include_test=False) != session_expected
+        runtime.write_bytes(original)
+        assert worker_runtime_identity(source) == expected
+
     compiler_declaration = source.compiler_module_path.parent / "lib.es2024.d.ts"
     compiler_declaration.write_text(
         "interface Array<T> { readonly length: number; at(index: number): T | undefined; }\n"
@@ -347,6 +800,14 @@ def test_packaged_worker_identity_is_portable_and_scoped_to_runtime(tmp_path: Pa
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     original_manifest = json.dumps(manifest)
     manifest["exports"]["./spec"]["types"] = "./dist/spec-v2.d.cts"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert worker_runtime_identity(source) != expected
+    manifest_path.write_text(original_manifest, encoding="utf-8")
+    assert worker_runtime_identity(source) == expected
+    manifest_path.write_text(json.dumps(json.loads(original_manifest), indent=2), encoding="utf-8")
+    assert worker_runtime_identity(source) == expected
+    manifest = json.loads(original_manifest)
+    manifest["jauntRuntime"] = {"mode": "strict"}
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     assert worker_runtime_identity(source) != expected
     manifest_path.write_text(original_manifest, encoding="utf-8")
@@ -502,9 +963,14 @@ def test_package_resolution_pin_rejects_nearer_package_topology_changes(
 
 @pytest.mark.parametrize(
     "relative_runtime",
-    ["node_modules/vite/dist/index.js", "node_modules/rollup/dist/index.js"],
+    [
+        "node_modules/vite/dist/index.js",
+        "node_modules/rollup/dist/native.node",
+        "node_modules/rollup/dist/parser.wasm",
+        "node_modules/vite/bin/esbuild",
+    ],
 )
-def test_package_resolution_closure_pins_transitive_runtime_files(
+def test_package_resolution_closure_seal_pins_all_transitive_runtime_files(
     tmp_path: Path,
     relative_runtime: str,
 ) -> None:
@@ -531,6 +997,9 @@ def test_package_resolution_closure_pins_transitive_runtime_files(
     install("vitest", {"vite": "^7.0.0"})
     install("vite", {"rollup": "^4.0.0"})
     install("rollup")
+    runtime = tmp_path / relative_runtime
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_bytes(b"runtime-v1\n")
     client = WorkerClient(root=tmp_path, installation=installation)
     client.pin_package_resolution_closure(
         "Vitest package",
@@ -540,14 +1009,542 @@ def test_package_resolution_closure_pins_transitive_runtime_files(
         expected_name="vitest",
     )
 
-    runtime = tmp_path / relative_runtime
-    runtime.write_text("export const packageName = 'changed';\n", encoding="utf-8")
+    runtime.write_bytes(b"runtime-v2\n")
+
+    with pytest.raises(
+        WorkerToolchainChangedError,
+        match="JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+    ):
+        client.seal_runtime_identity()
+
+
+def test_package_resolution_closure_pins_undeclared_static_import_from_pnpm_store(
+    tmp_path: Path,
+) -> None:
+    installation = _installation(tmp_path, "console.log('worker');\n")
+    store = tmp_path / "node_modules/.pnpm/vite-plugin-example@1.0.0/node_modules"
+    plugin = store / "vite-plugin-example"
+    runtime = plugin / "dist/index.js"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text(
+        'import { createRequire } from "node:module";\n'
+        "const load = createRequire(import.meta.url);\n"
+        'export default load("hoisted-runtime-helper");\n',
+        encoding="utf-8",
+    )
+    (plugin / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "vite-plugin-example",
+                "version": "1.0.0",
+                "type": "module",
+                "main": "./dist/index.js",
+            }
+        ),
+        encoding="utf-8",
+    )
+    helper = store / "hoisted-runtime-helper"
+    helper.mkdir()
+    helper_runtime = helper / "index.js"
+    helper_runtime.write_text("export const value = 1;\n", encoding="utf-8")
+    (helper / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "hoisted-runtime-helper",
+                "version": "1.0.0",
+                "type": "module",
+                "main": "./index.js",
+            }
+        ),
+        encoding="utf-8",
+    )
+    lexical_plugin = tmp_path / "node_modules/vite-plugin-example"
+    lexical_plugin.symlink_to(plugin, target_is_directory=True)
+    client = WorkerClient(root=tmp_path, installation=installation)
+    client.pin_package_resolution_closure(
+        "Vitest config plugin",
+        tmp_path,
+        "vite-plugin-example",
+        boundary=tmp_path,
+        expected_name="vite-plugin-example",
+    )
+
+    helper_runtime.write_text("export const value = 2;\n", encoding="utf-8")
+
+    with pytest.raises(
+        WorkerToolchainChangedError,
+        match="JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+    ):
+        client.seal_runtime_identity()
+
+
+def test_package_resolution_closure_pins_external_package_import_alias(
+    tmp_path: Path,
+) -> None:
+    installation = _installation(tmp_path, "console.log('worker');\n")
+    plugin = tmp_path / "node_modules/vite-plugin-example"
+    runtime = plugin / "dist/index.js"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text('export { value } from "#helper";\n', encoding="utf-8")
+    (plugin / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "vite-plugin-example",
+                "version": "1.0.0",
+                "type": "module",
+                "main": "./dist/index.js",
+                "imports": {"#helper": "hoisted-runtime-helper"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    helper = tmp_path / "node_modules/hoisted-runtime-helper"
+    helper.mkdir()
+    helper_runtime = helper / "index.js"
+    helper_runtime.write_text("export const value = 1;\n", encoding="utf-8")
+    (helper / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "hoisted-runtime-helper",
+                "version": "1.0.0",
+                "main": "./index.js",
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = WorkerClient(root=tmp_path, installation=installation)
+    client.pin_package_resolution_closure(
+        "Vitest config plugin",
+        tmp_path,
+        "vite-plugin-example",
+        boundary=tmp_path,
+        expected_name="vite-plugin-example",
+    )
+
+    helper_runtime.write_text("export const value = 2;\n", encoding="utf-8")
+
+    with pytest.raises(
+        WorkerToolchainChangedError,
+        match="JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+    ):
+        client.seal_runtime_identity()
+
+
+def test_package_resolution_closure_handles_bundled_loader_runtime_plumbing(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "node_modules/vite-like"
+    runtime = package / "dist/index.js"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text(
+        'import * as nodeModule from "node:module";\n'
+        "const require = nodeModule.createRequire(import.meta.url);\n"
+        "const executor = { require: nodeModule.createRequire(runtimeHref) };\n"
+        "const bundled = ((fallback) => typeof require < 'u' ? require : "
+        "typeof Proxy < 'u' ? new Proxy(fallback, { get: (_target, name) => "
+        "(typeof require < 'u' ? require : fallback)[name] }) : fallback)"
+        "(function (...args) { return require.apply(this, args); });\n"
+        'bundled("hoisted-runtime-helper");\n'
+        "bundled(runtimeSelectedPackage);\n"
+        "export { executor, require as i };\n",
+        encoding="utf-8",
+    )
+    (package / "package.json").write_text(
+        json.dumps({"name": "vite-like", "version": "1.0.0", "main": "./dist/index.js"}),
+        encoding="utf-8",
+    )
+    helper = tmp_path / "node_modules/hoisted-runtime-helper"
+    helper.mkdir()
+    (helper / "index.js").write_text("export {};\n", encoding="utf-8")
+    (helper / "package.json").write_text(
+        json.dumps({"name": "hoisted-runtime-helper", "version": "1.0.0", "main": "./index.js"}),
+        encoding="utf-8",
+    )
+
+    closure = _runtime_package_resolution_closure(package, root_label="vite-like")
+
+    assert {edge.package for edge in closure} == {"hoisted-runtime-helper"}
+    assert all(edge.resolved_root is not None for edge in closure)
+
+
+def test_package_resolution_closure_resolves_all_package_import_mapping_forms(
+    tmp_path: Path,
+) -> None:
+    plugin = tmp_path / "node_modules/vite-plugin-example"
+    runtime = plugin / "dist/index.js"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text(
+        "\n".join(
+            [
+                'import "#exact";',
+                'import "#nested";',
+                'import "#conditional";',
+                'import "#array";',
+                'import "#pattern/feature";',
+                'import "#internal";',
+                'import "#self";',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (plugin / "dist/internal.js").write_text("export {};\n", encoding="utf-8")
+    (plugin / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "vite-plugin-example",
+                "version": "1.0.0",
+                "type": "module",
+                "main": "./dist/index.js",
+                "imports": {
+                    "#exact": "exact-helper/subpath",
+                    "#nested": "#exact",
+                    "#conditional": {
+                        "node": "node-helper",
+                        "default": "default-helper",
+                    },
+                    "#array": ["array-helper", "fallback-helper"],
+                    "#pattern/*": "pattern-helper/*",
+                    "#internal": "./dist/internal.js",
+                    "#self": "vite-plugin-example/internal",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    expected = {
+        "array-helper",
+        "default-helper",
+        "exact-helper",
+        "fallback-helper",
+        "node-helper",
+        "pattern-helper",
+    }
+    for package in expected:
+        package_root = tmp_path / "node_modules" / package
+        package_root.mkdir()
+        (package_root / "index.js").write_text("export {};\n", encoding="utf-8")
+        (package_root / "package.json").write_text(
+            json.dumps({"name": package, "version": "1.0.0", "main": "./index.js"}),
+            encoding="utf-8",
+        )
+
+    closure = _runtime_package_resolution_closure(
+        plugin,
+        root_label="vite-plugin-example",
+    )
+
+    assert {edge.package for edge in closure} == expected
+
+
+@pytest.mark.parametrize(
+    ("imports", "message"),
+    [
+        ({}, "unresolved alias"),
+        ({"#helper": "./../outside.js"}, "unsafe package-relative target"),
+    ],
+)
+def test_package_resolution_closure_rejects_invalid_package_import_alias(
+    tmp_path: Path,
+    imports: Mapping[str, object],
+    message: str,
+) -> None:
+    plugin = tmp_path / "node_modules/vite-plugin-example"
+    runtime = plugin / "dist/index.js"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text('import "#helper";\n', encoding="utf-8")
+    (plugin / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "vite-plugin-example",
+                "version": "1.0.0",
+                "type": "module",
+                "main": "./dist/index.js",
+                "imports": imports,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(TypeScriptWorkerError, match=message):
+        _runtime_package_resolution_closure(
+            plugin,
+            root_label="vite-plugin-example",
+        )
+
+
+def test_package_resolution_closure_pins_absent_undeclared_static_import(
+    tmp_path: Path,
+) -> None:
+    installation = _installation(tmp_path, "console.log('worker');\n")
+    plugin = tmp_path / "node_modules/vite-plugin-example"
+    runtime = plugin / "dist/index.js"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text(
+        'import { createRequire } from "node:module";\n'
+        "const load = createRequire(import.meta.url);\n"
+        'export const optional = () => load.resolve("optional-hoisted-helper");\n',
+        encoding="utf-8",
+    )
+    (plugin / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "vite-plugin-example",
+                "version": "1.0.0",
+                "type": "module",
+                "main": "./dist/index.js",
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = WorkerClient(root=tmp_path, installation=installation)
+    client.pin_package_resolution_closure(
+        "Vitest config plugin",
+        tmp_path,
+        "vite-plugin-example",
+        boundary=tmp_path,
+        expected_name="vite-plugin-example",
+    )
+
+    helper = tmp_path / "node_modules/optional-hoisted-helper"
+    helper.mkdir()
+    (helper / "index.js").write_text("export const value = 1;\n", encoding="utf-8")
+    (helper / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "optional-hoisted-helper",
+                "version": "1.0.0",
+                "main": "./index.js",
+            }
+        ),
+        encoding="utf-8",
+    )
 
     with pytest.raises(
         WorkerToolchainChangedError,
         match="JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
     ):
         client.verify_runtime_identity()
+
+
+def test_runtime_package_identity_prunes_nested_node_modules(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = tmp_path / "node_modules/vite"
+    (package / "dist").mkdir(parents=True)
+    (package / "dist/index.js").write_text("export {};\n", encoding="utf-8")
+    (package / "package.json").write_text(
+        json.dumps({"name": "vite", "version": "7.0.0", "main": "./dist/index.js"}),
+        encoding="utf-8",
+    )
+    nested_runtime = package / "node_modules/unlisted-runtime/native.node"
+    nested_runtime.parent.mkdir(parents=True)
+    nested_runtime.write_bytes(b"native-runtime\n")
+    original_is_file = Path.is_file
+
+    def reject_nested_walk(path: Path) -> bool:
+        if path == nested_runtime:
+            raise AssertionError("nested node_modules must be pruned before file inspection")
+        return original_is_file(path)
+
+    monkeypatch.setattr(Path, "is_file", reject_nested_walk)
+
+    assert runtime_package_identity(package, expected_name="vite").startswith("sha256:")
+
+
+def test_runtime_package_identity_tracks_full_manifest_semantics(tmp_path: Path) -> None:
+    package = tmp_path / "node_modules/vite-plugin-example"
+    (package / "dist").mkdir(parents=True)
+    (package / "dist/index.js").write_text("export {};\n", encoding="utf-8")
+    manifest = {
+        "name": "vite-plugin-example",
+        "version": "1.0.0",
+        "main": "./dist/index.js",
+        "pluginConfig": {"mode": "fast"},
+    }
+    manifest_path = package / "package.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    before = runtime_package_identity(package, expected_name="vite-plugin-example")
+
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    assert runtime_package_identity(package, expected_name="vite-plugin-example") == before
+
+    manifest["pluginConfig"]["mode"] = "strict"
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    assert runtime_package_identity(package, expected_name="vite-plugin-example") != before
+
+
+def test_runtime_package_identity_tracks_internal_symlink_retargeting_portably(
+    tmp_path: Path,
+) -> None:
+    def install(root: Path) -> tuple[Path, Path]:
+        package = root / "node_modules/vite-plugin-example"
+        dist = package / "dist"
+        dist.mkdir(parents=True)
+        for name in ("implementation-a.js", "implementation-b.js"):
+            (dist / name).write_text("export const value = 1;\n", encoding="utf-8")
+        entry = dist / "index.js"
+        entry.symlink_to("implementation-a.js")
+        (package / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "vite-plugin-example",
+                    "version": "1.0.0",
+                    "main": "./dist/index.js",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return package, entry
+
+    first, _first_entry = install(tmp_path / "first")
+    second, second_entry = install(tmp_path / "second")
+    expected = runtime_package_identity(first, expected_name="vite-plugin-example")
+    assert runtime_package_identity(second, expected_name="vite-plugin-example") == expected
+
+    second_entry.unlink()
+    second_entry.symlink_to("implementation-b.js")
+
+    assert runtime_package_identity(second, expected_name="vite-plugin-example") != expected
+
+
+def test_runtime_package_identity_tracks_exact_internal_symlink_text(tmp_path: Path) -> None:
+    package = tmp_path / "node_modules/vite-plugin-example"
+    dist = package / "dist"
+    dist.mkdir(parents=True)
+    (dist / "implementation.js").write_text("export const value = 1;\n", encoding="utf-8")
+    entry = dist / "index.js"
+    os.symlink("implementation.js", entry)
+    (package / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "vite-plugin-example",
+                "version": "1.0.0",
+                "main": "./dist/index.js",
+            }
+        ),
+        encoding="utf-8",
+    )
+    expected = runtime_package_identity(package, expected_name="vite-plugin-example")
+
+    entry.unlink()
+    os.symlink("./implementation.js", entry)
+
+    assert entry.resolve() == (dist / "implementation.js").resolve()
+    assert runtime_package_identity(package, expected_name="vite-plugin-example") != expected
+
+
+@pytest.mark.parametrize("target", ["missing.js", "../../../outside.js"])
+def test_runtime_package_identity_rejects_invalid_internal_symlinks(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    package = tmp_path / "node_modules/vite-plugin-example"
+    dist = package / "dist"
+    dist.mkdir(parents=True)
+    (tmp_path / "outside.js").write_text("export {};\n", encoding="utf-8")
+    (dist / "index.js").symlink_to(target)
+    (package / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "vite-plugin-example",
+                "version": "1.0.0",
+                "main": "./dist/index.js",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        TypeScriptWorkerError,
+        match="runtime package symlink|Runtime package symlink",
+    ):
+        runtime_package_identity(package, expected_name="vite-plugin-example")
+
+
+def test_runtime_package_identity_rejects_symlink_mutation_during_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = tmp_path / "node_modules/vite-plugin-example"
+    dist = package / "dist"
+    dist.mkdir(parents=True)
+    for name in ("implementation-a.js", "implementation-b.js"):
+        (dist / name).write_text("export const value = 1;\n", encoding="utf-8")
+    entry = dist / "index.js"
+    entry.symlink_to("implementation-a.js")
+    (package / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "vite-plugin-example",
+                "version": "1.0.0",
+                "main": "./dist/index.js",
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_readlink = os.readlink
+    mutated = False
+
+    def mutate_after_read(
+        path: os.PathLike[str] | str,
+        *,
+        dir_fd: int | None = None,
+    ) -> str:
+        nonlocal mutated
+        target = original_readlink(path, dir_fd=dir_fd)
+        if Path(path) == entry and not mutated:
+            mutated = True
+            entry.unlink()
+            entry.symlink_to("implementation-b.js")
+        return target
+
+    monkeypatch.setattr(os, "readlink", mutate_after_read)
+
+    with pytest.raises(TypeScriptWorkerError, match="changed while its freshness identity"):
+        runtime_package_identity(package, expected_name="vite-plugin-example")
+    assert mutated is True
+
+
+def test_runtime_seal_rechecks_packages_changed_during_its_first_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installation = _installation(tmp_path, "console.log('worker');\n")
+    package = tmp_path / "node_modules/vitest"
+    runtime = package / "dist/index.js"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("export const value = 1;\n", encoding="utf-8")
+    (package / "package.json").write_text(
+        json.dumps({"name": "vitest", "version": "4.1.10", "main": "./dist/index.js"}),
+        encoding="utf-8",
+    )
+    client = WorkerClient(root=tmp_path, installation=installation)
+    client.pin_package_runtime_identity(
+        "Vitest package",
+        package,
+        expected_name="vitest",
+    )
+    original_verify = client.verify_runtime_identity
+    verification_count = 0
+
+    def mutate_after_first_verification() -> str:
+        nonlocal verification_count
+        result = original_verify()
+        verification_count += 1
+        if verification_count == 1:
+            runtime.write_text("export const value = 2;\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(client, "verify_runtime_identity", mutate_after_first_verification)
+
+    with pytest.raises(
+        WorkerToolchainChangedError,
+        match="JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+    ):
+        client.seal_runtime_identity()
+
+    assert verification_count == 1
 
 
 def test_package_resolution_closure_rejects_dependency_symlink_aba(tmp_path: Path) -> None:

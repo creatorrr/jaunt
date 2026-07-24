@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import ctypes
 import hashlib
 import json
 import os
@@ -641,6 +642,74 @@ def test_windows_pinned_file_opens_inherit_nonblocking_mode(
         == 72
     )
     assert [call["blocking"] for call in calls] == [False, False]
+
+
+def test_windows_workspace_directory_pins_share_child_writes_without_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[Path, dict[str, object]]] = []
+    handles = iter((71, 72))
+
+    def open_pinned(path: Path, **kwargs: object) -> int:
+        calls.append((path, kwargs))
+        return next(handles)
+
+    monkeypatch.setattr(ts_builder.os, "name", "nt")
+    monkeypatch.setattr(ts_builder, "Path", type(tmp_path))
+    monkeypatch.setattr(ts_builder, "_windows_open_pinned_path", open_pinned)
+    monkeypatch.setattr(ts_builder, "_windows_flush_pinned_handle", lambda *_args: None)
+    monkeypatch.setattr(ts_builder, "_windows_close_pinned_handle", lambda *_args: None)
+
+    with ts_builder._PinnedWorkspace(tmp_path) as workspace:
+        workspace.directory(tmp_path / "transactions")
+
+    assert [path for path, _kwargs in calls] == [tmp_path, tmp_path / "transactions"]
+    assert all(kwargs["directory"] is True for _path, kwargs in calls)
+    assert all(kwargs["share_write"] is True for _path, kwargs in calls)
+
+
+def test_windows_directory_pin_createfile_share_mode_allows_write_not_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCall:
+        def __init__(self, result: object) -> None:
+            self.result = result
+            self.calls: list[tuple[object, ...]] = []
+
+        def __call__(self, *args: object) -> object:
+            self.calls.append(args)
+            return self.result
+
+    create = FakeCall(73)
+    get_info = FakeCall(True)
+    close = FakeCall(True)
+    kernel32 = SimpleNamespace(
+        CreateFileW=create,
+        GetFileInformationByHandleEx=get_info,
+        CloseHandle=close,
+    )
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *_args, **_kwargs: kernel32, raising=False)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 0, raising=False)
+    monkeypatch.setattr(
+        ts_builder, "_validate_windows_pinned_attributes", lambda *_args, **_kwargs: None
+    )
+
+    handle = ts_builder._windows_open_pinned_path(
+        tmp_path,
+        directory=True,
+        share_write=True,
+    )
+
+    assert handle == 73
+    assert len(create.calls) == 1
+    desired_access = create.calls[0][1]
+    share_mode = create.calls[0][2]
+    assert desired_access == 0x80000000 | 0x40000000
+    assert share_mode == 0x00000001 | 0x00000002
+    assert isinstance(share_mode, int)
+    assert share_mode & 0x00000004 == 0
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor regression")

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
 from jaunt.cli import (
     _cmd_mixed_check,
+    _cmd_typescript_build_loaded,
     _cmd_typescript_test_loaded,
     _cmd_mixed_status,
     _aggregate_cost_payloads,
@@ -178,7 +180,7 @@ def test_init_typescript_scaffolds_v2_without_mutating_package_json(tmp_path: Pa
 
     assert payload["language"] == "ts"
     assert payload["package_init_command"] == "npm init -y && npm pkg set type=module"
-    assert payload["install_command"].startswith("npm install -D @usejaunt/ts@^0.1.0 ")
+    assert payload["install_command"].startswith("npm install -D @usejaunt/ts@^0.1.2 ")
     assert not (tmp_path / "package.json").exists()
     assert (tmp_path / "src" / "index.jaunt.ts").is_file()
     assert (tmp_path / "src" / "index.context.ts").is_file()
@@ -414,10 +416,17 @@ projects = ["tsconfig.json"]
     )
     config = load_config(root=tmp_path)
     observed: dict[str, object] = {}
+    backend = object()
+    backend_calls = 0
+
+    def build_backend(_config: JauntConfig) -> object:
+        nonlocal backend_calls
+        backend_calls += 1
+        return backend
 
     async def fake_test(*_args, **kwargs):
+        observed.update(kwargs)
         progress = kwargs["progress"]
-        observed["progress"] = progress
         progress.set_total(2)
         progress.phase("tests/math.example.test.ts", "generating", "example")
         progress.advance("tests/math.example.test.ts", ok=True)
@@ -425,14 +434,70 @@ projects = ["tsconfig.json"]
         return TargetTestReport(language="ts")
 
     monkeypatch.setattr("jaunt.typescript.tester.run_test", fake_test)
+    monkeypatch.setattr("jaunt.cli._build_backend", build_backend)
     args = parse_args(["test", "--language", "ts", "--progress", "plain", "--json"])
 
     assert _cmd_typescript_test_loaded(args, tmp_path, config) == 0
     captured = capsys.readouterr()
     assert json.loads(captured.out)["ok"] is True
     assert observed["progress"] is not None
+    assert callable(observed["generator_factory"])
+    assert "generator" not in observed
+    assert backend_calls == 0
+    factory = cast("Callable[[], object]", observed["generator_factory"])
+    assert factory() is backend
+    assert factory() is backend
+    assert backend_calls == 1
+    assert observed["cost_tracker"] is args._command_cost_trackers["ts"]
+    assert callable(observed["semantic_gate_exec"])
     assert "[ts test] tests/math.example.test.ts: generating (example)" in captured.err
     assert "[ts test] 1/2" in captured.err
+
+
+def test_typescript_build_passes_a_lazy_cached_backend_factory(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tsconfig.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "jaunt.toml").write_text(
+        """version = 2
+[target.ts]
+source_roots = ["src"]
+test_roots = ["tests"]
+projects = ["tsconfig.json"]
+""",
+        encoding="utf-8",
+    )
+    config = load_config(root=tmp_path)
+    observed: dict[str, object] = {}
+    backend = object()
+    backend_calls = 0
+
+    async def fake_build(*_args, **kwargs):
+        observed.update(kwargs)
+        return TargetBuildReport(language="ts")
+
+    def build_backend(_config: JauntConfig) -> object:
+        nonlocal backend_calls
+        backend_calls += 1
+        return backend
+
+    monkeypatch.setattr("jaunt.typescript.builder.run_build", fake_build)
+    monkeypatch.setattr("jaunt.cli._build_backend", build_backend)
+    args = parse_args(["build", "--language", "ts", "--json"])
+
+    assert _cmd_typescript_build_loaded(args, tmp_path, config) == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+    assert callable(observed["generator_factory"])
+    assert "generator" not in observed
+    assert backend_calls == 0
+    factory = cast("Callable[[], object]", observed["generator_factory"])
+    assert factory() is backend
+    assert factory() is backend
+    assert backend_calls == 1
 
 
 def test_mixed_cost_payloads_sum_language_usage() -> None:

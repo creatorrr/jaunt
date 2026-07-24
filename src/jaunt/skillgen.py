@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from jaunt.agent_runtime import AgentFile, AgentTask
-from jaunt.codex_executor import CodexExecutor
+from jaunt.codex_executor import CodexExecutor, ModelCallRunner
 from jaunt.config import AgentConfig, CodexConfig, LLMConfig
 from jaunt.generate.shared import load_prompt, render_template
 from jaunt.skill_agent import (
@@ -12,8 +12,19 @@ from jaunt.skill_agent import (
 
 
 class CodexSkillGenerator:
-    def __init__(self, llm: LLMConfig, agent: AgentConfig, codex: CodexConfig) -> None:
-        self._executor = CodexExecutor(codex, llm)
+    def __init__(
+        self,
+        llm: LLMConfig,
+        agent: AgentConfig,
+        codex: CodexConfig,
+        *,
+        model_call_runner: ModelCallRunner | None = None,
+    ) -> None:
+        self._executor = CodexExecutor(
+            codex,
+            llm,
+            model_call_runner=model_call_runner,
+        )
         self._system_prompt = load_prompt("pypi_skill_system.md", None)
         self._user_prompt = load_prompt("pypi_skill_user.md", None)
 

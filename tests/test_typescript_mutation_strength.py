@@ -5,7 +5,9 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import signal
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,7 +16,7 @@ from typing import Any
 import pytest
 
 from jaunt.config import JauntConfig, load_config
-from jaunt.errors import JauntGenerationError
+from jaunt.errors import JauntConfigError, JauntGenerationError
 from jaunt.generate.base import (
     GenerationRequest,
     GeneratorBackend,
@@ -28,6 +30,7 @@ from jaunt.typescript.contracts import (
     _battery_body_digest_issue,
     _battery_header_metadata,
     _battery_path,
+    _mutation_runner_path,
     _parse_strength_metadata,
     _run_mutation_strength,
     _terminate_mutation_process,
@@ -99,6 +102,302 @@ def _with_no_fixture_provenance(
 
 def test_default_mutation_budget_covers_typecheck_and_runner_startup() -> None:
     assert _MUTATION_TIMEOUT_SECONDS == 15.0
+
+
+def _linked_mutation_workspace(
+    tmp_path: Path,
+    *,
+    runner_source: str = "// fake mutation runner\n",
+) -> tuple[Path, JauntConfig, _ContractWorker, str, Path]:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    config = _config(root, strength=True)
+    worker = _ContractWorker(root)
+    compiler = worker.installation.compiler_module_path
+    compiler.parent.mkdir(parents=True)
+    compiler.write_text("export {};\n", encoding="utf-8")
+    runner = root / "dist/test/mutation.js"
+    runner.parent.mkdir(parents=True)
+    runner.write_text(runner_source, encoding="utf-8")
+    (runner.parent / "permission_guard.cjs").write_text('"use strict";\n', encoding="utf-8")
+
+    external_package = tmp_path / "external-store/node_modules/external-package"
+    external_package.mkdir(parents=True)
+    sentinel = external_package / "sentinel.txt"
+    sentinel.write_text("untouched\n", encoding="utf-8")
+    (root / "node_modules/external-package").symlink_to(
+        external_package,
+        target_is_directory=True,
+    )
+    return (
+        root,
+        config,
+        worker,
+        "tests/contract/src/contract.clamp.contract.test.ts",
+        sentinel,
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink setup uses POSIX directory links")
+def test_mutation_runner_path_uses_the_physical_package_entrypoint(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    runner = package / "dist/test/mutation.js"
+    runner.parent.mkdir(parents=True)
+    runner.write_text("export {};\n", encoding="utf-8")
+    linked_package = tmp_path / "node_modules/@usejaunt/ts"
+    linked_package.parent.mkdir(parents=True)
+    linked_package.symlink_to(package, target_is_directory=True)
+    client = SimpleNamespace(installation=SimpleNamespace(package_root=linked_package))
+
+    assert _mutation_runner_path(client) == runner.resolve()
+
+
+@pytest.mark.asyncio
+async def test_mutation_snapshot_maps_the_compiler_into_the_disposable_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path, strength=True)
+    worker = _ContractWorker(tmp_path)
+    compiler = worker.installation.compiler_module_path
+    compiler.parent.mkdir(parents=True)
+    compiler.write_text("export {};\n", encoding="utf-8")
+    runner = tmp_path / "dist/test/mutation.js"
+    runner.parent.mkdir(parents=True)
+    runner.write_text("export {};\n", encoding="utf-8")
+    (runner.parent / "permission_guard.cjs").write_text('"use strict";\n', encoding="utf-8")
+    battery_file = "tests/contract/src/contract.clamp.contract.test.ts"
+    captured: dict[str, object] = {}
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self, raw_payload: bytes) -> tuple[bytes, bytes]:
+            payload = json.loads(raw_payload)
+            captured.update(payload)
+            isolated_root = Path(str(payload["root"]))
+            isolated_compiler = Path(str(payload["compilerModulePath"]))
+            assert isolated_root != tmp_path
+            assert isolated_compiler == isolated_root / compiler.relative_to(tmp_path)
+            assert isolated_compiler.read_text(encoding="utf-8") == "export {};\n"
+            return json.dumps(_strength_report()).encode("utf-8"), b""
+
+    async def create_subprocess_exec(*args: object, **kwargs: object) -> Process:
+        captured["args"] = list(args)
+        captured["cwd"] = kwargs["cwd"]
+        captured["env"] = kwargs["env"]
+        return Process()
+
+    monkeypatch.setattr(
+        "jaunt.typescript.contracts.asyncio.create_subprocess_exec",
+        create_subprocess_exec,
+    )
+    monkeypatch.setattr(
+        "jaunt.typescript.contracts._bubblewrap_executable", lambda _environment: None
+    )
+    monkeypatch.setattr(
+        "jaunt.typescript.contracts._node_permission_flag", lambda _node: "--permission"
+    )
+
+    report = await _run_mutation_strength(
+        worker,
+        tmp_path,
+        config,
+        source_path="src/contract.ts",
+        symbol="clamp",
+        battery_file=battery_file,
+        owner_project="tsconfig.json",
+        overlays={battery_file: "test('contract', () => {});\n"},
+        config_snapshot=({}, {}),
+    )
+
+    assert report["complete"] is True
+    assert captured["cwd"] == captured["root"]
+    assert captured["permissionSandbox"] is True
+    isolated_root = Path(str(captured["root"]))
+    args = captured["args"]
+    assert isinstance(args, list)
+    assert args[0] == "node"
+    assert "--permission" in args
+    assert "--allow-addons" in args
+    assert "--allow-worker" in args
+    assert "--allow-child-process" in args
+    assert f"--require={isolated_root / 'dist/test/permission_guard.cjs'}" in args
+    assert f"--allow-fs-read={isolated_root}" in args
+    assert f"--allow-fs-write={isolated_root}" in args
+    assert args[-1] == str(isolated_root / "dist/test/mutation.js")
+    serialized_launch = json.dumps(
+        {
+            "args": args,
+            "payload": {
+                key: value for key, value in captured.items() if key not in {"args", "env"}
+            },
+            "env": captured["env"],
+        },
+        sort_keys=True,
+    )
+    assert str(tmp_path.resolve()) not in serialized_launch
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink setup uses POSIX directory links")
+@pytest.mark.asyncio
+async def test_node_permission_fallback_rejects_external_workspace_links_before_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, config, worker, battery_file, sentinel = _linked_mutation_workspace(tmp_path)
+    spawned = False
+
+    async def unexpected_spawn(*_args: object, **_kwargs: object) -> object:
+        nonlocal spawned
+        spawned = True
+        raise AssertionError("unsafe mutation runner must not start")
+
+    monkeypatch.setattr(
+        "jaunt.typescript.contracts.asyncio.create_subprocess_exec",
+        unexpected_spawn,
+    )
+    monkeypatch.setattr(
+        "jaunt.typescript.contracts._bubblewrap_executable", lambda _environment: None
+    )
+
+    with pytest.raises(
+        JauntConfigError,
+        match=r"cannot safely use Node's permission fallback.*node_modules/external-package",
+    ):
+        await _run_mutation_strength(
+            worker,
+            root,
+            config,
+            source_path="src/contract.ts",
+            symbol="clamp",
+            battery_file=battery_file,
+            owner_project="tsconfig.json",
+            overlays={battery_file: "test('contract', () => {});\n"},
+            config_snapshot=({}, {}),
+        )
+
+    assert spawned is False
+    assert sentinel.read_text(encoding="utf-8") == "untouched\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink setup uses POSIX directory links")
+@pytest.mark.asyncio
+async def test_bubblewrap_path_allows_external_workspace_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, config, worker, battery_file, sentinel = _linked_mutation_workspace(tmp_path)
+    captured: dict[str, object] = {}
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self, _raw_payload: bytes) -> tuple[bytes, bytes]:
+            return json.dumps(_strength_report()).encode("utf-8"), b""
+
+    async def create_subprocess_exec(*args: object, **kwargs: object) -> Process:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return Process()
+
+    monkeypatch.setattr(
+        "jaunt.typescript.contracts.asyncio.create_subprocess_exec",
+        create_subprocess_exec,
+    )
+    monkeypatch.setattr(
+        "jaunt.typescript.contracts._bubblewrap_executable",
+        lambda _environment: "/usr/bin/bwrap",
+    )
+    monkeypatch.setattr(
+        "jaunt.typescript.contracts._node_permission_flag", lambda _node: "--permission"
+    )
+
+    report = await _run_mutation_strength(
+        worker,
+        root,
+        config,
+        source_path="src/contract.ts",
+        symbol="clamp",
+        battery_file=battery_file,
+        owner_project="tsconfig.json",
+        overlays={battery_file: "test('contract', () => {});\n"},
+        config_snapshot=({}, {}),
+    )
+
+    assert report["complete"] is True
+    args = captured["args"]
+    assert isinstance(args, tuple)
+    assert args[0] == "/usr/bin/bwrap"
+    assert "--ro-bind" in args
+    assert "--bind" in args
+    assert sentinel.read_text(encoding="utf-8") == "untouched\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="bubblewrap is Linux-only")
+@pytest.mark.asyncio
+async def test_bubblewrap_keeps_external_symlink_target_read_only_during_real_mutation_spawn(
+    tmp_path: Path,
+) -> None:
+    bubblewrap = shutil.which("bwrap")
+    node = shutil.which("node")
+    if bubblewrap is None or node is None:
+        pytest.skip("bubblewrap and Node are required for the behavioral sandbox regression")
+    assert bubblewrap is not None
+    assert node is not None
+    probe = subprocess.run(
+        [bubblewrap, "--ro-bind", "/", "/", "--proc", "/proc", "true"],
+        check=False,
+        capture_output=True,
+        timeout=10,
+    )
+    if probe.returncode != 0:
+        pytest.skip("bubblewrap is installed but unavailable in this environment")
+
+    runner_source = """
+const fs = require("node:fs");
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const payload = JSON.parse(input);
+  try {
+    fs.writeFileSync(
+      `${payload.root}/node_modules/external-package/sentinel.txt`,
+      "tampered\\n",
+    );
+  } catch {}
+  process.stdout.write(JSON.stringify({
+    protocol: "jaunt-ts-mutation/1",
+    sourcePath: payload.sourcePath,
+    symbol: payload.symbol,
+    concurrency: 1,
+    complete: true,
+    killed: [],
+    survived: [],
+    excluded: [],
+    score: { killed: 0, applicable: 0, survived: 0, excluded: 0, ratio: null },
+  }));
+});
+"""
+    root, config, worker, battery_file, sentinel = _linked_mutation_workspace(
+        tmp_path,
+        runner_source=runner_source,
+    )
+    worker.installation.node = node
+
+    report = await _run_mutation_strength(
+        worker,
+        root,
+        config,
+        source_path="src/contract.ts",
+        symbol="clamp",
+        battery_file=battery_file,
+        owner_project="tsconfig.json",
+        overlays={battery_file: "test('contract', () => {});\n"},
+        config_snapshot=({}, {}),
+        global_timeout=20.0,
+    )
+
+    assert report["complete"] is True
+    assert sentinel.read_text(encoding="utf-8") == "untouched\n"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group behavior")

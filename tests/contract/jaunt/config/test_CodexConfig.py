@@ -1,10 +1,10 @@
 # This contract test battery was derived by jaunt. Derived regions are regenerated; edits outside them are preserved.
 # jaunt:derived-from=jaunt.config:CodexConfig
-# jaunt:prose-digest=sha256:4f78ef9fb6e7554a2aec35a0798e6ea783119470c1c27d582bd541ce3020c91f
-# jaunt:signature=60a56581b014d5ed63e58e408f5629d919deeb0973644eafac25bc3d594aba04
-# jaunt:body-digest=sha256:6eba55ebd2c515756bfe7d4763a21f0c57cd726c1e5fa50cf8ef87ac8a669e3a
-# jaunt:strength=8/12
-# jaunt:tool-version=1.6.1
+# jaunt:prose-digest=sha256:a52c72285cb274acec3691bb3686b29fcee6231537675d3165ba7d4da81327eb
+# jaunt:signature=177eaf6a83e97b95282473b267973f610f5ec45ea76a42f8b852356462830493
+# jaunt:body-digest=sha256:1a542b52cec215ff382e5d0794cffcda259a139b2a85e1d4ca48b79d97245e39
+# jaunt:strength=9/13
+# jaunt:tool-version=1.7.11
 import pytest
 from jaunt.config import CodexConfig
 
@@ -13,5 +13,6 @@ def test_examples():  # derived from: Examples
     assert CodexConfig().model == "gpt-5.6-sol"
     assert CodexConfig().reasoning_effort == "medium"
     assert CodexConfig().sandbox == "workspace-write"
+    assert CodexConfig().quota_wait_minutes == 0.0
     assert CodexConfig().fingerprint_cli_version == False
 # <<< jaunt:derived examples

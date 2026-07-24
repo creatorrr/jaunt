@@ -35,7 +35,7 @@ Pin a supported compiler when installing; an unversioned `typescript` install ma
 select TypeScript 7:
 
 ```bash
-npm install -D @usejaunt/ts@^0.1.0 'typescript@^5.9' vitest fast-check @types/node
+npm install -D @usejaunt/ts@^0.1.2 'typescript@^5.9' vitest fast-check @types/node
 ```
 
 Declare `vitest` directly in every package that owns a test project, and declare
