@@ -535,6 +535,58 @@ def test_runtime_package_scanner_ends_type_assertions_at_logical_operators(
     assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (package,)
 
 
+@pytest.mark.parametrize("assertion", ["as", "satisfies"])
+@pytest.mark.parametrize("asserted_type", ["Type", 'import("inert-type").Value'])
+@pytest.mark.parametrize(
+    ("operator", "package"),
+    [
+        ("+", "runtime-add"),
+        ("*", "runtime-multiply"),
+        ("==", "runtime-equal"),
+        ("===", "runtime-strict-equal"),
+        (">", "runtime-greater-than"),
+        ("<=", "runtime-less-equal"),
+        ("instanceof", "runtime-instanceof"),
+        ("in", "runtime-in"),
+        ("^", "runtime-xor"),
+        ("<<", "runtime-left-shift"),
+    ],
+)
+def test_runtime_package_scanner_ends_type_assertions_at_other_binary_operators(
+    tmp_path: Path,
+    assertion: str,
+    asserted_type: str,
+    operator: str,
+    package: str,
+) -> None:
+    source = f'const result = value {assertion} {asserted_type} {operator} import("{package}");'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (package,)
+
+
+@pytest.mark.parametrize("assertion", ["as", "satisfies"])
+def test_runtime_package_scanner_keeps_nested_assertion_types_erased(
+    tmp_path: Path,
+    assertion: str,
+) -> None:
+    source = (
+        f"const generic = value {assertion} "
+        'Outer<import("inert-first").First, Inner<import("inert-second").Second>> '
+        '+ import("runtime-after-generic"); '
+        f"const callable = value {assertion} "
+        '<T extends import("inert-constraint").Constraint = '
+        'import("inert-default").Default>(argument: T) => '
+        'T extends import("inert-check").Check '
+        '? import("inert-true").True : import("inert-false").False '
+        '^ import("runtime-after-function");'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (
+        "runtime-after-function",
+        "runtime-after-generic",
+    )
+
+
 def test_runtime_package_scanner_keeps_dynamic_import_expressions_executable(
     tmp_path: Path,
 ) -> None:

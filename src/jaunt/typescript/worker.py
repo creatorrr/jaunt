@@ -13,7 +13,7 @@ import stat
 from bisect import bisect_right
 from collections import deque
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NoReturn
 from urllib.parse import unquote
@@ -4386,6 +4386,17 @@ def _runtime_package_owner(specifier: str) -> str | None:
     return package
 
 
+@dataclass
+class _ErasedTypeRegion:
+    """State for one annotation or assertion type suffix."""
+
+    kind: str
+    angle_depth: int = 0
+    pending_conditionals: dict[int, int] = field(default_factory=dict)
+    conditional_depths: dict[int, int] = field(default_factory=dict)
+    speculative_angle_imports: set[int] = field(default_factory=set)
+
+
 def _erased_type_import_indices(
     tokens: Sequence[tuple[str, str]],
 ) -> frozenset[int]:
@@ -4407,7 +4418,7 @@ def _erased_type_import_indices(
     closing_for = {"(": ")", "[": "]", "{": "}"}
     pending_alias_depth: int | None = None
     alias_body_depth: int | None = None
-    type_regions: dict[int, str] = {}
+    type_regions: dict[int, _ErasedTypeRegion] = {}
     erased: set[int] = set()
     declaration_starters = {
         "class",
@@ -4424,6 +4435,24 @@ def _erased_type_import_indices(
         "type",
         "var",
     }
+    assertion_expression_operators = frozenset(
+        {
+            "=",
+            "+",
+            "-",
+            "*",
+            "/",
+            "%",
+            "^",
+            "==",
+            "!=",
+            "&&",
+            "||",
+            "??",
+            "in",
+            "instanceof",
+        }
+    )
 
     def token_value(index: int) -> str:
         return tokens[index][1] if 0 <= index < token_count else ""
@@ -4442,30 +4471,75 @@ def _erased_type_import_indices(
         if alias_body_depth == depth and value == ";":
             alias_body_depth = None
 
-        region_kind = type_regions.get(depth)
-        if region_kind is not None:
-            # Logical/nullish operators resume the surrounding expression;
-            # single ``|``/``&`` tokens can still belong to a union/intersection type.
-            boundaries = (
-                {"=", ",", ")", "]", "}", ";", "=>", "{"}
-                if region_kind == "annotation"
-                else {
-                    ",",
-                    ")",
-                    "]",
-                    "}",
-                    ";",
-                    "=>",
-                    "?",
-                    ":",
-                    "{",
-                    "&&",
-                    "||",
-                    "??",
-                }
-            )
-            if value in boundaries or line_break_starts_statement:
-                type_regions.pop(depth)
+        region = type_regions.get(depth)
+        if region is not None:
+            if region.kind == "annotation":
+                if value in {"=", ",", ")", "]", "}", ";", "=>", "{"} or (
+                    line_break_starts_statement
+                ):
+                    type_regions.pop(depth)
+            else:
+                # An assertion's type may contain root-level generic arguments,
+                # function arrows, and conditional types. Only operators which
+                # cannot continue that type return to the surrounding expression.
+                # ``|``/``&`` remain type operators; a speculative ``<`` is
+                # confirmed only when its outer ``>`` arrives.
+                boundary = line_break_starts_statement
+                if value == "<":
+                    if token_value(index + 1) in {"<", "="}:
+                        boundary = True
+                    else:
+                        region.angle_depth += 1
+                elif value == ">":
+                    if region.angle_depth:
+                        old_angle_depth = region.angle_depth
+                        region.pending_conditionals.pop(old_angle_depth, None)
+                        region.conditional_depths.pop(old_angle_depth, None)
+                        region.angle_depth -= 1
+                        if not region.angle_depth:
+                            erased.update(region.speculative_angle_imports)
+                            region.speculative_angle_imports.clear()
+                    else:
+                        boundary = True
+                elif (
+                    kind == "identifier"
+                    and value == "extends"
+                    and token_value(index - 1) not in {".", "?."}
+                ):
+                    angle_depth = region.angle_depth
+                    region.pending_conditionals[angle_depth] = (
+                        region.pending_conditionals.get(angle_depth, 0) + 1
+                    )
+                elif value == "?":
+                    angle_depth = region.angle_depth
+                    pending = region.pending_conditionals.get(angle_depth, 0)
+                    if pending:
+                        region.pending_conditionals[angle_depth] = pending - 1
+                        region.conditional_depths[angle_depth] = (
+                            region.conditional_depths.get(angle_depth, 0) + 1
+                        )
+                    elif not angle_depth:
+                        boundary = True
+                elif value == ":":
+                    angle_depth = region.angle_depth
+                    conditional_depth = region.conditional_depths.get(angle_depth, 0)
+                    if conditional_depth:
+                        region.conditional_depths[angle_depth] = conditional_depth - 1
+                    elif not angle_depth:
+                        boundary = True
+                elif value == "=>":
+                    if not region.angle_depth and token_value(index - 1) != ")":
+                        boundary = True
+                elif value in assertion_expression_operators:
+                    if (kind != "identifier" or token_value(index - 1) not in {".", "?."}) and (
+                        value != "=" or not region.angle_depth
+                    ):
+                        boundary = True
+                elif value in {",", ")", "]", "}", ";"}:
+                    if value != "," or not region.angle_depth:
+                        boundary = True
+                if boundary:
+                    type_regions.pop(depth)
 
         if (
             kind == "identifier"
@@ -4473,10 +4547,17 @@ def _erased_type_import_indices(
             and (
                 bool(type_body_contexts[index])
                 or alias_body_depth is not None
-                or bool(type_regions)
+                or any(
+                    region.kind == "annotation" or not region.angle_depth
+                    for region in type_regions.values()
+                )
             )
         ):
             erased.add(index)
+        if kind == "identifier" and value == "import":
+            for active_region in type_regions.values():
+                if active_region.kind == "assertion" and active_region.angle_depth:
+                    active_region.speculative_angle_imports.add(index)
 
         if value == "=" and pending_alias_depth == depth:
             alias_body_depth = depth
@@ -4512,13 +4593,13 @@ def _erased_type_import_indices(
                 or previous == ")"
                 or binding_prefix in _TYPED_BINDING_PREFIXES
             ):
-                type_regions[depth] = "annotation"
+                type_regions[depth] = _ErasedTypeRegion("annotation")
         elif (
             kind == "identifier"
             and value in {"as", "satisfies"}
             and token_value(index - 1) not in {".", "?."}
         ):
-            type_regions[depth] = "assertion"
+            type_regions[depth] = _ErasedTypeRegion("assertion")
 
         if value in closing_for:
             expected_closings.append(closing_for[value])
