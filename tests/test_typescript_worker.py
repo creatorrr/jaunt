@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import sys
+import time
 import tracemalloc
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -284,6 +285,50 @@ def test_semicolonless_static_clause_scans_read_linear_tokens(
     assert _runtime_module_specifiers("ignored", source_path=tmp_path / "runtime.ts") == ()
     assert tokens.indexed_items < len(tokens) * 40
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        'type Alias = import("inert-alias").Value;',
+        'type Query = typeof import("inert-query");',
+        'interface Shape { property: import("inert-interface-property").Value; }',
+        'type Shape = { property: typeof import("inert-object-property"); };',
+        'declare const declared: typeof import("inert-declaration");',
+        'const annotated: import("inert-annotation").Value = value;',
+        'class Container { property!: import("inert-class-property").Value; }',
+        'const asserted = value as import("inert-assertion").Value;',
+        'const checked = value satisfies import("inert-satisfies").Value;',
+    ],
+)
+def test_runtime_package_scanner_ignores_erased_import_type_expressions(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == ()
+
+
+def test_runtime_package_scanner_keeps_dynamic_import_expressions_executable(
+    tmp_path: Path,
+) -> None:
+    source = (
+        'type Inert = import("inert-type").Value; '
+        'const direct = import("runtime-direct"); '
+        'const nested = { load: import("runtime-property") };'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (
+        "runtime-direct",
+        "runtime-property",
+    )
+
+
+def test_runtime_package_scanner_scales_across_erased_import_type_expressions(
+    tmp_path: Path,
+) -> None:
+    source = "\n".join(
+        f'type Alias{index} = import("inert-{index}").Value;' for index in range(2_000)
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == ()
 
 def test_runtime_package_scanner_handles_regex_inside_template_expression(
     tmp_path: Path,
@@ -919,6 +964,44 @@ def test_runtime_package_scanner_handles_tsx_type_member_call_signatures(
 
 
 @pytest.mark.parametrize(
+    "declaration",
+    [
+        "declare const callable: { <T>(value: T): T };",
+        "const callable: { <T>(value: T): T } = implementation;",
+        "function consume(callable: { <T>(value: T): T }) {}",
+        "const callable = implementation as { <T>(value: T): T };",
+        "const callable = implementation satisfies { <T>(value: T): T };",
+        "function make(): { <T>(value: T): T } { return implementation; }",
+        "class Container { callable!: { <T>(value: T): T }; }",
+        "const container = { consume: (callable: { <T>(value: T): T }) => callable };",
+        "const callable: { nested: { <T>(value: T): T } } = implementation;",
+    ],
+)
+def test_runtime_package_scanner_handles_tsx_object_type_call_signatures(
+    tmp_path: Path,
+    declaration: str,
+) -> None:
+    source = f'{declaration} require("real-after-object-type");'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.tsx") == (
+        "real-after-object-type",
+    )
+
+
+def test_runtime_package_scanner_keeps_runtime_object_jsx_values_executable(
+    tmp_path: Path,
+) -> None:
+    source = (
+        'const container = { nested: { render: <T>(value): raw; require("inert-text")</T> } }; '
+        'require("real-after-object");'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.tsx") == (
+        "real-after-object",
+    )
+
+
+@pytest.mark.parametrize(
     ("suffix", "after"),
     [
         ('// </T>\nrequire("real-after-comment");', "real-after-comment"),
@@ -969,6 +1052,19 @@ def test_runtime_package_scanner_scales_across_tsx_generic_arrows(
     source = "\n".join(f"const generic{index} = <T,>(value: T) => value;" for index in range(2_000))
 
     assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.tsx") == ()
+
+
+def test_runtime_package_scanner_scales_across_nested_tsx_generic_signatures(
+    tmp_path: Path,
+) -> None:
+    nested_type = "string"
+    for index in range(2_000):
+        nested_type = f"<T{index}>(value{index}: {nested_type}) => T{index}"
+    source = f"type Nested = {nested_type};"
+
+    started = time.monotonic()
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.tsx") == ()
+    assert time.monotonic() - started < 1.5
 
 
 def test_runtime_package_scanner_handles_deep_alternating_jsx_expressions(

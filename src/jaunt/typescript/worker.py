@@ -325,18 +325,29 @@ def _line_comment_end(source: str, start: int) -> int:
 class _RuntimeJavaScriptTokens(tuple[tuple[str, str], ...]):
     """Executable tokens plus the source line-break boundary before each token."""
 
+    class_body_contexts: tuple[bool, ...]
     line_breaks_before: tuple[bool, ...]
+    type_body_contexts: tuple[bool, ...]
 
     def __new__(
         cls,
         values: Sequence[tuple[str, str]],
         line_breaks_before: Sequence[bool],
+        type_body_contexts: Sequence[bool],
+        class_body_contexts: Sequence[bool],
     ) -> _RuntimeJavaScriptTokens:
         instance = super().__new__(cls, values)
         boundaries = tuple(line_breaks_before)
-        if len(instance) != len(boundaries):
-            raise ValueError("Runtime token line-break metadata is misaligned")
+        type_contexts = tuple(type_body_contexts)
+        class_contexts = tuple(class_body_contexts)
+        if not all(
+            len(instance) == len(metadata)
+            for metadata in (boundaries, type_contexts, class_contexts)
+        ):
+            raise ValueError("Runtime token metadata is misaligned")
         instance.line_breaks_before = boundaries
+        instance.type_body_contexts = type_contexts
+        instance.class_body_contexts = class_contexts
         return instance
 
 
@@ -1134,6 +1145,51 @@ def _declaration_body_head(tokens: Sequence[tuple[str, str]]) -> str | None:
     return None
 
 
+def _opens_type_body_brace(
+    tokens: Sequence[tuple[str, str]],
+    *,
+    declaration_head: str | None,
+    enclosing_type_body: bool,
+    enclosing_statement_brace: bool | None,
+    enclosing_class_body: bool,
+    opens_statement_brace: bool,
+    nested_in_parentheses: bool,
+    previous_colon_is_conditional: bool,
+    previous_colon_is_switch_clause: bool,
+) -> bool:
+    """Recognize object-type literals whose members can start with ``<T>``.
+
+    TSX otherwise makes a generic call signature look exactly like a JSX
+    element. Declaration bodies and nested object types are unambiguous. For
+    standalone object types, only accept braces in a known type-introducing
+    position; notably, a colon in an ordinary object literal still introduces
+    an executable property value.
+    """
+
+    if declaration_head in {"interface", "type"} or enclosing_type_body:
+        return True
+    if not tokens:
+        return False
+    kind, value = tokens[-1]
+    if (
+        kind == "identifier"
+        and value in {"as", "satisfies"}
+        and (len(tokens) < 2 or tokens[-2][1] not in {".", "?."})
+    ):
+        return True
+    if value != ":" or previous_colon_is_conditional or previous_colon_is_switch_clause:
+        return False
+    if enclosing_class_body or nested_in_parentheses:
+        return True
+    if len(tokens) >= 2 and tokens[-2][1] == ")":
+        # A closed parameter list followed by a colon introduces a return
+        # type, including an arrow method used as an object property value.
+        return True
+    if enclosing_statement_brace is False:
+        return False
+    return not opens_statement_brace
+
+
 def _opens_statement_brace(
     tokens: Sequence[tuple[str, str]],
     *,
@@ -1652,11 +1708,15 @@ def _runtime_javascript_tokens(
         )
     tokens: list[tuple[str, str]] = []
     line_breaks_before: list[bool] = []
+    type_body_contexts: list[bool] = []
+    class_body_contexts: list[bool] = []
     cursor = 0
     previous: tuple[str, str] | None = None
     control_parentheses: list[str | None] = []
     statement_braces: list[bool] = []
     type_body_braces: list[bool] = []
+    class_body_braces: list[bool] = []
+    brace_parenthesis_depths: list[int] = []
     previous_closed_control_head: str | None = None
     previous_closed_statement_brace = False
     previous_conditional_colon = False
@@ -1677,6 +1737,8 @@ def _runtime_javascript_tokens(
         closes_statement_brace = False
         opens_statement_brace: bool | None = None
         opens_type_body = False
+        inside_type_body = type_body_braces[-1] if type_body_braces else False
+        inside_class_body = class_body_braces[-1] if class_body_braces else False
         opens_switch_body = (
             kind == "punctuation" and value == "{" and previous_closed_control_head == "switch"
         )
@@ -1686,9 +1748,11 @@ def _runtime_javascript_tokens(
             closes_control_head = control_parentheses.pop() if control_parentheses else None
         elif kind == "punctuation" and value == "{":
             enclosing_type_body = type_body_braces[-1] if type_body_braces else False
+            enclosing_statement_brace = statement_braces[-1] if statement_braces else None
+            declaration_head = _declaration_body_head(tokens)
             opens_statement_brace = _opens_statement_brace(
                 tokens,
-                enclosing_statement_brace=(statement_braces[-1] if statement_braces else None),
+                enclosing_statement_brace=enclosing_statement_brace,
                 previous_closed_control_head=previous_closed_control_head is not None,
                 previous_closed_statement_brace=previous_closed_statement_brace,
                 previous_colon_is_conditional=previous_conditional_colon,
@@ -1697,21 +1761,40 @@ def _runtime_javascript_tokens(
                 line_breaks_before=line_breaks_before,
                 decorator_candidates=decorator_candidates,
             )
-            opens_type_body = (
-                _declaration_body_head(tokens) in {"interface", "type"} or enclosing_type_body
+            opens_type_body = _opens_type_body_brace(
+                tokens,
+                declaration_head=declaration_head,
+                enclosing_type_body=enclosing_type_body,
+                enclosing_statement_brace=enclosing_statement_brace,
+                enclosing_class_body=(class_body_braces[-1] if class_body_braces else False),
+                opens_statement_brace=opens_statement_brace,
+                nested_in_parentheses=(
+                    len(control_parentheses)
+                    > (brace_parenthesis_depths[-1] if brace_parenthesis_depths else 0)
+                ),
+                previous_colon_is_conditional=previous_conditional_colon,
+                previous_colon_is_switch_clause=previous_switch_clause_colon,
             )
             statement_braces.append(opens_statement_brace)
             type_body_braces.append(opens_type_body)
+            class_body_braces.append(declaration_head == "class")
+            brace_parenthesis_depths.append(len(control_parentheses))
         elif kind == "punctuation" and value == "}":
             closes_statement_brace = statement_braces.pop() if statement_braces else False
             if type_body_braces:
                 type_body_braces.pop()
+            if class_body_braces:
+                class_body_braces.pop()
+            if brace_parenthesis_depths:
+                brace_parenthesis_depths.pop()
         previous_closed_control_head = closes_control_head
         previous_closed_statement_brace = closes_statement_brace
         token = (kind, value)
         token_index = len(tokens)
         tokens.append(token)
         line_breaks_before.append(pending_line_break)
+        type_body_contexts.append(inside_type_body)
+        class_body_contexts.append(inside_class_body)
         decorator_candidates.append(
             tokens,
             token_index,
@@ -1828,6 +1911,8 @@ def _runtime_javascript_tokens(
         expression_control_parentheses: list[str | None] = []
         expression_statement_braces: list[bool] = []
         expression_type_body_braces: list[bool] = []
+        expression_class_body_braces: list[bool] = []
+        expression_brace_parenthesis_depths: list[int] = []
         expression_previous_closed_control_head: str | None = None
         expression_previous_closed_statement_brace = False
         expression_previous_conditional_colon = False
@@ -1865,11 +1950,13 @@ def _runtime_javascript_tokens(
                 enclosing_type_body = (
                     expression_type_body_braces[-1] if expression_type_body_braces else False
                 )
+                enclosing_statement_brace = (
+                    expression_statement_braces[-1] if expression_statement_braces else None
+                )
+                declaration_head = _declaration_body_head(expression_tokens)
                 opens_statement_brace = _opens_statement_brace(
                     expression_tokens,
-                    enclosing_statement_brace=(
-                        expression_statement_braces[-1] if expression_statement_braces else None
-                    ),
+                    enclosing_statement_brace=enclosing_statement_brace,
                     previous_closed_control_head=(
                         expression_previous_closed_control_head is not None
                     ),
@@ -1880,18 +1967,40 @@ def _runtime_javascript_tokens(
                     line_breaks_before=expression_line_breaks_before,
                     decorator_candidates=expression_decorator_candidates,
                 )
-                opens_type_body = (
-                    _declaration_body_head(expression_tokens) in {"interface", "type"}
-                    or enclosing_type_body
+                opens_type_body = _opens_type_body_brace(
+                    expression_tokens,
+                    declaration_head=declaration_head,
+                    enclosing_type_body=enclosing_type_body,
+                    enclosing_statement_brace=enclosing_statement_brace,
+                    enclosing_class_body=(
+                        expression_class_body_braces[-1] if expression_class_body_braces else False
+                    ),
+                    opens_statement_brace=opens_statement_brace,
+                    nested_in_parentheses=(
+                        len(expression_control_parentheses)
+                        > (
+                            expression_brace_parenthesis_depths[-1]
+                            if expression_brace_parenthesis_depths
+                            else 0
+                        )
+                    ),
+                    previous_colon_is_conditional=expression_previous_conditional_colon,
+                    previous_colon_is_switch_clause=expression_previous_switch_clause_colon,
                 )
                 expression_statement_braces.append(opens_statement_brace)
                 expression_type_body_braces.append(opens_type_body)
+                expression_class_body_braces.append(declaration_head == "class")
+                expression_brace_parenthesis_depths.append(len(expression_control_parentheses))
             elif kind == "punctuation" and value == "}":
                 closes_statement_brace = (
                     expression_statement_braces.pop() if expression_statement_braces else False
                 )
                 if expression_type_body_braces:
                     expression_type_body_braces.pop()
+                if expression_class_body_braces:
+                    expression_class_body_braces.pop()
+                if expression_brace_parenthesis_depths:
+                    expression_brace_parenthesis_depths.pop()
             expression_previous_closed_control_head = closes_control_head
             expression_previous_closed_statement_brace = closes_statement_brace
             expression_previous = (kind, value)
@@ -2080,6 +2189,53 @@ def _runtime_javascript_tokens(
             f"Runtime package source has an unterminated template: {source_path}"
         )
 
+    parenthesis_end_cache: dict[int, int | None] = {}
+
+    def matching_parenthesis_end(start: int) -> int | None:
+        """Return the end of a balanced group with amortized linear scanning."""
+
+        if start in parenthesis_end_cache:
+            return parenthesis_end_cache[start]
+        if start >= len(source) or source[start] != "(":
+            return None
+        openings = [start]
+        index = start + 1
+        while index < len(source):
+            if source.startswith("//", index):
+                index = _line_comment_end(source, index + 2)
+                continue
+            if source.startswith("/*", index):
+                end = source.find("*/", index + 2)
+                if end < 0:
+                    break
+                index = end + 2
+                continue
+            character = source[index]
+            if character in {"'", '"', "`"}:
+                try:
+                    index, _value = skip_quoted(index, character)
+                except TypeScriptWorkerError:
+                    break
+                continue
+            if character == "(":
+                if index in parenthesis_end_cache:
+                    cached_end = parenthesis_end_cache[index]
+                    if cached_end is None:
+                        break
+                    index = cached_end
+                    continue
+                openings.append(index)
+            elif character == ")":
+                opening = openings.pop()
+                end = index + 1
+                parenthesis_end_cache[opening] = end
+                if not openings:
+                    return end
+            index += 1
+        for opening in openings:
+            parenthesis_end_cache[opening] = None
+        return None
+
     def tsx_generic_signature(start: int, *, type_member_context: bool) -> bool:
         """Reject a TSX generic arrow/call signature before JSX speculation."""
 
@@ -2154,39 +2310,10 @@ def _runtime_javascript_tokens(
             return False
         if definitive_marker:
             return True
-        parenthesis_depth = 0
-        quote = None
-        while index < len(source):
-            character = source[index]
-            if quote is not None:
-                if character == "\\":
-                    index += 2
-                    continue
-                if character == quote:
-                    quote = None
-                index += 1
-                continue
-            if character in {"'", '"', "`"}:
-                quote = character
-            elif source.startswith("//", index):
-                index = _line_comment_end(source, index + 2)
-                continue
-            elif source.startswith("/*", index):
-                end = source.find("*/", index + 2)
-                if end < 0:
-                    return False
-                index = end + 2
-                continue
-            elif character == "(":
-                parenthesis_depth += 1
-            elif character == ")":
-                parenthesis_depth -= 1
-                if parenthesis_depth == 0:
-                    index += 1
-                    break
-            index += 1
-        if parenthesis_depth:
+        parenthesis_end = matching_parenthesis_end(index)
+        if parenthesis_end is None:
             return False
+        index = parenthesis_end
         while index < len(source) and source[index].isspace():
             index += 1
         if source.startswith("=>", index):
@@ -2420,7 +2547,12 @@ def _runtime_javascript_tokens(
         else:
             append("punctuation", character)
             cursor += 1
-    return _RuntimeJavaScriptTokens(tokens, line_breaks_before)
+    return _RuntimeJavaScriptTokens(
+        tokens,
+        line_breaks_before,
+        type_body_contexts,
+        class_body_contexts,
+    )
 
 
 class _ScopeCapabilityNode:
@@ -3780,11 +3912,138 @@ def _runtime_package_owner(specifier: str) -> str | None:
     return package
 
 
+def _erased_type_import_indices(
+    tokens: Sequence[tuple[str, str]],
+) -> frozenset[int]:
+    """Find ``import(...)`` tokens used as TypeScript types in one pass."""
+
+    token_count = len(tokens)
+    type_body_contexts = getattr(tokens, "type_body_contexts", ())
+    if len(type_body_contexts) != token_count:
+        type_body_contexts = (False,) * token_count
+    class_body_contexts = getattr(tokens, "class_body_contexts", ())
+    if len(class_body_contexts) != token_count:
+        class_body_contexts = (False,) * token_count
+    line_breaks_before = getattr(tokens, "line_breaks_before", ())
+    if len(line_breaks_before) != token_count:
+        line_breaks_before = (False,) * token_count
+
+    conditional_colons = _conditional_expression_colons(tokens)
+    expected_closings: list[str] = []
+    closing_for = {"(": ")", "[": "]", "{": "}"}
+    pending_alias_depth: int | None = None
+    alias_body_depth: int | None = None
+    type_regions: dict[int, str] = {}
+    erased: set[int] = set()
+    declaration_starters = {
+        "class",
+        "const",
+        "declare",
+        "enum",
+        "export",
+        "function",
+        "import",
+        "interface",
+        "let",
+        "module",
+        "namespace",
+        "type",
+        "var",
+    }
+
+    def token_value(index: int) -> str:
+        return tokens[index][1] if 0 <= index < token_count else ""
+
+    for index, (kind, value) in enumerate(tokens):
+        depth = len(expected_closings)
+        line_break_starts_statement = (
+            bool(line_breaks_before[index])
+            and kind == "identifier"
+            and value in declaration_starters
+            and index > 0
+            and _can_end_statement_before_label(*tokens[index - 1])
+        )
+        if alias_body_depth == depth and line_break_starts_statement:
+            alias_body_depth = None
+        if alias_body_depth == depth and value == ";":
+            alias_body_depth = None
+
+        region_kind = type_regions.get(depth)
+        if region_kind is not None:
+            boundaries = (
+                {"=", ",", ")", "]", "}", ";", "=>", "{"}
+                if region_kind == "annotation"
+                else {",", ")", "]", "}", ";", "=>", "?", ":", "{"}
+            )
+            if value in boundaries or line_break_starts_statement:
+                type_regions.pop(depth)
+
+        if (
+            kind == "identifier"
+            and value == "import"
+            and (
+                bool(type_body_contexts[index])
+                or alias_body_depth is not None
+                or bool(type_regions)
+            )
+        ):
+            erased.add(index)
+
+        if value == "=" and pending_alias_depth == depth:
+            alias_body_depth = depth
+            pending_alias_depth = None
+        elif (
+            kind == "identifier"
+            and value == "type"
+            and index + 1 < token_count
+            and tokens[index + 1][0] == "identifier"
+            and token_value(index - 1) not in {".", "?."}
+        ):
+            pending_alias_depth = depth
+        elif (
+            pending_alias_depth is not None
+            and depth <= pending_alias_depth
+            and value
+            in {
+                ";",
+                "{",
+                "}",
+            }
+        ):
+            pending_alias_depth = None
+
+        if value == ":" and index not in conditional_colons:
+            previous = token_value(index - 1)
+            binding_prefix = token_value(index - 2)
+            inside_parentheses = bool(expected_closings) and expected_closings[-1] == ")"
+            if (
+                bool(type_body_contexts[index])
+                or bool(class_body_contexts[index])
+                or inside_parentheses
+                or previous == ")"
+                or binding_prefix in _TYPED_BINDING_PREFIXES
+            ):
+                type_regions[depth] = "annotation"
+        elif (
+            kind == "identifier"
+            and value in {"as", "satisfies"}
+            and token_value(index - 1) not in {".", "?."}
+        ):
+            type_regions[depth] = "assertion"
+
+        if value in closing_for:
+            expected_closings.append(closing_for[value])
+        elif value in {")", "]", "}"} and expected_closings and value == expected_closings[-1]:
+            expected_closings.pop()
+    return frozenset(erased)
+
+
 def _runtime_module_specifiers(source: str, *, source_path: Path) -> tuple[str, ...]:
     """Extract statically named native ESM and CommonJS runtime loads."""
 
     tokens = _runtime_javascript_tokens(source, source_path=source_path)
     specifiers: set[str] = set()
+    erased_type_imports = _erased_type_import_indices(tokens)
 
     def literal(index: int) -> str | None:
         if index >= len(tokens):
@@ -3891,6 +4150,8 @@ def _runtime_module_specifiers(source: str, *, source_path: Path) -> tuple[str, 
             ("punctuation", "?."),
         }:
             if index + 1 < len(tokens) and tokens[index + 1] == ("punctuation", "("):
+                if index in erased_type_imports:
+                    continue
                 specifier = literal(index + 2)
                 if specifier is not None:
                     specifiers.add(specifier)
