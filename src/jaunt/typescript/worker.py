@@ -5409,12 +5409,21 @@ def _shadowed_native_loader_indices(
             scope_stack.pop()
 
     bindings: list[set[str]] = [set() for _scope in scope_parent]
+    ambient_declaration_name_indices: set[int] = set()
     function_scopes: set[int] = set()
     expression_arrow_bindings: list[tuple[int, int, frozenset[str]]] = []
     parameter_head_bindings: list[tuple[int, int, frozenset[str]]] = []
 
     def token_value(index: int) -> str:
         return tokens[index][1] if 0 <= index < len(tokens) else ""
+
+    def is_ambient_declaration(index: int) -> bool:
+        """Return whether a value declaration is erased by ``declare``."""
+
+        cursor = index - 1
+        while token_value(cursor) in {"abstract", "const", "default", "export"}:
+            cursor -= 1
+        return token_value(cursor) == "declare"
 
     def pattern_names(start: int, end: int) -> set[str]:
         """Collect names bound by one parameter or destructuring pattern."""
@@ -5619,7 +5628,10 @@ def _shadowed_native_loader_indices(
             "export",
         }
         if is_declaration:
-            bindings[scope_at_token[index]].add(tokens[name_index][1])
+            if is_ambient_declaration(index):
+                ambient_declaration_name_indices.add(name_index)
+            else:
+                bindings[scope_at_token[index]].add(tokens[name_index][1])
         while cursor < len(tokens) and token_value(cursor) != "(":
             cursor += 1
         close_index = matching_close.get(cursor)
@@ -5643,7 +5655,7 @@ def _shadowed_native_loader_indices(
         if body_scope is not None:
             bindings[body_scope].add(tokens[name_index][1])
         previous = token_value(index - 1)
-        if index == 0 or previous in {
+        is_declaration = index == 0 or previous in {
             ";",
             "{",
             "}",
@@ -5651,8 +5663,12 @@ def _shadowed_native_loader_indices(
             "declare",
             "default",
             "export",
-        }:
-            bindings[scope_at_token[index]].add(tokens[name_index][1])
+        }
+        if is_declaration:
+            if is_ambient_declaration(index):
+                ambient_declaration_name_indices.add(name_index)
+            else:
+                bindings[scope_at_token[index]].add(tokens[name_index][1])
 
     # Runtime enum and namespace declarations introduce a value binding. Type
     # aliases and interfaces deliberately do not: their names are erased and
@@ -5672,6 +5688,9 @@ def _shadowed_native_loader_indices(
             continue
         if token[1] in {"module", "namespace"} and following not in {".", "{"}:
             continue
+        if is_ambient_declaration(index):
+            ambient_declaration_name_indices.add(name_index)
+            continue
         bindings[scope_at_token[index]].add(tokens[name_index][1])
 
     # Direct lexical declarations cover the overwhelmingly common shadowing
@@ -5689,6 +5708,7 @@ def _shadowed_native_loader_indices(
             )
         ):
             continue
+        ambient_declaration = is_ambient_declaration(index)
         scope = scope_at_token[index]
         if value == "var":
             while scope != 0 and scope not in function_scopes:
@@ -5698,7 +5718,15 @@ def _shadowed_native_loader_indices(
             binding_end = binding_start + 1
             if token_value(binding_start) in {"{", "["}:
                 binding_end = matching_close.get(binding_start, binding_start) + 1
-            bindings[scope].update(pattern_names(binding_start, binding_end))
+            if ambient_declaration:
+                ambient_declaration_name_indices.update(
+                    binding_index
+                    for binding_index in range(binding_start, binding_end)
+                    if tokens[binding_index][0] == "identifier"
+                    and tokens[binding_index][1] in target_names
+                )
+            else:
+                bindings[scope].update(pattern_names(binding_start, binding_end))
             cursor = binding_end
             in_type_annotation = token_value(cursor) == ":"
             angle_depth = 0
@@ -5810,6 +5838,9 @@ def _shadowed_native_loader_indices(
             active_arrow_bindings[name] += arrow_deltas[name][index]
             active_parameter_head_bindings[name] += parameter_head_deltas[name][index]
         if kind != "identifier" or value not in target_names:
+            continue
+        if index in ambient_declaration_name_indices:
+            shadowed.add(index)
             continue
         scope = scope_at_token[index]
         if (

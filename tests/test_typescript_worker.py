@@ -344,7 +344,6 @@ def test_runtime_package_scanner_ignores_private_loader_names(
     "source",
     [
         'function run(require) { require("inert-parameter"); }',
-        'declare function require(id: string): unknown; require("inert-declaration");',
         'function run(module) { module.require("inert-module-parameter"); }',
         'const run = require => require("inert-arrow-parameter");',
         'const run = (module) => module.require("inert-arrow-parameter");',
@@ -369,6 +368,131 @@ def test_runtime_package_scanner_ignores_shadowed_native_loaders(
     specifiers = _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts")
 
     assert not any(specifier.startswith("inert-") for specifier in specifiers)
+
+
+@pytest.mark.parametrize(
+    ("declaration", "use", "expected"),
+    [
+        (
+            "declare const require: { (id: string): unknown };",
+            'require("runtime-after-declare-const");',
+            "runtime-after-declare-const",
+        ),
+        (
+            "declare var require: { (id: string): unknown };",
+            'require("runtime-after-declare-var");',
+            "runtime-after-declare-var",
+        ),
+        (
+            "declare let require: { (id: string): unknown };",
+            'require("runtime-after-declare-let");',
+            "runtime-after-declare-let",
+        ),
+        (
+            "declare function require(id: string): unknown;",
+            'require("runtime-after-declare-function");',
+            "runtime-after-declare-function",
+        ),
+        (
+            "declare class require { static resolve(id: string): string }",
+            'require("runtime-after-declare-class");',
+            "runtime-after-declare-class",
+        ),
+        (
+            "declare enum require { value }",
+            'require("runtime-after-declare-enum");',
+            "runtime-after-declare-enum",
+        ),
+        (
+            "declare const enum require { value }",
+            'require("runtime-after-declare-const-enum");',
+            "runtime-after-declare-const-enum",
+        ),
+        (
+            "declare module require { type value = string }",
+            'require("runtime-after-declare-module");',
+            "runtime-after-declare-module",
+        ),
+        (
+            "declare namespace require { type value = string }",
+            'require("runtime-after-declare-namespace");',
+            "runtime-after-declare-namespace",
+        ),
+        (
+            "declare const module: { require(id: string): unknown };",
+            'module.require("runtime-after-declare-module-const");',
+            "runtime-after-declare-module-const",
+        ),
+        (
+            "declare var module: { require(id: string): unknown };",
+            'module.require("runtime-after-declare-module-var");',
+            "runtime-after-declare-module-var",
+        ),
+        (
+            "declare let module: { require(id: string): unknown };",
+            'module.require("runtime-after-declare-module-let");',
+            "runtime-after-declare-module-let",
+        ),
+        (
+            "declare namespace module { type value = string }",
+            'module.require("runtime-after-declare-module-namespace");',
+            "runtime-after-declare-module-namespace",
+        ),
+    ],
+)
+def test_runtime_package_scanner_keeps_ambient_loader_after_erased_value_declaration(
+    tmp_path: Path,
+    declaration: str,
+    use: str,
+    expected: str,
+) -> None:
+    source = f"{declaration} {use}"
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (expected,)
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (
+            "declare function require(id: string): unknown; "
+            "const load = require; "
+            'load("runtime-after-declare-require-alias");',
+            "runtime-after-declare-require-alias",
+        ),
+        (
+            "declare const module: { require(id: string): unknown }; "
+            "const load = module.require; "
+            'load("runtime-after-declare-module-alias");',
+            "runtime-after-declare-module-alias",
+        ),
+    ],
+)
+def test_runtime_package_scanner_keeps_proven_alias_after_erased_ambient_declaration(
+    tmp_path: Path,
+    source: str,
+    expected: str,
+) -> None:
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (expected,)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'const require = localLoader; require("inert-runtime-const");',
+        'var module = localModule; module.require("inert-runtime-var");',
+        'function require(id) { return id; } require("inert-runtime-function");',
+        "declare function require(id: string): unknown; namespace require { "
+        'export const value = 1; } require("inert-runtime-merged-namespace");',
+    ],
+)
+def test_runtime_package_scanner_keeps_runtime_value_shadows_with_ambient_declarations(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    specifiers = _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts")
+
+    assert not any(specifier.startswith("inert-runtime-") for specifier in specifiers)
 
 
 @pytest.mark.parametrize(
