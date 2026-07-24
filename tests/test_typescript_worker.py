@@ -667,6 +667,141 @@ def test_runtime_package_scanner_ignores_erased_import_type_expressions(
     assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == ()
 
 
+@pytest.mark.parametrize(
+    "asserted_type",
+    [
+        "Type",
+        "of",
+        "namespace.of",
+        "typeof of",
+        'Wrapper<import("inert-for-type").Value>',
+    ],
+)
+def test_runtime_package_scanner_ends_asserted_type_at_for_of_separator(
+    tmp_path: Path,
+    asserted_type: str,
+) -> None:
+    source = f'for (value as {asserted_type} of import("runtime-iterable")) {{}}'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (
+        "runtime-iterable",
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'type Alias = Type\nvoid import("runtime-after-alias");',
+        'type Alias = void\nimport("runtime-after-alias");',
+        'value as Type\nvoid import("runtime-after-alias");',
+    ],
+)
+def test_runtime_package_scanner_ends_erased_types_at_asi_expression_starts(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (
+        "runtime-after-alias",
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'type Alias = Type\n | import("inert-union").Value;',
+        'const value = input as Type\n & import("inert-intersection").Value;',
+        'type Alias = Namespace\n [import("inert-index").Key];',
+    ],
+)
+def test_runtime_package_scanner_preserves_multiline_erased_type_continuations(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == ()
+
+
+@pytest.mark.parametrize(
+    ("suffix", "source"),
+    [
+        (".ts", 'const value = <import("inert-angle").Value>input;'),
+        (
+            ".ts",
+            'const value = <Outer<import("inert-nested-angle").Value>>input;',
+        ),
+        (
+            ".ts",
+            'function load<T extends import("inert-constraint").Value = '
+            'import("inert-default").Value>() {}',
+        ),
+        (
+            ".ts",
+            'type Loader<T extends import("inert-alias-constraint").Value = '
+            'import("inert-alias-default").Value> = T;',
+        ),
+        (
+            ".tsx",
+            'const load = <T extends import("inert-arrow-constraint").Value = '
+            'import("inert-arrow-default").Value>(value: T) => value;',
+        ),
+        (".ts", 'load<import("inert-call-argument").Value>();'),
+        (".ts", 'object.load<import("inert-member-call-argument").Value>(value);'),
+        (".ts", 'load?.<import("inert-optional-call-argument").Value>();'),
+        (
+            ".ts",
+            'class Container<T extends import("inert-class-constraint").Value> '
+            'extends Base<import("inert-base-argument").Value> '
+            'implements Shape<import("inert-implements-argument").Value> {}',
+        ),
+        (".ts", 'class Container implements import("inert-implements").Shape {}'),
+        (
+            ".ts",
+            'interface Container<T extends import("inert-interface-constraint").Value> '
+            'extends Shape<import("inert-interface-heritage").Value> {}',
+        ),
+    ],
+)
+def test_runtime_package_scanner_erases_imports_in_ambiguous_type_contexts(
+    tmp_path: Path,
+    suffix: str,
+    source: str,
+) -> None:
+    assert _runtime_module_specifiers(source, source_path=tmp_path / f"runtime{suffix}") == ()
+
+
+def test_runtime_package_scanner_keeps_runtime_angle_and_heritage_expressions(
+    tmp_path: Path,
+) -> None:
+    source = (
+        'class RuntimeBase extends import("runtime-class-extends") {}\n'
+        'const relation = left < import("runtime-relation") > right;\n'
+        'const calledRelation = left < import("runtime-called-relation").then(load) > '
+        "(right);\n"
+        'const addedRelation = left < import("runtime-added-relation") + 1 > (right);\n'
+        "async function compare() { const awaitedRelation = left < await "
+        'import("runtime-awaited-relation") > (right); }\n'
+        'const view = <View value={import("runtime-jsx-attribute")} />;'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.tsx") == (
+        "runtime-added-relation",
+        "runtime-awaited-relation",
+        "runtime-called-relation",
+        "runtime-class-extends",
+        "runtime-jsx-attribute",
+        "runtime-relation",
+    )
+
+
+def test_runtime_package_scanner_keeps_javascript_relational_import_before_call(
+    tmp_path: Path,
+) -> None:
+    source = 'const relation = left < import("runtime-js-relation") > (right);'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == (
+        "runtime-js-relation",
+    )
+
+
 @pytest.mark.parametrize("assertion", ["as", "satisfies"])
 @pytest.mark.parametrize("asserted_type", ["Type", 'import("inert-type").Value'])
 @pytest.mark.parametrize(

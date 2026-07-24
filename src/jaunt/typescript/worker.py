@@ -4766,8 +4766,29 @@ class _ErasedTypeRegion:
     speculative_angle_imports: set[int] = field(default_factory=set)
 
 
+@dataclass
+class _SpeculativeTypeAngle:
+    """Imports held until an ambiguous ``<...>`` group is classified."""
+
+    declaration_kind: str | None
+    declaration_phase: str | None
+    open_index: int
+    imports: set[int] = field(default_factory=set)
+
+
+@dataclass
+class _TypeDeclarationRegion:
+    """Type-bearing declaration head visible before its body or initializer."""
+
+    kind: str
+    saw_name: bool = False
+    phase: str = "head"
+
+
 def _erased_type_import_indices(
     tokens: Sequence[tuple[str, str]],
+    *,
+    typescript_syntax: bool = True,
 ) -> frozenset[int]:
     """Find ``import(...)`` tokens used as TypeScript types in one pass."""
 
@@ -4782,12 +4803,29 @@ def _erased_type_import_indices(
     if len(line_breaks_before) != token_count:
         line_breaks_before = (False,) * token_count
 
+    matching_close: dict[int, int] = {}
+    delimiter_stack: list[tuple[str, int]] = []
+    opening_for = {")": "(", "]": "[", "}": "{"}
+    for delimiter_index, (_kind, delimiter) in enumerate(tokens):
+        if delimiter in {"(", "[", "{"}:
+            delimiter_stack.append((delimiter, delimiter_index))
+        elif (
+            delimiter in opening_for
+            and delimiter_stack
+            and delimiter_stack[-1][0] == opening_for[delimiter]
+        ):
+            _opening, open_index = delimiter_stack.pop()
+            matching_close[open_index] = delimiter_index
+
     conditional_colons = _conditional_expression_colons(tokens)
     expected_closings: list[str] = []
     closing_for = {"(": ")", "[": "]", "{": "}"}
     pending_alias_depth: int | None = None
     alias_body_depth: int | None = None
     type_regions: dict[int, _ErasedTypeRegion] = {}
+    declaration_regions: dict[int, _TypeDeclarationRegion] = {}
+    speculative_angles: list[_SpeculativeTypeAngle] = []
+    for_head_depths: set[int] = set()
     erased: set[int] = set()
     declaration_starters = {
         "class",
@@ -4822,18 +4860,222 @@ def _erased_type_import_indices(
             "instanceof",
         }
     )
+    asi_statement_starters = declaration_starters | {
+        "async",
+        "await",
+        "break",
+        "continue",
+        "debugger",
+        "delete",
+        "do",
+        "for",
+        "if",
+        "new",
+        "return",
+        "switch",
+        "throw",
+        "try",
+        "typeof",
+        "void",
+        "while",
+        "with",
+        "yield",
+    }
+    type_prefix_operators = {
+        "abstract",
+        "asserts",
+        "const",
+        "infer",
+        "keyof",
+        "new",
+        "readonly",
+        "typeof",
+        "unique",
+    }
 
     def token_value(index: int) -> str:
         return tokens[index][1] if 0 <= index < token_count else ""
+
+    def type_can_end_before_asi(index: int) -> bool:
+        """Return whether the token can finish an erased type on this line."""
+
+        kind, value = tokens[index]
+        if kind == "identifier":
+            return value not in type_prefix_operators
+        if kind in _RUNTIME_VALUE_TOKEN_KINDS or kind in {"number", "string"}:
+            return True
+        return value in {")", "]", "}", ">", "!"}
+
+    def begins_typed_declaration(index: int) -> bool:
+        """Recognize declaration heads which can own erased angle syntax."""
+
+        kind, value = tokens[index]
+        if (
+            not typescript_syntax
+            or kind != "identifier"
+            or value not in {"class", "function", "interface", "type"}
+            or token_value(index - 1) in {".", "?."}
+        ):
+            return False
+        following_kind = tokens[index + 1][0] if index + 1 < token_count else ""
+        following = token_value(index + 1)
+        if value == "class":
+            return following not in {"=", ":"}
+        if value == "function":
+            return following == "*" or following_kind == "identifier"
+        return following_kind == "identifier"
+
+    def angle_starts_assertion(open_index: int) -> bool:
+        """Recognize operand-position ``<Type>value`` without eating relations."""
+
+        if open_index == 0:
+            return True
+        kind, value = tokens[open_index - 1]
+        if value in {
+            "(",
+            "[",
+            "{",
+            ",",
+            ";",
+            ":",
+            "=",
+            "=>",
+            "?",
+            "&&",
+            "||",
+            "??",
+            "!",
+            "~",
+            "+",
+            "-",
+            "++",
+            "--",
+        }:
+            return True
+        return kind == "identifier" and value in {
+            "await",
+            "case",
+            "delete",
+            "return",
+            "throw",
+            "typeof",
+            "void",
+            "yield",
+        }
+
+    def token_starts_expression(index: int) -> bool:
+        """Return whether a token can begin the operand after an assertion."""
+
+        if not 0 <= index < token_count:
+            return False
+        kind, value = tokens[index]
+        if kind == "identifier" or kind in _RUNTIME_VALUE_TOKEN_KINDS:
+            return True
+        return value in {"(", "[", "{", "!", "~", "+", "-", "++", "--"}
+
+    def angle_imports_are_type_syntax(
+        angle: _SpeculativeTypeAngle,
+        close_index: int,
+    ) -> bool:
+        """Reject executable calls which only resemble import-type arguments."""
+
+        for import_index in angle.imports:
+            if token_value(import_index - 1) in {"await", "delete", "void"}:
+                return False
+            call_open = import_index + 1
+            if token_value(call_open) != "(":
+                return False
+            call_close = matching_close.get(call_open)
+            if call_close is None or call_close >= close_index:
+                return False
+            cursor = call_close + 1
+            while (
+                cursor + 1 < close_index
+                and token_value(cursor) in {".", "?."}
+                and tokens[cursor + 1][0] == "identifier"
+            ):
+                cursor += 2
+            if token_value(cursor) in {
+                "(",
+                "+",
+                "-",
+                "*",
+                "/",
+                "%",
+                "==",
+                "!=",
+                "&&",
+                "||",
+                "??",
+                "in",
+                "instanceof",
+            } or (token_value(cursor) == "?." and token_value(cursor + 1) == "("):
+                return False
+        return True
+
+    def angle_is_erased_type(
+        angle: _SpeculativeTypeAngle,
+        open_index: int,
+        close_index: int,
+    ) -> bool:
+        """Classify one completed ambiguous angle group from its boundaries."""
+
+        if not angle_imports_are_type_syntax(angle, close_index):
+            return False
+        following = token_value(close_index + 1)
+        if angle.declaration_phase == "head":
+            valid_following = {
+                "class": {"extends", "implements", "{"},
+                "function": {"("},
+                "interface": {"extends", "{"},
+                "type": {"="},
+            }
+            if following in valid_following.get(angle.declaration_kind or "", set()):
+                return True
+        elif angle.declaration_phase == "type":
+            return True
+        elif angle.declaration_phase == "class-extends" and following in {
+            "(",
+            ".",
+            "?.",
+            "[",
+            "implements",
+            "{",
+        }:
+            return True
+
+        previous_kind, previous = tokens[open_index - 1] if open_index else ("punctuation", "")
+        attaches_to_value = previous_kind in {
+            "identifier",
+            "computed-template",
+            "jsx",
+            "number",
+            "string",
+            "template",
+        } or previous in {")", "]", "}"}
+        if previous == "?." and open_index >= 2:
+            owner_kind, owner = tokens[open_index - 2]
+            attaches_to_value = owner_kind in _RUNTIME_VALUE_TOKEN_KINDS | {
+                "identifier"
+            } or owner in {")", "]", "}"}
+        if following == "(" and (attaches_to_value or angle_starts_assertion(open_index)):
+            # This covers call type arguments, declaration/method type
+            # parameters, and generic arrow signatures. In JavaScript files
+            # the caller disables angle classification so a relational
+            # ``left < import(...) > (right)`` remains executable.
+            return True
+        if following == "?." and token_value(close_index + 2) == "(" and attaches_to_value:
+            return True
+        return angle_starts_assertion(open_index) and token_starts_expression(close_index + 1)
 
     for index, (kind, value) in enumerate(tokens):
         depth = len(expected_closings)
         line_break_starts_statement = (
             bool(line_breaks_before[index])
             and kind == "identifier"
-            and value in declaration_starters
+            and value in asi_statement_starters
             and index > 0
-            and _can_end_statement_before_label(*tokens[index - 1])
+            and type_can_end_before_asi(index - 1)
         )
         if alias_body_depth == depth and line_break_starts_statement:
             alias_body_depth = None
@@ -4889,6 +5131,42 @@ def _erased_type_import_indices(
                         )
                     elif not angle_depth:
                         boundary = True
+                elif (
+                    kind == "identifier"
+                    and value == "of"
+                    and depth in for_head_depths
+                    and token_value(index - 1)
+                    not in {
+                        "as",
+                        "satisfies",
+                        ".",
+                        "?.",
+                        "(",
+                        "[",
+                        "{",
+                        ",",
+                        "<",
+                        "=",
+                        "=>",
+                        "extends",
+                        "|",
+                        "&",
+                        "?",
+                        ":",
+                        "abstract",
+                        "infer",
+                        "keyof",
+                        "new",
+                        "readonly",
+                        "typeof",
+                        "unique",
+                    }
+                ):
+                    # ``of`` is an ordinary contextual type name after ``as``
+                    # and after type-prefix/member operators. Once a complete
+                    # asserted type precedes it in a for head, it separates the
+                    # executable iterable expression.
+                    boundary = True
                 elif value == ":":
                     angle_depth = region.angle_depth
                     conditional_depth = region.conditional_depths.get(angle_depth, 0)
@@ -4916,6 +5194,11 @@ def _erased_type_import_indices(
             and (
                 bool(type_body_contexts[index])
                 or alias_body_depth is not None
+                or (
+                    typescript_syntax
+                    and (declaration := declaration_regions.get(depth)) is not None
+                    and declaration.phase == "type"
+                )
                 or any(
                     region.kind == "annotation" or not region.angle_depth
                     for region in type_regions.values()
@@ -4924,6 +5207,8 @@ def _erased_type_import_indices(
         ):
             erased.add(index)
         if kind == "identifier" and value == "import":
+            if speculative_angles:
+                speculative_angles[-1].imports.add(index)
             for active_region in type_regions.values():
                 if active_region.kind == "assertion" and active_region.angle_depth:
                     active_region.speculative_angle_imports.add(index)
@@ -4970,9 +5255,57 @@ def _erased_type_import_indices(
         ):
             type_regions[depth] = _ErasedTypeRegion("assertion")
 
+        if typescript_syntax:
+            declaration = declaration_regions.get(depth)
+            if declaration is not None and not speculative_angles:
+                if not declaration.saw_name:
+                    if declaration.kind == "class" and value == "extends":
+                        declaration.phase = "class-extends"
+                    elif index > 0 and kind == "identifier":
+                        declaration.saw_name = True
+                elif value == "extends":
+                    declaration.phase = "class-extends" if declaration.kind == "class" else "type"
+                elif value == "implements" and declaration.kind == "class":
+                    declaration.phase = "type"
+
+            if begins_typed_declaration(index):
+                declaration_regions[depth] = _TypeDeclarationRegion(value)
+
+            if value == "<":
+                declaration = declaration_regions.get(depth)
+                speculative_angles.append(
+                    _SpeculativeTypeAngle(
+                        declaration.kind if declaration is not None else None,
+                        declaration.phase if declaration is not None else None,
+                        index,
+                    )
+                )
+            elif value == ">" and speculative_angles:
+                angle = speculative_angles.pop()
+                if angle_is_erased_type(angle, angle.open_index, index):
+                    erased.update(angle.imports)
+                if speculative_angles:
+                    speculative_angles[-1].imports.update(angle.imports)
+            elif value == ";":
+                speculative_angles.clear()
+                declaration_regions.pop(depth, None)
+
+            declaration = declaration_regions.get(depth)
+            if declaration is not None and not speculative_angles:
+                if value == "=" and declaration.kind == "type":
+                    declaration_regions.pop(depth, None)
+                elif value == "(" and declaration.kind == "function":
+                    declaration_regions.pop(depth, None)
+                elif value == "{" and declaration.kind in {"class", "interface"}:
+                    declaration_regions.pop(depth, None)
+
         if value in closing_for:
+            if value == "(" and _control_flow_parenthesis_head(tokens, end=index) == "for":
+                for_head_depths.add(depth + 1)
             expected_closings.append(closing_for[value])
         elif value in {")", "]", "}"} and expected_closings and value == expected_closings[-1]:
+            if value == ")":
+                for_head_depths.discard(depth)
             expected_closings.pop()
     return frozenset(erased)
 
@@ -5437,7 +5770,10 @@ def _runtime_module_specifiers(source: str, *, source_path: Path) -> tuple[str, 
 
     tokens = _runtime_javascript_tokens(source, source_path=source_path)
     specifiers: set[str] = set()
-    erased_type_imports = _erased_type_import_indices(tokens)
+    erased_type_imports = _erased_type_import_indices(
+        tokens,
+        typescript_syntax=source_path.suffix.lower() in {".cts", ".mts", ".ts", ".tsx"},
+    )
     shadowed_native_loaders = _shadowed_native_loader_indices(tokens)
     runtime_close_for_open = _runtime_delimiter_close_indices(tokens)
 
