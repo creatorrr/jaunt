@@ -11,6 +11,7 @@ import shutil
 import signal
 import stat
 from bisect import bisect_right
+from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -1207,6 +1208,8 @@ def _opens_statement_brace(
     if not tokens:
         return True
     kind, value = tokens[-1]
+    if value == "=>":
+        return True
     if value == ")" and previous_closed_control_head:
         return True
     if kind == "identifier" and value in {"catch", "do", "else", "finally", "try"}:
@@ -1751,7 +1754,11 @@ def _runtime_javascript_tokens(
         elif kind == "punctuation" and value == "{":
             enclosing_type_body = type_body_braces[-1] if type_body_braces else False
             enclosing_statement_brace = statement_braces[-1] if statement_braces else None
-            declaration_head = _declaration_body_head(tokens)
+            declaration_head = (
+                None
+                if tokens and tokens[-1] == ("punctuation", "=>")
+                else _declaration_body_head(tokens)
+            )
             opens_statement_brace = _opens_statement_brace(
                 tokens,
                 enclosing_statement_brace=enclosing_statement_brace,
@@ -1957,7 +1964,11 @@ def _runtime_javascript_tokens(
                 enclosing_statement_brace = (
                     expression_statement_braces[-1] if expression_statement_braces else None
                 )
-                declaration_head = _declaration_body_head(expression_tokens)
+                declaration_head = (
+                    None
+                    if expression_tokens and expression_tokens[-1] == ("punctuation", "=>")
+                    else _declaration_body_head(expression_tokens)
+                )
                 opens_statement_brace = _opens_statement_brace(
                     expression_tokens,
                     enclosing_statement_brace=enclosing_statement_brace,
@@ -2752,6 +2763,8 @@ def _create_require_module_specifiers(
 
     node_module_specifiers = {"module", "node:module"}
     capability_names: set[str] = set()
+    hoisted_capability_indices: set[int] = set()
+    parameter_property_capabilities: set[str] = set()
     capability_bindings: dict[str, dict[int, tuple[int, str]]] = {}
     capability_interval_indices: dict[str, _ScopeCapabilityIndex] = {}
     safe_indices: set[int] = set()
@@ -2871,7 +2884,7 @@ def _create_require_module_specifiers(
                 parent_scope = scope_stack[-1]
                 scope_start = token_index
                 if (
-                    scope_previous_closed_control == "for"
+                    scope_previous_closed_control in {"catch", "for"}
                     and scope_tokens
                     and scope_tokens[-1][1] == ")"
                 ):
@@ -2941,6 +2954,9 @@ def _create_require_module_specifiers(
     scope_paren_close_for_open = {
         opening: closing for closing, opening in scope_paren_open_for_close.items()
     }
+    scope_brace_close_for_open = {
+        opening: closing for closing, opening in scope_brace_open_for_close.items()
+    }
 
     def token_value(index: int) -> str:
         return tokens[index][1] if 0 <= index < len(tokens) else ""
@@ -2994,6 +3010,10 @@ def _create_require_module_specifiers(
     def matching_close(open_index: int, opening: str = "(", closing: str = ")") -> int | None:
         if token_value(open_index) != opening:
             return None
+        if opening == "(" and closing == ")":
+            return scope_paren_close_for_open.get(open_index)
+        if opening == "{" and closing == "}":
+            return scope_brace_close_for_open.get(open_index)
         depth = 1
         cursor = open_index + 1
         while cursor < len(tokens):
@@ -3010,6 +3030,10 @@ def _create_require_module_specifiers(
     def matching_open(close_index: int, opening: str = "(", closing: str = ")") -> int | None:
         if token_value(close_index) != closing:
             return None
+        if opening == "(" and closing == ")":
+            return scope_paren_open_for_close.get(close_index)
+        if opening == "{" and closing == "}":
+            return scope_brace_open_for_close.get(close_index)
         depth = 1
         cursor = close_index - 1
         while cursor >= 0:
@@ -3022,6 +3046,19 @@ def _create_require_module_specifiers(
                     return cursor
             cursor -= 1
         return None
+
+    unsupported_var_pattern_names_by_scope: dict[int, set[str]] = {}
+    for index, token in enumerate(tokens):
+        if token != ("identifier", "var") or token_value(index + 1) not in {"{", "["}:
+            continue
+        opening = token_value(index + 1)
+        closing = "}" if opening == "{" else "]"
+        close = matching_close(index + 1, opening, closing)
+        if close is None:
+            continue
+        owner = scope_var_owner[owned_scope_at(index)]
+        names = unsupported_var_pattern_names_by_scope.setdefault(owner, set())
+        names.update(value for kind, value in tokens[index + 2 : close] if kind == "identifier")
 
     def decorator_before(index: int) -> bool:
         """Recognize a directly preceding parameter/member decorator."""
@@ -3157,7 +3194,14 @@ def _create_require_module_specifiers(
         if token_value(opening - 1) == "for" and declaration_kind in {"const", "let"}:
             return "an unbraced for-head lexical binding"
         cursor = closing + 1
-        while cursor < len(tokens) and token_value(cursor) not in {";", "="}:
+        while cursor < len(tokens) and token_value(cursor) != "=":
+            if token_value(cursor) == "{":
+                nested_close = scope_brace_close_for_open.get(cursor)
+                if nested_close is not None:
+                    cursor = nested_close + 1
+                    continue
+            if token_value(cursor) == ";":
+                return None
             if token_value(cursor) == "=>":
                 if token_value(cursor + 1) != "{":
                     return "an expression-bodied arrow parameter"
@@ -3174,6 +3218,18 @@ def _create_require_module_specifiers(
     ) -> bool:
         binding_scope = owned_scope_at(binding_index)
         declaration_kind = declaration_kind_override or binding_declaration_kind(binding_index)
+        modifier_cursor = binding_index - 1
+        parameter_property = False
+        while modifier_cursor >= 0 and binding_index - modifier_cursor <= 4:
+            modifier = token_value(modifier_cursor)
+            if modifier in {"private", "protected", "public", "readonly"}:
+                parameter_property = True
+                break
+            if modifier in {"(", ","}:
+                break
+            modifier_cursor -= 1
+        if parameter_property and scope_prebody_at_token[binding_index] >= 0:
+            parameter_property_capabilities.add(name)
         unsupported_context = unsupported_prebody_binding(binding_index, declaration_kind)
         if unsupported_context is not None:
             raise TypeScriptWorkerError(
@@ -3184,6 +3240,11 @@ def _create_require_module_specifiers(
             binding_scope = scope_var_owner[binding_scope]
         elif declaration_kind is None:
             var_owner = scope_var_owner[binding_scope]
+            if name in unsupported_var_pattern_names_by_scope.get(var_owner, ()):
+                raise TypeScriptWorkerError(
+                    f"Runtime package assigns module-loading capability {name!r} through a "
+                    f"destructured var binding; this lifetime is unsupported: {source_path}"
+                )
             if name in var_declared_names_by_scope.get(var_owner, ()):
                 binding_scope = var_owner
         if scope_kinds[binding_scope] == "class":
@@ -3251,6 +3312,7 @@ def _create_require_module_specifiers(
             continue
         if tokens[clause_start][0] == "identifier":
             set_capability(tokens[clause_start][1], "namespace", clause_start)
+            hoisted_capability_indices.add(clause_start)
         cursor = clause_start
         while cursor < from_index:
             if (
@@ -3260,6 +3322,7 @@ def _create_require_module_specifiers(
                 and tokens[cursor + 2][0] == "identifier"
             ):
                 set_capability(tokens[cursor + 2][1], "namespace", cursor + 2)
+                hoisted_capability_indices.add(cursor + 2)
                 cursor += 3
                 continue
             if token_value(cursor) != "{":
@@ -3290,8 +3353,10 @@ def _create_require_module_specifiers(
                     binding += 2
                 if imported == "createRequire" and not type_only:
                     set_capability(local, "factory", local_index)
+                    hoisted_capability_indices.add(local_index)
                 elif imported in {"Module", "default"} and not type_only:
                     set_capability(local, "namespace", local_index)
+                    hoisted_capability_indices.add(local_index)
                 binding += 1
             cursor = close + 1
 
@@ -3396,6 +3461,27 @@ def _create_require_module_specifiers(
             }:
                 return direct, index + 1
         return None
+
+    def proven_rhs_capability(index: int) -> tuple[str, int] | None:
+        """Recognize a capability through transparent parenthesis groups."""
+
+        group_closes: list[int] = []
+        cursor = index
+        while token_value(cursor) == "(":
+            close = matching_close(cursor)
+            if close is None:
+                return None
+            group_closes.append(close)
+            cursor += 1
+        capability = rhs_capability(cursor)
+        if capability is None:
+            return None
+        kind, end = capability
+        for close in reversed(group_closes):
+            if end != close:
+                return None
+            end = close + 1
+        return kind, end
 
     def safe_rhs_suffix(index: int) -> bool:
         if index >= len(tokens):
@@ -3531,8 +3617,8 @@ def _create_require_module_specifiers(
     }
 
     # Collect simple assignments, then propagate namespace/factory/loader
-    # aliases to a fixed point. This supports forward-hoisted imports and short
-    # alias chains while rejecting expression composition below.
+    # aliases through a dependency worklist. This supports forward-hoisted
+    # imports and short alias chains while rejecting expression composition.
     for index, token in enumerate(tokens):
         if token[0] != "identifier" or token_value(index - 1) in {".", "?."}:
             continue
@@ -3546,40 +3632,146 @@ def _create_require_module_specifiers(
             initializer = index + 3
         if initializer is not None:
             assignments.append((index, token[1], initializer))
-    changed = True
-    while changed:
-        changed = False
-        for lhs_index, name, initializer in assignments:
-            capability = rhs_capability(initializer)
-            wrapper_references: set[int] = set()
-            if capability is None and token_value(lhs_index - 1) in {"const", "let", "var"}:
-                wrapper = bundled_loader_wrapper(initializer)
-                if wrapper is not None:
-                    end, wrapper_references = wrapper
-                    capability = ("loader", end)
-            if capability is None:
-                continue
-            capability_kind, end = capability
-            if not safe_rhs_suffix(end):
+    assignments_by_dependency: dict[str, list[int]] = {}
+    for assignment_index, (_lhs_index, _name, initializer) in enumerate(assignments):
+        dependency = initializer
+        while token_value(dependency) == "(":
+            dependency += 1
+        if 0 <= dependency < len(tokens) and tokens[dependency][0] == "identifier":
+            assignments_by_dependency.setdefault(tokens[dependency][1], []).append(assignment_index)
+
+    pending_assignments = deque(range(len(assignments)))
+    queued_assignments = set(pending_assignments)
+    while pending_assignments:
+        assignment_index = pending_assignments.popleft()
+        queued_assignments.discard(assignment_index)
+        lhs_index, name, initializer = assignments[assignment_index]
+        capability = proven_rhs_capability(initializer)
+        wrapper_references: set[int] = set()
+        if capability is None and token_value(lhs_index - 1) in {"const", "let", "var"}:
+            wrapper = bundled_loader_wrapper(initializer)
+            if wrapper is not None:
+                end, wrapper_references = wrapper
+                capability = ("loader", end)
+        if capability is None:
+            continue
+        capability_kind, end = capability
+        dependency = initializer
+        while token_value(dependency) == "(":
+            dependency += 1
+        if 0 <= dependency < len(tokens) and tokens[dependency][0] == "identifier":
+            dependency_name = tokens[dependency][1]
+            dependency_scope = owned_scope_at(dependency)
+            dependency_binding = capability_bindings.get(dependency_name, {}).get(dependency_scope)
+            if (
+                dependency_binding is not None
+                and dependency_binding[0] > lhs_index
+                and dependency_binding[0] not in hoisted_capability_indices
+            ):
                 raise TypeScriptWorkerError(
-                    f"Runtime package ambiguously composes module-loading capability {name!r}: "
-                    f"{source_path}"
+                    f"Runtime package aliases module-loading capability {dependency_name!r} "
+                    f"before its assignment; execution order is unsupported: {source_path}"
                 )
-            changed = set_capability(name, capability_kind, lhs_index) or changed
-            safe_indices.update(range(initializer, end))
-            safe_indices.update(wrapper_references)
+        if not safe_rhs_suffix(end):
+            raise TypeScriptWorkerError(
+                f"Runtime package ambiguously composes module-loading capability {name!r}: "
+                f"{source_path}"
+            )
+        changed = set_capability(name, capability_kind, lhs_index)
+        safe_indices.update(range(initializer, end))
+        safe_indices.update(wrapper_references)
+        if changed:
+            for dependent in assignments_by_dependency.get(name, ()):
+                if dependent not in queued_assignments:
+                    pending_assignments.append(dependent)
+                    queued_assignments.add(dependent)
     safe_indices.update(
         binding_index
         for name, binding_index in uninitialized_bindings.items()
         if name in capability_names
     )
 
+    for index, token in enumerate(tokens):
+        if (
+            token[0] == "identifier"
+            and token[1] in parameter_property_capabilities
+            and token_value(index - 1) in {".", "?."}
+            and token_value(index - 2) == "this"
+        ):
+            raise TypeScriptWorkerError(
+                f"Runtime package accesses parameter-property loader {token[1]!r}; "
+                f"property-backed loaders are unsupported: {source_path}"
+            )
+        if (
+            token[0] != "identifier"
+            or token_value(index - 1) not in {".", "?."}
+            or token_value(index + 1) != "="
+        ):
+            continue
+        capability = proven_rhs_capability(index + 2)
+        if capability is not None:
+            raise TypeScriptWorkerError(
+                f"Runtime package stores a module-loading capability in property {token[1]!r}; "
+                f"property-backed loaders are unsupported: {source_path}"
+            )
+
+    parameter_modifiers = {
+        "accessor",
+        "override",
+        "private",
+        "protected",
+        "public",
+        "readonly",
+    }
+    for index, token in enumerate(tokens):
+        if token[0] != "identifier" or token[1] not in capability_names or index in safe_indices:
+            continue
+        declaration_kind = simple_declaration_kinds[index]
+        shadow_scope: int | None = None
+        if declaration_kind is not None:
+            shadow_scope = owned_scope_at(index)
+            if declaration_kind == "var":
+                shadow_scope = scope_var_owner[shadow_scope]
+        elif token_value(index - 1) == "function" or (
+            token_value(index - 1) == "*" and token_value(index - 2) == "function"
+        ):
+            shadow_scope = owned_scope_at(index)
+        elif scope_prebody_at_token[index] >= 0:
+            cursor = index - 1
+            while token_value(cursor) in parameter_modifiers:
+                cursor -= 1
+            if token_value(cursor) in {"(", ","} or token_value(index + 1) in {
+                ")",
+                ",",
+                ":",
+                "=",
+                "=>",
+            }:
+                shadow_scope = scope_prebody_at_token[index]
+        if shadow_scope is None:
+            continue
+        bindings = capability_bindings.setdefault(token[1], {})
+        existing = bindings.get(shadow_scope)
+        if existing is not None and existing[1] != "shadow":
+            raise TypeScriptWorkerError(
+                f"Runtime package shadows module-loading capability {token[1]!r} within its "
+                f"own lexical scope: {source_path}"
+            )
+        bindings[shadow_scope] = (index, "shadow")
+        interval_index = capability_interval_indices.get(token[1])
+        if interval_index is not None:
+            interval_index.add(
+                start=scope_open[shadow_scope],
+                end=scope_end_exclusive[shadow_scope],
+                capability="shadow",
+            )
+
     # Any unknown reassignment of a proven capability invalidates the closure.
     for lhs_index, name, initializer in assignments:
         scoped_capability = capability_at(lhs_index, name)
-        if scoped_capability is None:
+        if scoped_capability in {None, "shadow"}:
             continue
-        capability = rhs_capability(initializer)
+        capability = proven_rhs_capability(initializer)
         if capability is None or capability[0] != scoped_capability:
             if token_value(lhs_index - 1) in {
                 "const",
@@ -3758,7 +3950,7 @@ def _create_require_module_specifiers(
             continue
         name = token[1]
         capability = capability_at(index, name)
-        if capability is None or token_value(index - 1) in {".", "?."}:
+        if capability in {None, "shadow"} or token_value(index - 1) in {".", "?."}:
             continue
         if token_value(index + 1) == ":" and token_value(index - 1) in {"{", ","}:
             # Object/destructuring property key, not a reference to the
@@ -4354,6 +4546,29 @@ def _shadowed_native_loader_indices(
             in_type_annotation = token_value(cursor) == ":"
             angle_depth = 0
             while cursor < len(tokens):
+                if (
+                    cursor > binding_end
+                    and tokens[cursor][0] == "identifier"
+                    and token_value(cursor)
+                    in {
+                        "class",
+                        "const",
+                        "declare",
+                        "enum",
+                        "export",
+                        "function",
+                        "import",
+                        "interface",
+                        "let",
+                        "module",
+                        "namespace",
+                        "type",
+                        "var",
+                    }
+                    and _can_end_statement_before_block(*tokens[cursor - 1])
+                ):
+                    cursor = len(tokens)
+                    break
                 if token_value(cursor) in {"(", "[", "{"}:
                     cursor = matching_close.get(cursor, cursor) + 1
                     continue

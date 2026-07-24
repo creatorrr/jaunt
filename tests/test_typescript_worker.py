@@ -436,6 +436,7 @@ def test_semicolonless_static_clause_scans_read_linear_tokens(
     assert _runtime_module_specifiers("ignored", source_path=tmp_path / "runtime.ts") == ()
     assert tokens.indexed_items < len(tokens) * 40
 
+
 @pytest.mark.parametrize(
     "source",
     [
@@ -480,6 +481,7 @@ def test_runtime_package_scanner_scales_across_erased_import_type_expressions(
     )
 
     assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == ()
+
 
 def test_runtime_package_scanner_handles_regex_inside_template_expression(
     tmp_path: Path,
@@ -1747,6 +1749,15 @@ def test_runtime_package_scanner_keeps_function_like_capabilities_lexically_scop
             "var-block",
         ),
         (
+            "if (ok) { var sentinel = 1, load = createRequire(import.meta.url); } "
+            'load("var-multi");',
+            "var-multi",
+        ),
+        (
+            'var load; if (ok) { load = createRequire(import.meta.url); } load("var-assignment");',
+            "var-assignment",
+        ),
+        (
             'try { var load = createRequire(import.meta.url); } finally {} load("var-try");',
             "var-try",
         ),
@@ -1842,6 +1853,101 @@ def test_runtime_package_scanner_rejects_class_field_loader_storage(tmp_path: Pa
 
     with pytest.raises(TypeScriptWorkerError, match="class field"):
         _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts")
+
+
+@pytest.mark.parametrize(
+    "storage",
+    [
+        "class C { load = (createRequire(import.meta.url)); }",
+        "class C { load: NodeRequire = (createRequire(import.meta.url)); }",
+        "class C { constructor() { this.load = createRequire(import.meta.url); } }",
+        "class C { constructor(public load = createRequire(import.meta.url)) {} "
+        'use() { this.load("hidden"); } }',
+    ],
+)
+def test_runtime_package_scanner_rejects_property_backed_loader_variants(
+    tmp_path: Path,
+    storage: str,
+) -> None:
+    source = 'import { createRequire } from "node:module"; ' + storage
+
+    with pytest.raises(TypeScriptWorkerError, match="property"):
+        _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts")
+
+
+@pytest.mark.parametrize(
+    "shadow",
+    [
+        '{ const load = fake; load("phantom"); }',
+        'function scoped(load) { load("phantom"); }',
+        'try {} catch (load) { load("phantom"); }',
+        '{ function load() {} load("phantom"); }',
+    ],
+)
+def test_runtime_package_scanner_respects_non_capability_loader_shadows(
+    tmp_path: Path,
+    shadow: str,
+) -> None:
+    source = (
+        'import { createRequire } from "node:module"; '
+        "const load = createRequire(import.meta.url); "
+        f'{shadow} load("real");'
+    )
+
+    assert set(_runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts")) == {
+        "node:module",
+        "real",
+    }
+
+
+def test_runtime_package_scanner_rejects_expression_arrow_loader_lifetime(
+    tmp_path: Path,
+) -> None:
+    source = (
+        'import { createRequire } from "node:module"; '
+        "const run = (load = createRequire(import.meta.url)): "
+        '{ x: string; y: number } => load("inside"); '
+        'load("outside");'
+    )
+
+    with pytest.raises(TypeScriptWorkerError, match="expression-bodied arrow"):
+        _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts")
+
+
+def test_runtime_package_scanner_rejects_late_assignment_to_destructured_var(
+    tmp_path: Path,
+) -> None:
+    source = (
+        'import { createRequire } from "node:module"; '
+        "if (ok) { var { deeply, nested, destructured, load } = source; "
+        "load = createRequire(import.meta.url); } "
+        'load("outside");'
+    )
+
+    with pytest.raises(TypeScriptWorkerError, match="destructured var binding"):
+        _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts")
+
+
+def test_runtime_package_scanner_bounds_nested_arrow_scope_classification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = typescript_worker._declaration_body_head
+    scanned_tokens = 0
+
+    def counted(tokens: Sequence[tuple[str, str]]) -> str | None:
+        nonlocal scanned_tokens
+        scanned_tokens += len(tokens)
+        return original(tokens)
+
+    monkeypatch.setattr(typescript_worker, "_declaration_body_head", counted)
+    expression = "0"
+    for index in range(1_000):
+        expression = f"(value{index} = {expression}) => {{}}"
+    source = "const nested = " + expression
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == ()
+    assert scanned_tokens < len(source) * 10
 
 
 @pytest.mark.parametrize(
