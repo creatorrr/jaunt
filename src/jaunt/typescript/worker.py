@@ -2750,16 +2750,21 @@ def _create_require_module_specifiers(
     tokens: tuple[tuple[str, str], ...],
     *,
     source_path: Path,
+    shadowed_native_loaders: frozenset[int] | None = None,
 ) -> tuple[str, ...]:
-    """Track provenance-backed ``createRequire`` factories and loaders.
+    """Track provenance-backed factories and CommonJS loaders.
 
     Runtime packages commonly bridge from ESM to CommonJS through Node's
-    ``createRequire``. Treat only bindings proven to originate from the Node
-    ``module`` builtin as capabilities; a coincidentally named application
-    function is not a loader. Once proven, aliases may only be assigned or
-    called in simple static forms so the dependency graph cannot silently lose
-    an edge through composition or reassignment.
+    ``createRequire`` or alias the ambient ``require``/``module.require``.
+    Treat only unshadowed ambient references and bindings proven to originate
+    from the Node ``module`` builtin as capabilities; a coincidentally named
+    application function is not a loader. Once proven, aliases may only be
+    assigned or called in simple static forms so the dependency graph cannot
+    silently lose an edge through composition or reassignment.
     """
+
+    if shadowed_native_loaders is None:
+        shadowed_native_loaders = _shadowed_native_loader_indices(tokens)
 
     node_module_specifiers = {"module", "node:module"}
     capability_names: set[str] = set()
@@ -3046,6 +3051,62 @@ def _create_require_module_specifiers(
                     return cursor
             cursor -= 1
         return None
+
+    def static_computed_property(
+        open_index: int,
+        *,
+        owner_label: str,
+    ) -> tuple[str, int]:
+        """Return one literal computed property and its exclusive end.
+
+        A dynamic property on a proven ambient CommonJS capability could select
+        ``require`` (or one of its forwarding methods) at runtime. Reject that
+        composition instead of silently treating it as an unrelated property.
+        """
+
+        close = matching_close(open_index, "[", "]")
+        if close is None:
+            raise TypeScriptWorkerError(
+                f"Runtime package has unterminated computed access on {owner_label}: {source_path}"
+            )
+        if close != open_index + 2 or tokens[open_index + 1][0] not in {
+            "string",
+            "template",
+        }:
+            raise TypeScriptWorkerError(
+                f"Runtime package uses dynamic computed access on {owner_label}; "
+                f"module-loading capability flow is unsupported: {source_path}"
+            )
+        property_name = tokens[open_index + 1][1]
+        if "\\" in property_name:
+            raise TypeScriptWorkerError(
+                f"Runtime package uses an escaped computed property on {owner_label}: {source_path}"
+            )
+        return property_name, close + 1
+
+    def ambient_loader_reference_end(index: int) -> int | None:
+        """Return the exclusive end of one unshadowed ambient CJS loader."""
+
+        if index in shadowed_native_loaders or token_value(index - 1) in {"#", ".", "?."}:
+            return None
+        if tokens[index : index + 1] == (("identifier", "require"),):
+            return index + 1
+        if tokens[index : index + 1] != (("identifier", "module"),):
+            return None
+        member_index = index + 1
+        if token_value(member_index) in {".", "?."} and tokens[
+            member_index + 1 : member_index + 2
+        ] == (("identifier", "require"),):
+            return member_index + 2
+        if token_value(member_index) == "?." and token_value(member_index + 1) == "[":
+            member_index += 1
+        if token_value(member_index) != "[":
+            return None
+        property_name, end = static_computed_property(
+            member_index,
+            owner_label="ambient CommonJS module",
+        )
+        return end if property_name == "require" else None
 
     unsupported_var_pattern_names_by_scope: dict[int, set[str]] = {}
     for index, token in enumerate(tokens):
@@ -3367,7 +3428,12 @@ def _create_require_module_specifiers(
             # documented closure covers statically named loads; retain
             # capability provenance but do not invent a package edge here.
             return None
-        return tokens[argument][1]
+        specifier = tokens[argument][1]
+        if "\\" in specifier:
+            raise TypeScriptWorkerError(
+                f"Runtime package uses an escaped module specifier in {source_path}"
+            )
+        return specifier
 
     def node_module_value_end(index: int) -> int | None:
         cursor = index
@@ -3378,18 +3444,18 @@ def _create_require_module_specifiers(
             if not awaited:
                 return None
             open_index = cursor + 1
-        elif tokens[cursor : cursor + 1] == (("identifier", "require"),):
-            if _type_only_import_assignment_require(tokens, cursor):
-                return None
-            open_index = cursor + 1
-        elif (
-            tokens[cursor : cursor + 1] == (("identifier", "module"),)
-            and token_value(cursor + 1) in {".", "?."}
-            and tokens[cursor + 2 : cursor + 3] == (("identifier", "require"),)
-        ):
-            open_index = cursor + 3
         else:
-            return None
+            loader_end = ambient_loader_reference_end(cursor)
+            if (
+                loader_end is None
+                and tokens[cursor : cursor + 1]
+                and tokens[cursor][0] == "identifier"
+                and capability_at(cursor, tokens[cursor][1]) == "loader"
+            ):
+                loader_end = cursor + 1
+            if loader_end is None or _type_only_import_assignment_require(tokens, cursor):
+                return None
+            open_index = loader_end
         if (
             token_value(open_index) != "("
             or open_index + 1 >= len(tokens)
@@ -3448,6 +3514,15 @@ def _create_require_module_specifiers(
                 # expression is a module value, not a loader alias.
                 return None
             return "loader", close + 1
+        ambient_end = ambient_loader_reference_end(index)
+        if ambient_end is not None and token_value(ambient_end) not in {
+            "(",
+            ".",
+            "?.",
+            "[",
+            "=>",
+        }:
+            return "loader", ambient_end
         namespace_end = node_module_value_end(index)
         if namespace_end is not None:
             return "namespace", namespace_end
@@ -3481,6 +3556,10 @@ def _create_require_module_specifiers(
             if end != close:
                 return None
             end = close + 1
+        if token_value(end) in {":", "=>"}:
+            # Parenthesized arrow parameters are declarations, not aliases of
+            # the ambient loader. A colon after the group is the return type.
+            return None
         return kind, end
 
     def safe_rhs_suffix(index: int) -> bool:
@@ -3536,7 +3615,8 @@ def _create_require_module_specifiers(
         for cursor in range(index, end):
             if tokens[cursor][0] != "identifier":
                 continue
-            if capability_at(cursor, tokens[cursor][1]) != "loader":
+            is_ambient_loader = ambient_loader_reference_end(cursor) == cursor + 1
+            if capability_at(cursor, tokens[cursor][1]) != "loader" and not is_ambient_loader:
                 continue
             previous_value = token_value(cursor - 1)
             next_value = token_value(cursor + 1)
@@ -3575,8 +3655,31 @@ def _create_require_module_specifiers(
         close = matching_close(index + 1, "{", "}")
         if close is None or token_value(close + 1) != "=":
             continue
-        if node_module_value_end(close + 2) is None:
+        rhs_index = close + 2
+        ambient_module_rhs = (
+            tokens[rhs_index : rhs_index + 1] == (("identifier", "module"),)
+            and rhs_index not in shadowed_native_loaders
+            and token_value(rhs_index - 1) not in {"#", ".", "?."}
+            and safe_rhs_suffix(rhs_index + 1)
+        )
+        if node_module_value_end(rhs_index) is None and not ambient_module_rhs:
             continue
+        if ambient_module_rhs:
+            if any(token_value(cursor) in {"[", "..."} for cursor in range(index + 2, close)):
+                raise TypeScriptWorkerError(
+                    "Runtime package destructures the ambient CommonJS module with a computed "
+                    f"or rest binding; module-loading capability flow is unsupported: {source_path}"
+                )
+            for cursor in range(index + 2, close):
+                if tokens[cursor] != ("identifier", "require"):
+                    continue
+                if token_value(cursor + 1) == ":" and not (
+                    cursor + 2 < close and tokens[cursor + 2][0] == "identifier"
+                ):
+                    raise TypeScriptWorkerError(
+                        "Runtime package destructures ambient module.require through a nested "
+                        f"binding; module-loading capability flow is unsupported: {source_path}"
+                    )
         cursor = index + 2
         while cursor < close:
             if tokens[cursor][0] != "identifier":
@@ -3603,6 +3706,13 @@ def _create_require_module_specifiers(
                 set_capability(
                     local,
                     "namespace",
+                    local_index,
+                    declaration_kind_override=token[1],
+                )
+            elif imported == "require" and ambient_module_rhs:
+                set_capability(
+                    local,
+                    "loader",
                     local_index,
                     declaration_kind_override=token[1],
                 )
@@ -3813,17 +3923,9 @@ def _create_require_module_specifiers(
             return True
         return False
 
-    def loader_forward_call(index: int) -> bool:
-        """Accept apply/call forwarding and retain a statically named argument."""
+    def loader_forward_specifier(open_index: int, method: str) -> None:
+        """Retain a statically named package forwarded through apply/call."""
 
-        if token_value(index + 1) not in {".", "?."} or token_value(index + 2) not in {
-            "apply",
-            "call",
-        }:
-            return False
-        open_index = index + 3
-        if token_value(open_index) != "(":
-            return False
         close = matching_close(open_index)
         if close is None:
             raise TypeScriptWorkerError(
@@ -3839,13 +3941,26 @@ def _create_require_module_specifiers(
                 depth -= 1
             elif value == "," and depth == 0:
                 argument = cursor + 1
-                if token_value(index + 2) == "apply" and token_value(argument) == "[":
+                if method == "apply" and token_value(argument) == "[":
                     argument += 1
                 specifier = literal_call_argument(argument - 1)
                 if specifier is not None:
                     specifiers.add(specifier)
                 break
             cursor += 1
+
+    def loader_forward_call(index: int) -> bool:
+        """Accept apply/call forwarding and retain a statically named argument."""
+
+        if token_value(index + 1) not in {".", "?."} or token_value(index + 2) not in {
+            "apply",
+            "call",
+        }:
+            return False
+        open_index = index + 3
+        if token_value(open_index) != "(":
+            return False
+        loader_forward_specifier(open_index, token_value(index + 2))
         return True
 
     def inside_export_clause(index: int) -> bool:
@@ -3944,6 +4059,159 @@ def _create_require_module_specifiers(
                     ] == (("identifier", "get"),)
             cursor -= 1
         return False
+
+    def loader_call_open(index: int) -> int | None:
+        if token_value(index) == "(":
+            return index
+        if token_value(index) == "?." and token_value(index + 1) == "(":
+            return index + 1
+        return None
+
+    def ambient_loader_member(index: int) -> tuple[str, int] | None:
+        """Return a static member selected from an ambient loader."""
+
+        member_index = index
+        if token_value(member_index) in {".", "?."}:
+            if token_value(member_index) == "?." and token_value(member_index + 1) == "[":
+                member_index += 1
+            elif (
+                tokens[member_index + 1 : member_index + 2]
+                and tokens[member_index + 1][0] == "identifier"
+            ):
+                return token_value(member_index + 1), member_index + 2
+            else:
+                return None
+        if token_value(member_index) != "[":
+            return None
+        return static_computed_property(
+            member_index,
+            owner_label="ambient CommonJS loader",
+        )
+
+    token_type_body_contexts = getattr(tokens, "type_body_contexts", ())
+    token_class_body_contexts = getattr(tokens, "class_body_contexts", ())
+
+    def ambient_name_is_declaration(index: int) -> bool:
+        """Exclude declarations/keys whose spelling does not read the global."""
+
+        if len(token_type_body_contexts) == len(tokens) and token_type_body_contexts[index]:
+            return True
+        previous = token_value(index - 1)
+        following = token_value(index + 1)
+        if following in {":", "=>"}:
+            return True
+        if scope_prebody_at_token[index] >= 0 and previous in {
+            "(",
+            ",",
+            ":",
+            "{",
+            "[",
+            "accessor",
+            "override",
+            "private",
+            "protected",
+            "public",
+            "readonly",
+        }:
+            return True
+        enclosing_parenthesis = scope_enclosing_paren_at_token[index]
+        if enclosing_parenthesis >= 0:
+            parameter_close = scope_paren_close_for_open.get(enclosing_parenthesis)
+            if parameter_close is not None:
+                suffix = parameter_close + 1
+                if token_value(suffix) == "=>":
+                    return True
+                if token_value(suffix) == ":":
+                    suffix += 1
+                    while suffix < len(tokens) and token_value(suffix) not in {";", "="}:
+                        if token_value(suffix) == "=>":
+                            return True
+                        if token_value(suffix) in {"(", "[", "{"}:
+                            nested_close = matching_close(
+                                suffix,
+                                token_value(suffix),
+                                {"(": ")", "[": "]", "{": "}"}[token_value(suffix)],
+                            )
+                            if nested_close is not None:
+                                suffix = nested_close
+                        suffix += 1
+        if (
+            len(token_class_body_contexts) == len(tokens)
+            and token_class_body_contexts[index]
+            and previous
+            in {
+                "{",
+                ";",
+                "accessor",
+                "abstract",
+                "declare",
+                "get",
+                "override",
+                "private",
+                "protected",
+                "public",
+                "readonly",
+                "set",
+                "static",
+            }
+        ):
+            return True
+        if following == "(" and previous in {"{", ",", "get", "set"}:
+            close = matching_close(index + 1)
+            if close is not None and token_value(close + 1) == "{":
+                return True
+        return False
+
+    for index in range(len(tokens)):
+        ambient_end = ambient_loader_reference_end(index)
+        if (
+            ambient_end is None
+            or _type_only_import_assignment_require(tokens, index)
+            or ambient_name_is_declaration(index)
+            or all(safe_index in safe_indices for safe_index in range(index, ambient_end))
+        ):
+            continue
+        call_open = loader_call_open(ambient_end)
+        if call_open is not None:
+            specifier = literal_call_argument(call_open)
+            if specifier is not None:
+                specifiers.add(specifier)
+            continue
+        member = ambient_loader_member(ambient_end)
+        if member is not None:
+            member_name, member_end = member
+            member_call = loader_call_open(member_end)
+            if member_name == "resolve" and member_call is not None:
+                specifier = literal_call_argument(member_call)
+                if specifier is not None:
+                    specifiers.add(specifier)
+                continue
+            if member_name in {"apply", "call"} and member_call is not None:
+                loader_forward_specifier(member_call, member_name)
+                continue
+            if (
+                member_name == "resolve"
+                and token_value(member_end) in {".", "?."}
+                and token_value(member_end + 1) == "paths"
+            ):
+                continue
+            if member_name in {"cache", "extensions", "main"}:
+                continue
+            raise TypeScriptWorkerError(
+                "Runtime package passes or ambiguously uses an ambient CommonJS loader "
+                f"member {member_name!r}: {source_path}"
+            )
+        if token_value(index - 1) == "typeof" or inside_export_clause(index):
+            continue
+        map_name = stored_in_map(index)
+        if map_name is not None:
+            loader_maps.add(map_name)
+            continue
+        if token_value(index - 1) == "return" and inside_require_getter(index):
+            continue
+        raise TypeScriptWorkerError(
+            f"Runtime package passes or ambiguously uses an ambient CommonJS loader: {source_path}"
+        )
 
     for index, token in enumerate(tokens):
         if token[0] != "identifier" or index in safe_indices:
@@ -4858,6 +5126,7 @@ def _runtime_module_specifiers(source: str, *, source_path: Path) -> tuple[str, 
         _create_require_module_specifiers(
             tokens,
             source_path=source_path,
+            shadowed_native_loaders=shadowed_native_loaders,
         )
     )
     return tuple(sorted(specifiers))

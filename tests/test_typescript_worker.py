@@ -163,6 +163,65 @@ def test_runtime_package_scanner_captures_optional_native_loader_calls(
 @pytest.mark.parametrize(
     "source",
     [
+        'const load = require; load("indirect-commonjs");',
+        'const first = require; const second = first; second("indirect-commonjs");',
+        'const load = module.require; load("indirect-commonjs");',
+        'const load = module["require"]; load("indirect-commonjs");',
+        'const { require: load } = module; load("indirect-commonjs");',
+        'const { require } = module; require("indirect-commonjs");',
+        'module["require"]("indirect-commonjs");',
+        'require.call(null, "indirect-commonjs");',
+        'require.apply(null, ["indirect-commonjs"]);',
+        'require["resolve"]("indirect-commonjs");',
+    ],
+)
+def test_runtime_package_scanner_tracks_indirect_ambient_commonjs_loaders(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.cjs") == (
+        "indirect-commonjs",
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "consume(require);",
+        "const wrapped = require.bind(null);",
+        'module[property]("hidden-commonjs");',
+        'require[method]("hidden-commonjs");',
+        'module["require"].bind(null)("hidden-commonjs");',
+        'const { [property]: load } = module; load("hidden-commonjs");',
+        'const { ...rest } = module; rest.require("hidden-commonjs");',
+    ],
+)
+def test_runtime_package_scanner_rejects_ambiguous_ambient_commonjs_loader_flow(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    with pytest.raises(TypeScriptWorkerError, match="ambient CommonJS|module-loading capability"):
+        _runtime_module_specifiers(source, source_path=tmp_path / "runtime.cjs")
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'function run(require) { consume(require); require[method]("inert"); }',
+        'function run(module) { module[property]("inert"); }',
+        'module["exports"] = {};',
+    ],
+)
+def test_runtime_package_scanner_limits_ambient_commonjs_tracking_to_proven_globals(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.cjs") == ()
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
         'class C { #require(value) {} method() { this.#require("inert-private"); } }',
         'class C { #import(value) {} method() { this.#import("inert-private"); } }',
         'class C { static #require(value) {} method() { C.#require("inert-private"); } }',
