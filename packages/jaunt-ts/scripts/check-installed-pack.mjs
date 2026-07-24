@@ -5,6 +5,7 @@ import {
   mkdtemp,
   mkdir,
   readFile,
+  realpath,
   rename,
   rm,
   symlink,
@@ -452,8 +453,12 @@ export function slugify(value: string): string { return jaunt.magic(); }
     null,
     "supported Node versions must expose the permission model",
   );
+  // macOS exposes temporary directories through the /var -> /private/var alias.
+  // Node's permission model compares the physical paths used by its loader.
+  const permissionPackagePath = await realpath(installedPackagePath);
+  const permissionProjectPath = await realpath(project);
   const permissionGuardPath = resolve(
-    installedPackagePath,
+    permissionPackagePath,
     "dist/test/permission_guard.cjs",
   );
   const workerProbe = `
@@ -488,12 +493,12 @@ worker.once("error", (error) => {
     [
       permissionFlag,
       "--allow-worker",
-      `--allow-fs-read=${installedPackagePath}`,
+      `--allow-fs-read=${permissionPackagePath}`,
       `--require=${permissionGuardPath}`,
       "--eval",
       permissionProbe,
     ],
-    project,
+    permissionProjectPath,
     { timeout: 10_000 },
   );
   assert.equal(permissionOutput, "permission-guard-ok\n");
