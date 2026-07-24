@@ -3228,6 +3228,7 @@ def _create_require_module_specifiers(
     capability_bindings: dict[str, dict[int, tuple[int, str]]] = {}
     capability_interval_indices: dict[str, _ScopeCapabilityIndex] = {}
     safe_indices: set[int] = set()
+    approved_projected_namespace_ranges: list[tuple[int, int]] = []
     assignments: list[tuple[int, str, int]] = []
     specifiers: set[str] = set()
     loader_maps: set[str] = set()
@@ -4141,6 +4142,75 @@ def _create_require_module_specifiers(
         close = matching_close(open_index)
         return None if close is None else close + 1
 
+    def node_module_namespace_projection_end(end: int) -> int:
+        """Include the Node ``Module`` constructor from a proven ESM namespace."""
+
+        if token_value(end) in {".", "?."} and tokens[end + 1 : end + 2] == (
+            ("identifier", "Module"),
+        ):
+            return end + 2
+        return end
+
+    grouped_node_module_projection_cache: dict[int, int | None] = {}
+
+    def resolved_node_module_namespace_projection_end(end: int) -> int:
+        """Consume or reject a property selected from a resolved ESM namespace."""
+
+        if token_value(end) == "[":
+            raise TypeScriptWorkerError(
+                "Runtime package uses computed access on an awaited Node module namespace: "
+                f"{source_path}"
+            )
+        if token_value(end) in {".", "?."} and tokens[end + 1 : end + 2] == (
+            ("identifier", "default"),
+        ):
+            raise TypeScriptWorkerError(
+                "Runtime package projects the default export from an awaited Node module "
+                f"namespace; this provenance is unsupported: {source_path}"
+            )
+        return node_module_namespace_projection_end(end)
+
+    def grouped_node_module_namespace_projection_end(index: int) -> int | None:
+        """Return a safely grouped ``(await import('node:module')).Module`` end."""
+
+        if index in grouped_node_module_projection_cache:
+            return grouped_node_module_projection_cache[index]
+        group_closes: list[int] = []
+        group_opens: list[int] = []
+        cursor = index
+        while token_value(cursor) == "(":
+            close = matching_close(cursor)
+            if close is None:
+                grouped_node_module_projection_cache[index] = None
+                return None
+            group_opens.append(cursor)
+            group_closes.append(close)
+            cursor += 1
+        if not group_closes or tokens[cursor : cursor + 2] != (
+            ("identifier", "await"),
+            ("identifier", "import"),
+        ):
+            grouped_node_module_projection_cache[index] = None
+            return None
+        end = node_module_value_end(cursor)
+        if end is None:
+            grouped_node_module_projection_cache[index] = None
+            return None
+        projected = False
+        for opening, close in reversed(tuple(zip(group_opens, group_closes, strict=True))):
+            if end != close:
+                raise TypeScriptWorkerError(
+                    "Runtime package ambiguously composes an awaited Node module namespace: "
+                    f"{source_path}"
+                )
+            end = close + 1
+            projected_end = resolved_node_module_namespace_projection_end(end)
+            if projected_end != end:
+                projected = True
+                end = projected_end
+            grouped_node_module_projection_cache[opening] = end if projected else None
+        return grouped_node_module_projection_cache[index]
+
     def factory_reference_end(index: int) -> int | None:
         if index >= len(tokens):
             return None
@@ -4227,10 +4297,22 @@ def _create_require_module_specifiers(
         if capability is None:
             return None
         kind, end = capability
+        awaited_node_namespace = (
+            kind == "namespace"
+            and bool(group_closes)
+            and tokens[cursor : cursor + 2] == (("identifier", "await"), ("identifier", "import"))
+        )
         for close in reversed(group_closes):
             if end != close:
+                if kind == "namespace":
+                    raise TypeScriptWorkerError(
+                        "Runtime package ambiguously composes an awaited Node module namespace: "
+                        f"{source_path}"
+                    )
                 return None
             end = close + 1
+            if awaited_node_namespace:
+                end = resolved_node_module_namespace_projection_end(end)
         if token_value(end) in {":", "=>"}:
             # Parenthesized arrow parameters are declarations, not aliases of
             # the ambient loader. A colon after the group is the return type.
@@ -4331,6 +4413,11 @@ def _create_require_module_specifiers(
         if close is None or token_value(close + 1) != "=":
             continue
         rhs_index = close + 2
+        if grouped_node_module_namespace_projection_end(rhs_index) is not None:
+            raise TypeScriptWorkerError(
+                "Runtime package destructures a projected Node Module constructor; assign "
+                f"createRequire directly from node:module instead: {source_path}"
+            )
         ambient_module_rhs = (
             tokens[rhs_index : rhs_index + 1] == (("identifier", "module"),)
             and rhs_index not in shadowed_native_loaders
@@ -4443,6 +4530,10 @@ def _create_require_module_specifiers(
         if capability is None:
             continue
         capability_kind, end = capability
+        if capability_kind == "namespace":
+            projected_end = grouped_node_module_namespace_projection_end(initializer)
+            if projected_end == end:
+                approved_projected_namespace_ranges.append((initializer, end))
         dependency = initializer
         while token_value(dependency) == "(":
             dependency += 1
@@ -5008,6 +5099,14 @@ def _create_require_module_specifiers(
                 f"Runtime package uses computed access on Node module namespace {name!r}: "
                 f"{source_path}"
             )
+        if token_value(index + 1) in {".", "?."} and token_value(index + 2) in {
+            "Module",
+            "default",
+        }:
+            raise TypeScriptWorkerError(
+                f"Runtime package projects {token_value(index + 2)!r} from aliased Node module "
+                f"namespace {name!r}; this provenance is unsupported: {source_path}"
+            )
         factory_end = factory_reference_end(index)
         if factory_end is not None and factory_end > index + 1:
             if factory_call(index, factory_end, f"{name}.createRequire"):
@@ -5059,10 +5158,33 @@ def _create_require_module_specifiers(
             if specifier is not None:
                 specifiers.add(specifier)
 
+    merged_projected_namespace_ranges: list[tuple[int, int]] = []
+    for start, end in sorted(approved_projected_namespace_ranges):
+        if merged_projected_namespace_ranges and start <= merged_projected_namespace_ranges[-1][1]:
+            previous_start, previous_end = merged_projected_namespace_ranges[-1]
+            merged_projected_namespace_ranges[-1] = (previous_start, max(previous_end, end))
+        else:
+            merged_projected_namespace_ranges.append((start, end))
+
     # Direct ``require/import('node:module').createRequire(...)`` expressions
     # have no local capability name for the pass above to visit.
+    projected_range_index = 0
     for index in range(len(tokens)):
+        while (
+            projected_range_index < len(merged_projected_namespace_ranges)
+            and merged_projected_namespace_ranges[projected_range_index][1] <= index
+        ):
+            projected_range_index += 1
         direct_namespace_end = node_module_value_end(index)
+        projected_namespace_end = grouped_node_module_namespace_projection_end(index)
+        approved_projection = (
+            projected_range_index < len(merged_projected_namespace_ranges)
+            and merged_projected_namespace_ranges[projected_range_index][0] <= index
+        )
+        if projected_namespace_end is not None and not approved_projection:
+            raise TypeScriptWorkerError(
+                f"Runtime package directly uses a projected Node Module constructor: {source_path}"
+            )
         grouped_namespace = token_value(index) == "(" and token_value(index + 1) in {
             "await",
             "import",

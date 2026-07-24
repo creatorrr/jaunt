@@ -2362,6 +2362,117 @@ def test_runtime_package_scanner_tracks_proven_create_require_forms(
     assert "hoisted-runtime-helper" in specifiers
 
 
+def test_runtime_package_scanner_tracks_grouped_node_module_module_export(
+    tmp_path: Path,
+) -> None:
+    source = (
+        "let nodeModule;\n"
+        'nodeModule = (await import("node:module")).Module;\n'
+        "nodeModule.registerHooks?.({ resolve });\n"
+        'nodeModule.createRequire(import.meta.url)("hoisted-runtime-helper");\n'
+    )
+
+    assert set(_runtime_module_specifiers(source, source_path=tmp_path / "runtime.js")) == {
+        "hoisted-runtime-helper",
+        "node:module",
+    }
+
+
+def test_runtime_package_scanner_tracks_transparently_wrapped_module_export(
+    tmp_path: Path,
+) -> None:
+    source = (
+        'const nodeModule = ((await import("node:module")).Module);\n'
+        'nodeModule.createRequire(import.meta.url)("hoisted-runtime-helper");\n'
+    )
+
+    assert set(_runtime_module_specifiers(source, source_path=tmp_path / "runtime.js")) == {
+        "hoisted-runtime-helper",
+        "node:module",
+    }
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'const nodeModule = await import("node:module").Module;',
+        'const nodeModule = (await import("node:module")).default;',
+        'const nodeModule = require("node:module").default;',
+    ],
+)
+def test_runtime_package_scanner_rejects_unproven_node_module_namespace_exports(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    with pytest.raises(TypeScriptWorkerError, match="ambiguously composes|default export"):
+        _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js")
+
+
+def test_runtime_package_scanner_rejects_module_constructor_from_namespace_alias(
+    tmp_path: Path,
+) -> None:
+    source = (
+        'const namespace = await import("node:module");\n'
+        "const nodeModule = namespace.Module;\n"
+        'nodeModule.createRequire(import.meta.url)("hoisted-runtime-helper");\n'
+    )
+
+    with pytest.raises(TypeScriptWorkerError, match="projects 'Module'"):
+        _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js")
+
+
+def test_runtime_package_scanner_rejects_default_export_from_namespace_alias(
+    tmp_path: Path,
+) -> None:
+    source = (
+        'const namespace = await import("node:module");\nconst nodeModule = namespace.default;\n'
+    )
+
+    with pytest.raises(TypeScriptWorkerError, match="projects 'default'"):
+        _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js")
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'const nodeModule = (await import("node:module").Module);',
+        '(await import("node:module")).Module.createRequire(import.meta.url)("missed");',
+        'const { createRequire } = (await import("node:module")).Module;',
+        '(await import("node:module")).default.createRequire(import.meta.url)("missed");',
+        'const { createRequire } = (await import("node:module")).default;',
+        '(await import("node:module"))["Module"].createRequire(import.meta.url)("missed");',
+        'import { createRequire } from "node:module"; '
+        "const outer = createRequire(import.meta.url, "
+        '(await import("node:module")).Module.createRequire(import.meta.url)'
+        "(runtimeSelectedPackage)); "
+        'outer("visible");',
+    ],
+)
+def test_runtime_package_scanner_rejects_unsafe_module_constructor_compositions(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    with pytest.raises(
+        TypeScriptWorkerError,
+        match="ambiguously composes|computed access|destructures|default export|directly uses",
+    ):
+        _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js")
+
+
+def test_runtime_package_scanner_keeps_module_projection_inside_shadow_local(
+    tmp_path: Path,
+) -> None:
+    source = (
+        'const namespace = await import("node:module");\n'
+        "{ const namespace = arbitraryNamespace; const nodeModule = namespace.Module; "
+        "nodeModule.createRequire(import.meta.url)(runtimeSelectedPackage); }\n"
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == (
+        "node:module",
+    )
+
+
 def test_runtime_package_scanner_keeps_optional_parameter_after_comparison_local(
     tmp_path: Path,
 ) -> None:
@@ -2814,6 +2925,36 @@ def test_create_require_scope_scan_does_not_copy_every_token_prefix(tmp_path: Pa
         == ()
     )
     assert tokens.sliced_items < len(tokens) * 20
+
+
+def test_create_require_projection_scan_reads_nested_groups_linearly(tmp_path: Path) -> None:
+    depth = 2_000
+    tokens = _AccessCountingTokens(
+        [
+            ("identifier", "const"),
+            ("identifier", "nodeModule"),
+            ("punctuation", "="),
+            *[("punctuation", "(")] * depth,
+            ("identifier", "await"),
+            ("identifier", "import"),
+            ("punctuation", "("),
+            ("string", "node:module"),
+            ("punctuation", ")"),
+            *[("punctuation", ")")] * depth,
+            ("punctuation", "."),
+            ("identifier", "Module"),
+            ("punctuation", ";"),
+        ]
+    )
+
+    assert (
+        _create_require_module_specifiers(
+            tokens,
+            source_path=tmp_path / "runtime.js",
+        )
+        == ()
+    )
+    assert tokens.indexed_items + tokens.sliced_items < len(tokens) * 100
 
 
 def test_create_require_scope_scan_keeps_deep_nesting_memory_linear(tmp_path: Path) -> None:
@@ -4209,6 +4350,65 @@ def test_package_resolution_closure_handles_bundled_loader_runtime_plumbing(
 
     assert {edge.package for edge in closure} == {"hoisted-runtime-helper"}
     assert all(edge.resolved_root is not None for edge in closure)
+
+
+def test_package_resolution_closure_handles_vite_module_constructor_projection(
+    tmp_path: Path,
+) -> None:
+    vitest = tmp_path / "node_modules/vitest"
+    vitest_runtime = vitest / "dist/index.js"
+    vitest_runtime.parent.mkdir(parents=True)
+    vitest_runtime.write_text('import "vite";\n', encoding="utf-8")
+    (vitest / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "vitest",
+                "version": "3.2.7",
+                "type": "module",
+                "main": "./dist/index.js",
+                "dependencies": {"vite": "^7.3.6"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    vite = tmp_path / "node_modules/vite"
+    vite_runtime = vite / "dist/node/chunks/config.js"
+    vite_runtime.parent.mkdir(parents=True)
+    vite_runtime.write_text(
+        "async function createImportMetaResolver() {\n"
+        "  let nodeModule;\n"
+        "  try {\n"
+        '    nodeModule = (await import("node:module")).Module;\n'
+        "  } catch {\n"
+        "    return;\n"
+        "  }\n"
+        "  if (!nodeModule) return;\n"
+        "  if (nodeModule.registerHooks) {\n"
+        "    nodeModule.registerHooks({ resolve });\n"
+        "    return;\n"
+        "  }\n"
+        "  if (!nodeModule.register) return;\n"
+        "  nodeModule.register(hookModuleContent);\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (vite / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "vite",
+                "version": "7.3.6",
+                "type": "module",
+                "main": "./dist/node/chunks/config.js",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    closure = _runtime_package_resolution_closure(vitest, root_label="vitest")
+
+    assert [(edge.label, edge.package, edge.resolved_root) for edge in closure] == [
+        ("vitest>vite", "vite", vite),
+    ]
 
 
 def test_package_resolution_closure_resolves_all_package_import_mapping_forms(
