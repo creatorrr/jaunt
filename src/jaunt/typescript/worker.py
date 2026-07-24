@@ -4090,11 +4090,89 @@ def _create_require_module_specifiers(
 
     token_type_body_contexts = getattr(tokens, "type_body_contexts", ())
     token_class_body_contexts = getattr(tokens, "class_body_contexts", ())
+    arrow_parameter_default_indices: dict[int, frozenset[int]] = {}
+
+    def arrow_parameters_end_in_arrow(open_index: int, close_index: int) -> bool:
+        """Return whether one parenthesis group is an arrow parameter list."""
+
+        suffix = close_index + 1
+        if token_value(suffix) == "=>":
+            return True
+        if token_value(suffix) != ":":
+            return False
+        suffix += 1
+        while suffix < len(tokens) and token_value(suffix) not in {";", "="}:
+            if token_value(suffix) == "=>":
+                return True
+            if token_value(suffix) in {"(", "[", "{"}:
+                nested_close = matching_close(
+                    suffix,
+                    token_value(suffix),
+                    {"(": ")", "[": "]", "{": "}"}[token_value(suffix)],
+                )
+                if nested_close is not None:
+                    suffix = nested_close
+            suffix += 1
+        return False
+
+    def arrow_default_reads(open_index: int, close_index: int) -> frozenset[int]:
+        """Return ambient-name tokens read by top-level parameter defaults."""
+
+        cached = arrow_parameter_default_indices.get(open_index)
+        if cached is not None:
+            return cached
+        default_reads: set[int] = set()
+        expected_closings: list[str] = []
+        default_started = False
+        in_type_annotation = False
+        type_angle_depth = 0
+        for cursor in range(open_index + 1, close_index):
+            kind, value = tokens[cursor]
+            if kind == "identifier" and value in {"module", "require"} and default_started:
+                default_reads.add(cursor)
+            if value in {"(", "[", "{"}:
+                expected_closings.append({"(": ")", "[": "]", "{": "}"}[value])
+                continue
+            if expected_closings:
+                if value == expected_closings[-1]:
+                    expected_closings.pop()
+                continue
+            if value == "," and type_angle_depth == 0:
+                default_started = False
+                in_type_annotation = False
+                continue
+            if default_started:
+                continue
+            if value == ":" and cursor not in conditional_expression_colons:
+                in_type_annotation = True
+            elif in_type_annotation and value == "<":
+                type_angle_depth += 1
+            elif in_type_annotation and value == ">" and type_angle_depth:
+                type_angle_depth -= 1
+            elif value == "=" and (not in_type_annotation or type_angle_depth == 0):
+                default_started = True
+                in_type_annotation = False
+        frozen = frozenset(default_reads)
+        arrow_parameter_default_indices[open_index] = frozen
+        return frozen
+
+    def ambient_name_is_type_declaration(index: int) -> bool:
+        """Recognize an erased declaration name without hiding later values."""
+
+        previous = token_value(index - 1)
+        following = token_value(index + 1)
+        if previous == "type":
+            return following in {"<", "="}
+        if previous == "interface":
+            return following in {"<", "extends", "{"}
+        return False
 
     def ambient_name_is_declaration(index: int) -> bool:
         """Exclude declarations/keys whose spelling does not read the global."""
 
         if len(token_type_body_contexts) == len(tokens) and token_type_body_contexts[index]:
+            return True
+        if ambient_name_is_type_declaration(index):
             return True
         previous = token_value(index - 1)
         following = token_value(index + 1)
@@ -4117,24 +4195,10 @@ def _create_require_module_specifiers(
         enclosing_parenthesis = scope_enclosing_paren_at_token[index]
         if enclosing_parenthesis >= 0:
             parameter_close = scope_paren_close_for_open.get(enclosing_parenthesis)
-            if parameter_close is not None:
-                suffix = parameter_close + 1
-                if token_value(suffix) == "=>":
-                    return True
-                if token_value(suffix) == ":":
-                    suffix += 1
-                    while suffix < len(tokens) and token_value(suffix) not in {";", "="}:
-                        if token_value(suffix) == "=>":
-                            return True
-                        if token_value(suffix) in {"(", "[", "{"}:
-                            nested_close = matching_close(
-                                suffix,
-                                token_value(suffix),
-                                {"(": ")", "[": "]", "{": "}"}[token_value(suffix)],
-                            )
-                            if nested_close is not None:
-                                suffix = nested_close
-                        suffix += 1
+            if parameter_close is not None and arrow_parameters_end_in_arrow(
+                enclosing_parenthesis, parameter_close
+            ):
+                return index not in arrow_default_reads(enclosing_parenthesis, parameter_close)
         if (
             len(token_class_body_contexts) == len(tokens)
             and token_class_body_contexts[index]
@@ -4653,6 +4717,7 @@ def _shadowed_native_loader_indices(
     bindings: list[set[str]] = [set() for _scope in scope_parent]
     function_scopes: set[int] = set()
     expression_arrow_bindings: list[tuple[int, int, frozenset[str]]] = []
+    parameter_head_bindings: list[tuple[int, int, frozenset[str]]] = []
 
     def token_value(index: int) -> str:
         return tokens[index][1] if 0 <= index < len(tokens) else ""
@@ -4720,8 +4785,11 @@ def _shadowed_native_loader_indices(
         scope = scope_for_open.get(body_open)
         if scope is None:
             return
+        names = parameter_names(open_index, close_index)
         function_scopes.add(scope)
-        bindings[scope].update(parameter_names(open_index, close_index))
+        bindings[scope].update(names)
+        if names:
+            parameter_head_bindings.append((open_index + 1, close_index, frozenset(names)))
 
     # Function, method, catch, and braced-arrow parameters belong to the body
     # scope.  Control-flow heads other than ``catch`` are not bindings.
@@ -4741,7 +4809,10 @@ def _shadowed_native_loader_indices(
         if control_head == "catch":
             scope = scope_for_open.get(body_open)
             if scope is not None:
-                bindings[scope].update(parameter_names(open_index, close_index))
+                names = parameter_names(open_index, close_index)
+                bindings[scope].update(names)
+                if names:
+                    parameter_head_bindings.append((open_index + 1, close_index, frozenset(names)))
         else:
             bind_function_body(open_index, close_index, body_open)
 
@@ -4762,8 +4833,11 @@ def _shadowed_native_loader_indices(
                     open_index is not None
                     and _control_flow_parenthesis_head(tokens, end=open_index) is None
                 ):
+                    names = parameter_names(open_index, cursor)
                     function_scopes.add(scope)
-                    bindings[scope].update(parameter_names(open_index, cursor))
+                    bindings[scope].update(names)
+                    if names:
+                        parameter_head_bindings.append((open_index + 1, cursor, frozenset(names)))
                     if any(token_value(index) == ":" for index in range(cursor + 1, body_open)):
                         annotated_function_candidates.add(scope)
                 break
@@ -4789,6 +4863,7 @@ def _shadowed_native_loader_indices(
         if token != ("punctuation", "=>") or index == 0:
             continue
         arrow_names: set[str] = set()
+        open_index: int | None = None
         if tokens[index - 1][0] == "identifier":
             if tokens[index - 1][1] in target_names:
                 arrow_names.add(tokens[index - 1][1])
@@ -4805,6 +4880,10 @@ def _shadowed_native_loader_indices(
                         arrow_names.update(parameter_names(open_index, cursor))
                     break
                 cursor -= 1
+        if arrow_names and open_index is not None:
+            parameter_head_bindings.append(
+                (open_index + 1, matching_close[open_index], frozenset(arrow_names))
+            )
         if token_value(index + 1) == "{":
             scope = scope_for_open.get(index + 1)
             if scope is not None:
@@ -4880,6 +4959,26 @@ def _shadowed_native_loader_indices(
             "export",
         }:
             bindings[scope_at_token[index]].add(tokens[name_index][1])
+
+    # Runtime enum and namespace declarations introduce a value binding. Type
+    # aliases and interfaces deliberately do not: their names are erased and
+    # must not hide a later ambient CommonJS loader use.
+    for index, token in enumerate(tokens[:-1]):
+        if token not in {
+            ("identifier", "enum"),
+            ("identifier", "module"),
+            ("identifier", "namespace"),
+        }:
+            continue
+        name_index = index + 1
+        if tokens[name_index][0] != "identifier" or tokens[name_index][1] not in target_names:
+            continue
+        following = token_value(name_index + 1)
+        if token[1] == "enum" and following != "{":
+            continue
+        if token[1] in {"module", "namespace"} and following not in {".", "{"}:
+            continue
+        bindings[scope_at_token[index]].add(tokens[name_index][1])
 
     # Direct lexical declarations cover the overwhelmingly common shadowing
     # forms.  ``var`` hoists to the nearest function/static-block scope.
@@ -5003,15 +5102,27 @@ def _shadowed_native_loader_indices(
             arrow_deltas[name][start] += 1
             arrow_deltas[name][end] -= 1
 
+    parameter_head_deltas = {name: [0] * (len(tokens) + 1) for name in target_names}
+    for start, end, names in parameter_head_bindings:
+        for name in names:
+            parameter_head_deltas[name][start] += 1
+            parameter_head_deltas[name][end] -= 1
+
     active_arrow_bindings = {name: 0 for name in target_names}
+    active_parameter_head_bindings = {name: 0 for name in target_names}
     shadowed: set[int] = set()
     for index, (kind, value) in enumerate(tokens):
         for name in target_names:
             active_arrow_bindings[name] += arrow_deltas[name][index]
+            active_parameter_head_bindings[name] += parameter_head_deltas[name][index]
         if kind != "identifier" or value not in target_names:
             continue
         scope = scope_at_token[index]
-        if value in effective_bindings[scope] or active_arrow_bindings[value]:
+        if (
+            value in effective_bindings[scope]
+            or active_arrow_bindings[value]
+            or active_parameter_head_bindings[value]
+        ):
             shadowed.add(index)
     return frozenset(shadowed)
 

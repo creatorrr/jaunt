@@ -185,6 +185,48 @@ def test_runtime_package_scanner_tracks_indirect_ambient_commonjs_loaders(
 
 
 @pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ('require.call(null, "arrow-default-call")', "arrow-default-call"),
+        ('require.apply(null, ["arrow-default-apply"])', "arrow-default-apply"),
+    ],
+)
+def test_runtime_package_scanner_captures_ambient_loader_forwarding_in_arrow_defaults(
+    tmp_path: Path,
+    expression: str,
+    expected: str,
+) -> None:
+    source = f"const run = (value = {expression}) => value;"
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.cjs") == (expected,)
+
+
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ('load("arrow-default-bound")', "arrow-default-bound"),
+        ('load.call(null, "arrow-default-bound-call")', "arrow-default-bound-call"),
+        ('load.apply(null, ["arrow-default-bound-apply"])', "arrow-default-bound-apply"),
+    ],
+)
+def test_runtime_package_scanner_captures_bound_loader_calls_in_arrow_defaults(
+    tmp_path: Path,
+    expression: str,
+    expected: str,
+) -> None:
+    source = (
+        'import { createRequire } from "node:module"; '
+        "const load = createRequire(import.meta.url); "
+        f"const run = (value = {expression}) => value;"
+    )
+
+    assert set(_runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts")) == {
+        "node:module",
+        expected,
+    }
+
+
+@pytest.mark.parametrize(
     "source",
     [
         "consume(require);",
@@ -245,11 +287,14 @@ def test_runtime_package_scanner_ignores_private_loader_names(
         'const run = require => require("inert-arrow-parameter");',
         'const run = (module) => module.require("inert-arrow-parameter");',
         'const run = (require): void => require("inert-typed-arrow-parameter");',
+        'const run = (require, value = require.call(null, "inert-arrow-default")) => value;',
         '{ const require = localLoader; require("inert-const"); }',
         '{ let module = localModule; module.require("inert-let"); }',
         'function run({loader: require}) { require("inert-destructured"); }',
         'class require { static value = require("inert-class-name"); }',
         'class module { static value = module.require("inert-class-name"); }',
+        'enum require { value } require("inert-enum-name");',
+        'namespace require { export const value = 1; } require("inert-namespace-name");',
         'import require from "runtime-loader-shim"; require("inert-import");',
         'import {value as module} from "runtime-module-shim"; module.require("inert-import");',
     ],
@@ -261,6 +306,40 @@ def test_runtime_package_scanner_ignores_shadowed_native_loaders(
     specifiers = _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts")
 
     assert not any(specifier.startswith("inert-") for specifier in specifiers)
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        "type require = { value: string };",
+        "interface require { value: string }",
+        "enum require { value }",
+        "namespace require { export const value = 1; }",
+    ],
+)
+def test_runtime_package_scanner_allows_declarations_named_require(
+    tmp_path: Path,
+    declaration: str,
+) -> None:
+    assert _runtime_module_specifiers(declaration, source_path=tmp_path / "runtime.ts") == ()
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        "type require = { value: string };",
+        "interface require { value: string }",
+    ],
+)
+def test_runtime_package_scanner_keeps_ambient_loader_after_type_only_require_declaration(
+    tmp_path: Path,
+    declaration: str,
+) -> None:
+    source = f'{declaration} require.call(null, "runtime-after-type-declaration");'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (
+        "runtime-after-type-declaration",
+    )
 
 
 def test_runtime_package_scanner_restores_ambient_loader_after_nested_shadow(
