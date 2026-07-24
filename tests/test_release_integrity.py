@@ -213,7 +213,11 @@ def test_workflows_gate_release_integrity_and_typescript_fixture_freshness() -> 
     assert "git fetch --force --tags origin" in release
     assert "jaunt check --language ts --root examples/typescript-jwt" in release
     assert "jaunt check --language ts --root examples/typescript-jwt" in ci
-    assert '"$jaunt_bin" check --language ts --magic-only --root "$project"' in release
+    candidate_refreeze = '"$jaunt_bin" test --language ts --no-build --root "$project"'
+    candidate_check = '"$jaunt_bin" check --language ts --magic-only --root "$project"'
+    assert candidate_refreeze in release
+    assert candidate_check in release
+    assert release.index(candidate_refreeze) < release.index(candidate_check)
     assert 'if [[ -n "$published_commit" && "$published_commit" != "$GITHUB_SHA" ]]' in release
     assert "verify_pypi_candidates.py" in release
     assert 'published_integrity="$(npm view' in release

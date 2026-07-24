@@ -351,6 +351,14 @@ jobs:
             local project="$2"
             local init_project="$3"
             "$jaunt_bin" init --language ts --root "$init_project" --json >/dev/null
+            # The checkout fixture file-links the worker package, so its protected
+            # runner resolves Jaunt's development Vitest. The packed candidate is
+            # installed where users install it and resolves the fixture's locked
+            # Vitest instead. Normalize that legitimate tooling-only fingerprint
+            # transition through Jaunt's model-free refreeze path, and execute the
+            # protected batteries with the exact wheel and npm candidate before
+            # asking the deterministic check gate to confirm the new headers.
+            "$jaunt_bin" test --language ts --no-build --root "$project"
             # FIXME(exact-wheel-contract): the hosted runner intermittently
             # reports `contract-failed` when mutation strength is repeated from
             # the installed wheel. The full contract check passed above, and
