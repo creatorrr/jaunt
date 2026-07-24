@@ -1710,7 +1710,9 @@ def _runtime_javascript_tokens(
     line_breaks_before: list[bool] = []
     type_body_contexts: list[bool] = []
     class_body_contexts: list[bool] = []
-    cursor = 0
+    cursor = 1 if source.startswith("\ufeff") else 0
+    if source.startswith("#!", cursor):
+        cursor = _line_comment_end(source, cursor + 2)
     previous: tuple[str, str] | None = None
     control_parentheses: list[str | None] = []
     statement_braces: list[bool] = []
@@ -1849,6 +1851,8 @@ def _runtime_javascript_tokens(
         if kind in _RUNTIME_VALUE_TOKEN_KINDS:
             return False
         if kind == "identifier":
+            if pending_line_break and value in {"break", "continue", "debugger"}:
+                return True
             return _identifier_precedes_regex(tokens)
         if value == ")" and previous_closed_control_head is not None:
             return True
@@ -2056,6 +2060,8 @@ def _runtime_javascript_tokens(
             if kind in _RUNTIME_VALUE_TOKEN_KINDS:
                 return False
             if kind == "identifier":
+                if expression_pending_line_break and value in {"break", "continue", "debugger"}:
+                    return True
                 return _identifier_precedes_regex(expression_tokens)
             if value == ")" and expression_previous_closed_control_head is not None:
                 return True
@@ -2130,6 +2136,10 @@ def _runtime_javascript_tokens(
                 record_expression("identifier", source[index:end])
                 index = end
                 continue
+            if source.startswith("\\u", index):
+                raise TypeScriptWorkerError(
+                    f"Runtime package source uses an escaped executable identifier: {source_path}"
+                )
             if character.isdigit():
                 end = index + 1
                 while end < len(source) and (source[end].isalnum() or source[end] in "._"):
@@ -2529,6 +2539,10 @@ def _runtime_javascript_tokens(
             append("identifier", source[cursor:end])
             cursor = end
             continue
+        if source.startswith("\\u", cursor):
+            raise TypeScriptWorkerError(
+                f"Runtime package source uses an escaped executable identifier: {source_path}"
+            )
         if character.isdigit():
             end = cursor + 1
             while end < len(source) and (source[end].isalnum() or source[end] in "._"):
@@ -4038,12 +4052,398 @@ def _erased_type_import_indices(
     return frozenset(erased)
 
 
+def _shadowed_native_loader_indices(
+    tokens: Sequence[tuple[str, str]],
+) -> frozenset[int]:
+    """Return ``require``/``module`` identifiers shadowed by local bindings.
+
+    The runtime dependency scanner intentionally recognizes ambient CommonJS
+    loaders without requiring a full JavaScript parser.  Local bindings with
+    the same names must nevertheless win.  This pass models balanced brace
+    scopes and the common binding forms emitted by TypeScript and bundlers.
+    """
+
+    target_names = frozenset({"module", "require"})
+    opening_for = {")": "(", "]": "[", "}": "{"}
+    delimiter_stack: list[tuple[int, str]] = []
+    matching_open: dict[int, int] = {}
+    matching_close: dict[int, int] = {}
+    for index, (_kind, value) in enumerate(tokens):
+        if value in {"(", "[", "{"}:
+            delimiter_stack.append((index, value))
+        elif (
+            value in opening_for
+            and delimiter_stack
+            and delimiter_stack[-1][1] == opening_for[value]
+        ):
+            open_index, _opening = delimiter_stack.pop()
+            matching_open[index] = open_index
+            matching_close[open_index] = index
+
+    scope_parent = [-1]
+    scope_at_token: list[int] = []
+    scope_for_open: dict[int, int] = {}
+    scope_stack = [0]
+    for index, (_kind, value) in enumerate(tokens):
+        scope_at_token.append(scope_stack[-1])
+        if value == "{":
+            scope_parent.append(scope_stack[-1])
+            scope = len(scope_parent) - 1
+            scope_for_open[index] = scope
+            scope_stack.append(scope)
+        elif value == "}" and len(scope_stack) > 1:
+            scope_stack.pop()
+
+    bindings: list[set[str]] = [set() for _scope in scope_parent]
+    function_scopes: set[int] = set()
+    expression_arrow_bindings: list[tuple[int, int, frozenset[str]]] = []
+
+    def token_value(index: int) -> str:
+        return tokens[index][1] if 0 <= index < len(tokens) else ""
+
+    def pattern_names(start: int, end: int) -> set[str]:
+        """Collect names bound by one parameter or destructuring pattern."""
+
+        while start < end and token_value(start) in {
+            "...",
+            "accessor",
+            "override",
+            "private",
+            "protected",
+            "public",
+            "readonly",
+        }:
+            start += 1
+        if start >= end:
+            return set()
+        if tokens[start][0] == "identifier":
+            return {tokens[start][1]} if tokens[start][1] in target_names else set()
+        opening = token_value(start)
+        closing = matching_close.get(start)
+        if opening not in {"{", "["} or closing is None or closing >= end:
+            return set()
+        names: set[str] = set()
+        segment_start = start + 1
+        cursor = segment_start
+        while cursor <= closing:
+            at_end = cursor == closing
+            if not at_end and token_value(cursor) in {"(", "[", "{"}:
+                cursor = matching_close.get(cursor, cursor)
+            if at_end or token_value(cursor) == ",":
+                segment_end = cursor
+                colon: int | None = None
+                nested = segment_start
+                while nested < segment_end:
+                    if token_value(nested) in {"(", "[", "{"}:
+                        nested = matching_close.get(nested, nested)
+                    elif token_value(nested) == ":":
+                        colon = nested
+                        break
+                    nested += 1
+                binding_start = colon + 1 if colon is not None else segment_start
+                names.update(pattern_names(binding_start, segment_end))
+                segment_start = cursor + 1
+            cursor += 1
+        return names
+
+    def parameter_names(open_index: int, close_index: int) -> set[str]:
+        names: set[str] = set()
+        segment_start = open_index + 1
+        cursor = segment_start
+        while cursor <= close_index:
+            at_end = cursor == close_index
+            if not at_end and token_value(cursor) in {"(", "[", "{"}:
+                cursor = matching_close.get(cursor, cursor)
+            if at_end or token_value(cursor) == ",":
+                names.update(pattern_names(segment_start, cursor))
+                segment_start = cursor + 1
+            cursor += 1
+        return names
+
+    def bind_function_body(open_index: int, close_index: int, body_open: int) -> None:
+        scope = scope_for_open.get(body_open)
+        if scope is None:
+            return
+        function_scopes.add(scope)
+        bindings[scope].update(parameter_names(open_index, close_index))
+
+    # Function, method, catch, and braced-arrow parameters belong to the body
+    # scope.  Control-flow heads other than ``catch`` are not bindings.
+    for close_index, open_index in matching_open.items():
+        if token_value(close_index) != ")":
+            continue
+        body_open: int | None = None
+        if token_value(close_index + 1) == "{":
+            body_open = close_index + 1
+        elif token_value(close_index + 1) == "=>" and token_value(close_index + 2) == "{":
+            body_open = close_index + 2
+        if body_open is None:
+            continue
+        control_head = _control_flow_parenthesis_head(tokens, end=open_index)
+        if control_head is not None and control_head != "catch":
+            continue
+        if control_head == "catch":
+            scope = scope_for_open.get(body_open)
+            if scope is not None:
+                bindings[scope].update(parameter_names(open_index, close_index))
+        else:
+            bind_function_body(open_index, close_index, body_open)
+
+    # A TypeScript return annotation may sit between the parameter close and
+    # body brace. Find that parameter group without treating control heads as
+    # function scopes.
+    annotated_function_candidates: set[int] = set()
+    for body_open, scope in scope_for_open.items():
+        if scope in function_scopes:
+            continue
+        cursor = body_open - 1
+        if token_value(cursor) == "=>":
+            cursor -= 1
+        while cursor >= 0 and token_value(cursor) not in {";", "{", "}", "=", ","}:
+            if token_value(cursor) == ")":
+                open_index = matching_open.get(cursor)
+                if (
+                    open_index is not None
+                    and _control_flow_parenthesis_head(tokens, end=open_index) is None
+                ):
+                    function_scopes.add(scope)
+                    bindings[scope].update(parameter_names(open_index, cursor))
+                    if any(token_value(index) == ":" for index in range(cursor + 1, body_open)):
+                        annotated_function_candidates.add(scope)
+                break
+            cursor -= 1
+
+    # An object-shaped return annotation has its own brace before the actual
+    # body. Transfer the candidate function scope to the following brace.
+    for body_open, scope in scope_for_open.items():
+        previous_close = body_open - 1
+        annotation_open = matching_open.get(previous_close)
+        if annotation_open is None:
+            continue
+        annotation_scope = scope_for_open.get(annotation_open)
+        if annotation_scope not in annotated_function_candidates:
+            continue
+        function_scopes.discard(annotation_scope)
+        function_scopes.add(scope)
+        bindings[scope].update(bindings[annotation_scope])
+        bindings[annotation_scope].difference_update(target_names)
+
+    # Single-parameter braced arrows do not have a parenthesized head.
+    for index, token in enumerate(tokens):
+        if token != ("punctuation", "=>") or index == 0:
+            continue
+        arrow_names: set[str] = set()
+        if tokens[index - 1][0] == "identifier":
+            if tokens[index - 1][1] in target_names:
+                arrow_names.add(tokens[index - 1][1])
+        elif token_value(index - 1) == ")":
+            open_index = matching_open.get(index - 1)
+            if open_index is not None:
+                arrow_names.update(parameter_names(open_index, index - 1))
+        if not arrow_names and token_value(index - 1) != ")":
+            cursor = index - 1
+            while cursor >= 0 and token_value(cursor) not in {";", "{", "}", "=", ","}:
+                if token_value(cursor) == ")":
+                    open_index = matching_open.get(cursor)
+                    if open_index is not None:
+                        arrow_names.update(parameter_names(open_index, cursor))
+                    break
+                cursor -= 1
+        if token_value(index + 1) == "{":
+            scope = scope_for_open.get(index + 1)
+            if scope is not None:
+                function_scopes.add(scope)
+                bindings[scope].update(arrow_names)
+            continue
+        if not arrow_names:
+            continue
+        end = index + 1
+        while end < len(tokens) and token_value(end) not in {",", ";", ")", "]", "}"}:
+            if token_value(end) in {"(", "[", "{"}:
+                end = matching_close.get(end, end)
+            end += 1
+        expression_arrow_bindings.append((index + 1, end, frozenset(arrow_names)))
+
+    for body_open, scope in scope_for_open.items():
+        if token_value(body_open - 1) == "static":
+            function_scopes.add(scope)
+
+    # Function declarations and named function expressions bind their name in
+    # the containing scope and body respectively.
+    for index, token in enumerate(tokens):
+        if token != ("identifier", "function"):
+            continue
+        cursor = index + 1
+        if token_value(cursor) == "*":
+            cursor += 1
+        name_index = cursor if cursor < len(tokens) and tokens[cursor][0] == "identifier" else None
+        if name_index is None or tokens[name_index][1] not in target_names:
+            continue
+        previous = token_value(index - 1)
+        is_declaration = index == 0 or previous in {
+            ";",
+            "{",
+            "}",
+            "async",
+            "declare",
+            "default",
+            "export",
+        }
+        if is_declaration:
+            bindings[scope_at_token[index]].add(tokens[name_index][1])
+        while cursor < len(tokens) and token_value(cursor) != "(":
+            cursor += 1
+        close_index = matching_close.get(cursor)
+        body_open = None if close_index is None else close_index + 1
+        if body_open is None or token_value(body_open) != "{":
+            continue
+        body_scope = scope_for_open.get(body_open)
+        if body_scope is not None:
+            bindings[body_scope].add(tokens[name_index][1])
+
+    for index, token in enumerate(tokens):
+        if token != ("identifier", "class") or tokens[index + 1 : index + 2] == ():
+            continue
+        name_index = index + 1
+        if tokens[name_index][0] != "identifier" or tokens[name_index][1] not in target_names:
+            continue
+        body_open = name_index + 1
+        while body_open < len(tokens) and token_value(body_open) != "{":
+            body_open += 1
+        body_scope = scope_for_open.get(body_open)
+        if body_scope is not None:
+            bindings[body_scope].add(tokens[name_index][1])
+        previous = token_value(index - 1)
+        if index == 0 or previous in {
+            ";",
+            "{",
+            "}",
+            "abstract",
+            "declare",
+            "default",
+            "export",
+        }:
+            bindings[scope_at_token[index]].add(tokens[name_index][1])
+
+    # Direct lexical declarations cover the overwhelmingly common shadowing
+    # forms.  ``var`` hoists to the nearest function/static-block scope.
+    declaration_heads = {"const", "let", "using", "var"}
+    token_line_breaks = getattr(tokens, "line_breaks_before", ())
+    for index, (kind, value) in enumerate(tokens):
+        if (
+            kind != "identifier"
+            or value not in declaration_heads
+            or token_value(index - 1) in {"#", ".", "?."}
+            or not (
+                tokens[index + 1 : index + 2]
+                and (tokens[index + 1][0] == "identifier" or token_value(index + 1) in {"{", "["})
+            )
+        ):
+            continue
+        scope = scope_at_token[index]
+        if value == "var":
+            while scope != 0 and scope not in function_scopes:
+                scope = scope_parent[scope]
+        binding_start = index + 1
+        while binding_start < len(tokens):
+            binding_end = binding_start + 1
+            if token_value(binding_start) in {"{", "["}:
+                binding_end = matching_close.get(binding_start, binding_start) + 1
+            bindings[scope].update(pattern_names(binding_start, binding_end))
+            cursor = binding_end
+            in_type_annotation = token_value(cursor) == ":"
+            angle_depth = 0
+            while cursor < len(tokens):
+                if token_value(cursor) in {"(", "[", "{"}:
+                    cursor = matching_close.get(cursor, cursor) + 1
+                    continue
+                if in_type_annotation and token_value(cursor) == "<":
+                    angle_depth += 1
+                elif in_type_annotation and token_value(cursor) == ">" and angle_depth:
+                    angle_depth -= 1
+                elif token_value(cursor) == "=" and angle_depth == 0:
+                    in_type_annotation = False
+                if token_value(cursor) in {";", "in", "of"}:
+                    cursor = len(tokens)
+                    break
+                if token_value(cursor) == "," and angle_depth == 0:
+                    binding_start = cursor + 1
+                    break
+                if (
+                    len(token_line_breaks) == len(tokens)
+                    and token_line_breaks[cursor]
+                    and cursor > binding_end
+                    and _can_end_statement_before_block(*tokens[cursor - 1])
+                ):
+                    cursor = len(tokens)
+                    break
+                cursor += 1
+            else:
+                cursor = len(tokens)
+            if cursor >= len(tokens):
+                break
+
+    # Static imports introduce local bindings for the whole module. Advance
+    # over each clause once so semicolonless imports cannot trigger rescans.
+    index = 0
+    while index < len(tokens):
+        if tokens[index] != ("identifier", "import") or token_value(index + 1) in {
+            "(",
+            ".",
+            "?.",
+        }:
+            index += 1
+            continue
+        if tokens[index + 1 : index + 2] and tokens[index + 1][0] in {
+            "string",
+            "template",
+        }:
+            index += 2
+            continue
+        cursor = index + 1
+        while cursor < len(tokens):
+            if tokens[cursor][0] == "identifier" and tokens[cursor][1] in target_names:
+                previous = token_value(cursor - 1)
+                following = token_value(cursor + 1)
+                if previous == "as" or following in {",", "from", "=", "}"}:
+                    bindings[0].add(tokens[cursor][1])
+            if token_value(cursor) in {";", "from", "="}:
+                cursor += 1
+                break
+            cursor += 1
+        index = max(index + 1, cursor)
+
+    effective_bindings: list[frozenset[str]] = []
+    for scope, parent in enumerate(scope_parent):
+        inherited = frozenset() if parent < 0 else effective_bindings[parent]
+        effective_bindings.append(inherited | bindings[scope])
+
+    arrow_deltas = {name: [0] * (len(tokens) + 1) for name in target_names}
+    for start, end, names in expression_arrow_bindings:
+        for name in names:
+            arrow_deltas[name][start] += 1
+            arrow_deltas[name][end] -= 1
+
+    active_arrow_bindings = {name: 0 for name in target_names}
+    shadowed: set[int] = set()
+    for index, (kind, value) in enumerate(tokens):
+        for name in target_names:
+            active_arrow_bindings[name] += arrow_deltas[name][index]
+        if kind != "identifier" or value not in target_names:
+            continue
+        scope = scope_at_token[index]
+        if value in effective_bindings[scope] or active_arrow_bindings[value]:
+            shadowed.add(index)
+    return frozenset(shadowed)
+
+
 def _runtime_module_specifiers(source: str, *, source_path: Path) -> tuple[str, ...]:
     """Extract statically named native ESM and CommonJS runtime loads."""
 
     tokens = _runtime_javascript_tokens(source, source_path=source_path)
     specifiers: set[str] = set()
     erased_type_imports = _erased_type_import_indices(tokens)
+    shadowed_native_loaders = _shadowed_native_loader_indices(tokens)
 
     def literal(index: int) -> str | None:
         if index >= len(tokens):
@@ -4148,6 +4548,7 @@ def _runtime_module_specifiers(source: str, *, source_path: Path) -> tuple[str, 
         if value == "import" and previous not in {
             ("punctuation", "."),
             ("punctuation", "?."),
+            ("punctuation", "#"),
         }:
             if index + 1 < len(tokens) and tokens[index + 1] == ("punctuation", "("):
                 if index in erased_type_imports:
@@ -4183,22 +4584,42 @@ def _runtime_module_specifiers(source: str, *, source_path: Path) -> tuple[str, 
             if _type_only_import_assignment_require(tokens, index):
                 continue
             call_index = index + 1
+            if previous == ("punctuation", "#"):
+                continue
+            runtime_import_assignment = (
+                index >= 3
+                and tokens[index - 1] == ("punctuation", "=")
+                and tokens[index - 3] == ("identifier", "import")
+            )
             member_access = previous in {
                 ("punctuation", "."),
                 ("punctuation", "?."),
             }
-            is_native_loader = not member_access
+            is_native_loader = not member_access and (
+                runtime_import_assignment or index not in shadowed_native_loaders
+            )
             if member_access:
-                owner = tokens[index - 2] if index >= 2 else None
-                is_native_loader = owner == ("identifier", "module")
+                owner_index = index - 2
+                owner = tokens[owner_index] if owner_index >= 0 else None
+                is_native_loader = (
+                    owner == ("identifier", "module")
+                    and (owner_index == 0 or tokens[owner_index - 1][1] not in {"#", ".", "?."})
+                    and owner_index not in shadowed_native_loaders
+                )
             if not is_native_loader:
                 continue
             if (
                 call_index + 2 < len(tokens)
-                and tokens[call_index] == ("punctuation", ".")
+                and tokens[call_index][1] in {".", "?."}
                 and tokens[call_index + 1] == ("identifier", "resolve")
             ):
                 call_index += 2
+            if (
+                call_index + 1 < len(tokens)
+                and tokens[call_index] == ("punctuation", "?.")
+                and tokens[call_index + 1] == ("punctuation", "(")
+            ):
+                call_index += 1
             if call_index < len(tokens) and tokens[call_index] == ("punctuation", "("):
                 specifier = literal(call_index + 1)
                 if specifier is not None:

@@ -128,6 +128,157 @@ def test_runtime_package_scanner_captures_static_native_load_forms(
     )
 
 
+@pytest.mark.parametrize("prefix", ["", "\ufeff"])
+@pytest.mark.parametrize("terminator", ["\n", "\r", "\r\n", "\u2028", "\u2029"])
+def test_runtime_package_scanner_ignores_hashbang_text(
+    tmp_path: Path,
+    prefix: str,
+    terminator: str,
+) -> None:
+    source = f'{prefix}#! require("inert-hashbang"){terminator}require("real-after-hashbang");'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.cjs") == (
+        "real-after-hashbang",
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ('require?.("optional-require")', "optional-require"),
+        ('require?.resolve("optional-resolve")', "optional-resolve"),
+        ('require.resolve?.("optional-resolve-call")', "optional-resolve-call"),
+        ('module.require?.("optional-module-require")', "optional-module-require"),
+        ('module?.require?.("optional-module-chain")', "optional-module-chain"),
+    ],
+)
+def test_runtime_package_scanner_captures_optional_native_loader_calls(
+    tmp_path: Path,
+    source: str,
+    expected: str,
+) -> None:
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.cjs") == (expected,)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'class C { #require(value) {} method() { this.#require("inert-private"); } }',
+        'class C { #import(value) {} method() { this.#import("inert-private"); } }',
+        'class C { static #require(value) {} method() { C.#require("inert-private"); } }',
+        'class C { #module; method() { this.#module.require("inert-private"); } }',
+        'object.module.require("inert-nested-member");',
+    ],
+)
+def test_runtime_package_scanner_ignores_private_loader_names(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == ()
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'function run(require) { require("inert-parameter"); }',
+        'declare function require(id: string): unknown; require("inert-declaration");',
+        'function run(module) { module.require("inert-module-parameter"); }',
+        'const run = require => require("inert-arrow-parameter");',
+        'const run = (module) => module.require("inert-arrow-parameter");',
+        'const run = (require): void => require("inert-typed-arrow-parameter");',
+        '{ const require = localLoader; require("inert-const"); }',
+        '{ let module = localModule; module.require("inert-let"); }',
+        'function run({loader: require}) { require("inert-destructured"); }',
+        'class require { static value = require("inert-class-name"); }',
+        'class module { static value = module.require("inert-class-name"); }',
+        'import require from "runtime-loader-shim"; require("inert-import");',
+        'import {value as module} from "runtime-module-shim"; module.require("inert-import");',
+    ],
+)
+def test_runtime_package_scanner_ignores_shadowed_native_loaders(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    specifiers = _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts")
+
+    assert not any(specifier.startswith("inert-") for specifier in specifiers)
+
+
+def test_runtime_package_scanner_restores_ambient_loader_after_nested_shadow(
+    tmp_path: Path,
+) -> None:
+    source = (
+        '{ const require = localLoader; require("inert-shadow"); } '
+        'require("real-ambient"); '
+        'function local(module) { module.require("inert-module-shadow"); } '
+        'module.require("real-ambient-module");'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.cjs") == (
+        "real-ambient",
+        "real-ambient-module",
+    )
+
+
+def test_runtime_package_scanner_keeps_require_import_assignment_runtime_edge(
+    tmp_path: Path,
+) -> None:
+    source = 'import require = require("runtime-import-assignment"); require("inert-local");'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (
+        "runtime-import-assignment",
+    )
+
+
+def test_runtime_package_scanner_leaves_create_require_alias_tracking_authoritative(
+    tmp_path: Path,
+) -> None:
+    source = (
+        'import {createRequire} from "node:module"; '
+        "const require = createRequire(import.meta.url); "
+        'require("real-created-loader");'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.mjs") == (
+        "node:module",
+        "real-created-loader",
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'requ\\u0069re("hidden-require");',
+        'module.requ\\u0069re("hidden-module-require");',
+        'require.res\\u006flve("hidden-resolve");',
+        'const value = `${requ\\u0069re("hidden-template")}`;',
+        'const value = <A dep={requ\\u0069re("hidden-jsx")} />;',
+    ],
+)
+def test_runtime_package_scanner_rejects_escaped_executable_identifiers(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    suffix = ".tsx" if "<A" in source else ".cjs"
+    with pytest.raises(TypeScriptWorkerError, match="escaped executable identifier"):
+        _runtime_module_specifiers(source, source_path=tmp_path / f"runtime{suffix}")
+
+
+def test_runtime_package_scanner_keeps_inert_unicode_escapes_opaque(
+    tmp_path: Path,
+) -> None:
+    source = (
+        'const text = "requ\\u0069re(\\"inert-string\\")"; '
+        'const pattern = /requ\\u0069re\\("inert-regex"\\)/; '
+        'const template = `requ\\u0069re("inert-template")`; '
+        'require("real-after-inert-escapes");'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.cjs") == (
+        "real-after-inert-escapes",
+    )
+
+
 @pytest.mark.parametrize(
     "source",
     [
@@ -408,6 +559,48 @@ def test_runtime_package_scanner_tracks_control_flow_regex_inside_template_expre
     source = (
         'const rendered = `${(() => { if (ok)/} import("missing-template")/.test(value); '
         'return import("real-template"); })()}`;\n'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == (
+        "real-template",
+    )
+
+
+@pytest.mark.parametrize("terminator", ["\n", "\r", "\r\n", "\u2028", "\u2029"])
+@pytest.mark.parametrize("statement", ["break", "continue"])
+def test_runtime_package_scanner_uses_regex_after_restricted_control_statement(
+    tmp_path: Path,
+    statement: str,
+    terminator: str,
+) -> None:
+    source = (
+        f"while (ok) {{ {statement}{terminator}"
+        '/ require("inert-restricted-regex") /; } '
+        'require("real-after-restricted-regex");'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == (
+        "real-after-restricted-regex",
+    )
+
+
+def test_runtime_package_scanner_uses_regex_after_debugger_statement(
+    tmp_path: Path,
+) -> None:
+    source = 'debugger\n/ require("inert-debugger-regex") /; require("real-after-debugger-regex");'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == (
+        "real-after-debugger-regex",
+    )
+
+
+def test_runtime_package_scanner_tracks_restricted_statement_regex_in_template(
+    tmp_path: Path,
+) -> None:
+    source = (
+        "const rendered = `${(() => { while (ok) { break\n"
+        '/ require("inert-template-regex") /; } '
+        'return require("real-template"); })()}`;'
     )
 
     assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == (
