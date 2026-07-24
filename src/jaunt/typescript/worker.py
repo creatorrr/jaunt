@@ -2803,7 +2803,183 @@ def _transparent_static_module_specifier(
     close_for_open: Mapping[int, int],
     source_path: Path,
 ) -> str | None:
-    """Return one literal wrapped only in balanced grouping parentheses."""
+    """Return one literal wrapped only in runtime-transparent syntax.
+
+    JavaScript permits only grouping here.  TypeScript additionally erases
+    ``as``/``satisfies`` assertions and postfix non-null markers, so those may
+    wrap an otherwise static specifier without changing the runtime value.
+    The assertion type parser is intentionally conservative: accepting a
+    partial expression here would silently drop a runtime dependency edge.
+    """
+
+    typescript_syntax = source_path.suffix.lower() in {".cts", ".mts", ".ts", ".tsx"}
+
+    def safe_assertion_type(type_start: int, type_end: int) -> bool:
+        """Recognize a bounded, non-executable TypeScript type expression."""
+
+        prefix_operators = {"infer", "keyof", "readonly", "typeof", "unique"}
+
+        def parse_type(index: int, limit: int) -> int | None:
+            cursor = parse_operand(index, limit)
+            if cursor is None:
+                return None
+            while cursor < limit and tokens[cursor][1] in {"&", "|"}:
+                cursor = parse_operand(cursor + 1, limit)
+                if cursor is None:
+                    return None
+            return cursor
+
+        def parse_type_arguments(index: int, limit: int) -> int | None:
+            cursor = index + 1
+            if cursor >= limit or tokens[cursor][1] == ">":
+                return None
+            while cursor < limit:
+                cursor = parse_type(cursor, limit)
+                if cursor is None or cursor >= limit:
+                    return None
+                if tokens[cursor][1] == ">":
+                    return cursor + 1
+                if tokens[cursor][1] != ",":
+                    return None
+                cursor += 1
+                if cursor >= limit or tokens[cursor][1] == ">":
+                    return None
+            return None
+
+        def parse_type_list(index: int, limit: int) -> int | None:
+            cursor = index
+            while cursor < limit:
+                if tokens[cursor][1] == "...":
+                    cursor += 1
+                cursor = parse_type(cursor, limit)
+                if cursor is None:
+                    return None
+                if cursor < limit and tokens[cursor][1] == "?":
+                    cursor += 1
+                if cursor == limit:
+                    return cursor
+                if tokens[cursor][1] != ",":
+                    return None
+                cursor += 1
+                if cursor == limit:
+                    return cursor
+            return cursor
+
+        def parse_operand(index: int, limit: int) -> int | None:
+            cursor = index
+            while (
+                cursor < limit
+                and tokens[cursor][0] == "identifier"
+                and tokens[cursor][1] in prefix_operators
+            ):
+                cursor += 1
+            if cursor >= limit:
+                return None
+
+            kind, value = tokens[cursor]
+            if value == "(":
+                close = close_for_open.get(cursor)
+                if close is None or close >= limit:
+                    return None
+                nested_end = parse_type(cursor + 1, close)
+                if nested_end != close:
+                    return None
+                cursor = close + 1
+            elif value == "[":
+                close = close_for_open.get(cursor)
+                if close is None or close >= limit:
+                    return None
+                if cursor + 1 < close and parse_type_list(cursor + 1, close) != close:
+                    return None
+                cursor = close + 1
+            elif kind in {"number", "string", "template"}:
+                cursor += 1
+            elif kind == "identifier":
+                cursor += 1
+                if value == "import" and cursor < limit and tokens[cursor][1] == "(":
+                    close = close_for_open.get(cursor)
+                    if (
+                        close is None
+                        or close >= limit
+                        or close != cursor + 2
+                        or tokens[cursor + 1][0] not in {"string", "template"}
+                    ):
+                        return None
+                    cursor = close + 1
+            else:
+                return None
+
+            while cursor < limit:
+                value = tokens[cursor][1]
+                if value == ".":
+                    if cursor + 1 >= limit or tokens[cursor + 1][0] != "identifier":
+                        return None
+                    cursor += 2
+                    continue
+                if value == "<":
+                    generic_end = parse_type_arguments(cursor, limit)
+                    if generic_end is None:
+                        return None
+                    cursor = generic_end
+                    continue
+                if value == "[":
+                    close = close_for_open.get(cursor)
+                    if close is None or close >= limit:
+                        return None
+                    if cursor + 1 < close and parse_type(cursor + 1, close) != close:
+                        return None
+                    cursor = close + 1
+                    continue
+                break
+            return cursor
+
+        return type_start < type_end and parse_type(type_start, type_end) == type_end
+
+    def transparent_typescript_expression(
+        expression_start: int,
+        expression_end: int,
+    ) -> str | None:
+        if expression_start >= expression_end:
+            return None
+        if tokens[expression_start][1] == "(":
+            close = close_for_open.get(expression_start)
+            if close is None or close >= expression_end:
+                return None
+            specifier = transparent_typescript_expression(expression_start + 1, close)
+            if specifier is None:
+                return None
+            cursor = close + 1
+        elif tokens[expression_start][0] in {"string", "template"}:
+            specifier = tokens[expression_start][1]
+            cursor = expression_start + 1
+        else:
+            return None
+
+        while cursor < expression_end and tokens[cursor][1] == "!":
+            cursor += 1
+        if cursor == expression_end:
+            return specifier
+        if tokens[cursor] not in {
+            ("identifier", "as"),
+            ("identifier", "satisfies"),
+        }:
+            return None
+        type_end = expression_end
+        while type_end > cursor + 1 and tokens[type_end - 1][1] == "!":
+            type_end -= 1
+        if not safe_assertion_type(cursor + 1, type_end):
+            return None
+        return specifier
+
+    if typescript_syntax:
+        specifier = transparent_typescript_expression(start, end)
+        if specifier is None:
+            return None
+        if "\\" in specifier:
+            raise TypeScriptWorkerError(
+                f"Runtime package uses an escaped module specifier in {source_path}"
+            )
+        return specifier
 
     while start < end and tokens[start][1] == "(":
         if close_for_open.get(start) != end - 1:

@@ -161,6 +161,79 @@ def test_runtime_package_scanner_unwraps_grouped_static_specifiers(
 
 
 @pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ('import(("asserted-import" as const))', "asserted-import"),
+        ('require(("asserted-require" as const))', "asserted-require"),
+        (
+            'module.require(("satisfied-module-require" satisfies string))',
+            "satisfied-module-require",
+        ),
+        ('require.call(null, ("asserted-call" as "asserted-call"))', "asserted-call"),
+        ('require.apply(null, [("asserted-apply" as const)])', "asserted-apply"),
+        ('const load = require; load(("non-null-alias"!));', "non-null-alias"),
+        (
+            'require(((("nested-assertion" as Readonly<string>))!))',
+            "nested-assertion",
+        ),
+    ],
+)
+@pytest.mark.parametrize("suffix", [".cts", ".mts", ".ts", ".tsx"])
+def test_runtime_package_scanner_unwraps_erased_typescript_specifier_syntax(
+    tmp_path: Path,
+    source: str,
+    expected: str,
+    suffix: str,
+) -> None:
+    assert _runtime_module_specifiers(source, source_path=tmp_path / f"runtime{suffix}") == (
+        expected,
+    )
+
+
+@pytest.mark.parametrize("suffix", [".cjs", ".js", ".jsx", ".mjs"])
+@pytest.mark.parametrize(
+    "load",
+    [
+        'require(("typescript-only" as const))',
+        'require(("typescript-only" satisfies string))',
+        'require(("typescript-only"!))',
+    ],
+)
+def test_runtime_package_scanner_does_not_erase_typescript_syntax_in_javascript(
+    tmp_path: Path,
+    suffix: str,
+    load: str,
+) -> None:
+    source = f'{load}; require("real-javascript-sibling");'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / f"runtime{suffix}") == (
+        "real-javascript-sibling",
+    )
+
+
+@pytest.mark.parametrize(
+    "load",
+    [
+        'require((("partial-assertion" as const) + suffix))',
+        'require(("partial-logical" as string || fallback))',
+        'require(("partial-call" as typeof sideEffect()))',
+        'require(("partial-non-null"! + suffix))',
+        'require.call(null, ("partial-forward" satisfies string) + suffix)',
+        'const load = require; load(("partial-alias"!) + suffix)',
+    ],
+)
+def test_runtime_package_scanner_rejects_composed_typescript_specifiers(
+    tmp_path: Path,
+    load: str,
+) -> None:
+    source = f'{load}; require("real-static-sibling");'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (
+        "real-static-sibling",
+    )
+
+
+@pytest.mark.parametrize(
     "load",
     [
         'import(("partial-import") + suffix)',
