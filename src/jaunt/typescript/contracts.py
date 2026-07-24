@@ -1059,6 +1059,10 @@ async def _run_mutation_strength(
             captured_overlays,
             tier="derived",
             deleted_files=deleted_files,
+            # Mutation batteries run with a strict read boundary. Package-manager
+            # links must therefore become ordinary files in the disposable tree;
+            # granting their external store would expose unrelated siblings.
+            materialize_external_links=True,
         ) as isolated_root:
             installation = getattr(client, "installation", None)
             compiler = getattr(installation, "compiler_module_path", None)
@@ -1104,17 +1108,36 @@ async def _run_mutation_strength(
         lexical = Path(os.path.abspath(path))
         if lexical == runner_root or runner_root in lexical.parents:
             return lexical
+        if _isolated_from is not None:
+            source = _isolated_from.resolve()
+            # Preserve the lexical package route before resolving a development
+            # or package-manager link. The isolated workspace materializes that
+            # exact route even though its source target lives elsewhere.
+            with contextlib.suppress(ValueError):
+                mapped = runner_root / lexical.relative_to(source)
+                if mapped.exists():
+                    return mapped
         physical = path.resolve(strict=True)
-        if _isolated_from is None:
-            return physical
-        source = _isolated_from.resolve()
-        with contextlib.suppress(ValueError):
-            mapped = runner_root / physical.relative_to(source)
-            if mapped.exists():
-                return mapped
+        if _isolated_from is not None:
+            source = _isolated_from.resolve()
+            with contextlib.suppress(ValueError):
+                mapped = runner_root / physical.relative_to(source)
+                if mapped.exists():
+                    return mapped
         return physical
 
     compiler = sandbox_path(compiler)
+    if _isolated_from is not None:
+        installation_package = getattr(installation, "package_root", None)
+        if isinstance(installation_package, Path):
+            with contextlib.suppress(ValueError):
+                runner_relative = mutation_runner.relative_to(
+                    installation_package.resolve(strict=True)
+                )
+                mapped_package = sandbox_path(installation_package)
+                mapped_runner = mapped_package / runner_relative
+                if mapped_runner.is_file():
+                    mutation_runner = mapped_runner
     mutation_runner = sandbox_path(mutation_runner)
     node_path = Path(node)
     if node_path.is_absolute():
@@ -1152,7 +1175,7 @@ async def _run_mutation_strength(
             readable.add(compiler.parent.parent)
         external_links = _external_mutation_workspace_links(runner_root)
         bubblewrap = _bubblewrap_executable(environment)
-        if external_links and bubblewrap is None:
+        if external_links:
             shown = ", ".join(
                 candidate.relative_to(runner_root).as_posix()
                 for candidate, _physical in external_links[:5]
@@ -1161,16 +1184,10 @@ async def _run_mutation_strength(
             if remainder > 0:
                 shown += f" (and {remainder} more)"
             raise JauntConfigError(
-                "TypeScript contract mutation strength cannot safely use Node's permission "
-                "fallback because the disposable workspace contains links outside its root: "
-                f"{shown}. Install bubblewrap on Linux, replace the external package links "
-                "with local files, or set [contract] strength = false."
+                "TypeScript contract mutation strength could not materialize links outside "
+                f"its disposable workspace: {shown}. Replace those links with local files "
+                "or set [contract] strength = false."
             )
-        for _candidate, physical in external_links:
-            for parent in (physical, *physical.parents):
-                if parent.name == "node_modules":
-                    readable.add(parent)
-                    break
         minimal_readable = tuple(
             sorted(
                 path
@@ -1184,8 +1201,9 @@ async def _run_mutation_strength(
             _node_permission_flag(node),
             "--allow-addons",
             "--allow-worker",
-            # Only the trusted coordinator may launch mutant subprocesses.
-            # mutation.ts deliberately omits this flag from every child.
+            # The trusted coordinator and per-mutant Vitest host may launch
+            # infrastructure children. The preloaded guard strips this flag
+            # before generated batteries enter their worker threads.
             "--allow-child-process",
             f"--require={permission_guard}",
             *(f"--allow-fs-read={path}" for path in minimal_readable),

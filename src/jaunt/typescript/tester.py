@@ -6178,6 +6178,7 @@ def _isolated_test_workspace(
     *,
     tier: str,
     deleted_files: Sequence[str] = (),
+    materialize_external_links: bool = False,
 ) -> Iterator[Path]:
     """Copy one test tier without leaving links back into the source workspace.
 
@@ -6185,8 +6186,10 @@ def _isolated_test_workspace(
     symlink to the original ``node_modules`` is not isolation: resolving
     ``node_modules/../tests`` follows the physical parent and reaches held-out
     batteries.  Internal links are therefore remapped into the copy and external
-    links are materialized.  Generated batteries are staged only from the exact
-    selected bytes after the ordinary tree has been copied.
+    package links can be materialized for mutation runs, but a workspace-wide
+    external ``node_modules`` link is rejected rather than copying an unbounded
+    package store. Generated batteries are staged only from the exact selected
+    bytes after the ordinary tree has been copied.
     """
 
     if tier not in {"example", "derived"}:
@@ -6254,10 +6257,39 @@ def _isolated_test_workspace(
                         f"{candidate}"
                     )
 
-        def copy_symlink(source: Path, destination: Path, active: frozenset[Path]) -> None:
+        def resolved_symlink_target(source: Path, external_root: Path | None) -> Path | None:
             try:
                 physical = source.resolve(strict=True)
-            except OSError:
+            except OSError as exc:
+                if external_root is not None:
+                    raise JauntConfigError(
+                        "Mutation testing cannot safely materialize an invalid nested "
+                        f"external package link: {source}"
+                    ) from exc
+                return None
+            if external_root is not None:
+                try:
+                    package_root = external_root.resolve(strict=True)
+                except OSError as exc:
+                    raise JauntConfigError(
+                        "Mutation testing cannot safely materialize an invalid "
+                        f"external package root: {external_root}"
+                    ) from exc
+                if physical != package_root and package_root not in physical.parents:
+                    raise JauntConfigError(
+                        "Mutation testing cannot safely materialize a nested link "
+                        f"outside its external package: {source}"
+                    )
+            return physical
+
+        def copy_symlink(
+            source: Path,
+            destination: Path,
+            active: frozenset[Path],
+            external_root: Path | None,
+        ) -> None:
+            physical = resolved_symlink_target(source, external_root)
+            if physical is None:
                 return
             if source_is_generated_battery(physical) or source_is_snapshot(physical):
                 return
@@ -6273,22 +6305,56 @@ def _isolated_test_workspace(
                         target_is_directory=physical.is_dir(),
                     )
                     return
-            else:
+            elif materialize_external_links and source == root / "node_modules":
+                # A whole store can contain unrelated packages and be arbitrarily
+                # large. Mutation isolation only supports bounded package links.
+                raise JauntConfigError(
+                    "Mutation testing cannot safely materialize a workspace-wide "
+                    f"node_modules link to an external package store: {source}"
+                )
+            elif not materialize_external_links:
                 store = external_package_store(physical)
                 if store is not None:
                     assert_external_store_safe(store)
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     destination.symlink_to(physical, target_is_directory=physical.is_dir())
                     return
-            copy_entry(physical, destination, active)
+            copy_entry(
+                physical,
+                destination,
+                active,
+                external_root=external_root or physical,
+            )
 
-        def copy_entry(source: Path, destination: Path, active: frozenset[Path]) -> None:
+        def copy_entry(
+            source: Path,
+            destination: Path,
+            active: frozenset[Path],
+            *,
+            external_root: Path | None = None,
+        ) -> None:
+            # Validate every link in a materialized package before applying name-
+            # based filters. A link called `.git` or `node_modules` must not hide
+            # an escape merely because its destination would be skipped.
+            if source.is_symlink() and external_root is not None:
+                resolved_symlink_target(source, external_root)
             if source.name in skipped_directories:
+                return
+            # A linked package's private install can dwarf the package itself and
+            # is not part of the project-local dependency boundary. Dependencies
+            # resolve from the copied workspace's own node_modules; if one is
+            # missing, the protected runner fails closed instead of importing the
+            # linked package's unrelated development tree.
+            if (
+                external_root is not None
+                and source != external_root
+                and source.name == "node_modules"
+            ):
                 return
             if source_is_generated_battery(source) or source_is_snapshot(source):
                 return
             if source.is_symlink():
-                copy_symlink(source, destination, active)
+                copy_symlink(source, destination, active, external_root)
                 return
             if source.is_dir():
                 try:
@@ -6300,7 +6366,12 @@ def _isolated_test_workspace(
                 destination.mkdir(parents=True, exist_ok=True)
                 nested_active = active | {physical}
                 for entry in source.iterdir():
-                    copy_entry(entry, destination / entry.name, nested_active)
+                    copy_entry(
+                        entry,
+                        destination / entry.name,
+                        nested_active,
+                        external_root=external_root,
+                    )
                 shutil.copystat(source, destination, follow_symlinks=False)
                 return
             if source.is_file():

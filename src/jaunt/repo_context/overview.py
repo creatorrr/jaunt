@@ -164,6 +164,7 @@ async def load_or_build_overview(
     prose = raw.strip()
     if cost_tracker is not None and usage is not None:
         cost_tracker.record("__project_overview__", usage)
+        cost_tracker.check_budget()
 
     state_dir.mkdir(parents=True, exist_ok=True)
     overview_path.write_text(prose, encoding="utf-8")

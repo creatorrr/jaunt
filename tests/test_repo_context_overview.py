@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from jaunt.errors import JauntQuotaGenerationError
+from jaunt.errors import JauntBudgetExceededError, JauntQuotaGenerationError
 from jaunt.generate.base import (
     GenerationRequest,
     GenerationResult,
@@ -340,6 +340,42 @@ def test_overview_records_usage_against_cost_tracker(tmp_path: Path) -> None:
     assert tracker.api_calls == 1
     assert tracker.total_prompt_tokens == 100
     assert tracker.total_completion_tokens == 20
+
+
+def test_over_budget_overview_does_not_publish_cache(tmp_path: Path) -> None:
+    """An over-budget model call is charged but never published as a valid cache."""
+    from jaunt.cost import CostTracker
+    from jaunt.generate.base import TokenUsage
+
+    usage = TokenUsage(
+        prompt_tokens=100,
+        completion_tokens=20,
+        model="gpt-5.5",
+        provider="codex",
+        cached_prompt_tokens=0,
+    )
+    backend = _UsageBackend(usage)
+    tracker = CostTracker(max_cost=0.0)
+    state_dir = tmp_path / ".jaunt_state"
+
+    with pytest.raises(JauntBudgetExceededError, match="exceeds budget"):
+        asyncio.run(
+            load_or_build_overview(
+                backend,
+                repo_map_block="map",
+                project_docs="docs",
+                digest="d",
+                state_dir=state_dir,
+                enabled=True,
+                prompts=_stub_prompts(),
+                cost_tracker=tracker,
+            )
+        )
+
+    assert backend.calls == 1
+    assert tracker.api_calls == 1
+    assert not (state_dir / "PROJECT_OVERVIEW.md").exists()
+    assert not (state_dir / "project_overview.digest").exists()
 
 
 def test_overview_and_generation_share_one_quota_wait_ledger(

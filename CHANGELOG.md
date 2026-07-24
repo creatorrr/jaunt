@@ -65,9 +65,12 @@ Python or TypeScript release.
   positive.
 - Run contract mutation batteries from a disposable workspace under the protected Node
   permission envelope, with Linux namespace isolation when available. The trusted
-  coordinator alone may create children; each mutant loses that permission and cannot
-  read or write outside the isolated workspace. The portable fallback now refuses a
-  disposable tree whose symlinks escape that boundary.
+  coordinator and per-mutant runner host may create infrastructure children, including
+  Vitest 3's esbuild service; the preloaded guard removes that permission from battery
+  workers, which cannot create processes or read or write outside the isolated workspace.
+  External dependency links are materialized without granting their package-store parent,
+  and any residual escape link fails before the runner starts. Runner/collection failures
+  and timeouts are excluded, leave the report incomplete, and never count as killed mutants.
 - Preserve bounded startup diagnostics when Vitest fails before it can execute a
   protected battery, while keeping executed held-out failures opaque. One battery's
   ordinary generation infrastructure failure is reported without discarding successful

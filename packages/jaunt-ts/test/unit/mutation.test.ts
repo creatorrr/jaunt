@@ -5,11 +5,13 @@ import { afterEach, expect, test } from "vitest";
 import {
   generateMutationCases,
   runMutationProcess,
+  runSingleMutant,
   runMutationStrength,
   type MutationExecutor,
   type MutationRunResult,
   type MutationStrengthInput,
 } from "../../src/test/mutation.js";
+import { redactedRunnerFailure } from "../../src/test/runner.js";
 import { createFixtureWorkspace } from "../helpers/workspace.js";
 
 const roots: string[] = [];
@@ -56,6 +58,8 @@ function setup(source = CONTRACT): MutationStrengthInput {
 function processResult(value: {
   compiled?: boolean;
   killed?: boolean;
+  reportedTimeout?: boolean;
+  runnerError?: boolean;
   timedOut?: boolean;
 }): MutationRunResult {
   return {
@@ -64,6 +68,8 @@ function processResult(value: {
     stdout: JSON.stringify({
       compiled: value.compiled ?? true,
       killed: value.killed ?? true,
+      ...(value.reportedTimeout ? { timedOut: true } : {}),
+      ...(value.runnerError ? { runnerError: true } : {}),
     }),
     stderr: "",
     outputTruncated: false,
@@ -146,7 +152,112 @@ test("non-compiling mutants are strength-excluded from the denominator", async (
   ).toBe(true);
 });
 
-test("a timed-out mutant is killed and the committed source stays byte-identical", async () => {
+test("runner failures are excluded instead of strengthening the score", async () => {
+  const report = await runMutationStrength(setup(), async () =>
+    processResult({ killed: false, runnerError: true }),
+  );
+  expect(report.complete).toBe(false);
+  expect(report.score.applicable).toBe(0);
+  expect(report.score.killed).toBe(0);
+  expect(report.excluded.length).toBeGreaterThan(0);
+  expect(report.excluded.every((item) => item.reason === "runner-error")).toBe(
+    true,
+  );
+});
+
+test("typecheck runner failures propagate through the per-mutant boundary", async () => {
+  let calls = 0;
+  const result = await runSingleMutant({ runner: {} }, async () => {
+    calls += 1;
+    return redactedRunnerFailure("typecheck");
+  });
+  expect(result).toEqual({
+    compiled: false,
+    killed: false,
+    runnerError: true,
+  });
+  expect(calls).toBe(1);
+});
+
+test("empty failed run results propagate through the per-mutant boundary", async () => {
+  let calls = 0;
+  const result = await runSingleMutant({ runner: {} }, async ({ mode }) => {
+    calls += 1;
+    return {
+      ok: mode === "typecheck",
+      mode,
+      diagnostics: [],
+      tests: [],
+      captured: { stdout: "", stderr: "" },
+    };
+  });
+  expect(result).toEqual({
+    compiled: true,
+    killed: false,
+    runnerError: true,
+  });
+  expect(calls).toBe(2);
+});
+
+test("empty failed run results are excluded from mutation strength", async () => {
+  const single = await runSingleMutant({ runner: {} }, async ({ mode }) => ({
+    ok: mode === "typecheck",
+    mode,
+    diagnostics: [],
+    tests: [],
+    captured: { stdout: "", stderr: "" },
+  }));
+  const report = await runMutationStrength(setup(), async () =>
+    processResult({
+      compiled: single.compiled,
+      killed: single.killed,
+      runnerError: single.runnerError,
+    }),
+  );
+  expect(report.complete).toBe(false);
+  expect(report.score.applicable).toBe(0);
+  expect(report.score.killed).toBe(0);
+  expect(report.excluded.length).toBeGreaterThan(0);
+  expect(report.excluded.every((item) => item.reason === "runner-error")).toBe(
+    true,
+  );
+});
+
+test("Vitest-reported timeouts propagate through the per-mutant boundary", async () => {
+  let calls = 0;
+  const result = await runSingleMutant({ runner: {} }, async ({ mode }) => {
+    calls += 1;
+    return {
+      ok: mode === "typecheck",
+      mode,
+      diagnostics: [],
+      tests:
+        mode === "run"
+          ? [{ caseId: "timed-out-test", category: "timeout" }]
+          : [],
+      captured: { stdout: "", stderr: "" },
+    };
+  });
+  expect(result).toEqual({
+    compiled: true,
+    killed: false,
+    timedOut: true,
+  });
+  expect(calls).toBe(2);
+});
+
+test("Vitest-reported timeouts are excluded from mutation strength", async () => {
+  const report = await runMutationStrength(setup(), async () =>
+    processResult({ killed: false, reportedTimeout: true }),
+  );
+  expect(report.complete).toBe(false);
+  expect(report.score.applicable).toBe(0);
+  expect(report.score.killed).toBe(0);
+  expect(report.excluded.length).toBeGreaterThan(0);
+  expect(report.excluded.every((item) => item.reason === "timeout")).toBe(true);
+});
+
+test("a per-mutant timeout is excluded and leaves later mutants runnable", async () => {
   const input = setup();
   const source = resolve(input.root, input.sourcePath);
   const before = readFileSync(source);
@@ -156,7 +267,12 @@ test("a timed-out mutant is killed and the committed source stays byte-identical
       ? processResult({ timedOut: true })
       : processResult({ killed: true });
   const report = await runMutationStrength(input, timeoutOnce);
-  expect(report.killed.some((item) => item.reason === "timeout")).toBe(true);
+  expect(report.complete).toBe(false);
+  expect(report.killed.some((item) => item.reason === "timeout")).toBe(false);
+  expect(
+    report.excluded.filter((item) => item.reason === "timeout"),
+  ).toHaveLength(1);
+  expect(calls).toBeGreaterThan(1);
   expect(readFileSync(source)).toEqual(before);
 });
 
@@ -168,6 +284,7 @@ test("a global deadline marks the strength run incomplete", async () => {
   expect(report.complete).toBe(false);
   expect(report.killed).toHaveLength(0);
   expect(report.excluded.length).toBeGreaterThan(0);
+  expect(report.excluded[0]?.reason).toBe("timeout");
 });
 
 test("targets with no safe mutable site are strength-excluded", async () => {

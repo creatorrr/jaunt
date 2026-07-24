@@ -146,7 +146,7 @@
   "facadePath": "src/index.ts",
   "fingerprint": {
     "compilerOptionsHash": "sha256:675c129a2f6916705a4b5892acd260ec0dc719838ad83ecc17ac49a3890cbfaf",
-    "generationFingerprint": "sha256:614a84f49fc34f51c7e76999a8760e3e36133c39e96426254a4adb32cbd6bb6f",
+    "generationFingerprint": "sha256:e9b9f0eb9fe9ecde807c8e5fecd6d636cb12c31b5ad86e3ef91d832bb9c96419",
     "ir": "contract-ir/1-draft.3",
     "protocol": "jaunt-ts/1-draft.3",
     "toolVersion": "1.7.11",

@@ -77,10 +77,14 @@ upgrading even when their behavior is unchanged. The `build` → `test --no-buil
 call; `--no-semantic-gate` makes the model-free intent explicit for the build step.
 
 Contract mutation scoring now runs from a disposable workspace. On supported Linux hosts
-Jaunt adds a namespace boundary; all hosts apply Node's filesystem permissions, and mutant
-children cannot create further processes. The portable fallback refuses an external
-symlink in that disposable tree rather than allowing it to escape the write boundary.
-This changes no committed contract format.
+Jaunt adds a namespace boundary; all hosts apply Node's filesystem permissions. Trusted
+runner hosts may start infrastructure children such as Vitest 3's esbuild service, but the
+preloaded guard removes that permission from generated battery workers. Battery code cannot
+create processes or read or write outside the isolated workspace. External dependency links
+are materialized into that workspace instead of granting access to their package-store
+parent; any link that still escapes the copy fails before the runner starts. Mutation
+timeouts and runner failures are excluded and leave the strength report incomplete rather
+than increasing its score. This changes no committed contract format.
 
 Codex plan-level usage limits still fail immediately unless you opt in to waiting. Set a
 project default or override it for one command:

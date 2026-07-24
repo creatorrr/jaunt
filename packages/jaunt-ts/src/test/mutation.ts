@@ -96,10 +96,14 @@ interface SingleMutantInput {
   readonly runner: Omit<TestRunnerInput, "mode">;
 }
 
-interface SingleMutantOutput {
+export interface SingleMutantOutput {
   readonly compiled: boolean;
   readonly killed: boolean;
+  readonly runnerError?: boolean;
+  readonly timedOut?: boolean;
 }
+
+type TestRunner = typeof runTestRunner;
 
 export type MutationExecutor = (
   mutation: MutationCase,
@@ -312,6 +316,7 @@ function mutantPermissionArgs(input: MutationStrengthInput): string[] {
       value === "--experimental-permission" ||
       value === "--allow-addons" ||
       value === "--allow-worker" ||
+      value === "--allow-child-process" ||
       value.startsWith("--allow-fs-read=") ||
       value.startsWith("--allow-fs-write=") ||
       value.startsWith("--require="),
@@ -323,12 +328,15 @@ function mutantPermissionArgs(input: MutationStrengthInput): string[] {
     ) ||
     !args.some((value) => value.startsWith("--allow-fs-read=")) ||
     !args.some((value) => value.startsWith("--allow-fs-write=")) ||
+    !args.includes("--allow-child-process") ||
     !args.some((value) => value.startsWith("--require="))
   ) {
     throw new Error("mutation permission sandbox is incomplete");
   }
-  // The trusted coordinator receives --allow-child-process so it can schedule
-  // mutants. Generated batteries never inherit that escape hatch.
+  // The trusted coordinator schedules mutants, and each trusted per-mutant
+  // Vitest host may need an infrastructure child (Vitest 3 starts esbuild this
+  // way). The preloaded permission guard deliberately omits this flag from
+  // every battery worker, so generated code never inherits the escape hatch.
   return args;
 }
 
@@ -623,14 +631,13 @@ export async function runMutationStrength(
       Math.max(1, Math.min(input.timeoutMs, remaining)),
     );
     if (outcome.timedOut) {
+      complete = false;
+      excluded.push(record(mutation, "excluded", "timeout"));
       if (globallyLimited) {
-        complete = false;
-        excluded.push(record(mutation, "excluded", "runner-error"));
         for (const unrun of mutations.slice(index + 1))
           excluded.push(record(unrun, "excluded", "runner-error"));
         break;
       }
-      killed.push(record(mutation, "killed", "timeout"));
       continue;
     }
     if (outcome.exitCode !== 0 || outcome.outputTruncated) {
@@ -646,7 +653,13 @@ export async function runMutationStrength(
       excluded.push(record(mutation, "excluded", "runner-error"));
       continue;
     }
-    if (decoded.compiled !== true) {
+    if (decoded.timedOut === true) {
+      complete = false;
+      excluded.push(record(mutation, "excluded", "timeout"));
+    } else if (decoded.runnerError === true) {
+      complete = false;
+      excluded.push(record(mutation, "excluded", "runner-error"));
+    } else if (decoded.compiled !== true) {
       excluded.push(record(mutation, "excluded", "did-not-compile"));
     } else if (decoded.killed === true) {
       killed.push(record(mutation, "killed", "test-failed"));
@@ -689,14 +702,45 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-async function runSingleMutant(value: unknown): Promise<SingleMutantOutput> {
+function hasRunnerError(output: Awaited<ReturnType<TestRunner>>): boolean {
+  return output.tests.some(
+    (record) =>
+      record.category === "collection" || record.category === "runner",
+  );
+}
+
+function hasTestTimeout(output: Awaited<ReturnType<TestRunner>>): boolean {
+  return output.tests.some((record) => record.category === "timeout");
+}
+
+export async function runSingleMutant(
+  value: unknown,
+  execute: TestRunner = runTestRunner,
+): Promise<SingleMutantOutput> {
   if (!value || typeof value !== "object" || !("runner" in value))
     throw new Error("mutant input must contain runner settings");
   const runner = (value as { runner: Omit<TestRunnerInput, "mode"> }).runner;
-  const typed = await runTestRunner({ ...runner, mode: "typecheck" });
-  if (!typed.ok) return { compiled: false, killed: false };
-  const tested = await runTestRunner({ ...runner, mode: "run" });
-  return { compiled: true, killed: !tested.ok };
+  const typed = await execute({ ...runner, mode: "typecheck" });
+  if (!typed.ok) {
+    const runnerError = hasRunnerError(typed);
+    const timedOut = hasTestTimeout(typed);
+    return {
+      compiled: false,
+      killed: false,
+      ...(runnerError ? { runnerError: true } : {}),
+      ...(timedOut ? { timedOut: true } : {}),
+    };
+  }
+  const tested = await execute({ ...runner, mode: "run" });
+  const runnerError =
+    (!tested.ok && tested.tests.length === 0) || hasRunnerError(tested);
+  const timedOut = hasTestTimeout(tested);
+  return {
+    compiled: true,
+    killed: !tested.ok && !runnerError && !timedOut,
+    ...(runnerError ? { runnerError: true } : {}),
+    ...(timedOut ? { timedOut: true } : {}),
+  };
 }
 
 const invokedPath = process.argv[1] ? resolve(process.argv[1]) : "";
