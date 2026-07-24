@@ -167,4 +167,4 @@
 - [x] Add adopter-shaped regressions and run the full repository validation suite.
 - [x] Obtain an independent final Codex review and address every actionable finding.
 - [x] Re-run the completed patch in the adopter dashboard workspace before release.
-- [ ] Merge PR #97, close superseded PR #96, and publish both 1.7.11 packages.
+- [x] Merge PR #97, close superseded PR #96, and publish both 1.7.11 packages.

@@ -675,6 +675,11 @@ jobs:
           # protected contract/eject runner after direct Vitest passes. Full
           # contract and eject coverage runs before publishing; keep this live
           # registry smoke on deterministic magic freshness and public runtime.
+          refreeze_report="$(
+            "$venv/bin/jaunt" test --language ts --no-build --no-run --root "$project" --json
+          )"
+          python -c 'import json, sys; payload = json.loads(sys.argv[1]); expected = ["tests/__generated__/tokens.derived.test.ts", "tests/__generated__/tokens.example.test.ts"]; (payload.get("schema_version") == 2 and payload.get("command") == "test" and payload.get("ok") is True and payload.get("generated") == [] and payload.get("skipped") == [] and payload.get("failed") == {} and payload.get("refrozen") == expected) or sys.exit(f"Unexpected registry refreeze report: {payload}")' \
+            "$refreeze_report"
           "$venv/bin/jaunt" check --language ts --magic-only --root "$project"
           npm --prefix "$project" run typecheck
           npm --prefix "$project" test
