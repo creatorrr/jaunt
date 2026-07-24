@@ -458,6 +458,24 @@ def test_runtime_package_scanner_ignores_erased_import_type_expressions(
     assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == ()
 
 
+@pytest.mark.parametrize("assertion", ["as", "satisfies"])
+@pytest.mark.parametrize("asserted_type", ["Type", 'import("inert-type").Value'])
+@pytest.mark.parametrize(
+    ("operator", "package"),
+    [("&&", "runtime-and"), ("||", "runtime-or"), ("??", "runtime-nullish")],
+)
+def test_runtime_package_scanner_ends_type_assertions_at_logical_operators(
+    tmp_path: Path,
+    assertion: str,
+    asserted_type: str,
+    operator: str,
+    package: str,
+) -> None:
+    source = f'const result = value {assertion} {asserted_type} {operator} import("{package}");'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (package,)
+
+
 def test_runtime_package_scanner_keeps_dynamic_import_expressions_executable(
     tmp_path: Path,
 ) -> None:

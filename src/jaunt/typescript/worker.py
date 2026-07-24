@@ -4176,10 +4176,25 @@ def _erased_type_import_indices(
 
         region_kind = type_regions.get(depth)
         if region_kind is not None:
+            # Logical/nullish operators resume the surrounding expression;
+            # single ``|``/``&`` tokens can still belong to a union/intersection type.
             boundaries = (
                 {"=", ",", ")", "]", "}", ";", "=>", "{"}
                 if region_kind == "annotation"
-                else {",", ")", "]", "}", ";", "=>", "?", ":", "{"}
+                else {
+                    ",",
+                    ")",
+                    "]",
+                    "}",
+                    ";",
+                    "=>",
+                    "?",
+                    ":",
+                    "{",
+                    "&&",
+                    "||",
+                    "??",
+                }
             )
             if value in boundaries or line_break_starts_statement:
                 type_regions.pop(depth)
