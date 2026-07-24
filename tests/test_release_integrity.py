@@ -219,17 +219,40 @@ def test_workflows_gate_release_integrity_and_typescript_fixture_freshness() -> 
     candidate_check = '"$jaunt_bin" check --language ts --magic-only --root "$project"'
     candidate_typecheck = 'npm --prefix "$project" run typecheck'
     candidate_vitest = 'npm --prefix "$project" test'
-    assert candidate_refreeze in release
+    registry_refreeze = (
+        '"$venv/bin/jaunt" test --language ts --no-build --no-run --root "$project" --json'
+    )
+    registry_check = '"$venv/bin/jaunt" check --language ts --magic-only --root "$project"'
+    assert release.count(candidate_refreeze) == 1
+    assert release.count(registry_refreeze) == 1
     assert candidate_check in release
-    assert 'payload.get("generated") == []' in release
-    assert 'payload.get("skipped") == []' in release
-    assert 'payload.get("failed") == {}' in release
-    assert 'payload.get("refrozen") == expected' in release
+    assert registry_check in release
+    candidate_offset = release.index(candidate_refreeze)
+    candidate_check_offset = release.index(candidate_check, candidate_offset)
+    candidate_guard = release[candidate_offset:candidate_check_offset]
+    registry_offset = release.index(registry_refreeze)
+    registry_check_offset = release.index(registry_check, registry_offset)
+    registry_guard = release[registry_offset:registry_check_offset]
+    for guard, failure_message in (
+        (candidate_guard, "Unexpected exact-candidate refreeze report"),
+        (registry_guard, "Unexpected registry refreeze report"),
+    ):
+        assert 'payload.get("generated") == []' in guard
+        assert 'payload.get("skipped") == []' in guard
+        assert 'payload.get("failed") == {}' in guard
+        assert 'payload.get("refrozen") == expected' in guard
+        assert failure_message in guard
     assert (
-        release.index(candidate_refreeze)
-        < release.index(candidate_check)
+        candidate_offset
+        < candidate_check_offset
         < release.index(candidate_typecheck)
         < release.index(candidate_vitest)
+    )
+    assert (
+        registry_offset
+        < registry_check_offset
+        < release.index(candidate_typecheck, registry_offset)
+        < release.index(candidate_vitest, registry_offset)
     )
     assert 'if [[ -n "$published_commit" && "$published_commit" != "$GITHUB_SHA" ]]' in release
     assert "verify_pypi_candidates.py" in release
