@@ -10,6 +10,7 @@ import os
 import shutil
 import signal
 import stat
+from bisect import bisect_right
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -272,22 +273,147 @@ _NODE_BUILTIN_PACKAGES = frozenset(
 )
 _CONTROL_FLOW_PAREN_HEADS = frozenset({"catch", "for", "if", "switch", "while", "with"})
 _DECLARATION_BODY_HEADS = frozenset(
-    {"class", "enum", "function", "interface", "module", "namespace", "type"}
+    {"class", "enum", "function", "global", "interface", "module", "namespace", "type"}
 )
 _DECLARATION_PREFIXES = frozenset({"abstract", "async", "const", "declare", "default", "export"})
+_TYPED_BINDING_PREFIXES = frozenset(
+    {
+        "abstract",
+        "accessor",
+        "const",
+        "declare",
+        "let",
+        "override",
+        "private",
+        "protected",
+        "public",
+        "readonly",
+        "static",
+        "using",
+        "var",
+    }
+)
+_LABEL_CONTEXTUAL_IDENTIFIERS = frozenset(
+    {
+        "abstract",
+        "async",
+        "await",
+        "declare",
+        "implements",
+        "interface",
+        "module",
+        "namespace",
+        "of",
+        "type",
+    }
+)
+_JAVASCRIPT_LINE_TERMINATORS = frozenset({"\n", "\r", "\u2028", "\u2029"})
+_RUNTIME_VALUE_TOKEN_KINDS = frozenset(
+    {"computed-template", "jsx", "number", "regex", "string", "template"}
+)
 
 
-def _opens_control_flow_parenthesis(tokens: Sequence[tuple[str, str]]) -> bool:
-    """Return whether the next ``(`` opens a statement-leading control head."""
+def _line_comment_end(source: str, start: int) -> int:
+    """Return the next ECMAScript line terminator or ``len(source)``."""
 
-    if not tokens:
+    index = start
+    while index < len(source) and source[index] not in _JAVASCRIPT_LINE_TERMINATORS:
+        index += 1
+    return index
+
+
+class _RuntimeJavaScriptTokens(tuple[tuple[str, str], ...]):
+    """Executable tokens plus the source line-break boundary before each token."""
+
+    line_breaks_before: tuple[bool, ...]
+
+    def __new__(
+        cls,
+        values: Sequence[tuple[str, str]],
+        line_breaks_before: Sequence[bool],
+    ) -> _RuntimeJavaScriptTokens:
+        instance = super().__new__(cls, values)
+        boundaries = tuple(line_breaks_before)
+        if len(instance) != len(boundaries):
+            raise ValueError("Runtime token line-break metadata is misaligned")
+        instance.line_breaks_before = boundaries
+        return instance
+
+
+@dataclass(frozen=True)
+class _RuntimeTokenEvent:
+    """One executable token recorded before the final stream is flattened."""
+
+    kind: str
+    value: str
+    line_break_before: bool
+
+
+@dataclass(frozen=True)
+class _RuntimeExpressionGroup:
+    """A structured executable expression whose nested literals remain ropes."""
+
+    events: tuple[_RuntimeTokenEvent | _RuntimeGroupedValueEvent, ...]
+
+
+@dataclass(frozen=True)
+class _RuntimeGroupedValueEvent:
+    """Nested template/JSX expressions followed by their completed value."""
+
+    groups: tuple[_RuntimeExpressionGroup, ...]
+    kind: str
+    value: str
+    line_break_before: bool
+
+
+def _type_only_import_assignment_require(
+    tokens: Sequence[tuple[str, str]],
+    require_index: int,
+) -> bool:
+    """Recognize the erased ``import type Name = require(...)`` form."""
+
+    if require_index < 4 or tokens[require_index - 1] != ("punctuation", "="):
         return False
-    head = len(tokens) - 1
+    cursor = require_index - 2
+    while cursor >= 0 and tokens[cursor][1] not in {";", "{", "}"}:
+        if tokens[cursor] == ("identifier", "import"):
+            return (
+                cursor + 2 < require_index
+                and tokens[cursor + 1] == ("identifier", "type")
+                and tokens[cursor + 2] != ("punctuation", "=")
+            )
+        cursor -= 1
+    return False
+
+
+def _control_flow_parenthesis_head(
+    tokens: Sequence[tuple[str, str]],
+    *,
+    end: int | None = None,
+) -> str | None:
+    """Return the statement-leading control keyword before the next ``(``."""
+
+    token_count = len(tokens) if end is None else end
+    if token_count <= 0:
+        return None
+    head = token_count - 1
     if tokens[head] == ("identifier", "await") and head > 0:
         head -= 1
     if tokens[head][0] != "identifier" or tokens[head][1] not in _CONTROL_FLOW_PAREN_HEADS:
-        return False
-    return head == 0 or tokens[head - 1][1] not in {".", "?."}
+        return None
+    if head > 0 and tokens[head - 1][1] in {".", "?."}:
+        return None
+    return tokens[head][1]
+
+
+def _opens_control_flow_parenthesis(
+    tokens: Sequence[tuple[str, str]],
+    *,
+    end: int | None = None,
+) -> bool:
+    """Return whether the next ``(`` opens a statement-leading control head."""
+
+    return _control_flow_parenthesis_head(tokens, end=end) is not None
 
 
 def _closes_control_flow_parenthesis(tokens: Sequence[tuple[str, str]], close_index: int) -> bool:
@@ -303,29 +429,47 @@ def _closes_control_flow_parenthesis(tokens: Sequence[tuple[str, str]], close_in
         elif value == "(":
             depth -= 1
             if depth == 0:
-                return _opens_control_flow_parenthesis(tokens[:index])
+                return _opens_control_flow_parenthesis(tokens, end=index)
     return False
 
 
 def _colon_opens_statement_block(
-    tokens: Sequence[tuple[str, str]], *, enclosing_statement_brace: bool | None
+    tokens: Sequence[tuple[str, str]],
+    *,
+    enclosing_statement_brace: bool | None,
+    end: int | None = None,
+    line_breaks_before: Sequence[bool] | None = None,
 ) -> bool:
     """Recognize a label or completed switch clause before a block."""
 
-    if not tokens or tokens[-1][1] != ":":
+    token_count = len(tokens) if end is None else end
+    if token_count <= 0 or tokens[token_count - 1][1] != ":":
         return False
-    if len(tokens) >= 2 and tokens[-2][0] == "identifier":
-        prefix = len(tokens) - 3
+    if token_count >= 2 and tokens[token_count - 2][0] == "identifier":
+        label_index = token_count - 2
+        prefix = token_count - 3
+        while prefix >= 1 and tokens[prefix][1] == ":" and tokens[prefix - 1][0] == "identifier":
+            label_index = prefix - 1
+            prefix -= 2
         if (
             prefix < 0
             or tokens[prefix][1] in {";", "}"}
             or (tokens[prefix][1] == "{" and enclosing_statement_brace is True)
+            or (tokens[prefix][0] == "identifier" and tokens[prefix][1] in {"do", "else"})
+            or (tokens[prefix][1] == ")" and _closes_control_flow_parenthesis(tokens, prefix))
+            or (
+                line_breaks_before is not None
+                and len(line_breaks_before) >= token_count
+                and line_breaks_before[label_index]
+                and label_index > 0
+                and _can_end_statement_before_label(*tokens[label_index - 1])
+            )
         ):
             return True
     expected_openings: list[str] = []
     opening_for = {")": "(", "]": "[", "}": "{"}
     clause_index: int | None = None
-    for index in range(len(tokens) - 2, -1, -1):
+    for index in range(token_count - 2, -1, -1):
         kind, value = tokens[index]
         if value in opening_for:
             expected_openings.append(opening_for[value])
@@ -344,7 +488,8 @@ def _colon_opens_statement_block(
     conditional_depth = 0
     expected_closings: list[str] = []
     closing_for = {"(": ")", "[": "]", "{": "}"}
-    for _kind, value in tokens[clause_index + 1 : -1]:
+    for index in range(clause_index + 1, token_count - 1):
+        _kind, value = tokens[index]
         if value in closing_for:
             expected_closings.append(closing_for[value])
         elif expected_closings:
@@ -360,7 +505,7 @@ def _colon_opens_statement_block(
 def _can_end_statement_before_block(kind: str, value: str) -> bool:
     """Return whether ASI may put a standalone block after this token."""
 
-    if kind in {"number", "regex", "string", "template"}:
+    if kind in _RUNTIME_VALUE_TOKEN_KINDS:
         return True
     if value in {")", "]", "}", "++", "--"}:
         return True
@@ -368,7 +513,6 @@ def _can_end_statement_before_block(kind: str, value: str) -> bool:
         return False
     return value not in {
         "abstract",
-        "async",
         "await",
         "case",
         "class",
@@ -400,13 +544,525 @@ def _can_end_statement_before_block(kind: str, value: str) -> bool:
     }
 
 
+def _can_end_statement_before_label(kind: str, value: str) -> bool:
+    """Return whether a line break can make the next identifier a label."""
+
+    return (
+        kind == "identifier" and value in _LABEL_CONTEXTUAL_IDENTIFIERS
+    ) or _can_end_statement_before_block(kind, value)
+
+
+def _can_end_statement_before_declaration(
+    tokens: Sequence[tuple[str, str]],
+    index: int,
+) -> bool:
+    """Recognize expression terminals before an ASI-separated declaration."""
+
+    kind, value = tokens[index]
+    if _can_end_statement_before_block(kind, value):
+        return True
+    if value == "!" and index > 0:
+        # TypeScript non-null assertions end an expression, while a leading
+        # logical-not remains a unary continuation.
+        return _can_end_statement_before_declaration(tokens, index - 1)
+    if value == "const" and index > 0 and tokens[index - 1] == ("identifier", "as"):
+        return True
+    if value == ">":
+        opening = _decorator_group_open(tokens, index)
+        return (
+            opening is not None
+            and opening > 0
+            and _can_end_statement_before_declaration(tokens, opening - 1)
+        )
+    return False
+
+
+class _ConditionalExpressionTracker:
+    """Track delimiter-local ternary expressions as tokens arrive."""
+
+    def __init__(self) -> None:
+        self._expected_closings: list[str] = []
+        self._question_counts = [0]
+        self._angle_depths = [0]
+        self._previous: tuple[str, str] | None = None
+
+    def append(self, kind: str, value: str) -> bool:
+        """Record one token and return whether it is a ternary colon."""
+
+        closing_for = {"(": ")", "[": "]", "{": "}"}
+        is_conditional_colon = False
+        if kind != "punctuation":
+            pass
+        elif value in closing_for:
+            self._expected_closings.append(closing_for[value])
+            self._question_counts.append(0)
+            self._angle_depths.append(0)
+        elif value in {")", "]", "}"}:
+            if self._expected_closings and value == self._expected_closings[-1]:
+                self._expected_closings.pop()
+                self._question_counts.pop()
+                self._angle_depths.pop()
+            else:
+                self._question_counts[-1] = 0
+                self._angle_depths[-1] = 0
+        elif value == "<" and self._question_counts[-1]:
+            self._angle_depths[-1] += 1
+        elif value == ">" and self._angle_depths[-1]:
+            self._angle_depths[-1] -= 1
+        elif value == "?":
+            self._question_counts[-1] += 1
+        elif value == ":" and self._question_counts[-1]:
+            # An adjacent ``?:`` is a TypeScript optional marker rather than
+            # a conditional with an empty consequent.
+            if self._previous == ("punctuation", "?"):
+                self._question_counts[-1] -= 1
+            else:
+                self._question_counts[-1] -= 1
+                is_conditional_colon = True
+            if not self._question_counts[-1]:
+                self._angle_depths[-1] = 0
+        elif value == "," and not self._angle_depths[-1]:
+            self._question_counts[-1] = 0
+        elif value == ";":
+            self._question_counts[-1] = 0
+            self._angle_depths[-1] = 0
+        self._previous = (kind, value)
+        return is_conditional_colon
+
+
+class _SwitchClauseTracker:
+    """Track case/default colons without rescanning their expressions."""
+
+    def __init__(self) -> None:
+        self._expected_closings: list[str] = []
+        self._switch_body_depths: list[int | None] = [None]
+        self._pending_clause_depths: list[int | None] = [None]
+        self._previous: tuple[str, str] | None = None
+
+    def append(
+        self,
+        kind: str,
+        value: str,
+        *,
+        opens_switch_body: bool = False,
+        conditional_colon: bool = False,
+    ) -> bool:
+        """Record one token and return whether it closes a switch clause."""
+
+        is_clause_colon = False
+        depth = len(self._expected_closings)
+        if (
+            kind == "identifier"
+            and value in {"case", "default"}
+            and self._switch_body_depths[-1] == depth
+            and (self._previous is None or self._previous[1] not in {".", "?."})
+        ):
+            self._pending_clause_depths[-1] = depth
+        elif kind == "punctuation" and value == ":":
+            if self._pending_clause_depths[-1] == depth and not conditional_colon:
+                self._pending_clause_depths[-1] = None
+                is_clause_colon = True
+        elif kind == "punctuation" and value == ";":
+            if self._pending_clause_depths[-1] == depth:
+                self._pending_clause_depths[-1] = None
+
+        closing_for = {"(": ")", "[": "]", "{": "}"}
+        if kind == "punctuation" and value in closing_for:
+            self._expected_closings.append(closing_for[value])
+            if value == "{":
+                self._switch_body_depths.append(depth + 1 if opens_switch_body else None)
+                self._pending_clause_depths.append(None)
+        elif kind == "punctuation" and value in {")", "]", "}"}:
+            if self._expected_closings and value == self._expected_closings[-1]:
+                self._expected_closings.pop()
+            if value == "}" and len(self._switch_body_depths) > 1:
+                self._switch_body_depths.pop()
+                self._pending_clause_depths.pop()
+        self._previous = (kind, value)
+        return is_clause_colon
+
+
+def _conditional_expression_colons(
+    tokens: Sequence[tuple[str, str]],
+) -> frozenset[int]:
+    """Find ternary colons in one linear pass over executable tokens."""
+
+    tracker = _ConditionalExpressionTracker()
+    return frozenset(
+        index for index, (kind, value) in enumerate(tokens) if tracker.append(kind, value)
+    )
+
+
+def _annotation_initializer_starts(
+    tokens: Sequence[tuple[str, str]],
+) -> list[int]:
+    """Precompute the existing tolerant type-suffix scan from every token."""
+
+    closing_for = {"(": ")", "[": "]", "{": "}", "<": ">"}
+    expected: list[tuple[int, str]] = []
+    starts = [-1] * (len(tokens) + 1)
+    for index, (_kind, value) in enumerate(tokens):
+        if value in closing_for:
+            expected.append((index, closing_for[value]))
+        elif expected and value == expected[-1][1]:
+            opening, _closing = expected.pop()
+            starts[opening] = index
+
+    stops = {";", ",", ")", "]", "}"}
+    for index in range(len(tokens) - 1, -1, -1):
+        value = tokens[index][1]
+        if value in closing_for:
+            close = starts[index]
+            starts[index] = -1 if close < 0 else starts[close + 1]
+        elif value == "=":
+            starts[index] = index + 1
+        elif value in stops:
+            starts[index] = -1
+        else:
+            starts[index] = starts[index + 1]
+    return starts
+
+
+def _colon_follows_comma_at_current_depth(tokens: Sequence[tuple[str, str]]) -> bool:
+    """Return whether the current colon's key started after a peer comma."""
+
+    if not tokens or tokens[-1][1] != ":":
+        return False
+    expected_openings: list[str] = []
+    opening_for = {")": "(", "]": "[", "}": "{", ">": "<"}
+    for index in range(len(tokens) - 2, -1, -1):
+        value = tokens[index][1]
+        if value in opening_for:
+            expected_openings.append(opening_for[value])
+            continue
+        if expected_openings:
+            if value == expected_openings[-1]:
+                expected_openings.pop()
+            continue
+        if value == ",":
+            return True
+        if value in {":", ";", "{", "}"}:
+            return False
+    return False
+
+
+def _decorator_group_open(
+    tokens: Sequence[tuple[str, str]],
+    close_index: int,
+    *,
+    minimum_index: int = 0,
+) -> int | None:
+    """Return the opener for one balanced decorator suffix group."""
+
+    structural_opening_for = {")": "(", "]": "[", "}": "{"}
+    close_kind, close = tokens[close_index]
+    if close_kind != "punctuation":
+        return None
+    if close not in {*structural_opening_for, ">"}:
+        return None
+    expected = ["<" if close == ">" else structural_opening_for[close]]
+    for index in range(close_index - 1, minimum_index - 1, -1):
+        kind, value = tokens[index]
+        if kind != "punctuation":
+            continue
+        if value in structural_opening_for:
+            expected.append(structural_opening_for[value])
+        elif expected[-1] == "<" and value == ">":
+            expected.append("<")
+        elif value == expected[-1]:
+            expected.pop()
+            if not expected:
+                return index
+        elif value in {"(", "[", "{"}:
+            return None
+    return None
+
+
+def _decorator_prefix_before(
+    tokens: Sequence[tuple[str, str]],
+    end: int,
+    *,
+    at_index: int | None = None,
+) -> int | None:
+    """Consume one decorator expression and return the token before its ``@``."""
+
+    cursor = end
+    consumed_primary = False
+    minimum_index = 0 if at_index is None else at_index + 1
+    while cursor >= 0:
+        while (
+            cursor >= 0
+            and tokens[cursor][0] == "punctuation"
+            and tokens[cursor][1] in {")", "]", "}", ">"}
+        ):
+            close = tokens[cursor][1]
+            opening = _decorator_group_open(
+                tokens,
+                cursor,
+                minimum_index=minimum_index,
+            )
+            if opening is None:
+                return None
+            if close in {"]", "}"} or (close == ")" and opening + 1 < cursor):
+                consumed_primary = True
+            cursor = opening - 1
+        before_non_null = cursor
+        while cursor >= 0 and tokens[cursor] == ("punctuation", "!"):
+            cursor -= 1
+        if cursor != before_non_null:
+            continue
+        if not consumed_primary and cursor >= 0 and tokens[cursor] == ("punctuation", "?."):
+            cursor -= 1
+            continue
+        if cursor >= 0 and tokens[cursor][0] == "identifier":
+            cursor -= 1
+            consumed_primary = True
+        elif not consumed_primary:
+            return None
+        if (
+            cursor >= 0
+            and tokens[cursor][0] == "punctuation"
+            and tokens[cursor][1]
+            in {
+                ".",
+                "?.",
+            }
+        ):
+            cursor -= 1
+            consumed_primary = False
+            continue
+        break
+    if (
+        consumed_primary
+        and cursor >= 0
+        and tokens[cursor] == ("punctuation", "@")
+        and (at_index is None or cursor == at_index)
+    ):
+        return cursor - 1
+    return None
+
+
+def _declaration_prefix_before(
+    tokens: Sequence[tuple[str, str]],
+    head_index: int,
+    *,
+    decorator_at_indices: Sequence[int] | None,
+) -> tuple[int, int, bool]:
+    """Return the token before a declaration, its start, and decorator use."""
+
+    declaration_start = head_index
+    prefix = head_index - 1
+    consumed_decorator = False
+    while True:
+        decorator_prefix: int | None = None
+        if decorator_at_indices is None:
+            decorator_prefix = _decorator_prefix_before(tokens, prefix)
+        else:
+            decorator_position = bisect_right(decorator_at_indices, prefix) - 1
+            if decorator_position >= 0:
+                decorator_prefix = _decorator_prefix_before(
+                    tokens,
+                    prefix,
+                    at_index=decorator_at_indices[decorator_position],
+                )
+        if decorator_prefix is not None:
+            consumed_decorator = True
+            declaration_start = decorator_prefix + 1
+            prefix = decorator_prefix
+            continue
+        if (
+            prefix >= 0
+            and tokens[prefix][0] == "identifier"
+            and tokens[prefix][1] in _DECLARATION_PREFIXES
+            and (tokens[prefix][1] != "const" or tokens[head_index][1] == "enum")
+        ):
+            declaration_start = prefix
+            prefix -= 1
+            continue
+        break
+    return prefix, declaration_start, consumed_decorator
+
+
+class _DecoratorCandidateTracker:
+    """Track decorator starts in the current balanced delimiter frame."""
+
+    def __init__(self) -> None:
+        self._frames: list[tuple[str | None, list[int]]] = [(None, [])]
+        self._decorated_declaration_starts: dict[int, int] = {}
+
+    @property
+    def current(self) -> Sequence[int]:
+        """Return decorator candidates visible before the next token."""
+
+        return self._frames[-1][1]
+
+    def consume_current(self) -> None:
+        """Forget decorators consumed by the declaration now opening its body."""
+
+        self._frames[-1][1].clear()
+
+    def declaration_start(self, head_index: int) -> int | None:
+        """Return the recorded start of one decorated declaration head."""
+
+        return self._decorated_declaration_starts.get(head_index)
+
+    def consume_declaration(self, head_index: int) -> None:
+        """Forget a decorated declaration once its body brace is reached."""
+
+        self._decorated_declaration_starts.pop(head_index, None)
+
+    def append(
+        self,
+        tokens: Sequence[tuple[str, str]],
+        index: int,
+        kind: str,
+        value: str,
+    ) -> None:
+        """Record one token without retaining candidates from finished declarations."""
+
+        if (
+            kind == "identifier"
+            and value == "class"
+            and self.current
+            and (index == 0 or tokens[index - 1][1] not in {".", "?.", "@"})
+        ):
+            _prefix, declaration_start, consumed_decorator = _declaration_prefix_before(
+                tokens,
+                index,
+                decorator_at_indices=self.current,
+            )
+            if consumed_decorator:
+                self._decorated_declaration_starts[index] = declaration_start
+            # A same-frame ``@`` that is not this declaration's prefix belongs
+            # to an earlier decorated member or inert JSX text. Retire it on
+            # the first declaration head so later class expressions cannot
+            # rescan the same prefix quadratically.
+            self.consume_current()
+            return
+        if kind != "punctuation":
+            return
+        if value == "@":
+            self._frames[-1][1].append(index)
+            return
+        closing_for = {"(": ")", "[": "]", "{": "}"}
+        if value in closing_for:
+            self._frames.append((closing_for[value], []))
+            return
+        if value in {")", "]", "}"}:
+            if len(self._frames) > 1 and self._frames[-1][0] == value:
+                self._frames.pop()
+            return
+        if value == ";":
+            self._frames[-1][1].clear()
+
+
+def _declaration_head_can_open_body(
+    tokens: Sequence[tuple[str, str]],
+    head_index: int,
+) -> bool:
+    """Reject contextual head words used as names, types, or assignment targets."""
+
+    _kind, head = tokens[head_index]
+    if head_index > 0 and tokens[head_index - 1][1] in {".", "?."}:
+        return False
+    tail = head_index + 1
+    if head == "global":
+        return head_index > 0 and tokens[head_index - 1] == ("identifier", "declare")
+    if head == "class":
+        return tail >= len(tokens) or tokens[tail][1] not in {"=", ":"}
+    if head == "function":
+        depth = 0
+        for index in range(tail, len(tokens)):
+            _kind, value = tokens[index]
+            if value in {"[", "{", "<"}:
+                depth += 1
+            elif value in {"]", "}", ">"} and depth:
+                depth -= 1
+            elif value == "(" and depth == 0:
+                return True
+        return False
+    if tail >= len(tokens):
+        return False
+    if head == "module" and tokens[tail][0] == "string":
+        return True
+    return tokens[tail][0] == "identifier"
+
+
+def _brace_opens_lexical_scope(
+    tokens: Sequence[tuple[str, str]],
+    *,
+    opens_statement: bool,
+    enclosing_statement_brace: bool | None,
+) -> bool:
+    """Recognize function, method, arrow, and static-block lexical scopes."""
+
+    if opens_statement:
+        return True
+    if not tokens:
+        return False
+    if tokens[-1] == ("punctuation", "=>"):
+        return True
+    if tokens[-1] == ("identifier", "static") and enclosing_statement_brace is True:
+        return True
+    expected_openings: list[str] = []
+    opening_for = {")": "(", "]": "[", "}": "{", ">": "<"}
+    for index in range(len(tokens) - 1, -1, -1):
+        value = tokens[index][1]
+        if value == ")" and not expected_openings:
+            return True
+        if value in opening_for:
+            expected_openings.append(opening_for[value])
+            continue
+        if expected_openings:
+            if value == expected_openings[-1]:
+                expected_openings.pop()
+            continue
+        if value in {";", "{", "}", "=", ","}:
+            return False
+    return False
+
+
+def _declaration_body_head(tokens: Sequence[tuple[str, str]]) -> str | None:
+    """Return the actual declaration head whose body brace follows."""
+
+    expected_openings: list[str] = []
+    opening_for = {")": "(", "]": "[", "}": "{"}
+    for index in range(len(tokens) - 1, -1, -1):
+        kind, value = tokens[index]
+        if value == ">" and (not expected_openings or expected_openings[-1] == "<"):
+            expected_openings.append("<")
+            continue
+        if value in opening_for:
+            if value == "}" and not expected_openings:
+                break
+            expected_openings.append(opening_for[value])
+            continue
+        if expected_openings:
+            if value == expected_openings[-1]:
+                expected_openings.pop()
+            continue
+        if value in {";", "{"}:
+            break
+        if (
+            kind == "identifier"
+            and value in _DECLARATION_BODY_HEADS
+            and _declaration_head_can_open_body(tokens, index)
+        ):
+            return value
+    return None
+
+
 def _opens_statement_brace(
     tokens: Sequence[tuple[str, str]],
     *,
     enclosing_statement_brace: bool | None,
     previous_closed_control_head: bool,
     previous_closed_statement_brace: bool,
+    previous_colon_is_conditional: bool = False,
+    previous_colon_is_switch_clause: bool = False,
     line_break_before: bool = False,
+    line_breaks_before: Sequence[bool] | None = None,
+    decorator_candidates: _DecoratorCandidateTracker | None = None,
 ) -> bool:
     """Return whether the next brace begins a statement/declaration body."""
 
@@ -419,13 +1075,40 @@ def _opens_statement_brace(
         return True
     if value == ";" or (value == "}" and previous_closed_statement_brace):
         return True
+    if value in {"(", "[", ","}:
+        # A brace immediately inside an expression/group cannot open a
+        # statement body. Avoid walking the complete preceding expression for
+        # every object literal in a large bundled source.
+        return False
     # Two adjacent opening braces cannot form an object/property expression;
     # the inner brace is a nested statement block (including inside an arrow
     # or function expression body, whose outer close remains expression-like).
     if value == "{":
         return True
+    if value == ":" and previous_colon_is_conditional:
+        return False
+    if value == ":" and previous_colon_is_switch_clause:
+        return True
+    if value == ":" and len(tokens) >= 2 and tokens[-2][0] != "identifier":
+        # Labels always end in an identifier, while switch clauses are
+        # tracked above. Return-type, computed-key, string-key, and numeric-key
+        # colons therefore introduce expression/type braces without a scan.
+        return False
+    if (
+        value == ":"
+        and line_breaks_before is not None
+        and len(line_breaks_before) >= len(tokens)
+        and len(tokens) >= 3
+        and line_breaks_before[-2]
+        and _can_end_statement_before_label(*tokens[-3])
+    ):
+        return True
+    if value == ":" and _colon_follows_comma_at_current_depth(tokens):
+        return False
     if value == ":" and _colon_opens_statement_block(
-        tokens, enclosing_statement_brace=enclosing_statement_brace
+        tokens,
+        enclosing_statement_brace=enclosing_statement_brace,
+        line_breaks_before=line_breaks_before,
     ):
         return True
     expected_openings: list[str] = []
@@ -448,35 +1131,67 @@ def _opens_statement_brace(
             break
         if token_kind != "identifier" or token_value not in _DECLARATION_BODY_HEADS:
             continue
-        prefix = index - 1
-        while (
-            prefix >= 0
-            and tokens[prefix][0] == "identifier"
-            and tokens[prefix][1] in _DECLARATION_PREFIXES
-        ):
-            prefix -= 1
-        while prefix >= 1 and tokens[prefix - 1][1] == "@":
-            prefix -= 2
+        if not _declaration_head_can_open_body(tokens, index):
+            continue
+        decorated_start = (
+            None if decorator_candidates is None else decorator_candidates.declaration_start(index)
+        )
+        if decorated_start is None:
+            prefix, declaration_start, _consumed_decorator = _declaration_prefix_before(
+                tokens,
+                index,
+                decorator_at_indices=None if decorator_candidates is None else (),
+            )
+        else:
+            declaration_start = decorated_start
+            prefix = decorated_start - 1
+        is_statement = False
         if (
             prefix >= 0
             and tokens[prefix][1] == ")"
             and _closes_control_flow_parenthesis(tokens, prefix)
         ):
-            return True
-        if (
+            is_statement = True
+        elif (
             prefix >= 0
             and tokens[prefix][1] == ":"
             and _colon_opens_statement_block(
-                tokens[: prefix + 1], enclosing_statement_brace=enclosing_statement_brace
+                tokens,
+                enclosing_statement_brace=enclosing_statement_brace,
+                end=prefix + 1,
+                line_breaks_before=line_breaks_before,
             )
         ):
-            return True
-        return (
-            prefix < 0
-            or tokens[prefix][1] in {";", "}"}
-            or (tokens[prefix][1] == "{" and enclosing_statement_brace is True)
-            or (tokens[prefix][0] == "identifier" and tokens[prefix][1] in {"do", "else"})
-        )
+            is_statement = True
+        elif (
+            prefix >= 0
+            and line_breaks_before is not None
+            and declaration_start < len(line_breaks_before)
+            and line_breaks_before[declaration_start]
+            and _can_end_statement_before_declaration(tokens, prefix)
+        ):
+            is_statement = True
+        else:
+            is_statement = (
+                prefix < 0
+                or tokens[prefix][1] in {";", "}"}
+                or (tokens[prefix][1] == "{" and enclosing_statement_brace is True)
+                or (tokens[prefix][0] == "identifier" and tokens[prefix][1] in {"do", "else"})
+            )
+        if (
+            not is_statement
+            and prefix >= 0
+            and tokens[prefix][0] == "identifier"
+            and tokens[prefix][1] in _DECLARATION_BODY_HEADS
+        ):
+            # Contextual declaration keywords remain legal declaration names,
+            # e.g. ``class interface {}`` and ``function namespace() {}``.
+            # Keep walking to the actual head instead of treating the name as
+            # a failed expression-level declaration.
+            continue
+        if decorated_start is not None and decorator_candidates is not None:
+            decorator_candidates.consume_declaration(index)
+        return is_statement
     if line_break_before and _can_end_statement_before_block(kind, value):
         return True
     return False
@@ -840,7 +1555,7 @@ def _runtime_javascript_tokens(
     *,
     source_path: Path,
     _template_depth: int = 0,
-) -> tuple[tuple[str, str], ...]:
+) -> _RuntimeJavaScriptTokens:
     """Tokenize executable JavaScript while discarding inert lexical text.
 
     This deliberately is not a JavaScript parser. It recognizes enough lexical
@@ -854,52 +1569,123 @@ def _runtime_javascript_tokens(
             f"Runtime package source has excessively nested templates: {source_path}"
         )
     tokens: list[tuple[str, str]] = []
-    deferred_template_expression_tokens: list[tuple[str, str]] = []
+    line_breaks_before: list[bool] = []
     cursor = 0
     previous: tuple[str, str] | None = None
-    control_parentheses: list[bool] = []
+    control_parentheses: list[str | None] = []
     statement_braces: list[bool] = []
-    previous_closed_control_head = False
+    type_body_braces: list[bool] = []
+    previous_closed_control_head: str | None = None
     previous_closed_statement_brace = False
+    previous_conditional_colon = False
+    conditional_expressions = _ConditionalExpressionTracker()
+    previous_switch_clause_colon = False
+    switch_clauses = _SwitchClauseTracker()
+    decorator_candidates = _DecoratorCandidateTracker()
     pending_line_break = False
+    jsx_source = source_path.suffix.lower() in {".jsx", ".tsx"}
+    expression_depth = [_template_depth]
 
     def append(kind: str, value: str) -> None:
         nonlocal pending_line_break, previous
         nonlocal previous_closed_control_head, previous_closed_statement_brace
-        closes_control_head = False
+        nonlocal previous_conditional_colon
+        nonlocal previous_switch_clause_colon
+        closes_control_head: str | None = None
         closes_statement_brace = False
+        opens_statement_brace: bool | None = None
+        opens_type_body = False
+        opens_switch_body = (
+            kind == "punctuation" and value == "{" and previous_closed_control_head == "switch"
+        )
         if kind == "punctuation" and value == "(":
-            control_parentheses.append(_opens_control_flow_parenthesis(tokens))
+            control_parentheses.append(_control_flow_parenthesis_head(tokens))
         elif kind == "punctuation" and value == ")":
-            closes_control_head = control_parentheses.pop() if control_parentheses else False
+            closes_control_head = control_parentheses.pop() if control_parentheses else None
         elif kind == "punctuation" and value == "{":
-            statement_braces.append(
-                _opens_statement_brace(
-                    tokens,
-                    enclosing_statement_brace=(statement_braces[-1] if statement_braces else None),
-                    previous_closed_control_head=previous_closed_control_head,
-                    previous_closed_statement_brace=previous_closed_statement_brace,
-                    line_break_before=pending_line_break,
-                )
+            enclosing_type_body = type_body_braces[-1] if type_body_braces else False
+            opens_statement_brace = _opens_statement_brace(
+                tokens,
+                enclosing_statement_brace=(statement_braces[-1] if statement_braces else None),
+                previous_closed_control_head=previous_closed_control_head is not None,
+                previous_closed_statement_brace=previous_closed_statement_brace,
+                previous_colon_is_conditional=previous_conditional_colon,
+                previous_colon_is_switch_clause=previous_switch_clause_colon,
+                line_break_before=pending_line_break,
+                line_breaks_before=line_breaks_before,
+                decorator_candidates=decorator_candidates,
             )
+            opens_type_body = (
+                _declaration_body_head(tokens) in {"interface", "type"} or enclosing_type_body
+            )
+            statement_braces.append(opens_statement_brace)
+            type_body_braces.append(opens_type_body)
         elif kind == "punctuation" and value == "}":
             closes_statement_brace = statement_braces.pop() if statement_braces else False
+            if type_body_braces:
+                type_body_braces.pop()
         previous_closed_control_head = closes_control_head
         previous_closed_statement_brace = closes_statement_brace
         token = (kind, value)
+        token_index = len(tokens)
         tokens.append(token)
+        line_breaks_before.append(pending_line_break)
+        decorator_candidates.append(
+            tokens,
+            token_index,
+            kind,
+            value,
+        )
+        previous_conditional_colon = conditional_expressions.append(kind, value)
+        previous_switch_clause_colon = switch_clauses.append(
+            kind,
+            value,
+            opens_switch_body=opens_switch_body,
+            conditional_colon=previous_conditional_colon,
+        )
         previous = token
         pending_line_break = False
+
+    def append_grouped_value(
+        expression_groups: Sequence[_RuntimeExpressionGroup],
+        kind: str,
+        value: str,
+    ) -> None:
+        """Replay embedded expressions at their lexical position, then one value."""
+
+        nonlocal pending_line_break
+        if not expression_groups:
+            append(kind, value)
+            return
+
+        def append_expression_group(expression_group: _RuntimeExpressionGroup) -> None:
+            nonlocal pending_line_break
+            for event in expression_group.events:
+                if isinstance(event, _RuntimeTokenEvent):
+                    pending_line_break = event.line_break_before
+                    append(event.kind, event.value)
+                else:
+                    pending_line_break = event.line_break_before
+                    append_grouped_value(event.groups, event.kind, event.value)
+
+        append("punctuation", "(")
+        for expression_group in expression_groups:
+            append("punctuation", "(")
+            append_expression_group(expression_group)
+            append("punctuation", ")")
+            append("punctuation", ",")
+        append(kind, value)
+        append("punctuation", ")")
 
     def slash_starts_regex() -> bool:
         if previous is None:
             return True
         kind, value = previous
-        if kind in {"number", "regex", "string", "template"}:
+        if kind in _RUNTIME_VALUE_TOKEN_KINDS:
             return False
         if kind == "identifier":
             return _identifier_precedes_regex(tokens)
-        if value == ")" and previous_closed_control_head:
+        if value == ")" and previous_closed_control_head is not None:
             return True
         if value == "}" and previous_closed_statement_brace:
             return True
@@ -929,7 +1715,7 @@ def _runtime_javascript_tokens(
             if character == "\\":
                 index += 2
                 continue
-            if character in "\r\n":
+            if character in _JAVASCRIPT_LINE_TERMINATORS:
                 break
             if character == "[":
                 in_character_class = True
@@ -945,67 +1731,142 @@ def _runtime_javascript_tokens(
         # the punctuation path instead of rejecting valid minified code.
         return start + 1
 
-    def template_expression_end(start: int) -> tuple[int, tuple[tuple[str, str], ...]]:
+    def template_expression_end(start: int) -> tuple[int, _RuntimeExpressionGroup]:
+        expression_depth[0] += 1
+        if expression_depth[0] > 64:
+            raise TypeScriptWorkerError(
+                f"Runtime package source has excessively nested expressions: {source_path}"
+            )
         index = start
         depth = 0
         expression_previous: tuple[str, str] | None = None
         expression_tokens: list[tuple[str, str]] = []
-        expression_control_parentheses: list[bool] = []
+        expression_line_breaks_before: list[bool] = []
+        expression_events: list[_RuntimeTokenEvent | _RuntimeGroupedValueEvent] = []
+        expression_control_parentheses: list[str | None] = []
         expression_statement_braces: list[bool] = []
-        expression_previous_closed_control_head = False
+        expression_type_body_braces: list[bool] = []
+        expression_previous_closed_control_head: str | None = None
         expression_previous_closed_statement_brace = False
+        expression_previous_conditional_colon = False
+        expression_conditional_expressions = _ConditionalExpressionTracker()
+        expression_previous_switch_clause_colon = False
+        expression_switch_clauses = _SwitchClauseTracker()
+        expression_decorator_candidates = _DecoratorCandidateTracker()
         expression_pending_line_break = False
 
-        def record_expression(kind: str, value: str) -> None:
+        def record_expression(kind: str, value: str, *, emit: bool = True) -> None:
             nonlocal expression_pending_line_break
             nonlocal expression_previous
             nonlocal expression_previous_closed_control_head
             nonlocal expression_previous_closed_statement_brace
-            closes_control_head = False
+            nonlocal expression_previous_conditional_colon
+            nonlocal expression_previous_switch_clause_colon
+            closes_control_head: str | None = None
             closes_statement_brace = False
+            opens_statement_brace: bool | None = None
+            opens_type_body = False
+            opens_switch_body = (
+                kind == "punctuation"
+                and value == "{"
+                and expression_previous_closed_control_head == "switch"
+            )
             if kind == "punctuation" and value == "(":
                 expression_control_parentheses.append(
-                    _opens_control_flow_parenthesis(expression_tokens)
+                    _control_flow_parenthesis_head(expression_tokens)
                 )
             elif kind == "punctuation" and value == ")":
                 closes_control_head = (
-                    expression_control_parentheses.pop()
-                    if expression_control_parentheses
-                    else False
+                    expression_control_parentheses.pop() if expression_control_parentheses else None
                 )
             elif kind == "punctuation" and value == "{":
-                expression_statement_braces.append(
-                    _opens_statement_brace(
-                        expression_tokens,
-                        enclosing_statement_brace=(
-                            expression_statement_braces[-1] if expression_statement_braces else None
-                        ),
-                        previous_closed_control_head=expression_previous_closed_control_head,
-                        previous_closed_statement_brace=(
-                            expression_previous_closed_statement_brace
-                        ),
-                        line_break_before=expression_pending_line_break,
-                    )
+                enclosing_type_body = (
+                    expression_type_body_braces[-1] if expression_type_body_braces else False
                 )
+                opens_statement_brace = _opens_statement_brace(
+                    expression_tokens,
+                    enclosing_statement_brace=(
+                        expression_statement_braces[-1] if expression_statement_braces else None
+                    ),
+                    previous_closed_control_head=(
+                        expression_previous_closed_control_head is not None
+                    ),
+                    previous_closed_statement_brace=(expression_previous_closed_statement_brace),
+                    previous_colon_is_conditional=expression_previous_conditional_colon,
+                    previous_colon_is_switch_clause=(expression_previous_switch_clause_colon),
+                    line_break_before=expression_pending_line_break,
+                    line_breaks_before=expression_line_breaks_before,
+                    decorator_candidates=expression_decorator_candidates,
+                )
+                opens_type_body = (
+                    _declaration_body_head(expression_tokens) in {"interface", "type"}
+                    or enclosing_type_body
+                )
+                expression_statement_braces.append(opens_statement_brace)
+                expression_type_body_braces.append(opens_type_body)
             elif kind == "punctuation" and value == "}":
                 closes_statement_brace = (
                     expression_statement_braces.pop() if expression_statement_braces else False
                 )
+                if expression_type_body_braces:
+                    expression_type_body_braces.pop()
             expression_previous_closed_control_head = closes_control_head
             expression_previous_closed_statement_brace = closes_statement_brace
             expression_previous = (kind, value)
+            expression_token_index = len(expression_tokens)
             expression_tokens.append(expression_previous)
+            expression_line_breaks_before.append(expression_pending_line_break)
+            if emit:
+                expression_events.append(
+                    _RuntimeTokenEvent(kind, value, expression_pending_line_break)
+                )
+            expression_decorator_candidates.append(
+                expression_tokens,
+                expression_token_index,
+                kind,
+                value,
+            )
+            expression_previous_conditional_colon = expression_conditional_expressions.append(
+                kind, value
+            )
+            expression_previous_switch_clause_colon = expression_switch_clauses.append(
+                kind,
+                value,
+                opens_switch_body=opens_switch_body,
+                conditional_colon=expression_previous_conditional_colon,
+            )
             expression_pending_line_break = False
+
+        def record_grouped_value(
+            expression_groups: Sequence[_RuntimeExpressionGroup],
+            kind: str,
+            value: str,
+        ) -> None:
+            """Replay nested literal expressions into this executable group."""
+
+            nonlocal expression_pending_line_break
+            if not expression_groups:
+                record_expression(kind, value)
+                return
+            expression_events.append(
+                _RuntimeGroupedValueEvent(
+                    tuple(expression_groups),
+                    kind,
+                    value,
+                    expression_pending_line_break,
+                )
+            )
+            record_expression(kind, value, emit=False)
 
         def expression_slash_starts_regex() -> bool:
             if expression_previous is None:
                 return True
             kind, value = expression_previous
-            if kind in {"number", "regex", "string", "template"}:
+            if kind in _RUNTIME_VALUE_TOKEN_KINDS:
                 return False
             if kind == "identifier":
                 return _identifier_precedes_regex(expression_tokens)
-            if value == ")" and expression_previous_closed_control_head:
+            if value == ")" and expression_previous_closed_control_head is not None:
                 return True
             if value == "}" and expression_previous_closed_statement_brace:
                 return True
@@ -1014,13 +1875,17 @@ def _runtime_javascript_tokens(
         while index < len(source):
             character = source[index]
             if character.isspace():
-                expression_pending_line_break = expression_pending_line_break or character in "\r\n"
+                expression_pending_line_break = (
+                    expression_pending_line_break or character in _JAVASCRIPT_LINE_TERMINATORS
+                )
                 index += 1
                 continue
             if source.startswith("//", index):
-                newline = source.find("\n", index + 2)
-                expression_pending_line_break = expression_pending_line_break or newline >= 0
-                index = len(source) if newline < 0 else newline + 1
+                line_end = _line_comment_end(source, index + 2)
+                expression_pending_line_break = expression_pending_line_break or line_end < len(
+                    source
+                )
+                index = len(source) if line_end == len(source) else line_end + 1
                 continue
             if source.startswith("/*", index):
                 end = source.find("*/", index + 2)
@@ -1029,19 +1894,39 @@ def _runtime_javascript_tokens(
                         f"Runtime package source has an unterminated comment: {source_path}"
                     )
                 expression_pending_line_break = expression_pending_line_break or any(
-                    character in "\r\n" for character in source[index : end + 2]
+                    character in _JAVASCRIPT_LINE_TERMINATORS
+                    for character in source[index : end + 2]
                 )
                 index = end + 2
                 continue
             if character in {"'", '"'}:
-                index, _value = skip_quoted(index, character)
-                record_expression("string", "literal")
+                index, value = skip_quoted(index, character)
+                record_expression("string", value)
                 continue
             if character == "`":
-                index = skip_template(index)
-                record_expression("template", "literal")
+                index, template_kind, template_value, template_groups = consume_template(index)
+                record_grouped_value(template_groups, template_kind, template_value)
                 continue
-            if character == "/" and expression_slash_starts_regex():
+            if jsx_can_start(
+                index,
+                starts_operand=expression_slash_starts_regex(),
+                type_member_context=(
+                    expression_type_body_braces[-1] if expression_type_body_braces else False
+                ),
+            ):
+                jsx_result = skip_jsx_element(index)
+                if jsx_result is None:
+                    raise TypeScriptWorkerError(
+                        f"Runtime package source has malformed JSX: {source_path}"
+                    )
+                index, jsx_expression_groups = jsx_result
+                record_grouped_value(jsx_expression_groups, "jsx", "element")
+                continue
+            if (
+                character == "/"
+                and not (jsx_source and index > 0 and source[index - 1] == "<")
+                and expression_slash_starts_regex()
+            ):
                 end = skip_regex(index)
                 if end > index + 1:
                     index = end
@@ -1065,18 +1950,19 @@ def _runtime_javascript_tokens(
                 depth += 1
             elif character == "}":
                 if depth == 0:
-                    expression = source[start:index]
-                    return index + 1, _runtime_javascript_tokens(
-                        expression,
-                        source_path=source_path,
-                        _template_depth=_template_depth + 1,
-                    )
+                    expression_depth[0] -= 1
+                    return index + 1, _RuntimeExpressionGroup(tuple(expression_events))
                 depth -= 1
+            triple = source[index : index + 3]
             pair = source[index : index + 2]
             punctuation = (
-                pair
-                if pair in {"++", "--", "=>", "?.", "??", "&&", "||", "==", "!="}
-                else character
+                triple
+                if triple == "..."
+                else (
+                    pair
+                    if pair in {"++", "--", "=>", "?.", "??", "&&", "||", "==", "!="}
+                    else character
+                )
             )
             record_expression("punctuation", punctuation)
             index += len(punctuation)
@@ -1084,32 +1970,306 @@ def _runtime_javascript_tokens(
             f"Runtime package source has an unterminated template expression: {source_path}"
         )
 
-    def skip_template(start: int) -> int:
+    def consume_template(
+        start: int,
+    ) -> tuple[int, str, str, list[_RuntimeExpressionGroup]]:
+        """Consume one template literal and retain its executable interpolations."""
+
         index = start + 1
+        chunk_start = index
+        chunks: list[str] = []
+        expression_groups: list[_RuntimeExpressionGroup] = []
         while index < len(source):
             if source[index] == "\\":
                 index += 2
                 continue
             if source.startswith("${", index):
-                index, _expression_tokens = template_expression_end(index + 2)
+                chunks.append(source[chunk_start:index])
+                index, expression_tokens = template_expression_end(index + 2)
+                expression_groups.append(expression_tokens)
+                chunk_start = index
                 continue
             if source[index] == "`":
-                return index + 1
+                chunks.append(source[chunk_start:index])
+                kind = "computed-template" if expression_groups else "template"
+                return index + 1, kind, "".join(chunks), expression_groups
             index += 1
         raise TypeScriptWorkerError(
             f"Runtime package source has an unterminated template: {source_path}"
         )
 
+    def tsx_generic_signature(start: int, *, type_member_context: bool) -> bool:
+        """Reject a TSX generic arrow/call signature before JSX speculation."""
+
+        index = start + 1
+        angle_depth = 1
+        quote: str | None = None
+        top_level_words: list[str] = []
+        definitive_marker = False
+        while index < len(source) and angle_depth:
+            character = source[index]
+            if quote is not None:
+                if character == "\\":
+                    index += 2
+                    continue
+                if character == quote:
+                    quote = None
+                index += 1
+                continue
+            if character in {"'", '"', "`"}:
+                quote = character
+                index += 1
+                continue
+            if source.startswith("//", index):
+                index = _line_comment_end(source, index + 2)
+                continue
+            if source.startswith("/*", index):
+                end = source.find("*/", index + 2)
+                if end < 0:
+                    return False
+                index = end + 2
+                continue
+            if source.startswith("=>", index):
+                index += 2
+                continue
+            if angle_depth == 1 and (character.isalpha() or character in "_$"):
+                end = index + 1
+                while end < len(source) and (source[end].isalnum() or source[end] in "_$"):
+                    end += 1
+                word = source[index:end]
+                top_level_words.append(word)
+                if word == "extends":
+                    following = end
+                    while following < len(source) and source[following].isspace():
+                        following += 1
+                    definitive_marker = definitive_marker or (
+                        following < len(source) and source[following] not in "=/>"
+                    )
+                index = end
+                continue
+            if angle_depth == 1 and character == ",":
+                definitive_marker = True
+            elif (
+                angle_depth == 1
+                and character == "="
+                and (
+                    len(top_level_words) == 1
+                    or (len(top_level_words) == 2 and top_level_words[0] in {"const", "in", "out"})
+                )
+                and not source.startswith("=>", index)
+            ):
+                definitive_marker = True
+            if character == "<":
+                angle_depth += 1
+            elif character == ">":
+                angle_depth -= 1
+            index += 1
+        if angle_depth:
+            return False
+        while index < len(source) and source[index].isspace():
+            index += 1
+        if index >= len(source) or source[index] != "(":
+            return False
+        if definitive_marker:
+            return True
+        parenthesis_depth = 0
+        quote = None
+        while index < len(source):
+            character = source[index]
+            if quote is not None:
+                if character == "\\":
+                    index += 2
+                    continue
+                if character == quote:
+                    quote = None
+                index += 1
+                continue
+            if character in {"'", '"', "`"}:
+                quote = character
+            elif source.startswith("//", index):
+                index = _line_comment_end(source, index + 2)
+                continue
+            elif source.startswith("/*", index):
+                end = source.find("*/", index + 2)
+                if end < 0:
+                    return False
+                index = end + 2
+                continue
+            elif character == "(":
+                parenthesis_depth += 1
+            elif character == ")":
+                parenthesis_depth -= 1
+                if parenthesis_depth == 0:
+                    index += 1
+                    break
+            index += 1
+        if parenthesis_depth:
+            return False
+        while index < len(source) and source[index].isspace():
+            index += 1
+        if source.startswith("=>", index):
+            return True
+        if index < len(source) and source[index] == ":":
+            return type_member_context
+        return False
+
+    def jsx_can_start(
+        start: int,
+        *,
+        starts_operand: bool,
+        type_member_context: bool,
+    ) -> bool:
+        """Return whether an operand-position ``<`` confidently begins JSX."""
+
+        if not jsx_source or not starts_operand or source[start : start + 1] != "<":
+            return False
+        index = start + 1
+        while index < len(source) and source[index].isspace():
+            index += 1
+        if index >= len(source) or source[index] == "/":
+            return False
+        if source[index] != ">" and not (source[index].isalpha() or source[index] in "_$"):
+            return False
+        return not tsx_generic_signature(start, type_member_context=type_member_context)
+
+    def skip_jsx_element(start: int) -> tuple[int, list[_RuntimeExpressionGroup]] | None:
+        """Skip one balanced JSX element and retain executable containers."""
+
+        expression_groups: list[_RuntimeExpressionGroup] = []
+
+        def tag(
+            tag_start: int,
+        ) -> tuple[int, str, bool, bool, list[_RuntimeExpressionGroup]] | None:
+            if tag_start >= len(source) or source[tag_start] != "<":
+                return None
+            index = tag_start + 1
+            while index < len(source) and source[index].isspace():
+                index += 1
+            closing = source.startswith("/", index)
+            if closing:
+                index += 1
+                while index < len(source) and source[index].isspace():
+                    index += 1
+            if index < len(source) and source[index] == ">":
+                return index + 1, "", closing, False, []
+            if index >= len(source) or not (source[index].isalpha() or source[index] in "_$"):
+                return None
+            name_start = index
+            index += 1
+            while index < len(source) and (source[index].isalnum() or source[index] in "_$.:-"):
+                index += 1
+            name = source[name_start:index]
+            if closing:
+                while index < len(source) and source[index].isspace():
+                    index += 1
+                if index < len(source) and source[index] == ">":
+                    return index + 1, name, True, False, []
+                return None
+
+            tag_expressions: list[_RuntimeExpressionGroup] = []
+            type_argument_depth = 0
+            while index < len(source):
+                character = source[index]
+                if character.isspace():
+                    index += 1
+                    continue
+                if type_argument_depth and source.startswith("//", index):
+                    index = _line_comment_end(source, index + 2)
+                    continue
+                if type_argument_depth and source.startswith("/*", index):
+                    end = source.find("*/", index + 2)
+                    if end < 0:
+                        return None
+                    index = end + 2
+                    continue
+                if character in {"'", '"'} or (type_argument_depth and character == "`"):
+                    quote = character
+                    index += 1
+                    while index < len(source) and source[index] != quote:
+                        if type_argument_depth and source[index] == "\\":
+                            index += 2
+                            continue
+                        index += 1
+                    if index >= len(source):
+                        return None
+                    index += 1
+                    continue
+                if character == "<":
+                    type_argument_depth += 1
+                    index += 1
+                    continue
+                if character == ">" and type_argument_depth:
+                    if index > 0 and source[index - 1] == "=":
+                        index += 1
+                        continue
+                    type_argument_depth -= 1
+                    index += 1
+                    continue
+                if character == "{" and not type_argument_depth:
+                    index, expression_tokens = template_expression_end(index + 1)
+                    tag_expressions.append(expression_tokens)
+                    continue
+                if character == "/" and not type_argument_depth:
+                    closing_index = index + 1
+                    while closing_index < len(source) and source[closing_index].isspace():
+                        closing_index += 1
+                    if closing_index < len(source) and source[closing_index] == ">":
+                        return closing_index + 1, name, False, True, tag_expressions
+                if character == ">" and not type_argument_depth:
+                    return index + 1, name, False, False, tag_expressions
+                index += 1
+            return None
+
+        opening = tag(start)
+        if opening is None:
+            return None
+        cursor, name, closing, self_closing, opening_expressions = opening
+        if closing:
+            return None
+        expression_groups.extend(opening_expressions)
+        if self_closing:
+            return cursor, expression_groups
+        names = [name]
+        while cursor < len(source):
+            if source[cursor] == "{":
+                cursor, expression_tokens = template_expression_end(cursor + 1)
+                expression_groups.append(expression_tokens)
+                continue
+            if source.startswith("</", cursor):
+                closing_tag = tag(cursor)
+                if closing_tag is None:
+                    return None
+                cursor, closing_name, is_closing, _self_closing, closing_expressions = closing_tag
+                if not is_closing or closing_expressions or closing_name != names[-1]:
+                    return None
+                names.pop()
+                if not names:
+                    return cursor, expression_groups
+                continue
+            if source[cursor] == "<":
+                nested = tag(cursor)
+                if nested is None:
+                    return None
+                cursor, nested_name, is_closing, nested_self_closing, nested_expressions = nested
+                if is_closing:
+                    return None
+                expression_groups.extend(nested_expressions)
+                if not nested_self_closing:
+                    names.append(nested_name)
+                continue
+            cursor += 1
+        return None
+
     while cursor < len(source):
         character = source[cursor]
         if character.isspace():
-            pending_line_break = pending_line_break or character in "\r\n"
+            pending_line_break = pending_line_break or character in _JAVASCRIPT_LINE_TERMINATORS
             cursor += 1
             continue
         if source.startswith("//", cursor):
-            newline = source.find("\n", cursor + 2)
-            pending_line_break = pending_line_break or newline >= 0
-            cursor = len(source) if newline < 0 else newline + 1
+            line_end = _line_comment_end(source, cursor + 2)
+            pending_line_break = pending_line_break or line_end < len(source)
+            cursor = len(source) if line_end == len(source) else line_end + 1
             continue
         if source.startswith("/*", cursor):
             end = source.find("*/", cursor + 2)
@@ -1118,7 +2278,7 @@ def _runtime_javascript_tokens(
                     f"Runtime package source has an unterminated comment: {source_path}"
                 )
             pending_line_break = pending_line_break or any(
-                character in "\r\n" for character in source[cursor : end + 2]
+                character in _JAVASCRIPT_LINE_TERMINATORS for character in source[cursor : end + 2]
             )
             cursor = end + 2
             continue
@@ -1127,33 +2287,27 @@ def _runtime_javascript_tokens(
             append("string", value)
             continue
         if character == "`":
-            cursor += 1
-            start = cursor
-            chunks: list[str] = []
-            computed = False
-            while cursor < len(source):
-                if source[cursor] == "\\":
-                    cursor += 2
-                    continue
-                if source.startswith("${", cursor):
-                    computed = True
-                    chunks.append(source[start:cursor])
-                    cursor, expression_tokens = template_expression_end(cursor + 2)
-                    deferred_template_expression_tokens.extend(expression_tokens)
-                    start = cursor
-                    continue
-                if source[cursor] == "`":
-                    chunks.append(source[start:cursor])
-                    cursor += 1
-                    append("computed-template" if computed else "template", "".join(chunks))
-                    break
-                cursor += 1
-            else:
-                raise TypeScriptWorkerError(
-                    f"Runtime package source has an unterminated template: {source_path}"
-                )
+            cursor, template_kind, template_value, template_groups = consume_template(cursor)
+            append_grouped_value(template_groups, template_kind, template_value)
             continue
-        if character == "/" and slash_starts_regex():
+        if jsx_can_start(
+            cursor,
+            starts_operand=slash_starts_regex(),
+            type_member_context=type_body_braces[-1] if type_body_braces else False,
+        ):
+            jsx_result = skip_jsx_element(cursor)
+            if jsx_result is None:
+                raise TypeScriptWorkerError(
+                    f"Runtime package source has malformed JSX: {source_path}"
+                )
+            cursor, jsx_expression_groups = jsx_result
+            append_grouped_value(jsx_expression_groups, "jsx", "element")
+            continue
+        if (
+            character == "/"
+            and not (jsx_source and cursor > 0 and source[cursor - 1] == "<")
+            and slash_starts_regex()
+        ):
             end = skip_regex(cursor)
             if end > cursor + 1:
                 cursor = end
@@ -1173,15 +2327,184 @@ def _runtime_javascript_tokens(
             append("number", source[cursor:end])
             cursor = end
             continue
+        triple = source[cursor : cursor + 3]
         pair = source[cursor : cursor + 2]
-        if pair in {"++", "--", "=>", "?.", "??", "&&", "||", "==", "!="}:
+        if triple == "...":
+            append("punctuation", triple)
+            cursor += 3
+        elif pair in {"++", "--", "=>", "?.", "??", "&&", "||", "==", "!="}:
             append("punctuation", pair)
             cursor += 2
         else:
             append("punctuation", character)
             cursor += 1
-    tokens.extend(deferred_template_expression_tokens)
-    return tuple(tokens)
+    return _RuntimeJavaScriptTokens(tokens, line_breaks_before)
+
+
+class _ScopeCapabilityNode:
+    """One balanced interval-tree node for a proven lexical capability."""
+
+    __slots__ = (
+        "capability",
+        "end",
+        "height",
+        "left",
+        "max_end",
+        "right",
+        "start",
+    )
+
+    def __init__(self, start: int, end: int, capability: str) -> None:
+        self.start = start
+        self.end = end
+        self.capability = capability
+        self.left: _ScopeCapabilityNode | None = None
+        self.right: _ScopeCapabilityNode | None = None
+        self.height = 1
+        self.max_end = end
+
+
+class _ScopeCapabilityIndex:
+    """Incrementally resolve nearest containing bindings in logarithmic time."""
+
+    def __init__(
+        self,
+        bindings: Mapping[int, tuple[int, str]],
+        scope_open: Sequence[int],
+        scope_end_exclusive: Sequence[int],
+    ) -> None:
+        self._root: _ScopeCapabilityNode | None = None
+        for scope, (_binding_index, capability) in bindings.items():
+            self.add(
+                start=scope_open[scope],
+                end=scope_end_exclusive[scope],
+                capability=capability,
+            )
+
+    @staticmethod
+    def _height(node: _ScopeCapabilityNode | None) -> int:
+        return 0 if node is None else node.height
+
+    @classmethod
+    def _refresh(cls, node: _ScopeCapabilityNode) -> None:
+        node.height = max(cls._height(node.left), cls._height(node.right)) + 1
+        node.max_end = max(
+            node.end,
+            -1 if node.left is None else node.left.max_end,
+            -1 if node.right is None else node.right.max_end,
+        )
+
+    @classmethod
+    def _rotate_left(cls, node: _ScopeCapabilityNode) -> _ScopeCapabilityNode:
+        pivot = node.right
+        assert pivot is not None
+        node.right = pivot.left
+        pivot.left = node
+        cls._refresh(node)
+        cls._refresh(pivot)
+        return pivot
+
+    @classmethod
+    def _rotate_right(cls, node: _ScopeCapabilityNode) -> _ScopeCapabilityNode:
+        pivot = node.left
+        assert pivot is not None
+        node.left = pivot.right
+        pivot.right = node
+        cls._refresh(node)
+        cls._refresh(pivot)
+        return pivot
+
+    @classmethod
+    def _rebalance(cls, node: _ScopeCapabilityNode) -> _ScopeCapabilityNode:
+        cls._refresh(node)
+        balance = cls._height(node.left) - cls._height(node.right)
+        if balance > 1:
+            assert node.left is not None
+            if cls._height(node.left.left) < cls._height(node.left.right):
+                node.left = cls._rotate_left(node.left)
+            return cls._rotate_right(node)
+        if balance < -1:
+            assert node.right is not None
+            if cls._height(node.right.right) < cls._height(node.right.left):
+                node.right = cls._rotate_right(node.right)
+            return cls._rotate_left(node)
+        return node
+
+    @classmethod
+    def _insert(
+        cls,
+        node: _ScopeCapabilityNode | None,
+        *,
+        start: int,
+        end: int,
+        capability: str,
+    ) -> _ScopeCapabilityNode:
+        if node is None:
+            return _ScopeCapabilityNode(start, end, capability)
+        if start < node.start:
+            node.left = cls._insert(
+                node.left,
+                start=start,
+                end=end,
+                capability=capability,
+            )
+        elif start > node.start:
+            node.right = cls._insert(
+                node.right,
+                start=start,
+                end=end,
+                capability=capability,
+            )
+        else:
+            node.end = end
+            node.capability = capability
+        return cls._rebalance(node)
+
+    def add(self, *, start: int, end: int, capability: str) -> None:
+        """Insert or replace one scope interval without rebuilding the index."""
+
+        self._root = self._insert(
+            self._root,
+            start=start,
+            end=end,
+            capability=capability,
+        )
+
+    def capability_at(self, reference_index: int) -> str | None:
+        """Return the binding with the deepest interval containing the token."""
+
+        node = self._rightmost_containing(
+            self._root,
+            reference_index=reference_index,
+        )
+        return None if node is None else node.capability
+
+    @classmethod
+    def _rightmost_containing(
+        cls,
+        node: _ScopeCapabilityNode | None,
+        *,
+        reference_index: int,
+    ) -> _ScopeCapabilityNode | None:
+        if node is None or node.max_end <= reference_index:
+            return None
+        if node.start >= reference_index:
+            return cls._rightmost_containing(
+                node.left,
+                reference_index=reference_index,
+            )
+        result = cls._rightmost_containing(
+            node.right,
+            reference_index=reference_index,
+        )
+        if result is not None:
+            return result
+        if node.end > reference_index:
+            return node
+        return cls._rightmost_containing(
+            node.left,
+            reference_index=reference_index,
+        )
 
 
 def _create_require_module_specifiers(
@@ -1201,43 +2524,98 @@ def _create_require_module_specifiers(
 
     node_module_specifiers = {"module", "node:module"}
     capabilities: dict[str, str] = {}
-    capability_bindings: dict[str, list[tuple[int, str, tuple[int, ...]]]] = {}
+    capability_bindings: dict[str, dict[int, tuple[int, str]]] = {}
+    capability_interval_indices: dict[str, _ScopeCapabilityIndex] = {}
     safe_indices: set[int] = set()
     assignments: list[tuple[int, str, int]] = []
     specifiers: set[str] = set()
     loader_maps: set[str] = set()
-    scope_paths: list[tuple[int, ...]] = []
-    scope_stack: list[int] = []
-    scope_control_parentheses: list[bool] = []
+    scope_at_token: list[int] = []
+    scope_open = [-1]
+    scope_end_exclusive = [len(tokens)]
+    scope_stack = [0]
+    scope_control_parentheses: list[str | None] = []
     scope_statement_braces: list[bool] = []
-    scope_previous_closed_control = False
+    scope_lexical_braces: list[bool] = []
+    scope_nonstatement_brace_indices: set[int] = set()
+    scope_closed_control_before: list[bool] = []
+    scope_previous_closed_control: str | None = None
     scope_previous_closed_statement = False
-    for token_index, (_kind, value) in enumerate(tokens):
-        scope_paths.append(tuple(scope_stack))
-        closes_control = False
+    scope_tokens: list[tuple[str, str]] = []
+    token_line_breaks = getattr(tokens, "line_breaks_before", ())
+    if len(token_line_breaks) != len(tokens):
+        token_line_breaks = (False,) * len(tokens)
+    conditional_expression_colons = _conditional_expression_colons(tokens)
+    annotation_initializer_starts = _annotation_initializer_starts(tokens)
+    scope_line_breaks_before: list[bool] = []
+    scope_switch_clauses = _SwitchClauseTracker()
+    scope_previous_switch_clause_colon = False
+    scope_decorator_candidates = _DecoratorCandidateTracker()
+    for token_index, (kind, value) in enumerate(tokens):
+        scope_at_token.append(scope_stack[-1])
+        scope_closed_control_before.append(scope_previous_closed_control is not None)
+        closes_control: str | None = None
         closes_statement = False
+        closes_lexical_scope = False
+        opens_statement: bool | None = None
+        opens_lexical_scope = False
+        opens_switch_body = value == "{" and scope_previous_closed_control == "switch"
         if value == "(":
-            scope_control_parentheses.append(_opens_control_flow_parenthesis(tokens[:token_index]))
+            scope_control_parentheses.append(_control_flow_parenthesis_head(scope_tokens))
         elif value == ")":
-            closes_control = scope_control_parentheses.pop() if scope_control_parentheses else False
+            closes_control = scope_control_parentheses.pop() if scope_control_parentheses else None
         elif value == "{":
             opens_statement = _opens_statement_brace(
-                tokens[:token_index],
+                scope_tokens,
                 enclosing_statement_brace=(
                     scope_statement_braces[-1] if scope_statement_braces else None
                 ),
-                previous_closed_control_head=scope_previous_closed_control,
+                previous_closed_control_head=scope_previous_closed_control is not None,
                 previous_closed_statement_brace=scope_previous_closed_statement,
+                previous_colon_is_conditional=(
+                    token_index > 0 and token_index - 1 in conditional_expression_colons
+                ),
+                previous_colon_is_switch_clause=scope_previous_switch_clause_colon,
+                line_breaks_before=scope_line_breaks_before,
+                decorator_candidates=scope_decorator_candidates,
+            )
+            opens_lexical_scope = _brace_opens_lexical_scope(
+                scope_tokens,
+                opens_statement=opens_statement,
+                enclosing_statement_brace=(
+                    scope_statement_braces[-1] if scope_statement_braces else None
+                ),
             )
             scope_statement_braces.append(opens_statement)
-            if opens_statement:
-                scope_stack.append(token_index)
+            scope_lexical_braces.append(opens_lexical_scope)
+            if opens_lexical_scope:
+                scope_open.append(token_index)
+                scope_end_exclusive.append(len(tokens))
+                scope_stack.append(len(scope_open) - 1)
+            else:
+                scope_nonstatement_brace_indices.add(token_index)
         elif value == "}":
             closes_statement = scope_statement_braces.pop() if scope_statement_braces else False
-            if closes_statement and scope_stack:
+            closes_lexical_scope = scope_lexical_braces.pop() if scope_lexical_braces else False
+            if closes_lexical_scope and len(scope_stack) > 1:
+                scope_end_exclusive[scope_stack[-1]] = token_index + 1
                 scope_stack.pop()
         scope_previous_closed_control = closes_control
         scope_previous_closed_statement = closes_statement
+        scope_tokens.append((kind, value))
+        scope_line_breaks_before.append(bool(token_line_breaks[token_index]))
+        scope_decorator_candidates.append(
+            scope_tokens,
+            token_index,
+            kind,
+            value,
+        )
+        scope_previous_switch_clause_colon = scope_switch_clauses.append(
+            kind,
+            value,
+            opens_switch_body=opens_switch_body,
+            conditional_colon=(token_index in conditional_expression_colons),
+        )
 
     def token_value(index: int) -> str:
         return tokens[index][1] if 0 <= index < len(tokens) else ""
@@ -1258,27 +2636,96 @@ def _create_require_module_specifiers(
             cursor += 1
         return None
 
+    def matching_open(close_index: int, opening: str = "(", closing: str = ")") -> int | None:
+        if token_value(close_index) != closing:
+            return None
+        depth = 1
+        cursor = close_index - 1
+        while cursor >= 0:
+            value = token_value(cursor)
+            if value == closing:
+                depth += 1
+            elif value == opening:
+                depth -= 1
+                if depth == 0:
+                    return cursor
+            cursor -= 1
+        return None
+
+    def decorator_before(index: int) -> bool:
+        """Recognize a directly preceding parameter/member decorator."""
+
+        cursor = index - 1
+        while cursor >= 0:
+            value = token_value(cursor)
+            if value == "@":
+                return True
+            if tokens[cursor][0] == "identifier" or value in {".", "?."}:
+                cursor -= 1
+                continue
+            if value in {")", "]", ">"}:
+                opening = {")": "(", "]": "[", ">": "<"}[value]
+                open_index = matching_open(cursor, opening, value)
+                if open_index is None:
+                    return False
+                cursor = open_index - 1
+                continue
+            if value == "?":
+                cursor -= 1
+                continue
+            return False
+        return False
+
     def assignment_initializer(index: int) -> int | None:
         cursor = index + 1
         if token_value(cursor) == "=":
             return cursor + 1
         if token_value(cursor) != ":":
             return None
-        cursor += 1
-        closing_for = {"(": ")", "[": "]", "{": "}", "<": ">"}
-        expected: list[str] = []
-        while cursor < len(tokens):
-            value = token_value(cursor)
-            if value in closing_for:
-                expected.append(closing_for[value])
-            elif expected and value == expected[-1]:
-                expected.pop()
-            elif not expected and value == "=":
-                return cursor + 1
-            elif not expected and value in {";", ",", ")", "]", "}"}:
-                return None
-            cursor += 1
-        return None
+        if cursor in conditional_expression_colons:
+            return None
+        previous = token_value(index - 1)
+        statement_brace_before = previous == "{" and scope_open[scope_at_token[index]] == index - 1
+        nonstatement_brace_before = (
+            previous == "{" and index - 1 in scope_nonstatement_brace_indices
+        )
+        typed_binding_prefix = (
+            previous in {"(", ","}
+            or previous in _TYPED_BINDING_PREFIXES
+            or nonstatement_brace_before
+            or (previous == "." and token_value(index - 2) == "." and token_value(index - 3) == ".")
+            or decorator_before(index)
+        )
+        line_break_before = bool(token_line_breaks[index])
+        asi_boundary_before = (
+            line_break_before and index > 0 and _can_end_statement_before_label(*tokens[index - 1])
+        )
+        if (
+            index == 0
+            or previous in {";", "}"}
+            or previous in {"catch", "do", "else", "finally", "try"}
+            or statement_brace_before
+            or scope_closed_control_before[index]
+            or (asi_boundary_before and not typed_binding_prefix)
+        ):
+            # A statement-leading identifier followed by a colon is a label,
+            # not a TypeScript binding annotation. Keep this check local: a
+            # backwards statement scan for every typed parameter is quadratic.
+            return None
+        if previous == ":" or (
+            not typed_binding_prefix
+            and _colon_opens_statement_block(
+                tokens,
+                enclosing_statement_brace=True,
+                end=cursor + 1,
+                line_breaks_before=token_line_breaks,
+            )
+        ):
+            # Catch nested labels and switch clauses without charging ordinary
+            # typed parameter/declaration lists for a backwards statement scan.
+            return None
+        initializer = annotation_initializer_starts[cursor + 1]
+        return None if initializer < 0 else initializer
 
     def static_import_clause(index: int) -> tuple[int, int, str] | None:
         next_index = index + 1
@@ -1305,10 +2752,18 @@ def _create_require_module_specifiers(
                 f"{source_path}"
             )
         safe_indices.add(binding_index)
-        binding = (binding_index, capability, scope_paths[binding_index])
-        bindings = capability_bindings.setdefault(name, [])
-        if binding not in bindings:
-            bindings.append(binding)
+        binding_scope = scope_at_token[binding_index]
+        bindings = capability_bindings.setdefault(name, {})
+        existing = bindings.get(binding_scope)
+        if existing is None or binding_index > existing[0]:
+            bindings[binding_scope] = (binding_index, capability)
+            interval_index = capability_interval_indices.get(name)
+            if interval_index is not None:
+                interval_index.add(
+                    start=scope_open[binding_scope],
+                    end=scope_end_exclusive[binding_scope],
+                    capability=capability,
+                )
         if previous is None:
             capabilities[name] = capability
             return True
@@ -1317,17 +2772,24 @@ def _create_require_module_specifiers(
     def capability_at(index: int, name: str) -> str | None:
         """Return the nearest proven capability whose lexical brace owns a use."""
 
-        if not 0 <= index < len(scope_paths):
+        if not 0 <= index < len(scope_at_token):
             return None
-        reference_scope = scope_paths[index]
-        candidates = [
-            (len(scope), binding_index, capability)
-            for binding_index, capability, scope in capability_bindings.get(name, ())
-            if reference_scope[: len(scope)] == scope
-        ]
-        if not candidates:
+        bindings = capability_bindings.get(name)
+        if bindings is None:
             return None
-        return max(candidates)[2]
+        reference_scope = scope_at_token[index]
+        exact = bindings.get(reference_scope)
+        if exact is not None:
+            return exact[1]
+        interval_index = capability_interval_indices.get(name)
+        if interval_index is None:
+            interval_index = _ScopeCapabilityIndex(
+                bindings,
+                scope_open,
+                scope_end_exclusive,
+            )
+            capability_interval_indices[name] = interval_index
+        return interval_index.capability_at(index)
 
     # ESM imports are hoisted, so establish their provenance before walking
     # assignments and uses in source order.
@@ -1407,6 +2869,8 @@ def _create_require_module_specifiers(
                 return None
             open_index = cursor + 1
         elif tokens[cursor : cursor + 1] == (("identifier", "require"),):
+            if _type_only_import_assignment_require(tokens, cursor):
+                return None
             open_index = cursor + 1
         elif (
             tokens[cursor : cursor + 1] == (("identifier", "module"),)
@@ -1665,11 +3129,11 @@ def _create_require_module_specifiers(
                 "static",
                 "var",
             } or initializer_is_function(initializer):
-                # The token scanner intentionally does not build lexical
-                # scopes. A same-spelled inner declaration shadows the outer
-                # capability; treating its calls as possible loader calls is a
-                # safe over-approximation, while rejecting it would break
-                # ordinary bundled code.
+                # The scope index tracks proven capabilities, not arbitrary
+                # shadow bindings. A same-spelled inner declaration shadows
+                # the outer capability; treating its calls as possible loader
+                # calls is a safe over-approximation, while rejecting it would
+                # break ordinary bundled code.
                 safe_indices.add(lhs_index)
                 continue
             raise TypeScriptWorkerError(
@@ -2022,17 +3486,63 @@ def _runtime_module_specifiers(source: str, *, source_path: Path) -> tuple[str, 
             )
         return value
 
+    def named_clause_is_type_only(open_index: int, close_index: int) -> bool:
+        """Return whether every named import/export carries an inline type modifier."""
+
+        segment: list[tuple[str, str]] = []
+        saw_segment = False
+        for cursor in range(open_index + 1, close_index + 1):
+            token = tokens[cursor] if cursor < close_index else ("punctuation", ",")
+            if token == ("punctuation", ","):
+                if segment and not (
+                    len(segment) >= 2
+                    and segment[0] == ("identifier", "type")
+                    and segment[1] != ("identifier", "as")
+                ):
+                    return False
+                saw_segment = saw_segment or bool(segment)
+                segment = []
+            else:
+                segment.append(token)
+        return saw_segment
+
+    def clause_is_type_only(start: int, end: int) -> bool:
+        """Disambiguate TypeScript type modifiers from a binding named ``type``."""
+
+        if start >= end:
+            return False
+        if tokens[start] == ("identifier", "type"):
+            following = tokens[start + 1] if start + 1 <= end else None
+            if following not in {
+                ("identifier", "from"),
+                ("punctuation", ","),
+                ("punctuation", "="),
+            }:
+                return True
+        if tokens[start] != ("punctuation", "{"):
+            return False
+        depth = 1
+        close = start + 1
+        while close < end and depth:
+            if tokens[close] == ("punctuation", "{"):
+                depth += 1
+            elif tokens[close] == ("punctuation", "}"):
+                depth -= 1
+            close += 1
+        return depth == 0 and close == end and named_clause_is_type_only(start, close - 1)
+
     for index, (kind, value) in enumerate(tokens):
         if kind != "identifier":
             continue
         previous = tokens[index - 1] if index else None
-        if value == "import" and previous != ("punctuation", "."):
+        if value == "import" and previous not in {
+            ("punctuation", "."),
+            ("punctuation", "?."),
+        }:
             if index + 1 < len(tokens) and tokens[index + 1] == ("punctuation", "("):
                 specifier = literal(index + 2)
                 if specifier is not None:
                     specifiers.add(specifier)
-                continue
-            if index + 1 < len(tokens) and tokens[index + 1] == ("identifier", "type"):
                 continue
             specifier = literal(index + 1)
             if specifier is not None:
@@ -2041,26 +3551,33 @@ def _runtime_module_specifiers(source: str, *, source_path: Path) -> tuple[str, 
             for cursor in range(index + 1, len(tokens) - 1):
                 if tokens[cursor] == ("identifier", "from"):
                     specifier = literal(cursor + 1)
-                    if specifier is not None:
+                    if specifier is not None and not clause_is_type_only(index + 1, cursor):
                         specifiers.add(specifier)
                     break
                 if tokens[cursor] == ("punctuation", ";"):
                     break
-        elif value == "export" and previous != ("punctuation", "."):
-            if index + 1 < len(tokens) and tokens[index + 1] == ("identifier", "type"):
-                continue
+        elif value == "export" and previous not in {
+            ("punctuation", "."),
+            ("punctuation", "?."),
+        }:
             for cursor in range(index + 1, len(tokens) - 1):
                 if tokens[cursor] == ("identifier", "from"):
                     specifier = literal(cursor + 1)
-                    if specifier is not None:
+                    if specifier is not None and not clause_is_type_only(index + 1, cursor):
                         specifiers.add(specifier)
                     break
                 if tokens[cursor] == ("punctuation", ";"):
                     break
         elif value == "require":
+            if _type_only_import_assignment_require(tokens, index):
+                continue
             call_index = index + 1
-            is_native_loader = previous is None or previous != ("punctuation", ".")
-            if previous == ("punctuation", "."):
+            member_access = previous in {
+                ("punctuation", "."),
+                ("punctuation", "?."),
+            }
+            is_native_loader = not member_access
+            if member_access:
                 owner = tokens[index - 2] if index >= 2 else None
                 is_native_loader = owner == ("identifier", "module")
             if not is_native_loader:

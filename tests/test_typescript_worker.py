@@ -5,16 +5,22 @@ import json
 import os
 import shutil
 import sys
-from collections.abc import Mapping
+import tracemalloc
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import SupportsIndex, overload
 
 import pytest
 
+import jaunt.typescript.worker as typescript_worker
 from jaunt.typescript.config import TypeScriptTargetConfig
 from jaunt.typescript.protocol import PROTOCOL_VERSION, InitializeParams
 from jaunt.typescript.worker import (
+    _annotation_initializer_starts,
+    _create_require_module_specifiers,
     _runtime_module_specifiers,
     _runtime_package_resolution_closure,
+    _ScopeCapabilityIndex,
     REQUIRED_WORKER_CAPABILITIES,
     WorkerClient,
     WorkerCrashedError,
@@ -32,6 +38,61 @@ from jaunt.typescript.worker import (
     worker_environment,
     worker_runtime_identity,
 )
+
+
+class _AccessCountingTokens(tuple[tuple[str, str], ...]):
+    """Count token reads and copies so scanner tests can guard linear setup."""
+
+    indexed_items: int
+    line_breaks_before: tuple[bool, ...]
+    sliced_items: int
+
+    def __new__(cls, values: list[tuple[str, str]]) -> _AccessCountingTokens:
+        instance = super().__new__(cls, values)
+        instance.indexed_items = 0
+        instance.sliced_items = 0
+        return instance
+
+    @overload
+    def __getitem__(self, key: SupportsIndex, /) -> tuple[str, str]: ...
+
+    @overload
+    def __getitem__(
+        self,
+        key: slice[SupportsIndex | None],
+        /,
+    ) -> tuple[tuple[str, str], ...]: ...
+
+    def __getitem__(
+        self,
+        key: SupportsIndex | slice[SupportsIndex | None],
+        /,
+    ) -> tuple[str, str] | tuple[tuple[str, str], ...]:
+        if isinstance(key, slice):
+            start, stop, step = key.indices(len(self))
+            self.sliced_items += len(range(start, stop, step))
+        else:
+            self.indexed_items += 1
+        return super().__getitem__(key)
+
+
+def test_scope_capability_index_resolves_nearest_containing_interval() -> None:
+    index = _ScopeCapabilityIndex(
+        {
+            0: (0, "root"),
+            3: (3, "sibling"),
+        },
+        scope_open=[-1, 0, 1, 20],
+        scope_end_exclusive=[100, 20, 10, 40],
+    )
+
+    index.add(start=0, end=20, capability="outer")
+    index.add(start=1, end=10, capability="inner")
+
+    assert index.capability_at(5) == "inner"
+    assert index.capability_at(15) == "outer"
+    assert index.capability_at(30) == "sibling"
+    assert index.capability_at(50) == "root"
 
 
 def _installation(tmp_path: Path, source: str) -> WorkerInstallation:
@@ -64,6 +125,70 @@ def test_runtime_package_scanner_captures_static_native_load_forms(
     assert _runtime_module_specifiers(source, source_path=tmp_path / "index.js") == (
         "hoisted-runtime-helper",
     )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'object?.require("fake-require");',
+        'object?.require?.("fake-optional-call");',
+        'object?.import("fake-import");',
+        'object?.import?.("fake-optional-import-call");',
+    ],
+)
+def test_runtime_package_scanner_ignores_optional_member_loader_names(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == ()
+
+
+def test_runtime_package_scanner_allows_optional_node_module_require(
+    tmp_path: Path,
+) -> None:
+    source = 'module?.require("real-optional-module-require");'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == (
+        "real-optional-module-require",
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'import type from "runtime-default-type";',
+        'import type, { value } from "runtime-default-and-named";',
+        'import type = require("runtime-import-assignment");',
+        'import { type } from "runtime-named-type";',
+        'export { type } from "runtime-export-named-type";',
+        'import { type Foo, value } from "runtime-mixed-import";',
+        'export { type Foo, value } from "runtime-mixed-export";',
+    ],
+)
+def test_runtime_package_scanner_disambiguates_runtime_type_bindings(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    assert len(_runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts")) == 1
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'import type Foo from "inert-default-type";',
+        'import type Foo = require("inert-import-assignment");',
+        'import type { Foo } from "inert-named-type";',
+        'import type * as Foo from "inert-namespace-type";',
+        'import { type Foo, type Bar as Baz } from "inert-inline-types";',
+        'export type { Foo } from "inert-export-type";',
+        'export { type Foo, type Bar as Baz } from "inert-inline-export-types";',
+    ],
+)
+def test_runtime_package_scanner_ignores_type_only_static_clauses(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == ()
 
 
 def test_runtime_package_scanner_handles_regex_inside_template_expression(
@@ -237,6 +362,77 @@ def test_runtime_package_scanner_tracks_nested_block_regex_inside_template_expre
     )
 
 
+@pytest.mark.parametrize("terminator", ["\n", "\r", "\r\n", "\u2028", "\u2029"])
+def test_runtime_package_scanner_ends_line_comments_at_ecmascript_terminators(
+    tmp_path: Path,
+    terminator: str,
+) -> None:
+    source = f'// comment{terminator}require("real-after-comment");'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == (
+        "real-after-comment",
+    )
+
+
+@pytest.mark.parametrize("terminator", ["\n", "\r", "\r\n", "\u2028", "\u2029"])
+def test_runtime_package_scanner_ends_template_expression_comments_at_terminators(
+    tmp_path: Path,
+    terminator: str,
+) -> None:
+    source = (
+        "const rendered = `${1 // comment" + terminator + '+ require("real-template-comment")}`;'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == (
+        "real-template-comment",
+    )
+
+
+@pytest.mark.parametrize("terminator", ["\n", "\r", "\r\n", "\u2028", "\u2029"])
+@pytest.mark.parametrize("in_comment", [False, True])
+def test_runtime_package_scanner_tracks_line_breaks_inside_whitespace_and_block_comments(
+    tmp_path: Path,
+    terminator: str,
+    in_comment: bool,
+) -> None:
+    separator = f"/*{terminator}*/" if in_comment else terminator
+    source = (
+        f"const async = 1; async{separator}"
+        'label: {} / require("inert-regex-text") /; require("real-after-label");'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == (
+        "real-after-label",
+    )
+
+
+@pytest.mark.parametrize(
+    ("suffix", "expected"),
+    [
+        (
+            '`value${x}`\nlabel: {} / require("inert-label") /; require("real-label");',
+            ("real-label",),
+        ),
+        (
+            '`value${x}`\n{} / require("inert-block") /; require("real-block");',
+            ("real-block",),
+        ),
+        (
+            '`value${x}` / require("real-division") / 2;',
+            ("real-division",),
+        ),
+    ],
+)
+def test_runtime_package_scanner_treats_computed_templates_as_expression_values(
+    tmp_path: Path,
+    suffix: str,
+    expected: tuple[str, ...],
+) -> None:
+    source = f"const x = 1; {suffix}"
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == expected
+
+
 @pytest.mark.parametrize(
     "statement",
     ["label: function run() {}", "if (ok) function run() {}"],
@@ -252,6 +448,593 @@ def test_runtime_package_scanner_ignores_regex_after_annex_b_function_declaratio
 
     assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.cjs") == (
         "real-require",
+    )
+
+
+@pytest.mark.parametrize(
+    "decorators",
+    [
+        "@dec",
+        "@abstract",
+        "@async",
+        "@declare",
+        "@interface",
+        "@module",
+        "@namespace",
+        "@type",
+        "@declare export default",
+        "@async export",
+        "@dec()",
+        "@ns.dec",
+        "@ns.class",
+        "@ns.class()",
+        "@ns.class.dec",
+        "@ns.enum<T>()",
+        "@ns.function()?.type",
+        "@ns.interface.module.namespace",
+        "@ns.dec<T>(arg)",
+        "@factory().decorate<T>()",
+        "@dec(a > b)",
+        "@dec(a >= b)",
+        "@dec(a >> b)",
+        "@dec({x: a > b}, [c >= d], (e > f))",
+        "@factory(a > b).decorate<T>({x: c > d})",
+        '@dec(")")',
+        '@dec("]")',
+        '@dec("}")',
+        '@dec("(")',
+        '@dec("[")',
+        '@dec("{")',
+        "@dec(`)`)",
+        "@dec<')'>()",
+        "@dec<'>'>()",
+        "@registry[key]",
+        "@(factory())",
+        "@[]",
+        "@{}",
+        "@foo!",
+        "@foo!.bar",
+        "@foo()!",
+        "@foo[key]!",
+        "@foo<T>!",
+        "@foo?.[key]!.bar",
+        "@foo<T>()!.bar",
+        "@foo?.()",
+        "@a()\n@b.c<T>(x)\nexport default",
+        "export @dec()",
+    ],
+)
+def test_runtime_package_scanner_ignores_regex_after_decorated_class_declaration(
+    tmp_path: Path,
+    decorators: str,
+) -> None:
+    source = (
+        f'{decorators} class C {{}} / require("inert-decorator-regex") /; '
+        'require("real-after-declaration");'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (
+        "real-after-declaration",
+    )
+
+
+@pytest.mark.parametrize("name", ["interface", "module", "namespace", "type"])
+@pytest.mark.parametrize(
+    ("head", "decorator"),
+    [("class", ""), ("class", "@dec "), ("function", "")],
+)
+def test_runtime_package_scanner_allows_contextual_declaration_names(
+    tmp_path: Path,
+    name: str,
+    head: str,
+    decorator: str,
+) -> None:
+    signature = f"{name}()" if head == "function" else name
+    source = (
+        f'{decorator}{head} {signature} {{}} / require("inert-after-declaration") /; '
+        'require("real-after-declaration");'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (
+        "real-after-declaration",
+    )
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        "class C extends ns.type {}",
+        "class C extends type {}",
+        "class C extends ns.interface {}",
+        "class C implements ns.interface {}",
+        "interface C extends ns.type {}",
+        "function f(): ns.type {}",
+        "@dec class C extends ns.type {}",
+        "abstract class C implements ns.interface {}",
+    ],
+)
+def test_runtime_package_scanner_ignores_contextual_names_in_declaration_tails(
+    tmp_path: Path,
+    declaration: str,
+) -> None:
+    source = (
+        f'{declaration} / require("inert-after-declaration") /; require("real-after-declaration");'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (
+        "real-after-declaration",
+    )
+
+
+def test_runtime_package_scanner_recognizes_ambient_global_declaration(
+    tmp_path: Path,
+) -> None:
+    source = (
+        'export {}; declare global {} / require("inert-after-global") /; '
+        'require("real-after-global");'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (
+        "real-after-global",
+    )
+
+
+def test_runtime_package_scanner_keeps_global_assignment_object_executable(
+    tmp_path: Path,
+) -> None:
+    source = 'global = {} / require("real-global-divisor") / divisor;'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (
+        "real-global-divisor",
+    )
+
+
+@pytest.mark.parametrize("name", ["interface", "module", "namespace", "type"])
+@pytest.mark.parametrize("context", ["", "function outer() { ", "class C { "])
+def test_runtime_package_scanner_keeps_contextual_name_object_initializers_executable(
+    tmp_path: Path,
+    name: str,
+    context: str,
+) -> None:
+    closing = " }" if context else ""
+    source = f'{context}{name} = {{}} / require("real-object-divisor") / divisor;{closing}'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (
+        "real-object-divisor",
+    )
+
+
+@pytest.mark.parametrize("terminator", ["\n", "\r", "\r\n", "\u2028", "\u2029"])
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        "class C {}",
+        "@dec class C {}",
+        "@a()\n@b.c<T>(x) export default class C {}",
+    ],
+)
+@pytest.mark.parametrize("previous", ["foo()", "const value = 1"])
+def test_runtime_package_scanner_recognizes_asi_separated_class_declarations(
+    tmp_path: Path,
+    previous: str,
+    declaration: str,
+    terminator: str,
+) -> None:
+    source = (
+        f'{previous}{terminator}{declaration} / require("inert-after-class") /; '
+        'require("real-after-class");'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (
+        "real-after-class",
+    )
+
+
+@pytest.mark.parametrize("previous", ["foo!", "const value = foo as const", "foo<string>"])
+@pytest.mark.parametrize("decorator", ["", "@dec "])
+def test_runtime_package_scanner_recognizes_typescript_asi_expression_terminals(
+    tmp_path: Path,
+    previous: str,
+    decorator: str,
+) -> None:
+    source = (
+        f'{previous}\n{decorator}class C {{}} / require("inert-after-class") /; '
+        'require("real-after-class");'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (
+        "real-after-class",
+    )
+
+
+@pytest.mark.parametrize("previous", ["!", "left >"])
+def test_runtime_package_scanner_preserves_declaration_keyword_expression_continuations(
+    tmp_path: Path,
+    previous: str,
+) -> None:
+    source = f'{previous}\nclass C {{}} / require("real-expression-divisor") / divisor;'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (
+        "real-expression-divisor",
+    )
+
+
+@pytest.mark.parametrize("extension", [".jsx", ".tsx"])
+@pytest.mark.parametrize(
+    "element",
+    [
+        "<A></A>",
+        "<><A><B /></A></>",
+        "<UI.Panel></UI.Panel>",
+        "<svg:path></svg:path>",
+        "<A />",
+    ],
+)
+def test_runtime_package_scanner_handles_jsx_inside_decorators(
+    tmp_path: Path,
+    extension: str,
+    element: str,
+) -> None:
+    source = (
+        f'@dec({element}) class C {{}} / require("inert-after-jsx-class") /; '
+        'require("real-after-jsx-class");'
+    )
+
+    assert _runtime_module_specifiers(
+        source,
+        source_path=tmp_path / f"runtime{extension}",
+    ) == ("real-after-jsx-class",)
+
+
+def test_runtime_package_scanner_handles_jsx_inside_template_expression(
+    tmp_path: Path,
+) -> None:
+    source = (
+        'const rendered = `${<A></A>} / require("inert-template-text") /`; '
+        'require("real-after-template");'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.tsx") == (
+        "real-after-template",
+    )
+
+
+@pytest.mark.parametrize(
+    "element",
+    [
+        '<span>require("inert-text")</span>',
+        '<>import("inert-import") require("inert-require")</>',
+        '<A><UI.Panel>@require("inert-nested")</UI.Panel></A>',
+    ],
+)
+def test_runtime_package_scanner_ignores_raw_jsx_text(
+    tmp_path: Path,
+    element: str,
+) -> None:
+    source = f'const element = {element}; require("real-after-jsx");'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.tsx") == (
+        "real-after-jsx",
+    )
+
+
+def test_runtime_package_scanner_captures_jsx_expression_containers(
+    tmp_path: Path,
+) -> None:
+    source = '<A value={require("real-attribute")}>{import("real-child")}require("inert-text")</A>;'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.tsx") == (
+        "real-attribute",
+        "real-child",
+    )
+
+
+@pytest.mark.parametrize("element", ["<A></A>", "<A />", "<></>"])
+def test_runtime_package_scanner_treats_completed_jsx_as_expression_value(
+    tmp_path: Path,
+    element: str,
+) -> None:
+    source = f'const ratio = {element} / require("real-jsx-divisor") / divisor;'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.tsx") == (
+        "real-jsx-divisor",
+    )
+
+
+@pytest.mark.parametrize(
+    "element",
+    [
+        "< A></A>",
+        "< ></ >",
+        "<A / >",
+        '<Select<string> dep={require("real-generic-dep")} />',
+        "<Select<Map<string, number>> />",
+        "<Select<<T>() => T> />",
+    ],
+)
+def test_runtime_package_scanner_handles_tsx_tag_trivia_and_type_arguments(
+    tmp_path: Path,
+    element: str,
+) -> None:
+    source = f'{element} / require("real-generic-divisor") / divisor;'
+
+    assert set(_runtime_module_specifiers(source, source_path=tmp_path / "runtime.tsx")) == {
+        "real-generic-divisor",
+        *({"real-generic-dep"} if "real-generic-dep" in element else set()),
+    }
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        "<T,>(value: T) => value",
+        "<T extends {}>(value: T) => value",
+        "<T = unknown>(value: T) => value",
+        "<const T,>(value: T) => value",
+    ],
+)
+def test_runtime_package_scanner_distinguishes_tsx_generic_arrows_from_jsx(
+    tmp_path: Path,
+    head: str,
+) -> None:
+    source = f'const generic = {head}; <T></T>; require("real-after-generic");'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.tsx") == (
+        "real-after-generic",
+    )
+
+
+def test_runtime_package_scanner_handles_regex_defaults_in_tsx_generic_arrows(
+    tmp_path: Path,
+) -> None:
+    source = 'const generic = <T,>(value = /\\)/) => require("real-generic-body");'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.tsx") == (
+        "real-generic-body",
+    )
+
+
+def test_runtime_package_scanner_preserves_call_signature_shaped_jsx_text(
+    tmp_path: Path,
+) -> None:
+    source = '<T>(x): raw; require("inert-jsx-text")</T>; require("real-after-jsx");'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.tsx") == (
+        "real-after-jsx",
+    )
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        "interface I { <T>(value: T): T; }",
+        "type I = { <T>(value: T): T };",
+        "interface I { property: { <T>(value: T): T; }; }",
+        "type I = { property: { <T>(value: T): T } };",
+    ],
+)
+def test_runtime_package_scanner_handles_tsx_type_member_call_signatures(
+    tmp_path: Path,
+    declaration: str,
+) -> None:
+    source = f'{declaration} require("real-after-call-signature");'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.tsx") == (
+        "real-after-call-signature",
+    )
+
+
+@pytest.mark.parametrize(
+    ("suffix", "after"),
+    [
+        ('// </T>\nrequire("real-after-comment");', "real-after-comment"),
+        ('const marker = "</T>"; require("real-after-string");', "real-after-string"),
+    ],
+)
+def test_runtime_package_scanner_ignores_unrelated_generic_closing_tag_text(
+    tmp_path: Path,
+    suffix: str,
+    after: str,
+) -> None:
+    source = f'interface I {{ <T>(value: T): T; }} require("real-before-marker"); {suffix}'
+
+    assert set(
+        _runtime_module_specifiers(
+            source,
+            source_path=tmp_path / "runtime.tsx",
+        )
+    ) == {
+        "real-before-marker",
+        after,
+    }
+
+
+@pytest.mark.parametrize(
+    "element",
+    [
+        "<Select<Map</* > */ string>> />",
+        "<Select<`>`> />",
+    ],
+)
+def test_runtime_package_scanner_keeps_tsx_type_argument_literals_opaque(
+    tmp_path: Path,
+    element: str,
+) -> None:
+    source = (
+        f'{element}\nclass C {{}} / require("inert-after-class") /; require("real-after-class");'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.tsx") == (
+        "real-after-class",
+    )
+
+
+def test_runtime_package_scanner_scales_across_tsx_generic_arrows(
+    tmp_path: Path,
+) -> None:
+    source = "\n".join(f"const generic{index} = <T,>(value: T) => value;" for index in range(2_000))
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.tsx") == ()
+
+
+def test_runtime_package_scanner_handles_deep_alternating_jsx_expressions(
+    tmp_path: Path,
+) -> None:
+    depth = 60
+    source = "<A>{" * depth + 'require("real-nested")' + "}</A>" * depth
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.tsx") == (
+        "real-nested",
+    )
+
+
+@pytest.mark.parametrize("element", ["<A></A>", "<A />", "<></>", "<span>@</span>"])
+@pytest.mark.parametrize("decorator", ["", "@dec "])
+def test_runtime_package_scanner_recognizes_asi_after_jsx_values(
+    tmp_path: Path,
+    element: str,
+    decorator: str,
+) -> None:
+    source = (
+        f"const element = {element}\n{decorator}class C {{}} "
+        '/ require("inert-after-jsx-class") /; require("real-after-jsx-class");'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.tsx") == (
+        "real-after-jsx-class",
+    )
+
+
+def test_runtime_package_scanner_does_not_record_jsx_text_as_decorator_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = typescript_worker._decorator_prefix_before
+    decorator_scans = 0
+
+    def counting_decorator_prefix(
+        tokens: Sequence[tuple[str, str]],
+        end: int,
+        *,
+        at_index: int | None = None,
+    ) -> int | None:
+        nonlocal decorator_scans
+        decorator_scans += 1
+        return original(tokens, end, at_index=at_index)
+
+    monkeypatch.setattr(
+        typescript_worker,
+        "_decorator_prefix_before",
+        counting_decorator_prefix,
+    )
+    declarations = "\n".join(
+        f"const value{index} = left > class C{index} {{}}" for index in range(1_000)
+    )
+    source = f"const element = <span>@</span>\n{declarations}"
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.tsx") == ()
+    assert decorator_scans == 0
+
+
+@pytest.mark.parametrize(
+    ("extension", "comparison"),
+    [
+        (".ts", 'left</require("inert-regex")/.test(text)'),
+        (".tsx", 'left < /require("inert-regex")/.test(text)'),
+    ],
+)
+def test_runtime_package_scanner_preserves_comparison_to_regex_controls(
+    tmp_path: Path,
+    extension: str,
+    comparison: str,
+) -> None:
+    source = f'{comparison}; require("real-after-regex");'
+
+    assert _runtime_module_specifiers(
+        source,
+        source_path=tmp_path / f"runtime{extension}",
+    ) == ("real-after-regex",)
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ('const value = {...require("real-object-spread")};', "real-object-spread"),
+        ('const value = [...require("real-array-spread")];', "real-array-spread"),
+        ('consume(...require("real-call-spread"));', "real-call-spread"),
+        ('consume(...import("real-import-spread"));', "real-import-spread"),
+        ('const element = <A {...require("real-jsx-spread")} />;', "real-jsx-spread"),
+    ],
+)
+def test_runtime_package_scanner_captures_loads_after_spread(
+    tmp_path: Path,
+    source: str,
+    expected: str,
+) -> None:
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.tsx") == (expected,)
+
+
+@pytest.mark.parametrize(
+    ("wrapper", "maximum_decorator_scans", "maximum_decorator_span"),
+    [
+        ("const values = [{comparisons}];", 0, 0),
+        ("@dec class Root {{}}; const values = [{comparisons}];", 2, 4),
+        ("const values = [@dec class Root {{}},{comparisons}];", 2, 4),
+        ("class Host {{ @dec field = {comparisons}; }}", 2, 20),
+    ],
+)
+def test_runtime_package_scanner_bounds_decorator_scans_to_current_frame(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    wrapper: str,
+    maximum_decorator_scans: int,
+    maximum_decorator_span: int,
+) -> None:
+    original = typescript_worker._decorator_prefix_before
+    decorator_scans = 0
+    decorator_span = 0
+
+    def counting_decorator_prefix(
+        tokens: Sequence[tuple[str, str]],
+        end: int,
+        *,
+        at_index: int | None = None,
+    ) -> int | None:
+        nonlocal decorator_scans, decorator_span
+        decorator_scans += 1
+        decorator_span += end - (at_index if at_index is not None else -1)
+        return original(tokens, end, at_index=at_index)
+
+    monkeypatch.setattr(
+        typescript_worker,
+        "_decorator_prefix_before",
+        counting_decorator_prefix,
+    )
+    comparisons = ",".join(f"left > class C{index} {{}}" for index in range(1_000))
+    source = wrapper.format(comparisons=comparisons)
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == ()
+    assert decorator_scans <= maximum_decorator_scans
+    assert decorator_span <= maximum_decorator_span
+
+
+@pytest.mark.parametrize(
+    "decorator",
+    [
+        "@dec([x)",
+        "@dec({x)",
+        "@()",
+        "@<>",
+    ],
+)
+def test_runtime_package_scanner_fails_closed_on_malformed_decorator_groups(
+    tmp_path: Path,
+    decorator: str,
+) -> None:
+    source = f'{decorator} class C {{}} / require("decorator-probe") / divisor;'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (
+        "decorator-probe",
     )
 
 
@@ -274,6 +1057,7 @@ def test_runtime_package_scanner_keeps_division_after_braced_expression_executab
         'const value = class extends (class {}) {} / require("real-divisor");',
         '({ value } = {}) / require("real-divisor");',
         'function ratio() { return {} / require("real-divisor"); }',
+        'const value = condition ? left : {} / require("real-divisor");',
     ],
 )
 def test_runtime_package_scanner_preserves_nested_braced_expression_division(
@@ -298,6 +1082,126 @@ def test_runtime_package_scanner_keeps_division_adjacent_loads_executable(
         "real-import",
         "real-require",
     )
+
+
+@pytest.mark.parametrize(
+    "case_expression",
+    [
+        "left, right",
+        "((value: Type) => value)",
+        "((value): {field: Type} => value)",
+        "(<Value extends {field: Type}>(value: Value) => value)",
+        "fn(object.case)",
+        "fn(object.default)",
+        "[object.case][0]",
+        "object.case",
+    ],
+)
+def test_runtime_package_scanner_keeps_switch_clause_blocks_statement_like(
+    tmp_path: Path,
+    case_expression: str,
+) -> None:
+    source = f'switch (value) {{ case {case_expression}: {{}} / require("inert-regex-text") /; }}'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == ()
+
+
+def test_runtime_package_scanner_tracks_generic_ternary_alternate_division(
+    tmp_path: Path,
+) -> None:
+    source = (
+        "switch (value) { "
+        'case condition ? factory<Left, Right>() : {} / require("real-divisor") / 2: '
+        "break; }"
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (
+        "real-divisor",
+    )
+
+
+def test_runtime_package_scanner_tracks_comparison_ternary_alternate_division(
+    tmp_path: Path,
+) -> None:
+    source = (
+        "switch (value) { "
+        'case condition ? left < right : {} / require("real-divisor") / 2: '
+        "break; }"
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (
+        "real-divisor",
+    )
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "factory<Left, Right>()",
+        "first(), second()",
+        "first > Left, Right",
+    ],
+)
+def test_runtime_package_scanner_keeps_asi_label_statement_like(
+    tmp_path: Path,
+    prefix: str,
+) -> None:
+    source = f'{prefix}\nlabel: {{}} / require("inert-regex-text") /;'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == ()
+
+
+@pytest.mark.parametrize(
+    "identifier",
+    [
+        "abstract",
+        "async",
+        "await",
+        "declare",
+        "implements",
+        "interface",
+        "module",
+        "namespace",
+        "of",
+        "type",
+    ],
+)
+def test_runtime_package_scanner_keeps_contextual_identifier_asi_labels_statement_like(
+    tmp_path: Path,
+    identifier: str,
+) -> None:
+    source = f'const {identifier} = 1; {identifier}\nlabel: {{}} / require("inert-regex-text") /;'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == ()
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (
+            'const async = 1; async\n{} / require("inert-async") /;',
+            (),
+        ),
+        (
+            'async function run() { await\n{} / require("real-await") / 2; }',
+            ("real-await",),
+        ),
+        (
+            'for (const value of\n{} / require("real-of") / 2) {}',
+            ("real-of",),
+        ),
+        (
+            'function* run() { yield\n{} / require("inert-yield") /; }',
+            (),
+        ),
+    ],
+)
+def test_runtime_package_scanner_distinguishes_asi_from_expression_continuation(
+    tmp_path: Path,
+    source: str,
+    expected: tuple[str, ...],
+) -> None:
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == expected
 
 
 @pytest.mark.parametrize(
@@ -333,6 +1237,20 @@ def test_runtime_package_scanner_keeps_division_adjacent_loads_executable(
         'load("hoisted-runtime-helper");',
         'require("node:module").createRequire(__filename)("hoisted-runtime-helper");',
         '(await import("node:module")).createRequire(import.meta.url)("hoisted-runtime-helper");',
+        'import { createRequire } from "node:module";\n'
+        "class Container {\n"
+        "  constructor(public\n"
+        "    load: NodeRequire = createRequire(import.meta.url)) {\n"
+        '    load("hoisted-runtime-helper");\n'
+        "  }\n"
+        "}",
+        'import { createRequire } from "node:module";\n'
+        "class Container {\n"
+        "  constructor(@decorator()\n"
+        "    load: NodeRequire = createRequire(import.meta.url)) {\n"
+        '    load("hoisted-runtime-helper");\n'
+        "  }\n"
+        "}",
     ],
 )
 def test_runtime_package_scanner_tracks_proven_create_require_forms(
@@ -342,6 +1260,679 @@ def test_runtime_package_scanner_tracks_proven_create_require_forms(
     specifiers = _runtime_module_specifiers(source, source_path=tmp_path / "plugin.js")
 
     assert "hoisted-runtime-helper" in specifiers
+
+
+def test_runtime_package_scanner_keeps_optional_parameter_after_comparison_local(
+    tmp_path: Path,
+) -> None:
+    source = (
+        'import { createRequire } from "node:module";\n'
+        "function scoped(\n"
+        "  compare = left < right,\n"
+        "  optional?,\n"
+        "  load: NodeRequire = createRequire(import.meta.url),\n"
+        ") {\n"
+        '  load("typed-loader");\n'
+        "}\n"
+    )
+
+    assert set(_runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts")) == {
+        "node:module",
+        "typed-loader",
+    }
+
+
+def test_runtime_package_scanner_keeps_same_name_capabilities_scope_local(
+    tmp_path: Path,
+) -> None:
+    source = (
+        'import { createRequire } from "node:module";\n'
+        '{ const load = createRequire(import.meta.url); load("inner-only"); }\n'
+        "function load(name) { return name; }\n"
+        'load("ordinary-root");\n'
+    )
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.js") == (
+        "inner-only",
+        "node:module",
+    )
+
+
+@pytest.mark.parametrize(
+    ("container", "inside", "outside"),
+    [
+        (
+            "const object = { method() { BODY } };",
+            "object-method",
+            'load("outside-object");',
+        ),
+        (
+            'class C { a() { BODY } b() { load("sibling-method"); } }',
+            "class-method",
+            "",
+        ),
+        (
+            'class C { type(): string { BODY } interface() { load("sibling-contextual"); } }',
+            "typed-method",
+            "",
+        ),
+        (
+            "const arrow = () => { BODY };",
+            "arrow",
+            'load("outside-arrow");',
+        ),
+        (
+            "const arrow = async (value: string): Promise<void> => { BODY };",
+            "typed-arrow",
+            'load("outside-typed-arrow");',
+        ),
+        (
+            "const expression = function () { BODY };",
+            "function-expression",
+            'load("outside-function");',
+        ),
+        (
+            'class C { static { BODY } static { load("sibling-static"); } }',
+            "static-block",
+            "",
+        ),
+    ],
+)
+def test_runtime_package_scanner_keeps_function_like_capabilities_lexically_scoped(
+    tmp_path: Path,
+    container: str,
+    inside: str,
+    outside: str,
+) -> None:
+    body = f'const load = createRequire(import.meta.url); load("{inside}");'
+    source = (
+        'import { createRequire } from "node:module"; '
+        f"{container.replace('BODY', body)} {outside}"
+    )
+
+    assert set(_runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts")) == {
+        "node:module",
+        inside,
+    }
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '`${load("inside-template")}`',
+        '<A dep={load("inside-jsx")} />',
+    ],
+)
+def test_runtime_package_scanner_preserves_embedded_expression_lexical_scope(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    inside = "inside-jsx" if value.startswith("<") else "inside-template"
+    source = (
+        'import { createRequire } from "node:module"; '
+        "function scoped() { const load = createRequire(import.meta.url); "
+        f"return {value}; }} "
+        'load("outside-scope");'
+    )
+
+    assert set(_runtime_module_specifiers(source, source_path=tmp_path / "runtime.tsx")) == {
+        "node:module",
+        inside,
+    }
+
+
+def test_runtime_package_scanner_resolves_nearest_same_name_capability(
+    tmp_path: Path,
+) -> None:
+    source = (
+        'import { createRequire } from "node:module";\n'
+        "{\n"
+        "  const load = createRequire(import.meta.url);\n"
+        '  load("outer-before");\n'
+        "  {\n"
+        "    const load = createRequire(import.meta.url);\n"
+        '    load("inner");\n'
+        "  }\n"
+        '  load("outer-after");\n'
+        "}\n"
+    )
+
+    assert set(_runtime_module_specifiers(source, source_path=tmp_path / "runtime.js")) == {
+        "inner",
+        "node:module",
+        "outer-after",
+        "outer-before",
+    }
+
+
+def test_runtime_package_scanner_scales_across_same_name_sibling_bindings(
+    tmp_path: Path,
+) -> None:
+    dependency_count = 400
+    source = 'import { createRequire } from "node:module";\n' + "\n".join(
+        f'{{ const load = createRequire(import.meta.url); load("sibling-{index}"); }}'
+        for index in range(dependency_count)
+    )
+
+    specifiers = set(_runtime_module_specifiers(source, source_path=tmp_path / "runtime.js"))
+
+    assert specifiers == {
+        "node:module",
+        *(f"sibling-{index}" for index in range(dependency_count)),
+    }
+
+
+def test_runtime_package_scanner_updates_nested_scope_indices_incrementally(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    depth = 100
+    original_index = typescript_worker._ScopeCapabilityIndex
+    created = 0
+    additions = 0
+
+    class CountingIndex(original_index):
+        def __init__(
+            self,
+            bindings: Mapping[int, tuple[int, str]],
+            scope_open: Sequence[int],
+            scope_end_exclusive: Sequence[int],
+        ) -> None:
+            nonlocal created
+            created += 1
+            super().__init__(bindings, scope_open, scope_end_exclusive)
+
+        def add(self, *, start: int, end: int, capability: str) -> None:
+            nonlocal additions
+            additions += 1
+            super().add(start=start, end=end, capability=capability)
+
+    monkeypatch.setattr(typescript_worker, "_ScopeCapabilityIndex", CountingIndex)
+    chunks = ['import { createRequire } from "node:module";']
+    for index in range(depth):
+        chunks.append("{ const load = createRequire(import.meta.url); {{{")
+        chunks.append(f'const alias{index} = load; alias{index}("nested-{index}");')
+    chunks.append("}" * (depth * 4))
+
+    specifiers = set(
+        _runtime_module_specifiers("\n".join(chunks), source_path=tmp_path / "runtime.js")
+    )
+
+    assert specifiers == {
+        "node:module",
+        *(f"nested-{index}" for index in range(depth)),
+    }
+    assert created == 2
+    assert additions == depth + 1
+
+
+def test_create_require_scope_scan_does_not_copy_every_token_prefix(tmp_path: Path) -> None:
+    tokens = _AccessCountingTokens(
+        [
+            token
+            for _ in range(2_000)
+            for token in (
+                ("identifier", "call"),
+                ("punctuation", "("),
+                ("punctuation", ")"),
+                ("punctuation", ";"),
+            )
+        ]
+    )
+
+    assert (
+        _create_require_module_specifiers(
+            tokens,
+            source_path=tmp_path / "runtime.js",
+        )
+        == ()
+    )
+    assert tokens.sliced_items < len(tokens) * 20
+
+
+def test_create_require_scope_scan_keeps_deep_nesting_memory_linear(tmp_path: Path) -> None:
+    depth = 2_000
+    tokens = tuple(
+        [("punctuation", "{")] * depth
+        + [("identifier", "noop"), ("punctuation", ";")]
+        + [("punctuation", "}")] * depth
+    )
+
+    tracemalloc.start()
+    try:
+        assert (
+            _create_require_module_specifiers(
+                tokens,
+                source_path=tmp_path / "runtime.js",
+            )
+            == ()
+        )
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 16 * 1024 * 1024
+
+
+def test_create_require_scope_lookup_bounds_sparse_capability_cache(tmp_path: Path) -> None:
+    capability_count = 800
+    source = (
+        'import { createRequire } from "node:module";\n'
+        + "\n".join(
+            f"const load{index} = createRequire(import.meta.url);"
+            for index in range(capability_count)
+        )
+        + "\n"
+        + "{" * capability_count
+        + "\n"
+        + "\n".join(f'load{index}("deep-{index}");' for index in range(capability_count))
+        + "\n"
+        + "}" * capability_count
+    )
+    tokens = typescript_worker._runtime_javascript_tokens(
+        source,
+        source_path=tmp_path / "runtime.js",
+    )
+
+    tracemalloc.start()
+    try:
+        specifiers = _create_require_module_specifiers(
+            tokens,
+            source_path=tmp_path / "runtime.js",
+        )
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert set(specifiers) == {f"deep-{index}" for index in range(capability_count)}
+    assert peak < 16 * 1024 * 1024
+
+
+def test_create_require_scope_scan_does_not_rescan_statement_colons(tmp_path: Path) -> None:
+    tokens = _AccessCountingTokens(
+        [
+            token
+            for index in range(500)
+            for token in (
+                ("identifier", f"outer{index}"),
+                ("punctuation", ":"),
+                ("identifier", f"inner{index}"),
+                ("punctuation", ":"),
+                ("identifier", "function"),
+                ("identifier", f"fn{index}"),
+                ("punctuation", "("),
+                ("punctuation", ")"),
+                ("punctuation", "{"),
+                ("punctuation", "}"),
+                ("identifier", "case"),
+                ("identifier", f"condition{index}"),
+                ("punctuation", ":"),
+                ("identifier", "function"),
+                ("identifier", f"caseFn{index}"),
+                ("punctuation", "("),
+                ("punctuation", ")"),
+                ("punctuation", "{"),
+                ("punctuation", "}"),
+                ("identifier", "else"),
+                ("identifier", f"elseLabel{index}"),
+                ("punctuation", ":"),
+                ("punctuation", "{"),
+                ("punctuation", "}"),
+                ("identifier", "do"),
+                ("identifier", f"doLabel{index}"),
+                ("punctuation", ":"),
+                ("punctuation", "{"),
+                ("punctuation", "}"),
+            )
+        ]
+    )
+
+    assert (
+        _create_require_module_specifiers(
+            tokens,
+            source_path=tmp_path / "runtime.js",
+        )
+        == ()
+    )
+    assert tokens.indexed_items < len(tokens) * 100
+
+
+def test_create_require_scope_scan_does_not_rescan_typed_parameter_prefixes(
+    tmp_path: Path,
+) -> None:
+    tokens = _AccessCountingTokens(
+        [
+            ("identifier", "function"),
+            ("identifier", "typed"),
+            ("punctuation", "("),
+            *[
+                token
+                for index in range(500)
+                for token in (
+                    ("identifier", f"arg{index}"),
+                    ("punctuation", ":"),
+                    ("identifier", "string"),
+                    ("punctuation", ","),
+                    ("identifier", "public"),
+                    ("identifier", f"property{index}"),
+                    ("punctuation", ":"),
+                    ("identifier", "string"),
+                    ("punctuation", ","),
+                    ("punctuation", "@"),
+                    ("identifier", "factory"),
+                    ("punctuation", "("),
+                    ("punctuation", ")"),
+                    ("punctuation", "."),
+                    ("identifier", "decorator"),
+                    ("punctuation", "<"),
+                    ("identifier", "string"),
+                    ("punctuation", ">"),
+                    ("punctuation", "("),
+                    ("punctuation", ")"),
+                    ("identifier", f"decorated{index}"),
+                    ("punctuation", ":"),
+                    ("identifier", "string"),
+                    ("punctuation", ","),
+                )
+            ],
+            ("punctuation", ")"),
+            ("punctuation", "{"),
+            ("punctuation", "}"),
+        ]
+    )
+
+    assert (
+        _create_require_module_specifiers(
+            tokens,
+            source_path=tmp_path / "runtime.ts",
+        )
+        == ()
+    )
+    assert tokens.indexed_items < len(tokens) * 100
+
+
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        (("Type", "=", "value"), 2),
+        (("(", "Inner", "=", "ignored", ")", "=", "value"), 6),
+        (("[", "Inner", "=", "ignored", "]", "=", "value"), 6),
+        (("{", "Inner", "=", "ignored", "}", "=", "value"), 6),
+        (("<", "Inner", "=", "ignored", ">", "=", "value"), 6),
+        (("(", "Inner", "=", "ignored"), -1),
+        (("(", "Inner", "]", "=", "ignored", ")", "=", "value"), 7),
+        (("Type", ",", "value", "=", "ignored"), -1),
+        (("Type", ")", "=", "ignored"), -1),
+        (("Type", "="), 2),
+    ],
+)
+def test_annotation_initializer_starts_match_tolerant_forward_scan(
+    values: tuple[str, ...],
+    expected: int,
+) -> None:
+    punctuation = {"(", ")", "[", "]", "{", "}", "<", ">", "=", ","}
+    tokens = tuple(
+        ("punctuation" if value in punctuation else "identifier", value) for value in values
+    )
+
+    assert _annotation_initializer_starts(tokens)[0] == expected
+
+
+def test_create_require_scope_scan_does_not_rescan_nested_type_suffixes(
+    tmp_path: Path,
+) -> None:
+    depth = 500
+    tokens = _AccessCountingTokens(
+        [
+            ("identifier", "const"),
+            ("identifier", "value"),
+            ("punctuation", ":"),
+            *[
+                token
+                for index in range(depth)
+                for token in (
+                    ("punctuation", "("),
+                    ("identifier", f"arg{index}"),
+                    ("punctuation", ":"),
+                )
+            ],
+            ("identifier", "Result"),
+            *[
+                token
+                for _index in range(depth)
+                for token in (
+                    ("punctuation", ")"),
+                    ("punctuation", "=>"),
+                    ("identifier", "Result"),
+                )
+            ],
+            ("punctuation", "="),
+            ("identifier", "ordinaryValue"),
+            ("punctuation", ";"),
+        ]
+    )
+
+    assert (
+        _create_require_module_specifiers(
+            tokens,
+            source_path=tmp_path / "runtime.ts",
+        )
+        == ()
+    )
+    assert tokens.indexed_items < len(tokens) * 100
+
+
+def test_runtime_package_scanner_tracks_loader_after_nested_function_type(
+    tmp_path: Path,
+) -> None:
+    annotation = "Result"
+    for index in range(100):
+        annotation = f"(arg{index}: {annotation}) => Result"
+    source = (
+        'import { createRequire } from "node:module";\n'
+        f"const load: ({annotation}) = createRequire(import.meta.url);\n"
+        'load("nested-type-dependency");\n'
+    )
+
+    assert set(_runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts")) == {
+        "nested-type-dependency",
+        "node:module",
+    }
+
+
+def test_create_require_scope_scan_does_not_rescan_braced_expressions(tmp_path: Path) -> None:
+    tokens = _AccessCountingTokens(
+        [
+            token
+            for _ in range(500)
+            for token in (
+                ("punctuation", "("),
+                ("punctuation", "{"),
+                ("punctuation", "}"),
+                ("punctuation", ")"),
+            )
+        ]
+    )
+
+    assert (
+        _create_require_module_specifiers(
+            tokens,
+            source_path=tmp_path / "runtime.js",
+        )
+        == ()
+    )
+    assert tokens.indexed_items < len(tokens) * 50
+
+
+def test_create_require_scope_scan_does_not_rescan_control_or_asi_labels(
+    tmp_path: Path,
+) -> None:
+    values: list[tuple[str, str]] = []
+    line_breaks_before: list[bool] = []
+    for index in range(500):
+        control = (
+            ("identifier", "if"),
+            ("punctuation", "("),
+            ("identifier", "ok"),
+            ("punctuation", ")"),
+            ("identifier", f"controlled{index}"),
+            ("punctuation", ":"),
+            ("punctuation", "{"),
+            ("punctuation", "}"),
+        )
+        values.extend(control)
+        line_breaks_before.extend(False for _ in control)
+        call_and_label = (
+            ("identifier", "call"),
+            ("punctuation", "("),
+            ("punctuation", ")"),
+            ("identifier", f"afterCall{index}"),
+            ("punctuation", ":"),
+            ("punctuation", "{"),
+            ("punctuation", "}"),
+        )
+        values.extend(call_and_label)
+        line_breaks_before.extend((False, False, False, True, False, False, False))
+    tokens = _AccessCountingTokens(values)
+    tokens.line_breaks_before = tuple(line_breaks_before)
+
+    assert (
+        _create_require_module_specifiers(
+            tokens,
+            source_path=tmp_path / "runtime.js",
+        )
+        == ()
+    )
+    assert tokens.indexed_items < len(tokens) * 100
+
+
+def test_create_require_scope_scan_does_not_rescan_conditional_colons(
+    tmp_path: Path,
+) -> None:
+    tokens = _AccessCountingTokens(
+        [
+            ("identifier", "const"),
+            ("identifier", "values"),
+            ("punctuation", "="),
+            ("punctuation", "["),
+            *[
+                token
+                for index in range(500)
+                for token in (
+                    ("identifier", f"condition{index}"),
+                    ("punctuation", "?"),
+                    ("identifier", f"left{index}"),
+                    ("punctuation", "+"),
+                    ("identifier", f"right{index}"),
+                    ("punctuation", ":"),
+                    ("punctuation", "{"),
+                    ("punctuation", "}"),
+                    ("punctuation", ","),
+                )
+            ],
+            ("punctuation", "]"),
+            ("punctuation", ";"),
+        ]
+    )
+
+    assert (
+        _create_require_module_specifiers(
+            tokens,
+            source_path=tmp_path / "runtime.js",
+        )
+        == ()
+    )
+    assert tokens.indexed_items < len(tokens) * 100
+
+
+def test_create_require_scope_scan_does_not_rescan_object_property_colons(
+    tmp_path: Path,
+) -> None:
+    tokens = _AccessCountingTokens(
+        [
+            ("identifier", "const"),
+            ("identifier", "values"),
+            ("punctuation", "="),
+            ("punctuation", "{"),
+            *[
+                token
+                for index in range(500)
+                for token in (
+                    ("identifier", f"property{index}"),
+                    ("punctuation", ":"),
+                    ("punctuation", "{"),
+                    ("punctuation", "}"),
+                    ("punctuation", ","),
+                )
+            ],
+            ("punctuation", "}"),
+            ("punctuation", ";"),
+        ]
+    )
+
+    assert (
+        _create_require_module_specifiers(
+            tokens,
+            source_path=tmp_path / "runtime.js",
+        )
+        == ()
+    )
+    assert tokens.indexed_items < len(tokens) * 100
+
+
+def test_runtime_scanners_do_not_rescan_object_value_colons(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = typescript_worker._colon_opens_statement_block
+    scanned_prefix_items = 0
+
+    def count_scanned_prefix(
+        tokens: list[tuple[str, str]],
+        *,
+        enclosing_statement_brace: bool | None,
+        end: int | None = None,
+        line_breaks_before: list[bool] | None = None,
+    ) -> bool:
+        nonlocal scanned_prefix_items
+        scanned_prefix_items += len(tokens) if end is None else end
+        return original(
+            tokens,
+            enclosing_statement_brace=enclosing_statement_brace,
+            end=end,
+            line_breaks_before=line_breaks_before,
+        )
+
+    monkeypatch.setattr(
+        typescript_worker,
+        "_colon_opens_statement_block",
+        count_scanned_prefix,
+    )
+    sources = (
+        "const values = ["
+        + ",".join(f"condition{index} ? left{index} : {{}}" for index in range(500))
+        + "];",
+        "const values = {" + ",".join(f"property{index}: {{}}" for index in range(500)) + "};",
+        "interface Values {\n"
+        + "".join(f"method{index}(): {{value: string}}\n" for index in range(500))
+        + "}",
+    )
+    for source in sources:
+        before = scanned_prefix_items
+        tokens = typescript_worker._runtime_javascript_tokens(
+            source,
+            source_path=tmp_path / "runtime.js",
+        )
+        assert (
+            _create_require_module_specifiers(
+                tokens,
+                source_path=tmp_path / "runtime.js",
+            )
+            == ()
+        )
+
+        assert tokens
+        assert scanned_prefix_items - before < len(tokens) * 20
 
 
 @pytest.mark.parametrize(
