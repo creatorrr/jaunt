@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import threading
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -17,6 +18,8 @@ from jaunt.cli import (
     _cmd_mixed_reconcile,
     _cmd_mixed_specs,
     _cmd_mixed_test,
+    _command_cost_tracker,
+    _command_model_call_runner,
     _command_semantic_exec,
     _capture_python_json,
     _mixed_runtime_args,
@@ -26,7 +29,13 @@ from jaunt.cli import (
     parse_args,
 )
 from jaunt.config import load_config
-from jaunt.errors import JauntConfigError, JauntDiscoveryError, JauntGenerationError
+from jaunt.errors import (
+    JauntBudgetExceededError,
+    JauntConfigError,
+    JauntDiscoveryError,
+    JauntGenerationError,
+    JauntQuotaGenerationError,
+)
 from jaunt.generate.base import (
     GenerationModuleResult,
     GenerationRequest,
@@ -107,7 +116,8 @@ def test_mixed_build_runs_languages_concurrently_and_preserves_exit_precedence(
     assert payload["recomposed"] == ["ts:src/math"]
     assert payload["targets"]["ts"]["recomposed"] == ["src/math"]
     assert observed["jobs"] == 2
-    assert observed["generator"] is not None
+    assert callable(observed["generator_factory"])
+    assert "generator" not in observed
     assert observed["cost_tracker"] is not None
     assert isinstance(observed["python_runtime"], MixedTargetRuntime)
     assert observed["python_runtime"].jobs == 2
@@ -161,7 +171,8 @@ def test_mixed_test_runs_languages_concurrently(tmp_path: Path, monkeypatch, cap
     assert payload["targets"]["py"]["failed"] == {}
     assert payload["targets"]["ts"]["generated"] == []
     assert observed["jobs"] == 3
-    assert observed["generator"] is not None
+    assert callable(observed["generator_factory"])
+    assert "generator" not in observed
     assert observed["cost_tracker"] is not None
     assert isinstance(observed["python_runtime"], MixedTargetRuntime)
     assert observed["python_runtime"].jobs == 3
@@ -227,6 +238,134 @@ def _request() -> GenerationRequest:
         cache_payload={},
         validator=lambda _source: [],
     )
+
+
+class _QuotaOnceBackend(GeneratorBackend):
+    def __init__(self, first_call_barrier: threading.Barrier | None = None) -> None:
+        self.calls = 0
+        self.first_call_barrier = first_call_barrier
+
+    async def generate_module(
+        self,
+        ctx: ModuleSpecContext,
+        *,
+        extra_error_context: list[str] | None = None,
+    ) -> GenerationModuleResult:
+        del ctx, extra_error_context
+        return "def generated():\n    return True\n", None
+
+    async def generate_request(
+        self,
+        request: GenerationRequest,
+        *,
+        extra_error_context: list[str] | None = None,
+    ) -> GenerationModuleResult:
+        del request, extra_error_context
+        self.calls += 1
+        if self.calls == 1:
+            if self.first_call_barrier is not None:
+                self.first_call_barrier.wait(timeout=2)
+            raise JauntQuotaGenerationError("usage limit")
+        return "export const generated = true;\n", None
+
+
+def test_mixed_runtime_shares_quota_wait_budget_across_languages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+
+    async def no_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("jaunt.generate.base.asyncio.sleep", no_sleep)
+    runtime = MixedTargetRuntime(jobs=2, max_cost=None, quota_wait_minutes=3.0)
+    py_delegate = _QuotaOnceBackend()
+    ts_delegate = _QuotaOnceBackend()
+    py_backend = runtime.backend("py", lambda: py_delegate)
+    ts_backend = runtime.backend("ts", lambda: ts_delegate)
+
+    async def generate_both():
+        first = await py_backend.generate_request_with_retry(_request())
+        second = await ts_backend.generate_request_with_retry(_request())
+        return first, second
+
+    first, second = asyncio.run(generate_both())
+
+    assert first.errors == []
+    assert second.errors == []
+    assert py_delegate.calls == 2
+    assert ts_delegate.calls == 2
+    assert sleeps == [60.0, 120.0]
+
+
+def test_mixed_cli_runtime_starts_a_fresh_effective_quota_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _mixed_config(tmp_path)
+    config = replace(config, codex=replace(config.codex, quota_wait_minutes=1.0))
+    sleeps: list[float] = []
+
+    async def no_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("jaunt.generate.base.asyncio.sleep", no_sleep)
+
+    for _command in range(2):
+        args = parse_args(["build", "--root", str(tmp_path)])
+        mixed_args = _mixed_runtime_args(args, config, command="build")
+        delegate = _QuotaOnceBackend()
+        backend = mixed_args._mixed_runtime.backend("ts", lambda current=delegate: current)
+        result = asyncio.run(backend.generate_request_with_retry(_request()))
+        assert result.errors == []
+        assert delegate.calls == 2
+
+    assert sleeps == [60.0, 60.0]
+
+
+def test_mixed_runtime_concurrent_languages_cannot_overdraw_quota_wait_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    sleeps_lock = threading.Lock()
+    original_sleep = asyncio.sleep
+
+    async def yielding_sleep(delay: float) -> None:
+        with sleeps_lock:
+            sleeps.append(delay)
+        await original_sleep(0)
+
+    monkeypatch.setattr("jaunt.generate.base.asyncio.sleep", yielding_sleep)
+    runtime = MixedTargetRuntime(jobs=2, max_cost=None, quota_wait_minutes=1.0)
+    first_calls = threading.Barrier(2)
+    py_delegate = _QuotaOnceBackend(first_calls)
+    ts_delegate = _QuotaOnceBackend(first_calls)
+    py_backend = runtime.backend("py", lambda: py_delegate)
+    ts_backend = runtime.backend("ts", lambda: ts_delegate)
+    outcomes: list[object] = []
+    outcomes_lock = threading.Lock()
+
+    def generate(backend: GeneratorBackend) -> None:
+        try:
+            outcome: object = asyncio.run(backend.generate_request_with_retry(_request()))
+        except BaseException as error:
+            outcome = error
+        with outcomes_lock:
+            outcomes.append(outcome)
+
+    threads = [
+        threading.Thread(target=generate, args=(backend,)) for backend in (py_backend, ts_backend)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert sum(isinstance(outcome, JauntQuotaGenerationError) for outcome in outcomes) == 1
+    assert sum(isinstance(outcome, asyncio.CancelledError) for outcome in outcomes) == 1
+    assert py_delegate.calls + ts_delegate.calls == 2
+    assert sleeps == [60.0]
 
 
 def test_shared_runtime_caps_combined_backend_peak_across_event_loop_threads() -> None:
@@ -345,7 +484,10 @@ def test_shared_runtime_combines_language_usage_under_one_budget() -> None:
         thread.join(timeout=2)
 
     assert len(errors) == 1
-    assert isinstance(errors[0], JauntGenerationError)
+    assert type(errors[0]) is JauntBudgetExceededError
+    with pytest.raises(JauntBudgetExceededError) as exc_info:
+        runtime.cost_tracker("py").check_budget()
+    assert type(exc_info.value) is JauntBudgetExceededError
     assert runtime.summary()["api_calls"] == 2
     assert runtime.summary("py")["api_calls"] == 1
     assert runtime.summary("ts")["api_calls"] == 1
@@ -366,13 +508,177 @@ async def test_python_semantic_gate_usage_charges_shared_ledger_once(
         return SimpleNamespace(usage_input=2, usage_output=1, usage_cached=1)
 
     monkeypatch.setattr("jaunt.generate.codex_backend.run_codex_exec", fake_exec)
-    run_exec = _command_semantic_exec(args)
+    run_exec = _command_semantic_exec(args, config)
     assert run_exec is not None
     await run_exec(model="gpt-5.6-luna")
 
     runtime = args._mixed_runtime
     assert runtime.summary("py")["api_calls"] == 1
     assert runtime.summary("ts")["api_calls"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("language", ["py", "ts"])
+async def test_semantic_gate_and_generation_share_one_quota_wait_ledger(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    language: str,
+) -> None:
+    config = _mixed_config(tmp_path)
+    config = replace(config, codex=replace(config.codex, quota_wait_minutes=1.5))
+    args = parse_args(["build", "--root", str(tmp_path)])
+    sleeps: list[float] = []
+    semantic_calls = 0
+    backends: list[_QuotaOnceBackend] = []
+
+    class BudgetedBackend(_QuotaOnceBackend):
+        @property
+        def quota_wait_minutes(self) -> float:
+            return 1.5
+
+    def backend_factory(_config: object) -> BudgetedBackend:
+        backend = BudgetedBackend()
+        backends.append(backend)
+        return backend
+
+    async def fake_exec(**_kwargs: Any) -> SimpleNamespace:
+        nonlocal semantic_calls
+        semantic_calls += 1
+        if semantic_calls == 1:
+            raise JauntQuotaGenerationError("semantic usage limit")
+        return SimpleNamespace(usage_input=2, usage_output=1, usage_cached=0)
+
+    async def no_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("jaunt.cli._build_backend", backend_factory)
+    monkeypatch.setattr("jaunt.generate.codex_backend.run_codex_exec", fake_exec)
+    monkeypatch.setattr("jaunt.generate.base.asyncio.sleep", no_sleep)
+
+    run_exec = _command_semantic_exec(
+        args,
+        config,
+        language=language,  # type: ignore[arg-type]
+        charge_usage=False,
+    )
+    await run_exec(model="gpt-5.6-luna")
+    generated = await backends[0].generate_request_with_retry(_request())
+
+    assert generated.errors == []
+    assert generated.attempts == 1
+    assert semantic_calls == 2
+    assert backends[0].calls == 2
+    assert len(backends) == 1
+    assert sleeps == [60.0, 30.0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("language", ["py", "ts"])
+async def test_pure_auxiliary_calls_share_one_cost_ledger_without_double_counting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    language: str,
+) -> None:
+    config = _mixed_config(tmp_path)
+    args = parse_args(["build", "--root", str(tmp_path)])
+    backend_calls = 0
+
+    class CostedBackend(_QuotaOnceBackend):
+        @property
+        def model_name(self) -> str:
+            return "gpt-5.6-sol"
+
+    def backend_factory(_config: object) -> CostedBackend:
+        nonlocal backend_calls
+        backend_calls += 1
+        return CostedBackend()
+
+    async def fake_exec(**_kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(usage_input=5, usage_output=2, usage_cached=1)
+
+    async def auxiliary_call() -> SimpleNamespace:
+        return SimpleNamespace(usage_input=3, usage_output=1, usage_cached=0)
+
+    monkeypatch.setattr("jaunt.cli._build_backend", backend_factory)
+    monkeypatch.setattr("jaunt.generate.codex_backend.run_codex_exec", fake_exec)
+
+    auxiliary_runner = _command_model_call_runner(
+        args,
+        config,
+        language=language,  # type: ignore[arg-type]
+        usage_label="auto-skill",
+    )
+    assert backend_calls == 0
+    await auxiliary_runner(auxiliary_call)
+    semantic_runner = _command_semantic_exec(
+        args,
+        config,
+        language=language,  # type: ignore[arg-type]
+        charge_usage=True,
+    )
+    await semantic_runner(model="gpt-5.6-luna")
+
+    first = _command_cost_tracker(
+        args,
+        config,
+        language,  # type: ignore[arg-type]
+    )
+    second = _command_cost_tracker(
+        args,
+        config,
+        language,  # type: ignore[arg-type]
+    )
+    assert first is second
+    assert backend_calls == 1
+    assert first.summary_dict() == {
+        "api_calls": 2,
+        "cache_hits": 0,
+        "prompt_tokens": 8,
+        "cached_prompt_tokens": 1,
+        "completion_tokens": 3,
+        "total_tokens": 11,
+        "estimated_cost_usd": 0.00004,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("language", ["py", "ts"])
+async def test_pure_auxiliary_call_checks_command_cost_budget_immediately(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    language: str,
+) -> None:
+    loaded = _mixed_config(tmp_path)
+    config = replace(loaded, llm=replace(loaded.llm, max_cost_per_build=0.0))
+    args = parse_args(["build", "--root", str(tmp_path)])
+    exec_calls = 0
+
+    async def fake_exec(**_kwargs: Any) -> SimpleNamespace:
+        nonlocal exec_calls
+        exec_calls += 1
+        return SimpleNamespace(usage_input=1, usage_output=1, usage_cached=0)
+
+    monkeypatch.setattr("jaunt.cli._build_backend", lambda _config: _QuotaOnceBackend())
+    monkeypatch.setattr("jaunt.generate.codex_backend.run_codex_exec", fake_exec)
+
+    semantic_runner = _command_semantic_exec(
+        args,
+        config,
+        language=language,  # type: ignore[arg-type]
+        charge_usage=True,
+    )
+    with pytest.raises(JauntBudgetExceededError, match="exceeds budget"):
+        await semantic_runner(model="gpt-5.6-luna")
+    with pytest.raises(JauntBudgetExceededError, match="exceeds budget"):
+        await semantic_runner(model="gpt-5.6-luna")
+
+    tracker = _command_cost_tracker(
+        args,
+        config,
+        language,  # type: ignore[arg-type]
+    )
+    assert tracker.api_calls == 1
+    assert exec_calls == 1
 
 
 def test_mixed_runtime_uses_command_specific_default_jobs(tmp_path: Path) -> None:
@@ -565,22 +871,61 @@ def test_mixed_test_preflight_plans_contract_authored_and_implicit_batteries(
 
 
 @pytest.mark.asyncio
-async def test_mixed_python_build_defers_auto_skill_model_work(
+async def test_mixed_python_build_routes_auto_skill_model_work_through_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     config = _mixed_config(tmp_path)
+    package = tmp_path / "src" / "mixed_python_app"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "specs.py").write_text(
+        "import jaunt\n\n"
+        "@jaunt.magic()\n"
+        "def generated_smoke() -> None:\n"
+        '    """Generate a no-op smoke function."""\n'
+        '    raise RuntimeError("spec stub")\n',
+        encoding="utf-8",
+    )
     args = _mixed_runtime_args(
         parse_args(["build", "--root", str(tmp_path), "--json"]),
         config,
         command="build",
     )
 
-    async def forbidden(**_kwargs: Any) -> None:
-        raise AssertionError("auto skill model work escaped the mixed runtime")
+    class PythonBackend(GeneratorBackend):
+        async def generate_module(
+            self,
+            ctx: ModuleSpecContext,
+            *,
+            extra_error_context: list[str] | None = None,
+        ) -> GenerationModuleResult:
+            del extra_error_context
+            source = "\n".join(
+                f"def {name}() -> None:\n    return None\n" for name in ctx.expected_names
+            )
+            return source, None
 
-    monkeypatch.setattr("jaunt.skills_auto.ensure_pypi_skills", forbidden)
-    assert await _cmd_build_async(args) == 0
-    assert "deferred automatic PyPI skill generation" in capsys.readouterr().err
+    async def fake_ensure(**kwargs: Any) -> SimpleNamespace:
+        runner = kwargs["model_call_runner"]
+
+        async def model_call() -> SimpleNamespace:
+            return SimpleNamespace(usage_input=2, usage_output=1, usage_cached=1)
+
+        await runner(model_call)
+        return SimpleNamespace(warnings=[])
+
+    monkeypatch.setattr("jaunt.cli._build_backend", lambda _cfg: PythonBackend())
+    monkeypatch.setattr("jaunt.skills_auto.ensure_pypi_skills", fake_ensure)
+    original_sys_path = list(sys.path)
+    try:
+        assert await _cmd_build_async(args) == 0
+    finally:
+        sys.path[:] = original_sys_path
+        for name in tuple(sys.modules):
+            if name == "mixed_python_app" or name.startswith("mixed_python_app."):
+                sys.modules.pop(name, None)
+    assert "deferred automatic PyPI skill generation" not in capsys.readouterr().err
+    assert args._mixed_runtime.summary("py")["api_calls"] == 1
 
 
 def test_mixed_reconcile_runs_both_targets_and_aggregates_v2_payload(
@@ -598,8 +943,12 @@ def test_mixed_reconcile_runs_both_targets_and_aggregates_v2_payload(
         assert target_ids == ()
         order.append("preflight")
 
-    def python(_command: object, _args: object) -> tuple[int, dict[str, object]]:
+    def python(_command: object, child_args: Any) -> tuple[int, dict[str, object]]:
         order.append("py")
+        child_args._mixed_runtime.cost_tracker("py").record(
+            "pkg.contract:f",
+            TokenUsage(10, 3, "gpt-5.6-sol", "codex"),
+        )
         return 0, {
             "command": "reconcile",
             "ok": True,
@@ -607,9 +956,13 @@ def test_mixed_reconcile_runs_both_targets_and_aggregates_v2_payload(
             "failed": [],
         }
 
-    async def typescript(*_args: object, **kwargs: object) -> LifecycleReport:
+    async def typescript(*_args: object, **kwargs: Any) -> LifecycleReport:
         assert kwargs["target_ids"] == ()
         order.append("ts")
+        kwargs["cost_tracker"].record(
+            "src/contract.ts#f",
+            TokenUsage(20, 7, "gpt-5.6-sol", "codex"),
+        )
         return LifecycleReport(
             command="reconcile",
             targets=("src/contract.ts#f",),
@@ -631,6 +984,11 @@ def test_mixed_reconcile_runs_both_targets_and_aggregates_v2_payload(
     assert payload["changed"] == ["tests/contract/f.test.ts"]
     assert payload["targets"]["py"]["reconciled"]
     assert payload["targets"]["ts"]["selected"] == ["src/contract.ts#f"]
+    assert payload["targets"]["py"]["cost"]["api_calls"] == 1
+    assert payload["targets"]["ts"]["cost"]["api_calls"] == 1
+    assert payload["targets"]["ts"]["usage"] == payload["targets"]["ts"]["cost"]
+    assert payload["cost"]["api_calls"] == 2
+    assert payload["usage"] == payload["cost"]
 
 
 def test_mixed_reconcile_budget_failure_cancels_typescript_operation(
@@ -676,6 +1034,76 @@ def test_mixed_reconcile_budget_failure_cancels_typescript_operation(
     payload = json.loads(capsys.readouterr().out)
     assert payload["targets"]["ts"]["skipped"] is True
     assert payload["cost"]["api_calls"] == 1
+
+
+def test_mixed_reconcile_model_extract_quota_failure_cancels_typescript_operation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _mixed_config(tmp_path)
+    config_path = tmp_path / "jaunt.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8") + "\n[codex]\nquota_wait_minutes = 0.000001\n",
+        encoding="utf-8",
+    )
+    config = load_config(root=tmp_path)
+    (tmp_path / "src" / "quota_contract.py").write_text(
+        "import jaunt\n\n"
+        "@jaunt.contract\n"
+        "def echo(value: str) -> str:\n"
+        '    """Return the supplied value unchanged."""\n'
+        "    return value\n",
+        encoding="utf-8",
+    )
+    typescript_started = threading.Event()
+    typescript_cancelled = threading.Event()
+    completion_calls: list[str] = []
+
+    class QuotaTextBackend(GeneratorBackend):
+        async def generate_module(
+            self,
+            ctx: ModuleSpecContext,
+            *,
+            extra_error_context: list[str] | None = None,
+        ) -> GenerationModuleResult:
+            del ctx, extra_error_context
+            return "def generated():\n    return True\n", None
+
+        async def complete_text_with_usage(
+            self, *, system: str, user: str
+        ) -> tuple[str, TokenUsage | None]:
+            del system, user
+            assert typescript_started.wait(timeout=2)
+            completion_calls.append("quota")
+            raise JauntQuotaGenerationError("usage limit")
+
+    async def typescript(*_args: object, **_kwargs: object) -> LifecycleReport:
+        typescript_started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            typescript_cancelled.set()
+            raise
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr("jaunt.cli._mixed_typescript_preflight", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("jaunt.cli._mixed_python_preflight", lambda *_args: None)
+    monkeypatch.setattr("jaunt.cli._build_backend", lambda _config: QuotaTextBackend())
+    monkeypatch.setattr("jaunt.typescript.contracts.run_reconcile", typescript)
+    args = parse_args(["reconcile", "--root", str(tmp_path), "--json"])
+
+    original_sys_path = list(sys.path)
+    try:
+        assert _cmd_mixed_reconcile(args, tmp_path, config) == 3
+        assert typescript_cancelled.wait(timeout=1)
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["targets"]["ts"]["skipped"] is True
+        assert completion_calls == ["quota", "quota"]
+    finally:
+        sys.path[:] = original_sys_path
+        sys.modules.pop("quota_contract", None)
+        from jaunt import registry
+
+        registry.clear_registries()
 
 
 def test_mixed_reconcile_ts_only_filter_skips_python_and_reports_failure(

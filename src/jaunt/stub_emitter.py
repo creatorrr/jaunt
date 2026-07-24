@@ -6,6 +6,9 @@ import ast
 import builtins
 import copy
 import hashlib
+import importlib.metadata
+import sys
+import sysconfig
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +23,33 @@ _STUB_FORMAT_VERSION = "6"
 _RENDERED_DIGEST_PREFIX = "# jaunt:rendered_digest="
 
 _BUILTIN_NAMES = frozenset(dir(builtins))
+
+
+def _ruff_command() -> list[str] | None:
+    """Run the Ruff installed beside Jaunt, independent of the caller's PATH."""
+
+    script_dirs = dict.fromkeys(
+        (
+            Path(sysconfig.get_path("scripts")),
+            Path(sys.executable).parent,
+        )
+    )
+    for directory in script_dirs:
+        for name in ("ruff", "ruff.exe"):
+            candidate = directory / name
+            if candidate.is_file():
+                return [str(candidate)]
+    try:
+        distribution = importlib.metadata.distribution("ruff")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+    for file in distribution.files or ():
+        if Path(file).name not in {"ruff", "ruff.exe"}:
+            continue
+        candidate = Path(str(distribution.locate_file(file)))
+        if candidate.is_file():
+            return [str(candidate)]
+    return None
 
 
 @jaunt.contract
@@ -89,15 +119,14 @@ def normalize_python_source(
     formatted and checked once more. The isolated configuration keeps emitted
     bytes stable across adopter repositories with different Ruff settings.
     """
-    import shutil
     import subprocess
 
-    ruff = shutil.which("ruff")
+    ruff = _ruff_command()
     if ruff is None:
         return source, ["Ruff normalization unavailable: the bundled ruff executable was not found"]
 
     format_args = [
-        ruff,
+        *ruff,
         "format",
         "--isolated",
         "--line-length",
@@ -117,7 +146,7 @@ def normalize_python_source(
         ignored_rules.extend(["UP006", "UP007", "UP035", "UP045"])
 
     check_args = [
-        ruff,
+        *ruff,
         "check",
         "--isolated",
         "--select",
@@ -238,15 +267,14 @@ def _owner_ruff_config(filename: Path) -> Path | None:
 def _format_stub_with_owner_config(stub_source: str, *, filename: Path) -> tuple[str, str | None]:
     """Apply the Ruff formatter configuration that owns ``filename``."""
 
-    import shutil
     import subprocess
 
-    ruff = shutil.which("ruff")
+    ruff = _ruff_command()
     if ruff is None:
         return stub_source, "the bundled ruff executable was not found"
     resolved = filename.resolve()
     config = _owner_ruff_config(resolved)
-    command = [ruff, "format"]
+    command = [*ruff, "format"]
     if config is None:
         command.append("--isolated")
     else:

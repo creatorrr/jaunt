@@ -15,13 +15,14 @@ from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
 from jaunt.cost import CostTracker, _estimate_cost
-from jaunt.errors import JauntGenerationError
+from jaunt.errors import JauntBudgetExceededError
 from jaunt.generate.base import (
     GenerationModuleResult,
     GenerationRequest,
     GeneratorBackend,
     ModuleSpecContext,
     TokenUsage,
+    _QuotaRetryState,
 )
 from jaunt.targets.base import Language
 
@@ -47,7 +48,7 @@ class _SharedBudgetLedger:
             # the sibling language scheduler to keep spending.
             self._on_exceeded()
             assert self.max_cost is not None
-            raise JauntGenerationError(
+            raise JauntBudgetExceededError(
                 f"Combined mixed-target cost ${estimated:.4f} exceeds budget "
                 f"limit ${self.max_cost:.4f}. Aborting."
             )
@@ -60,7 +61,7 @@ class _SharedBudgetLedger:
         with self._lock:
             estimated = self._estimated_cost_unlocked()
             if self.max_cost is not None and estimated > self.max_cost:
-                raise JauntGenerationError(
+                raise JauntBudgetExceededError(
                     f"Combined mixed-target cost ${estimated:.4f} exceeds budget "
                     f"limit ${self.max_cost:.4f}. Aborting."
                 )
@@ -242,9 +243,15 @@ class _ConcurrencyGate:
 class LimitedGeneratorBackend(GeneratorBackend):
     """Delegate backend calls through a process-wide mixed-command gate."""
 
-    def __init__(self, delegate: GeneratorBackend, gate: _ConcurrencyGate) -> None:
+    def __init__(
+        self,
+        delegate: GeneratorBackend,
+        gate: _ConcurrencyGate,
+        quota_retry_state: _QuotaRetryState | None = None,
+    ) -> None:
         self._delegate = delegate
         self._gate = gate
+        self._shared_quota_retry_state = quota_retry_state
 
     @property
     def supports_structured_output(self) -> bool:
@@ -257,6 +264,15 @@ class LimitedGeneratorBackend(GeneratorBackend):
     @property
     def provider_name(self) -> str:
         return self._delegate.provider_name
+
+    @property
+    def quota_wait_minutes(self) -> float:
+        return self._delegate.quota_wait_minutes
+
+    def _quota_retry_state(self) -> _QuotaRetryState:
+        if self._shared_quota_retry_state is not None:
+            return self._shared_quota_retry_state
+        return self._delegate._quota_retry_state()
 
     def generation_fingerprint(self, ctx: ModuleSpecContext) -> str:
         return self._delegate.generation_fingerprint(ctx)
@@ -301,13 +317,23 @@ class LimitedGeneratorBackend(GeneratorBackend):
 class MixedTargetRuntime:
     """One concurrency and budget boundary for a mixed CLI operation."""
 
-    def __init__(self, *, jobs: int, max_cost: float | None) -> None:
+    def __init__(
+        self,
+        *,
+        jobs: int,
+        max_cost: float | None,
+        quota_wait_minutes: float = 0.0,
+    ) -> None:
         self.jobs = jobs
         self._gate = _ConcurrencyGate(jobs)
         self._backend_lock = threading.Lock()
         self._backends: dict[Language, LimitedGeneratorBackend] = {}
         self._operation_lock = threading.Lock()
         self._operations: set[tuple[asyncio.AbstractEventLoop, asyncio.Task[Any]]] = set()
+        self._quota_retry_state = _QuotaRetryState(
+            max(0.0, quota_wait_minutes * 60.0),
+            on_exhausted=self.cancel,
+        )
         self._ledger = _SharedBudgetLedger(max_cost, on_exceeded=self.cancel)
 
     def backend(
@@ -318,7 +344,11 @@ class MixedTargetRuntime:
         with self._backend_lock:
             backend = self._backends.get(language)
             if backend is None:
-                backend = LimitedGeneratorBackend(factory(), self._gate)
+                backend = LimitedGeneratorBackend(
+                    factory(),
+                    self._gate,
+                    self._quota_retry_state,
+                )
                 self._backends[language] = backend
             return backend
 

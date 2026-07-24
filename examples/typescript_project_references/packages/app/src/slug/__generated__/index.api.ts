@@ -1,8 +1,8 @@
 // ⛓️ jaunt:api-mirror — generated; do not edit.
 // jaunt:module=ts:packages/app/src/slug/index
-// jaunt:structural=sha256:792dd4a05eaba45eef4447d42328c3864864eb42a43a43d2e5af7767362811cc
+// jaunt:structural=sha256:3ef0a949d9f3433815690375fd12857d03c44e071d80f52e2c30cbc2793d9c58
 // jaunt:prose=sha256:e9fa557be73e969f3cb26837fff759c7cccd3f8a5ca90099486dae5df986e4ee
-// jaunt:api=sha256:f5de4ef08ee45f2978b95a501fde3acac77ffc2b9cab343174b08cfca70e020e
+// jaunt:api=sha256:d52dd510560a400c78bbe28c3fa4b03f57ba013134ae9156ece5e54dccca87a0
 /**
  * Convert a title to a lowercase ASCII URL slug.
  *

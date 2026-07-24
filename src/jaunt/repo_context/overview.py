@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+from jaunt.errors import JauntBudgetExceededError, JauntQuotaGenerationError
 from jaunt.generate.shared import load_prompt, render_template
 from jaunt.registry import SpecEntry
 
@@ -93,7 +94,11 @@ async def project_overview_block_for_build(
             prompts=cfg.prompts,
             cost_tracker=cost_tracker,
         )
-    except Exception:  # noqa: BLE001 - never block the build on overview generation
+    except (JauntBudgetExceededError, JauntQuotaGenerationError):
+        # Command-wide cost and quota limits are hard stops, including for this
+        # otherwise best-effort auxiliary model call.
+        raise
+    except Exception:  # noqa: BLE001 - other overview failures remain best-effort
         return ""
 
 
@@ -144,14 +149,22 @@ async def load_or_build_overview(
     ):
         return overview_path.read_text(encoding="utf-8")
 
+    complete_with_quota_retry = getattr(
+        backend,
+        "complete_text_with_usage_and_quota_retry",
+        None,
+    )
     complete_with_usage = getattr(backend, "complete_text_with_usage", None)
-    if complete_with_usage is not None:
+    if complete_with_quota_retry is not None:
+        raw, usage = await complete_with_quota_retry(system=system, user=user)
+    elif complete_with_usage is not None:
         raw, usage = await complete_with_usage(system=system, user=user)
     else:
         raw, usage = await backend.complete_text(system=system, user=user), None
     prose = raw.strip()
     if cost_tracker is not None and usage is not None:
         cost_tracker.record("__project_overview__", usage)
+        cost_tracker.check_budget()
 
     state_dir.mkdir(parents=True, exist_ok=True)
     overview_path.write_text(prose, encoding="utf-8")

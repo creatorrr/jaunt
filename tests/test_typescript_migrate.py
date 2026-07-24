@@ -617,10 +617,10 @@ async def test_typescript_migrate_rolls_back_partial_atomic_apply(
     destinations = sorted(tmp_path / write.path for write in plan.writes)
     original_replace = os.replace
 
-    def fail_second(source: str | Path, destination: str | Path) -> None:
-        if Path(destination) == destinations[1]:
+    def fail_second(source: str | Path, destination: str | Path, *args, **kwargs) -> None:
+        if Path(destination).name == destinations[1].name:
             raise OSError("migration replacement failed")
-        original_replace(source, destination)
+        original_replace(source, destination, *args, **kwargs)
 
     monkeypatch.setattr("jaunt.typescript.builder.os.replace", fail_second)
 

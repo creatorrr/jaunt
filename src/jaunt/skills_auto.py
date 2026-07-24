@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from jaunt.external_imports import discover_external_distributions_with_warnings, pep503_normalize
+from jaunt.errors import JauntBudgetExceededError, JauntQuotaGenerationError
 from jaunt.pypi import PyPIReadmeError, fetch_readme
 from jaunt.skill_agent import strip_leading_frontmatter
 from jaunt.skill_manager import _atomic_write_text
@@ -17,6 +18,7 @@ _logger = logging.getLogger("jaunt.skills_auto")
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Sequence
 
+    from jaunt.codex_executor import ModelCallRunner
     from jaunt.config import AgentConfig, CodexConfig, LLMConfig, SkillsConfig
 
 
@@ -143,6 +145,7 @@ async def ensure_pypi_skills(
     agent: AgentConfig | None = None,
     codex: CodexConfig | None = None,
     skills: SkillsConfig | None = None,
+    model_call_runner: ModelCallRunner | None = None,
 ) -> PyPISkillsResult:
     """Ensure SKILL.md files exist (frontmatter format) for imported PyPI libs."""
     if skills is not None and not skills.auto:
@@ -163,6 +166,7 @@ async def ensure_pypi_skills(
             agent=agent,
             codex=codex,
             warnings=warnings,
+            model_call_runner=model_call_runner,
         )
     return PyPISkillsResult(
         warnings=_dedupe_heading_warnings(warnings),
@@ -179,6 +183,7 @@ async def _generate_pypi_skills(
     agent: AgentConfig | None,
     codex: CodexConfig | None,
     warnings: list[str],
+    model_call_runner: ModelCallRunner | None,
 ) -> int:
     """Phase 1+2: identify stale PyPI dists and generate skills concurrently.
 
@@ -234,51 +239,90 @@ async def _generate_pypi_skills(
 
             resolved_agent = agent or AgentConfig()
             resolved_codex = codex or CodexConfig()
-            generator = CodexSkillGenerator(llm, resolved_agent, resolved_codex)
+            if model_call_runner is None:
+                generator = CodexSkillGenerator(llm, resolved_agent, resolved_codex)
+            else:
+                generator = CodexSkillGenerator(
+                    llm,
+                    resolved_agent,
+                    resolved_codex,
+                    model_call_runner=model_call_runner,
+                )
         except Exception as e:  # noqa: BLE001
             warnings.append(f"Failed initializing skill generator: {type(e).__name__}: {e}")
             failures += len(to_generate)
 
         if generator is not None:
 
-            async def _generate_one(dist: str, version: str, path: Path) -> bool:
-                """Returns True on success, False on failure."""
+            async def _generate_one(
+                dist: str,
+                version: str,
+                path: Path,
+            ) -> tuple[str, str, Path, str] | None:
+                """Stage one generated skill in memory; return None on ordinary failure."""
                 try:
                     readme, readme_type = fetch_readme(dist, version)
                 except PyPIReadmeError as e:
                     warnings.append(str(e))
-                    return False
+                    return None
                 except Exception as e:  # noqa: BLE001
                     warnings.append(
                         f"Failed fetching PyPI README for {dist}=={version}: "
                         f"{type(e).__name__}: {e}"
                     )
-                    return False
+                    return None
 
                 try:
                     md = await generator.generate_skill_markdown(dist, version, readme, readme_type)
+                except (JauntBudgetExceededError, JauntQuotaGenerationError):
+                    raise
                 except Exception as e:  # noqa: BLE001
                     warnings.append(
                         f"Failed generating skill for {dist}=={version}: {type(e).__name__}: {e}"
                     )
-                    return False
+                    return None
 
                 try:
                     content = _format_generated_skill_file(dist=dist, version=version, body_md=md)
+                except Exception as e:  # noqa: BLE001
+                    warnings.append(
+                        f"Failed formatting skill for {dist}=={version}: {type(e).__name__}: {e}"
+                    )
+                    return None
+
+                return dist, version, path, content
+
+            tasks = [
+                asyncio.create_task(_generate_one(dist, version, path))
+                for dist, version, path in to_generate
+            ]
+            try:
+                # Ordinary per-distribution failures return None and remain
+                # best-effort. A command-wide quota/cost stop is different: surface it
+                # immediately and prevent sibling Codex calls or file writes from
+                # completing after the fatal signal.
+                results = await asyncio.gather(*tasks)
+            except (JauntBudgetExceededError, JauntQuotaGenerationError):
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
+            # Publish only after every concurrent generation has reached an
+            # ordinary success/failure outcome. A fatal command-wide limit above
+            # therefore leaves even already-completed siblings entirely in memory.
+            for staged in results:
+                if staged is None:
+                    failures += 1
+                    continue
+                dist, version, path, content = staged
+                try:
                     _atomic_write_text(path, content)
                 except Exception as e:  # noqa: BLE001
                     warnings.append(
                         f"Failed writing skill for {dist}=={version} to {path}: "
                         f"{type(e).__name__}: {e}"
                     )
-                    return False
-
-                return True
-
-            tasks = [_generate_one(dist, version, path) for dist, version, path in to_generate]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for r in results:
-                if r is not True:
                     failures += 1
 
     return failures

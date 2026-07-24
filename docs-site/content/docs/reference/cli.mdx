@@ -174,7 +174,7 @@ jaunt build --language ts --target ts:src/tokens/index
 | Flag | Effect |
 |------|--------|
 | `--force` | Regenerate everything, ignoring digests. |
-| `--instruction "..."` | Extra build instruction appended to the prompt (repeatable). |
+| `--instruction "..."` | Extra generation instruction (repeatable). On `jaunt test --language ts`, it reaches both example and derived battery prompts. |
 | `--include-target-tests` / `--no-include-target-tests` | Include targeted test-spec source in build prompts (default from `[build] include_target_tests`). |
 | `--no-auto-skills` | Skip automatic PyPI or npm package skills this run. |
 | `--no-builtin-skills` | Don't seed the bundled builtin skills into the Codex workspace. |
@@ -287,12 +287,14 @@ jaunt test --no-build
 jaunt test --no-run
 jaunt test --pytest-args=-k --pytest-args email
 jaunt test --language ts --target ts:src/tokens/index
+jaunt test --language ts --no-build --instruction "Use the canonical fixture factory"
 ```
 
 | Flag | Effect |
 |------|--------|
 | `--no-build` | Skip the `build` step. |
 | `--no-run` | Generate tests without running the target's pytest or Vitest runner. |
+| `--instruction "..."` | Extra generation guidance (repeatable). TypeScript passes it to example and derived battery prompts; the one-off value is not committed provenance. |
 | `--pytest-args ARG` | Extra arg appended to pytest for Python targets (repeatable). TypeScript runner args are intentionally not accepted. |
 | `--no-semantic-gate` | Rebuild on every real change; skip the Layer B gate. |
 | `--no-redact-derived` | Debug only — feed full derived-tier failure detail into repair. |
@@ -309,7 +311,13 @@ escape hatch only.
 
 Fresh TypeScript batteries skip generation but still typecheck and run. Changes only
 to the protected runner or Vitest fingerprint deterministically reheader the unchanged
-battery and appear under `refrozen`; content-affecting drift and `--force` regenerate it.
+battery and appear under `refrozen`. When `target_api_digest` and the aggregate battery
+fingerprint changed, Jaunt first applies the current safety scan, then typechecks and
+runs the committed body against the current target. This free route also accepts
+co-drift in the prompt, runner, or Vitest fingerprint. A green body is reheadered
+without a model call, while a behavioral or compiler failure falls back to generation.
+`--no-run` disables this verification.
+Other content-affecting drift and `--force` regenerate the battery.
 When a separate `jaunt build` has already validated a compatible API recomposition,
 the following test command reheaders matching batteries from the persisted local proof.
 Build JSON uses `refrozen` for the full model-free set and `recomposed` for the

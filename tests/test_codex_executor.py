@@ -10,6 +10,7 @@ import pytest
 from jaunt.agent_runtime import AgentFile, AgentTask, AgentTaskExecutionError
 from jaunt.codex_executor import CodexExecutor
 from jaunt.config import CodexConfig, LLMConfig
+from jaunt.errors import JauntQuotaGenerationError
 from jaunt.generate.base import TokenUsage
 
 
@@ -128,5 +129,30 @@ def test_codex_executor_raises_execution_error_with_partial_output(monkeypatch) 
         assert "boom" in str(exc_info.value)
         assert exc_info.value.output == "partial\n"
         assert exc_info.value.usage is None
+
+    asyncio.run(run())
+
+
+def test_codex_executor_preserves_quota_failure_from_model_call_runner() -> None:
+    async def run() -> None:
+        async def quota_runner(_call):  # noqa: ANN001
+            raise JauntQuotaGenerationError("usage limit")
+
+        executor = CodexExecutor(
+            CodexConfig(model="gpt-test"),
+            LLMConfig(provider="openai", model="gpt-test", api_key_env="OPENAI_API_KEY"),
+            model_call_runner=quota_runner,
+        )
+
+        with pytest.raises(JauntQuotaGenerationError, match="usage limit"):
+            await executor.run_task(
+                AgentTask(
+                    kind="skill_update",
+                    mode="code",
+                    instruction="Update the skill.",
+                    target_file=AgentFile(relative_path="workspace/SKILL.md", content="# old\n"),
+                    read_only_files=[],
+                )
+            )
 
     asyncio.run(run())

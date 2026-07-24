@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -52,6 +53,163 @@ def failures_payload(
         ]
         for module_id, diagnostics in sorted(failures.items())
     }
+
+
+def _qualified_magic_target(language: str, value: str) -> str:
+    if value.startswith(("py:", "ts:")):
+        return value
+    return f"{language}:{value}"
+
+
+def _magic_blocker_diagnostics(
+    language: str,
+    magic: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Derive one structured error for every blocking magic state entry."""
+
+    label = {"py": "Python", "ts": "TypeScript"}.get(language, language)
+    build_command = f"jaunt build --language {language}"
+    diagnostics: list[dict[str, Any]] = []
+
+    stale = magic.get("stale")
+    if isinstance(stale, Mapping):
+        for raw_module, raw_reason in sorted(stale.items(), key=lambda item: str(item[0])):
+            target = _qualified_magic_target(language, str(raw_module))
+            reason = str(raw_reason)
+            diagnostics.append(
+                {
+                    "code": "JAUNT_MAGIC_STALE",
+                    "message": (
+                        f"{label} magic module {target} is stale ({reason}); run `{build_command}`."
+                    ),
+                    "severity": "error",
+                    "data": {
+                        "scope": "magic",
+                        "language": language,
+                        "target": target,
+                        "state": "stale",
+                        "reason": reason,
+                    },
+                }
+            )
+
+    unbuilt = magic.get("unbuilt")
+    if isinstance(unbuilt, (list, tuple, set, frozenset)):
+        for raw_module in sorted((str(item) for item in unbuilt)):
+            target = _qualified_magic_target(language, raw_module)
+            diagnostics.append(
+                {
+                    "code": "JAUNT_MAGIC_UNBUILT",
+                    "message": (
+                        f"{label} magic module {target} is unbuilt; run `{build_command}`."
+                    ),
+                    "severity": "error",
+                    "data": {
+                        "scope": "magic",
+                        "language": language,
+                        "target": target,
+                        "state": "unbuilt",
+                    },
+                }
+            )
+
+    invalid = magic.get("invalid")
+    if isinstance(invalid, Mapping):
+        for raw_module, raw_items in sorted(invalid.items(), key=lambda item: str(item[0])):
+            target = _qualified_magic_target(language, str(raw_module))
+            emitted = False
+            if isinstance(raw_items, (list, tuple)):
+                for raw_item in raw_items:
+                    if not isinstance(raw_item, Mapping):
+                        continue
+                    item = dict(raw_item)
+                    raw_data = item.get("data")
+                    data = dict(raw_data) if isinstance(raw_data, Mapping) else {}
+                    data.update(
+                        {
+                            "scope": "magic",
+                            "language": language,
+                            "target": target,
+                            "state": "invalid",
+                        }
+                    )
+                    item["code"] = str(item.get("code") or "JAUNT_MAGIC_INVALID")
+                    item["message"] = str(
+                        item.get("message")
+                        or (f"{label} magic module {target} is invalid; run `{build_command}`.")
+                    )
+                    item["severity"] = "error"
+                    item["data"] = data
+                    diagnostics.append(item)
+                    emitted = True
+            if not emitted:
+                diagnostics.append(
+                    {
+                        "code": "JAUNT_MAGIC_INVALID",
+                        "message": (
+                            f"{label} magic module {target} is invalid; run `{build_command}`."
+                        ),
+                        "severity": "error",
+                        "data": {
+                            "scope": "magic",
+                            "language": language,
+                            "target": target,
+                            "state": "invalid",
+                        },
+                    }
+                )
+
+    orphans = magic.get("orphans")
+    if isinstance(orphans, (list, tuple, set, frozenset)):
+        for raw_path in sorted((str(item) for item in orphans)):
+            diagnostics.append(
+                {
+                    "code": "JAUNT_MAGIC_ORPHAN",
+                    "message": (
+                        f"{label} magic artifact {raw_path} is orphaned; "
+                        "run `jaunt clean --orphans`."
+                    ),
+                    "severity": "error",
+                    "path": raw_path,
+                    "data": {
+                        "scope": "magic",
+                        "language": language,
+                        "state": "orphan",
+                        "path": raw_path,
+                    },
+                }
+            )
+
+    return diagnostics
+
+
+def _merge_diagnostic_payloads(*groups: object) -> list[dict[str, Any]]:
+    """Merge diagnostic groups in order, retaining the first exact diagnostic."""
+
+    merged: list[dict[str, Any]] = []
+    seen: set[tuple[str, ...]] = set()
+    identity_fields = ("code", "message", "severity", "path", "line", "column")
+    for group in groups:
+        if not isinstance(group, (list, tuple)):
+            continue
+        for raw_item in group:
+            if not isinstance(raw_item, Mapping):
+                continue
+            item = dict(raw_item)
+            identity = (
+                *(str(item.get(field)) for field in identity_fields),
+                json.dumps(
+                    item.get("data"),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ),
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+            merged.append(item)
+    return merged
 
 
 def _orphan_paths(items: tuple[Any, ...], root: Path | None) -> list[str]:
@@ -174,19 +332,28 @@ def check_payload(report: TargetCheckReport) -> dict[str, Any]:
         "invalid": failures_payload(report.invalid, local=True),
         "orphans": orphans,
     }
+    diagnostic_magic = dict(magic)
+    diagnostic_magic["orphans"] = _orphan_paths(
+        tuple(item for item in report.orphans if item.kind != "contract-battery"),
+        report.root,
+    )
+    diagnostics = _merge_diagnostic_payloads(
+        [diagnostic_payload(item) for item in report.diagnostics],
+        _magic_blocker_diagnostics("ts", diagnostic_magic),
+    )
     return {
         "schema_version": 2,
         "command": "check",
         "ok": report.exit_code == 0,
         "blocked": list(report.blocked),
         "checked": list(report.checked),
-        "diagnostics": [diagnostic_payload(item) for item in report.diagnostics],
+        "diagnostics": diagnostics,
         "invalid": failures_payload(report.invalid),
         "stale": dict(sorted(report.stale.items())),
         "unbuilt": sorted(report.unbuilt),
         "orphans": orphans,
         "magic": {"ts": magic},
-        "targets": {"ts": {"magic": magic}},
+        "targets": {"ts": {"magic": magic, "diagnostics": diagnostics}},
     }
 
 

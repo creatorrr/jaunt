@@ -116,14 +116,22 @@ def test_cmd_test_preflights_pytest_before_run_tests(
         "tests.specs_mod": sys.modules.get("tests.specs_mod"),
     }
     orig_sys_path = list(sys.path)
+    real_cost_tracker = jaunt.cli._command_cost_tracker
+    events: list[str] = []
+
+    def tracking_cost_tracker(*args, **kwargs):
+        events.append("cost-tracker")
+        return real_cost_tracker(*args, **kwargs)
 
     def fail_build_backend(cfg):
+        events.append("backend")
         raise AssertionError("_build_backend should not be called before pytest preflight")
 
     def fail_run_tests(*args, **kwargs):
         raise AssertionError("run_tests should not be called before pytest preflight")
 
     monkeypatch.setattr(tester, "pytest_available", lambda: False)
+    monkeypatch.setattr(jaunt.cli, "_command_cost_tracker", tracking_cost_tracker)
     monkeypatch.setattr(jaunt.cli, "_build_backend", fail_build_backend)
     monkeypatch.setattr(tester, "run_tests", fail_run_tests)
 
@@ -138,6 +146,7 @@ def test_cmd_test_preflights_pytest_before_run_tests(
     assert rc == jaunt.cli.EXIT_CONFIG_OR_DISCOVERY
     assert "pytest is not installed" in captured.err
     assert "pytest is now a core dependency" in captured.err
+    assert events == ["cost-tracker"]
 
 
 def test_cmd_test_no_run_skips_pytest_preflight(

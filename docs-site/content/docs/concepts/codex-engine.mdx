@@ -35,6 +35,14 @@ not read `llm.api_key_env` for generation. The `[codex]` keys that pick the
 model, reasoning effort, and sandbox policy live in the
 [configuration reference](/docs/reference/config).
 
+Plan-level usage limits fail immediately by default. Set
+`[codex] quota_wait_minutes` or pass `--quota-wait MINUTES` to `jaunt build` or
+`jaunt test` to let Jaunt wait within that command-wide total. Modules, test batteries,
+and both sides of a mixed-target command draw from the same budget. Concurrent waits
+reserve time before sleeping, so they cannot overdraw it. Retries back off from one
+minute up to eight minutes and do not consume a generation attempt; other generation
+errors still follow their existing retry rules.
+
 Current Codex CLIs are launched with `--ignore-user-config`, so unrelated user
 hooks, plugins, MCP servers, and tool settings do not enter a Jaunt generation call.
 Jaunt still passes its explicit `[codex]` settings and seeds project skills in the

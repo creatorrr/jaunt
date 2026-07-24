@@ -54,18 +54,25 @@ from jaunt.typescript.provenance import (
 )
 from jaunt.typescript.tester import (
     _async_export_names,
+    _bubblewrap_executable,
     _fixture_for_path,
     _fixture_names,
+    _fixture_resolution_preconditions,
     _generated_test_files,
     _implicit_class_test_specs,
+    _local_config_snapshot,
+    _node_permission_flag,
     _owner_project_for_source,
+    _pin_test_runtime_identity,
     _runner_fingerprint,
     _run_test_batches,
+    _seal_test_commit_environment,
     _strip_test_header,
     _static_test_validation,
     _test_output,
     _terminate_runner_process,
     _validate_test_owner_dependencies,
+    _verify_test_commit_environment,
     _workspace_project_config_paths,
     _workspace_test_file_owners,
 )
@@ -430,6 +437,8 @@ def _battery_request(
             "fixtures.ts or fixtures.tsx exists at the contract battery owner"
         )
     fixture_instruction = ""
+    fixture_path = ""
+    fixture_digest = MISSING_INPUT
     fixture_specifier = ""
     context_files = {"_context/contract-source.ts": declaration_context}
     if property_cases:
@@ -442,7 +451,7 @@ def _battery_request(
             + "\n"
         )
     if fixture is not None:
-        fixture_path, fixture_source = fixture
+        fixture_path, fixture_source, fixture_digest = fixture
         fixture_specifier = _facade_specifier(battery, _safe_path(root, fixture_path))
         context_files["_context/fixtures.ts"] = fixture_source
         fixture_instruction = (
@@ -450,6 +459,21 @@ def _battery_request(
             f"the declared fixtures: {', '.join(fixture_names)}."
             if fixture_names
             else f" The optional typed fixture surface is available from `{fixture_specifier}`."
+        )
+    fixture_topology = dict(_fixture_resolution_preconditions(root, relative_battery))
+    present_fixtures = {
+        path: digest for path, digest in fixture_topology.items() if digest != MISSING_INPUT
+    }
+    expected_present = {fixture_path: fixture_digest} if fixture_path else {}
+    if present_fixtures != expected_present:
+        raise JauntGenerationError(
+            "TypeScript contract fixture resolution changed while its request was prepared"
+        )
+    if fixture_path and _sha256(context_files["_context/fixtures.ts"].encode("utf-8")) != (
+        fixture_digest
+    ):
+        raise JauntGenerationError(
+            f"TypeScript contract fixture bytes changed while reading {fixture_path}"
         )
     property_instruction = (
         "Jaunt parsed every supported `@prop` bullet into `_context/properties.json` and "
@@ -521,6 +545,9 @@ snapshots, custom reporters, setup hooks, console output, or TypeScript suppress
             "propertyCount": property_count,
             "propertyCases": [case.payload() for case in property_cases],
             "propertyBlock": property_block,
+            "fixturePath": fixture_path,
+            "fixtureDigest": fixture_digest,
+            "fixtureTopology": fixture_topology,
         },
         validator=validate,
         project_root=root,
@@ -532,14 +559,55 @@ snapshots, custom reporters, setup hooks, console output, or TypeScript suppress
     )
 
 
+def _contract_fixture_provenance(
+    request: GenerationRequest,
+) -> tuple[str, str, str, dict[str, str]]:
+    """Return the exact fixture selection and candidate topology used by a request."""
+
+    fixture_path = request.cache_payload.get("fixturePath")
+    fixture_digest = request.cache_payload.get("fixtureDigest")
+    raw_topology = request.cache_payload.get("fixtureTopology")
+    if (
+        not isinstance(fixture_path, str)
+        or not isinstance(fixture_digest, str)
+        or not isinstance(raw_topology, Mapping)
+        or any(
+            not isinstance(path, str) or not isinstance(digest, str)
+            for path, digest in raw_topology.items()
+        )
+    ):
+        raise JauntGenerationError("TypeScript contract fixture provenance is malformed")
+    topology = {str(path): str(digest) for path, digest in raw_topology.items()}
+    fixture_topology = json.dumps(
+        dict(sorted(topology.items())),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return fixture_path or MISSING_INPUT, fixture_digest, fixture_topology, topology
+
+
 def _with_header(
     source: str,
     source_path: str,
     source_digest: str,
     property_digest: str = _sha256(b""),
+    *,
+    fixture_path: str | None = None,
+    fixture_digest: str | None = None,
+    fixture_topology: str | None = None,
 ) -> str:
     body = _canonical_battery_body(source)
     body_digest = _sha256(body.encode("utf-8"))
+    fixture_fields = (
+        (
+            ("fixture_path", fixture_path),
+            ("fixture_digest", fixture_digest),
+            ("fixture_topology", fixture_topology),
+        )
+        if fixture_path is not None and fixture_digest is not None and fixture_topology is not None
+        else ()
+    )
     return render_managed_document(
         _BATTERY_HEADER,
         (
@@ -547,6 +615,7 @@ def _with_header(
             ("source_digest", source_digest),
             ("property_scheme", PROPERTY_RENDERER_SCHEME),
             ("property_digest", property_digest),
+            *fixture_fields,
             ("body_digest", body_digest),
         ),
         body,
@@ -571,6 +640,60 @@ def _battery_header_metadata(source: str) -> Mapping[str, str] | None:
     if parsed is None or parsed.malformed:
         return None
     return parsed.fields
+
+
+def _battery_fixture_provenance_issue(
+    root: Path,
+    battery: Path,
+    metadata: Mapping[str, str],
+) -> str | None:
+    """Classify fixture drift against the exact selection recorded at reconcile."""
+
+    fixture_path = metadata.get("fixture_path")
+    fixture_digest = metadata.get("fixture_digest")
+    encoded_topology = metadata.get("fixture_topology")
+    if fixture_path is None and fixture_digest is None and encoded_topology is None:
+        return "missing-fixture-provenance"
+    if fixture_path is None or fixture_digest is None or encoded_topology is None:
+        return "malformed-fixture-provenance"
+    try:
+        raw_topology = json.loads(encoded_topology)
+    except json.JSONDecodeError:
+        return "malformed-fixture-provenance"
+    if not isinstance(raw_topology, dict) or any(
+        not isinstance(path, str)
+        or not isinstance(digest, str)
+        or (digest != MISSING_INPUT and re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None)
+        for path, digest in raw_topology.items()
+    ):
+        return "malformed-fixture-provenance"
+    topology = {str(path): str(digest) for path, digest in raw_topology.items()}
+    present = {path: digest for path, digest in topology.items() if digest != MISSING_INPUT}
+    if fixture_path == MISSING_INPUT:
+        if fixture_digest != MISSING_INPUT or present:
+            return "malformed-fixture-provenance"
+    elif re.fullmatch(r"sha256:[0-9a-f]{64}", fixture_digest) is None or present != {
+        fixture_path: fixture_digest
+    }:
+        return "malformed-fixture-provenance"
+
+    relative_battery = battery.resolve().relative_to(root.resolve()).as_posix()
+    current_topology = dict(_fixture_resolution_preconditions(root, relative_battery))
+    current_present = {
+        path: digest for path, digest in current_topology.items() if digest != MISSING_INPUT
+    }
+    if len(current_present) > 1:
+        return "ambiguous-fixture"
+    current_path, current_digest = (
+        next(iter(current_present.items())) if current_present else (MISSING_INPUT, MISSING_INPUT)
+    )
+    if (
+        topology != current_topology
+        or fixture_path != current_path
+        or fixture_digest != current_digest
+    ):
+        return "stale-fixture"
+    return None
 
 
 def _battery_body_digest_issue(source: str) -> str | None:
@@ -634,6 +757,11 @@ def _with_strength_metadata(source: str, report: Mapping[str, Any]) -> str:
         separators=(",", ":"),
         ensure_ascii=True,
     )
+    fixture_fields = tuple(
+        (key, metadata[key])
+        for key in ("fixture_path", "fixture_digest", "fixture_topology")
+        if key in metadata
+    )
     return render_managed_document(
         _BATTERY_HEADER,
         (
@@ -641,6 +769,7 @@ def _with_strength_metadata(source: str, report: Mapping[str, Any]) -> str:
             ("source_digest", metadata["source_digest"]),
             ("property_scheme", metadata.get("property_scheme", "")),
             ("property_digest", metadata.get("property_digest", "")),
+            *fixture_fields,
             ("body_digest", body_digest),
             ("strength_scheme", _MUTATION_SCHEME),
             ("strength", f"{killed}/{applicable}"),
@@ -715,7 +844,9 @@ def _mutation_runner_path(client: object) -> Path:
             path = worker_entry.parent.parent / "test" / "mutation.js"
     if not path.is_file():
         raise JauntConfigError(f"Installed @usejaunt/ts has no mutation runner at {path}")
-    return path
+    # Node compares argv[1] with import.meta.url before entering coordinator
+    # mode. Resolve package-manager links so those identities agree.
+    return path.resolve(strict=True)
 
 
 def _mutation_count(value: object, field_name: str) -> int:
@@ -856,6 +987,38 @@ async def _terminate_mutation_process(process: Any, *, platform: str | None = No
         await process.wait()
 
 
+def _external_mutation_workspace_links(root: Path) -> tuple[tuple[Path, Path], ...]:
+    """Return links in ``root`` whose resolved targets cross its boundary."""
+
+    root = root.resolve()
+    external: list[tuple[Path, Path]] = []
+    walk_errors: list[OSError] = []
+    for directory, directories, files in os.walk(
+        root,
+        topdown=True,
+        followlinks=False,
+        onerror=walk_errors.append,
+    ):
+        for name in (*directories, *files):
+            candidate = Path(directory) / name
+            if not candidate.is_symlink():
+                continue
+            try:
+                physical = candidate.resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise JauntConfigError(
+                    "The disposable TypeScript mutation workspace contains an invalid link: "
+                    + candidate.relative_to(root).as_posix()
+                ) from exc
+            if physical != root and root not in physical.parents:
+                external.append((candidate, physical))
+    if walk_errors:
+        raise JauntConfigError(
+            "Could not inspect the disposable TypeScript mutation workspace for unsafe links"
+        ) from walk_errors[0]
+    return tuple(sorted(external, key=lambda item: item[0].as_posix()))
+
+
 async def _run_mutation_strength(
     client: object,
     root: Path,
@@ -866,22 +1029,121 @@ async def _run_mutation_strength(
     battery_file: str,
     owner_project: str,
     overlays: Mapping[str, str],
+    config_snapshot: tuple[Mapping[str, str], Mapping[str, str]] | None = None,
+    _compiler_module_path: Path | None = None,
+    _isolated_from: Path | None = None,
     timeout: float = _MUTATION_TIMEOUT_SECONDS,
     global_timeout: float = _MUTATION_GLOBAL_TIMEOUT_SECONDS,
 ) -> Mapping[str, Any]:
     """Run the package coordinator in an isolated process tree."""
+
+    if config_snapshot is not None:
+        config_closure, config_overlays = config_snapshot
+        captured_overlays = dict(overlays)
+        for path, source in config_overlays.items():
+            previous = captured_overlays.setdefault(path, source)
+            if previous != source:
+                raise JauntGenerationError(
+                    "Contract mutation overlays conflict with captured Vitest input: " + path
+                )
+        deleted_files = tuple(
+            path
+            for path, digest in config_closure.items()
+            if digest == MISSING_INPUT and path not in captured_overlays
+        )
+        from jaunt.typescript.tester import _isolated_test_workspace
+
+        with _isolated_test_workspace(
+            root,
+            (battery_file,),
+            captured_overlays,
+            tier="derived",
+            deleted_files=deleted_files,
+            # Mutation batteries run with a strict read boundary. Package-manager
+            # links must therefore become ordinary files in the disposable tree;
+            # granting their external store would expose unrelated siblings.
+            materialize_external_links=True,
+        ) as isolated_root:
+            installation = getattr(client, "installation", None)
+            compiler = getattr(installation, "compiler_module_path", None)
+            if not isinstance(compiler, Path):
+                raise JauntConfigError("The TypeScript worker installation is incomplete")
+            try:
+                compiler_relative = Path(os.path.abspath(compiler)).relative_to(
+                    Path(os.path.abspath(root))
+                )
+            except ValueError as exc:
+                raise JauntConfigError(
+                    "The project-local TypeScript compiler is outside the contract workspace"
+                ) from exc
+            return await _run_mutation_strength(
+                client,
+                isolated_root,
+                config,
+                source_path=source_path,
+                symbol=symbol,
+                battery_file=battery_file,
+                owner_project=owner_project,
+                overlays={},
+                _compiler_module_path=isolated_root / compiler_relative,
+                _isolated_from=root,
+                timeout=timeout,
+                global_timeout=global_timeout,
+            )
 
     target = config.typescript_target
     if target is None:
         raise JauntConfigError("No [target.ts] is configured")
     installation = getattr(client, "installation", None)
     node = getattr(installation, "node", None)
-    compiler = getattr(installation, "compiler_module_path", None)
+    compiler = _compiler_module_path or getattr(installation, "compiler_module_path", None)
     if not isinstance(node, str) or not isinstance(compiler, Path):
         raise JauntConfigError("The TypeScript worker installation is incomplete")
     mutation_runner = _mutation_runner_path(client)
+    runner_root = root.resolve()
+
+    def sandbox_path(path: Path) -> Path:
+        """Map original-workspace files into the disposable view."""
+
+        lexical = Path(os.path.abspath(path))
+        if lexical == runner_root or runner_root in lexical.parents:
+            return lexical
+        if _isolated_from is not None:
+            source = _isolated_from.resolve()
+            # Preserve the lexical package route before resolving a development
+            # or package-manager link. The isolated workspace materializes that
+            # exact route even though its source target lives elsewhere.
+            with contextlib.suppress(ValueError):
+                mapped = runner_root / lexical.relative_to(source)
+                if mapped.exists():
+                    return mapped
+        physical = path.resolve(strict=True)
+        if _isolated_from is not None:
+            source = _isolated_from.resolve()
+            with contextlib.suppress(ValueError):
+                mapped = runner_root / physical.relative_to(source)
+                if mapped.exists():
+                    return mapped
+        return physical
+
+    compiler = sandbox_path(compiler)
+    if _isolated_from is not None:
+        installation_package = getattr(installation, "package_root", None)
+        if isinstance(installation_package, Path):
+            with contextlib.suppress(ValueError):
+                runner_relative = mutation_runner.relative_to(
+                    installation_package.resolve(strict=True)
+                )
+                mapped_package = sandbox_path(installation_package)
+                mapped_runner = mapped_package / runner_relative
+                if mapped_runner.is_file():
+                    mutation_runner = mapped_runner
+    mutation_runner = sandbox_path(mutation_runner)
+    node_path = Path(node)
+    if node_path.is_absolute():
+        node = str(sandbox_path(node_path))
     payload: dict[str, object] = {
-        "root": str(root),
+        "root": str(runner_root),
         "sourcePath": source_path,
         "symbol": symbol,
         "batteryFiles": [battery_file],
@@ -893,18 +1155,110 @@ async def _run_mutation_strength(
     }
     if target.vitest_config:
         payload["vitestConfigPath"] = target.vitest_config
+    environment = worker_environment()
+    command = [node]
+    if _isolated_from is not None:
+        permission_guard = mutation_runner.parent / "permission_guard.cjs"
+        if not permission_guard.is_file():
+            raise JauntConfigError(
+                "Installed @usejaunt/ts is missing its mutation permission guard"
+            )
+
+        readable = {runner_root, mutation_runner.parent, compiler.parent}
+        installation_package = getattr(installation, "package_root", None)
+        if isinstance(installation_package, Path):
+            readable.add(sandbox_path(installation_package))
+        # TypeScript loads sibling libraries and package metadata relative to
+        # lib/typescript.js. Keep that complete package readable even when a
+        # package manager resolves it outside the disposable tree.
+        if compiler.parent.name == "lib":
+            readable.add(compiler.parent.parent)
+        external_links = _external_mutation_workspace_links(runner_root)
+        bubblewrap = _bubblewrap_executable(environment)
+        if external_links:
+            shown = ", ".join(
+                candidate.relative_to(runner_root).as_posix()
+                for candidate, _physical in external_links[:5]
+            )
+            remainder = len(external_links) - 5
+            if remainder > 0:
+                shown += f" (and {remainder} more)"
+            raise JauntConfigError(
+                "TypeScript contract mutation strength could not materialize links outside "
+                f"its disposable workspace: {shown}. Replace those links with local files "
+                "or set [contract] strength = false."
+            )
+        minimal_readable = tuple(
+            sorted(
+                path
+                for path in readable
+                if not any(
+                    path != ancestor and path.is_relative_to(ancestor) for ancestor in readable
+                )
+            )
+        )
+        permission_args = [
+            _node_permission_flag(node),
+            "--allow-addons",
+            "--allow-worker",
+            # The trusted coordinator and per-mutant Vitest host may launch
+            # infrastructure children. The preloaded guard strips this flag
+            # before generated batteries enter their worker threads.
+            "--allow-child-process",
+            f"--require={permission_guard}",
+            *(f"--allow-fs-read={path}" for path in minimal_readable),
+            f"--allow-fs-write={runner_root}",
+        ]
+        if bubblewrap is not None:
+            source = _isolated_from.resolve()
+            command = [
+                bubblewrap,
+                "--die-with-parent",
+                "--new-session",
+                "--unshare-pid",
+                "--unshare-net",
+                "--ro-bind",
+                "/",
+                "/",
+                "--proc",
+                "/proc",
+                "--dev-bind",
+                "/dev",
+                "/dev",
+                "--bind",
+                str(runner_root),
+                str(runner_root),
+                "--bind",
+                str(runner_root),
+                str(source),
+                "--chdir",
+                str(runner_root),
+                node,
+            ]
+        command.extend(permission_args)
+        payload["permissionSandbox"] = True
+        source_text = str(_isolated_from.resolve())
+        for key, value in tuple(environment.items()):
+            if key != "PATH" and source_text in value:
+                environment.pop(key, None)
+        environment["PATH"] = os.pathsep.join(
+            entry
+            for entry in environment.get("PATH", "").split(os.pathsep)
+            if entry and source_text not in os.path.abspath(entry)
+        )
+        environment["PWD"] = str(runner_root)
+    command.append(str(mutation_runner))
     process = await asyncio.create_subprocess_exec(
-        node,
-        str(mutation_runner),
-        cwd=str(root),
-        env=worker_environment(),
+        *command,
+        cwd=str(runner_root),
+        env=environment,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         start_new_session=os.name == "posix",
     )
     try:
-        stdout, _stderr = await asyncio.wait_for(
+        stdout, stderr = await asyncio.wait_for(
             process.communicate(json.dumps(payload, sort_keys=True).encode("utf-8")),
             timeout=global_timeout + 10.0,
         )
@@ -915,7 +1269,15 @@ async def _run_mutation_strength(
         await asyncio.shield(_terminate_mutation_process(process))
         raise
     if process.returncode != 0 or len(stdout) > _MUTATION_MAX_OUTPUT_BYTES or not stdout.strip():
-        raise JauntGenerationError("TypeScript contract mutation runner failed")
+        detail = stderr.decode("utf-8", errors="replace").strip()[:2000]
+        summary = (
+            f"exit={process.returncode}, stdout_bytes={len(stdout)}, "
+            f"limit={_MUTATION_MAX_OUTPUT_BYTES}"
+        )
+        raise JauntGenerationError(
+            f"TypeScript contract mutation runner failed ({summary})"
+            + (f": {detail}" if detail else "")
+        )
     try:
         result = json.loads(stdout)
     except (UnicodeError, json.JSONDecodeError) as error:
@@ -977,12 +1339,14 @@ async def _generate_battery(
     *,
     max_attempts: int,
     initialized: object | None = None,
+    runner_fingerprint: str | None = None,
     workspace: Mapping[str, Any] | None = None,
     response_cache: ResponseCache | None = None,
     cost_tracker: CostTracker | None = None,
     progress: Callable[[str, str], None] | None = None,
     builtin_skill_names: Sequence[str] | None = None,
-) -> tuple[Path, str, TokenUsage | None, tuple[str, ...]]:
+    config_snapshot: tuple[Mapping[str, str], Mapping[str, str]] | None = None,
+) -> tuple[Path, str, TokenUsage | None, tuple[str, ...], Mapping[str, str]]:
     battery = _battery_path(root, config, source, symbol)
     projected = await _project_contract(client, root, source, symbol, source_text)
     declaration_context = _declaration_only_contract(source_text, symbol, projected)
@@ -995,6 +1359,9 @@ async def _generate_battery(
         source_text,
         declaration_context=declaration_context,
         builtin_skill_names=builtin_skill_names,
+    )
+    fixture_path, fixture_digest, fixture_topology, fixture_preconditions = (
+        _contract_fixture_provenance(request)
     )
     if workspace is not None:
         battery_relative = battery.relative_to(root).as_posix()
@@ -1032,6 +1399,9 @@ async def _generate_battery(
             source.relative_to(root).as_posix(),
             source_digest,
             _sha256((property_block if isinstance(property_block, str) else "").encode("utf-8")),
+            fixture_path=fixture_path,
+            fixture_digest=fixture_digest,
+            fixture_topology=fixture_topology,
         )
         battery_relative = battery.relative_to(root).as_posix()
         owner = _owner_project_for_source(
@@ -1052,18 +1422,23 @@ async def _generate_battery(
                 battery_relative: rendered,
             },
             typecheck_only=True,
+            config_snapshot=config_snapshot,
         )
         if bool(checked.get("ok", False)):
             return []
         return ["generated TypeScript contract battery failed analyzer overlay typechecking"]
 
     request = replace(request, validator=validate_candidate)
-    runner_fingerprint = (
-        _runner_fingerprint(root, client, initialized)
-        if initialized is not None
-        else "runner-unavailable"
+    effective_runner_fingerprint = (
+        runner_fingerprint
+        if runner_fingerprint is not None
+        else (
+            _runner_fingerprint(root, client, initialized)
+            if initialized is not None
+            else "runner-unavailable"
+        )
     )
-    fingerprint = _contract_generation_fingerprint(root, request, runner_fingerprint)
+    fingerprint = _contract_generation_fingerprint(root, request, effective_runner_fingerprint)
     result = await generate_request_cached(
         backend,
         request,
@@ -1089,8 +1464,11 @@ async def _generate_battery(
         source.relative_to(root).as_posix(),
         source_digest,
         _sha256((property_block if isinstance(property_block, str) else "").encode("utf-8")),
+        fixture_path=fixture_path,
+        fixture_digest=fixture_digest,
+        fixture_topology=fixture_topology,
     )
-    return battery, rendered, result.usage, result.advisories
+    return battery, rendered, result.usage, result.advisories, fixture_preconditions
 
 
 def _contract_generation_fingerprint(
@@ -1109,6 +1487,9 @@ def _contract_generation_fingerprint(
                 "propertyBlockDigest": _sha256(
                     str(request.cache_payload.get("propertyBlock", "")).encode("utf-8")
                 ),
+                "fixturePath": request.cache_payload.get("fixturePath", ""),
+                "fixtureDigest": request.cache_payload.get("fixtureDigest", MISSING_INPUT),
+                "fixtureTopology": request.cache_payload.get("fixtureTopology", {}),
                 "prompt": _sha256(request.prompt.encode("utf-8")),
                 "builtinSkills": tuple(request.builtin_skill_names),
                 "skillsFingerprint": skills_fingerprint(
@@ -1171,6 +1552,7 @@ async def run_adopt(
     battery_precondition = _precondition(expected_battery)
     strength_report: Mapping[str, Any] | None = None
     strength_diagnostics: tuple[TargetDiagnostic, ...] = ()
+    proposed: dict[str, str] = {}
     async with worker_session(root, config, worker_factory=worker_factory) as (
         client,
         initialized,
@@ -1180,8 +1562,22 @@ async def run_adopt(
         if marked == original:
             raise JauntConfigError(f"{target} is already marked with {_CONTRACT_TAG}")
         analysis = await analyze(client, initialized)
+        pinned_runner_fingerprint = _runner_fingerprint(root, client, initialized)
+        _pin_test_runtime_identity(client)
+        pinned_vitest_config_snapshot = (
+            _local_config_snapshot(root, target_config.vitest_config, client=client)
+            if target_config.vitest_config
+            else ({}, {})
+        )
+        pinned_vitest_config_closure, _pinned_vitest_config_overlays = pinned_vitest_config_snapshot
         _progress_phase(progress, target, "generating contract battery")
-        battery, battery_source, _usage, _advisories = await _generate_battery(
+        (
+            battery,
+            battery_source,
+            _usage,
+            _advisories,
+            fixture_preconditions,
+        ) = await _generate_battery(
             root,
             config,
             client,
@@ -1191,11 +1587,13 @@ async def run_adopt(
             backend,
             max_attempts=max_attempts,
             initialized=initialized,
+            runner_fingerprint=pinned_runner_fingerprint,
             workspace=analysis.workspace,
             response_cache=response_cache,
             cost_tracker=cost,
             progress=lambda stage, detail: _progress_phase(progress, target, stage, detail),
             builtin_skill_names=effective_builtin_skills,
+            config_snapshot=pinned_vitest_config_snapshot,
         )
         overlay = {
             source.relative_to(root).as_posix(): marked,
@@ -1218,6 +1616,7 @@ async def run_adopt(
             files=(battery_relative,),
             explicit_owners={battery_relative: owner},
             overlays=overlay,
+            config_snapshot=pinned_vitest_config_snapshot,
         )
         if bool(checked.get("ok", False)) and config.contract.strength:
             strength_report = await _run_mutation_strength(
@@ -1229,11 +1628,57 @@ async def run_adopt(
                 battery_file=battery_relative,
                 owner_project=owner,
                 overlays=overlay,
+                config_snapshot=pinned_vitest_config_snapshot,
             )
             strength_diagnostics = _mutation_strength_diagnostics(
                 strength_report, source.relative_to(root).as_posix()
             )
             battery_source = _with_strength_metadata(battery_source, strength_report)
+        proposed = {
+            source.relative_to(root).as_posix(): marked,
+            battery.relative_to(root).as_posix(): battery_source,
+        }
+        if bool(checked.get("ok", False)) and not strength_diagnostics and apply:
+            expected_inputs = {
+                source.relative_to(root).as_posix(): _sha256(original.encode("utf-8")),
+                expected_battery.relative_to(root).as_posix(): battery_precondition,
+            }
+            for config_path, config_digest in pinned_vitest_config_closure.items():
+                previous = expected_inputs.setdefault(config_path, config_digest)
+                if previous != config_digest:
+                    raise JauntGenerationError(
+                        "TypeScript contract Vitest preconditions conflict at " + config_path
+                    )
+            for fixture_candidate, fixture_precondition in fixture_preconditions.items():
+                previous = expected_inputs.setdefault(fixture_candidate, fixture_precondition)
+                if previous != fixture_precondition:
+                    raise JauntGenerationError(
+                        "TypeScript contract fixture preconditions conflict at " + fixture_candidate
+                    )
+            atomic_write_manifest(
+                root,
+                tuple(
+                    _Write(path=path, content=content, kind="contract", module_id=target)
+                    for path, content in proposed.items()
+                ),
+                expected_inputs=expected_inputs,
+                pre_commit_guard=lambda: _verify_test_commit_environment(
+                    root,
+                    client,
+                    initialized,
+                    pinned_runner_fingerprint,
+                    vitest_config=target_config.vitest_config,
+                    config_closure=pinned_vitest_config_closure,
+                ),
+                commit_seal=lambda: _seal_test_commit_environment(
+                    root,
+                    client,
+                    initialized,
+                    pinned_runner_fingerprint,
+                    vitest_config=target_config.vitest_config,
+                    config_closure=pinned_vitest_config_closure,
+                ),
+            )
     if not bool(checked.get("ok", False)):
         _progress_advance(progress, target, ok=False)
         _progress_finish(progress)
@@ -1280,10 +1725,6 @@ async def run_adopt(
             },
             exit_code=4,
         )
-    proposed = {
-        source.relative_to(root).as_posix(): marked,
-        battery.relative_to(root).as_posix(): battery_source,
-    }
     if not apply:
         _progress_advance(progress, target, ok=True)
         _progress_finish(progress)
@@ -1312,17 +1753,6 @@ async def run_adopt(
                 },
             },
         )
-    atomic_write_manifest(
-        root,
-        tuple(
-            _Write(path=path, content=content, kind="contract", module_id=target)
-            for path, content in proposed.items()
-        ),
-        expected_inputs={
-            source.relative_to(root).as_posix(): _sha256(original.encode("utf-8")),
-            expected_battery.relative_to(root).as_posix(): battery_precondition,
-        },
-    )
     append_events(root, [JournalEvent("adopt", target, battery.relative_to(root).as_posix())])
     _progress_advance(progress, target, ok=True)
     _progress_finish(progress)
@@ -1405,6 +1835,14 @@ async def run_reconcile(
     strength_reports: dict[str, Mapping[str, Any]] = {}
     async with worker_session(root, config, worker_factory=worker_factory) as (client, initialized):
         analysis = await analyze(client, initialized)
+        pinned_runner_fingerprint = _runner_fingerprint(root, client, initialized)
+        _pin_test_runtime_identity(client)
+        pinned_vitest_config_snapshot = (
+            _local_config_snapshot(root, target_config.vitest_config, client=client)
+            if target_config.vitest_config
+            else ({}, {})
+        )
+        pinned_vitest_config_closure, _pinned_vitest_config_overlays = pinned_vitest_config_snapshot
         records = _contract_records(analysis.workspace)
         for record in records:
             path_value = record.get("path")
@@ -1430,7 +1868,13 @@ async def run_reconcile(
                     expected_battery
                 )
                 _progress_phase(progress, target, "generating contract battery")
-                battery, rendered, _usage, _advisories = await _generate_battery(
+                (
+                    battery,
+                    rendered,
+                    _usage,
+                    _advisories,
+                    fixture_preconditions,
+                ) = await _generate_battery(
                     root,
                     config,
                     client,
@@ -1440,6 +1884,7 @@ async def run_reconcile(
                     backend,
                     max_attempts=max_attempts,
                     initialized=initialized,
+                    runner_fingerprint=pinned_runner_fingerprint,
                     workspace=analysis.workspace,
                     response_cache=response_cache,
                     cost_tracker=cost,
@@ -1447,10 +1892,18 @@ async def run_reconcile(
                         progress, item, stage, detail
                     ),
                     builtin_skill_names=effective_builtin_skills,
+                    config_snapshot=pinned_vitest_config_snapshot,
                 )
                 battery_relative = battery.relative_to(root).as_posix()
                 proposed[battery_relative] = rendered
                 battery_owners[battery_relative] = owner
+                for fixture_candidate, fixture_precondition in fixture_preconditions.items():
+                    previous = expected_sources.setdefault(fixture_candidate, fixture_precondition)
+                    if previous != fixture_precondition:
+                        raise JauntGenerationError(
+                            "TypeScript contract fixture preconditions conflict at "
+                            + fixture_candidate
+                        )
                 targets.append(target)
                 strength_work.append((target, path_value, symbol, battery_relative, owner))
                 _progress_advance(progress, target, ok=True)
@@ -1464,6 +1917,7 @@ async def run_reconcile(
                 explicit_owners=battery_owners,
                 overlays=proposed,
                 typecheck_only=True,
+                config_snapshot=pinned_vitest_config_snapshot,
             )
             if not bool(checked.get("ok", False)):
                 _progress_finish(progress)
@@ -1500,6 +1954,7 @@ async def run_reconcile(
                 files=tuple(proposed),
                 explicit_owners=battery_owners,
                 overlays=proposed,
+                config_snapshot=pinned_vitest_config_snapshot,
             )
             if not bool(run.get("ok", False)):
                 _progress_finish(progress)
@@ -1540,6 +1995,7 @@ async def run_reconcile(
                         battery_file=battery_relative,
                         owner_project=owner,
                         overlays=proposed,
+                        config_snapshot=pinned_vitest_config_snapshot,
                     )
                     strength_reports[target] = report
                     strength_diagnostics.extend(_mutation_strength_diagnostics(report, source_path))
@@ -1573,14 +2029,37 @@ async def run_reconcile(
                         },
                         exit_code=4,
                     )
-    atomic_write_manifest(
-        root,
-        tuple(
-            _Write(path=path, content=content, kind="contract", module_id="ts-contract")
-            for path, content in proposed.items()
-        ),
-        expected_inputs=expected_sources,
-    )
+        if proposed:
+            for config_path, config_digest in pinned_vitest_config_closure.items():
+                previous = expected_sources.setdefault(config_path, config_digest)
+                if previous != config_digest:
+                    raise JauntGenerationError(
+                        "TypeScript contract Vitest preconditions conflict at " + config_path
+                    )
+            atomic_write_manifest(
+                root,
+                tuple(
+                    _Write(path=path, content=content, kind="contract", module_id="ts-contract")
+                    for path, content in proposed.items()
+                ),
+                expected_inputs=expected_sources,
+                pre_commit_guard=lambda: _verify_test_commit_environment(
+                    root,
+                    client,
+                    initialized,
+                    pinned_runner_fingerprint,
+                    vitest_config=target_config.vitest_config,
+                    config_closure=pinned_vitest_config_closure,
+                ),
+                commit_seal=lambda: _seal_test_commit_environment(
+                    root,
+                    client,
+                    initialized,
+                    pinned_runner_fingerprint,
+                    vitest_config=target_config.vitest_config,
+                    config_closure=pinned_vitest_config_closure,
+                ),
+            )
     append_events(
         root, [JournalEvent("reconcile", target, "TypeScript contract") for target in targets]
     )

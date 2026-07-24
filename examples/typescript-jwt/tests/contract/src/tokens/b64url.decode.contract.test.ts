@@ -3,7 +3,10 @@
 // jaunt:source_digest=sha256:0438748771e2aee3474d083c87b5aaf8ab3f72d3b41fcc561d3a811df6079a0c
 // jaunt:property_scheme=jaunt-ts-property/2
 // jaunt:property_digest=sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-// jaunt:body_digest=sha256:19a959dcea5d4d4936622e287be6f070650e49d1bd1fa9c6a8fe5cc96eecab01
+// jaunt:fixture_path=tests/fixtures.ts
+// jaunt:fixture_digest=sha256:c32ec5f5c70a85bd7592d29dad10ecc821f73933526c8d247cb5026feba316ac
+// jaunt:fixture_topology={"tests/contract/fixtures.ts":"<missing>","tests/contract/fixtures.tsx":"<missing>","tests/contract/src/fixtures.ts":"<missing>","tests/contract/src/fixtures.tsx":"<missing>","tests/contract/src/tokens/fixtures.ts":"<missing>","tests/contract/src/tokens/fixtures.tsx":"<missing>","tests/fixtures.ts":"sha256:c32ec5f5c70a85bd7592d29dad10ecc821f73933526c8d247cb5026feba316ac","tests/fixtures.tsx":"<missing>"}
+// jaunt:body_digest=sha256:b2c9e7b392a6a9b1be35c6cbc807d57b043e411cf642802c1f2e16b134aa4e07
 // jaunt:strength_scheme=jaunt-ts-mutation/1
 // jaunt:strength=5/5
 // jaunt:strength_excluded=1
@@ -16,27 +19,26 @@ import { decode } from "../../../../src/tokens/b64url.js";
 
 describe("decode", () => {
   test("decodes the documented unpadded base64url example", () => {
-    expect(decode("aGk")).toEqual(new Uint8Array([104, 105]));
+    const decoded = decode("aGk");
+
+    expect(decoded).toBeInstanceOf(Uint8Array);
+    expect(Array.from(decoded)).toEqual([104, 105]);
   });
 
   test.each([
-    ["", []],
-    ["Zg", [102]],
-    ["Zm9v", [102, 111, 111]],
-    ["-_8", [251, 255]],
-  ] as const)("decodes valid unpadded base64url text %j", (text, bytes) => {
-    expect(decode(text)).toEqual(new Uint8Array(bytes));
+    ["padding", "aGk="],
+    ["standard base64 plus", "aGk+"],
+    ["standard base64 slash", "aGk/"],
+    ["punctuation", "aGk!"],
+    ["space", "a Gk"],
+    ["newline", "aGk\n"],
+    ["non-ASCII character", "aGké"],
+  ])("throws TypeError for %s outside the base64url alphabet", (_label, text) => {
+    expect(() => decode(text)).toThrow(TypeError);
   });
 
-  test.each(["=", "aGk=", "a+b", "a/b", "a b", "a.b", "\u00e9"])(
-    "throws TypeError for characters outside the base64url alphabet in %j",
-    (text) => {
-      expect(() => decode(text)).toThrow(TypeError);
-    },
-  );
-
-  test.each(["A", "AAAAA", "AAAAAAAAA"])(
-    "throws TypeError for impossible unpadded length in %j",
+  test.each(["A", "abcde", "ABCDEFGHI"])(
+    "throws TypeError for impossible unpadded length: %s",
     (text) => {
       expect(() => decode(text)).toThrow(TypeError);
     },

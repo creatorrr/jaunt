@@ -59,6 +59,8 @@ const required = [
   "dist/worker/main.d.ts",
   "dist/test/runner.js",
   "dist/test/runner.d.ts",
+  "dist/test/mutation.js",
+  "dist/test/mutation.d.ts",
   "dist/test/permission_guard.cjs",
   "dist/schema/protocol-v1.schema.json",
   "dist/schema/contract-ir-v1.schema.json",

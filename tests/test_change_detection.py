@@ -5,6 +5,8 @@ import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from jaunt.change_detection import (
     assess_specs,
     classify_change,
@@ -15,6 +17,7 @@ from jaunt.change_detection import (
 )
 from jaunt.config import SemanticGateConfig
 from jaunt.digest import contract_snapshot
+from jaunt.errors import JauntQuotaGenerationError
 from jaunt.registry import SpecEntry
 from jaunt.spec_ref import normalize_spec_ref
 
@@ -231,6 +234,22 @@ def test_gate_prose_treats_exec_error_as_meaningful() -> None:
     )
 
     assert verdict == "MEANINGFUL"
+
+
+def test_gate_prose_preserves_terminal_quota_exhaustion() -> None:
+    async def fake_run_exec(**kwargs: object) -> SimpleNamespace:
+        raise JauntQuotaGenerationError("terminal quota")
+
+    with pytest.raises(JauntQuotaGenerationError, match="terminal quota"):
+        asyncio.run(
+            gate_prose(
+                old_prose="old",
+                new_prose="new",
+                signature="def Foo() -> None",
+                cfg=SemanticGateConfig(),
+                run_exec=fake_run_exec,
+            )
+        )
 
 
 def test_assess_specs_rolls_up_changes_and_only_gates_prose(tmp_path: Path) -> None:

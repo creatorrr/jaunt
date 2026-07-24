@@ -14,7 +14,8 @@
       "orphans",
       "invalidate",
       "contract-projection",
-      "release-programs"
+      "release-programs",
+      "test-runner-overlay-roots"
     ],
     "sessionId": "session-1",
     "epoch": 0,

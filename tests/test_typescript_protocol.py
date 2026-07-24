@@ -119,6 +119,7 @@ def test_python_models_consume_shared_initialize_fixture() -> None:
         "invalidate",
         "contract-projection",
         "release-programs",
+        "test-runner-overlay-roots",
     )
 
     request = json.loads((fixture_root / "initialize.request.json").read_text(encoding="utf-8"))

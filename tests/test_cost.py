@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from jaunt.cost import CostTracker, _estimate_cost
-from jaunt.errors import JauntGenerationError
+from jaunt.errors import JauntBudgetExceededError
 from jaunt.generate.base import TokenUsage
 
 
@@ -53,8 +53,9 @@ def test_check_budget_passes() -> None:
 def test_check_budget_raises() -> None:
     ct = CostTracker(max_cost=0.0001)
     ct.record("mod_a", TokenUsage(1_000_000, 1_000_000, "gpt-5", "openai"))
-    with pytest.raises(JauntGenerationError, match="exceeds budget"):
+    with pytest.raises(JauntBudgetExceededError, match="exceeds budget") as exc_info:
         ct.check_budget()
+    assert type(exc_info.value) is JauntBudgetExceededError
 
 
 def test_check_budget_none_unlimited() -> None:

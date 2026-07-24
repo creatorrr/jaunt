@@ -9,13 +9,18 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
+import fnmatch
 import hashlib
 import inspect
 import json
 import os
 import posixpath
 import re
+import stat
+import sys
 import tempfile
+import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
@@ -28,7 +33,7 @@ import jaunt
 from jaunt.cache import ResponseCache
 from jaunt.config import JauntConfig
 from jaunt.cost import CostTracker
-from jaunt.errors import JauntConfigError, JauntGenerationError
+from jaunt.errors import JauntConfigError, JauntGenerationError, JauntQuotaGenerationError
 from jaunt.generate.base import GenerationRequest, GenerationResult, GeneratorBackend, TokenUsage
 from jaunt.generate.codex_backend import CodexBackend
 from jaunt.generate.codex_backend import run_codex_exec
@@ -56,6 +61,52 @@ _ANALYZE_CONTRACT_BATCH_SIZE = 4
 _SYNC_BATCH_SIZE = 4
 _PLACEHOLDER_MARKERS = ("state=unbuilt", 'state = "unbuilt"', "state: unbuilt")
 MISSING_INPUT = "<missing>"
+_WINDOWS_RESERVED_LEAF_BASES = frozenset(
+    {"aux", "clock$", "con", "conin$", "conout$", "nul", "prn"}
+    | {
+        f"{prefix}{suffix}"
+        for prefix in ("com", "lpt")
+        for suffix in ("1", "2", "3", "4", "5", "6", "7", "8", "9", "¹", "²", "³")
+    }
+)
+_IMPORTED_TYPE_CONTEXT_BEGIN = "// <jaunt:imported-type-context version=2 encoding=base64-json>"
+_LEGACY_IMPORTED_TYPE_CONTEXT_BEGIN = "// <jaunt:imported-type-context version=1>"
+_IMPORTED_TYPE_CONTEXT_END = "// </jaunt:imported-type-context>"
+
+
+class _CommittedBatteryInfrastructureError(RuntimeError):
+    """Stop candidate retries when the protected battery runner itself is unavailable."""
+
+    def __init__(
+        self,
+        errors: Sequence[str],
+        *,
+        candidate_source: str | None = None,
+    ) -> None:
+        self.errors = tuple(errors)
+        self.candidate_source = candidate_source
+        super().__init__(self.errors[0] if self.errors else "Committed battery validation failed")
+
+    def attach_candidate(self, source: str) -> _CommittedBatteryInfrastructureError:
+        """Preserve the conformance-valid bytes that reached the unavailable runner."""
+
+        if self.candidate_source is None:
+            self.candidate_source = source
+        return self
+
+
+def _unsafe_portable_leaf(name: str) -> bool:
+    """Return whether one generated path component is unsafe on supported hosts."""
+
+    windows_base = name.split(".", 1)[0].rstrip(" .").casefold()
+    return (
+        not name
+        or name in {".", ".."}
+        or any(character in name for character in ("\0", "/", "\\", ":"))
+        or name.endswith((".", " "))
+        or windows_base in _WINDOWS_RESERVED_LEAF_BASES
+        or any(ord(character) < 32 or character in '<>"|?*' for character in name)
+    )
 
 
 class WorkerLike(Protocol):
@@ -72,6 +123,24 @@ WorkerFactory: TypeAlias = Callable[
     [Path, TypeScriptTargetConfig],
     WorkerLike | Awaitable[WorkerLike],
 ]
+
+
+def _verify_worker_runtime_identity(client: WorkerLike) -> None:
+    """Recheck a real worker's content pin without burdening protocol-only fakes."""
+
+    verify = getattr(client, "verify_runtime_identity", None)
+    if callable(verify):
+        verify()
+
+
+def _seal_worker_runtime_identity(client: WorkerLike) -> None:
+    """Verify and seal a real worker at the final rollback-capable boundary."""
+
+    seal = getattr(client, "seal_runtime_identity", None)
+    if callable(seal):
+        seal()
+    else:
+        _verify_worker_runtime_identity(client)
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,7 +199,7 @@ def _target(config: JauntConfig) -> TypeScriptTargetConfig:
 
 def _safe_path(root: Path, relative: str) -> Path:
     path = Path(relative)
-    if path.is_absolute() or ".." in path.parts:
+    if path.is_absolute() or any(_unsafe_portable_leaf(part) for part in path.parts):
         raise JauntConfigError(f"TypeScript worker returned an unsafe path: {relative!r}")
     resolved_root = root.resolve()
     resolved = (resolved_root / path).resolve()
@@ -150,9 +219,91 @@ def _path_hash(path: Path) -> str | None:
         return None
 
 
+def _windows_directory_sync_calls() -> tuple[
+    Callable[..., object],
+    Callable[[object], object],
+    Callable[[object], object],
+    Callable[[], int],
+    object,
+]:
+    """Return typed Win32 calls used to flush one directory handle."""
+
+    import ctypes
+    from ctypes import wintypes
+
+    win_dll = getattr(ctypes, "WinDLL", None)
+    get_last_error = getattr(ctypes, "get_last_error", None)
+    if not callable(win_dll) or not callable(get_last_error):
+        raise OSError(errno.ENOSYS, "Win32 durability APIs are unavailable")
+    kernel32 = win_dll("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    flush_file_buffers = kernel32.FlushFileBuffers
+    flush_file_buffers.argtypes = [wintypes.HANDLE]
+    flush_file_buffers.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+    return (
+        create_file,
+        flush_file_buffers,
+        close_handle,
+        cast("Callable[[], int]", get_last_error),
+        wintypes.HANDLE(-1).value,
+    )
+
+
+def _fsync_directory_windows(path: Path) -> None:
+    """Flush a Windows directory through a backup-semantics Win32 handle."""
+
+    create_file, flush_file_buffers, close_handle, get_last_error, invalid_handle = (
+        _windows_directory_sync_calls()
+    )
+    generic_write = 0x40000000
+    share_read_write_delete = 0x00000001 | 0x00000002 | 0x00000004
+    open_existing = 3
+    file_flag_backup_semantics = 0x02000000
+    handle = create_file(
+        str(path),
+        generic_write,
+        share_read_write_delete,
+        None,
+        open_existing,
+        file_flag_backup_semantics,
+        None,
+    )
+    if handle == invalid_handle:
+        error = get_last_error()
+        raise OSError(error, "CreateFileW could not open directory for durability sync", str(path))
+    try:
+        if not flush_file_buffers(handle):
+            error = get_last_error()
+            raise OSError(error, "FlushFileBuffers could not sync directory", str(path))
+    finally:
+        closed = bool(close_handle(handle))
+    if not closed:
+        error = get_last_error()
+        raise OSError(error, "CloseHandle failed after directory durability sync", str(path))
+
+
 def _fsync_directory(path: Path) -> None:
     """Persist directory-entry updates where the filesystem supports it."""
 
+    if os.name == "nt":
+        try:
+            _fsync_directory_windows(path)
+        except OSError:
+            pass
+        return
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     try:
         descriptor = os.open(path, flags)
@@ -164,6 +315,934 @@ def _fsync_directory(path: Path) -> None:
         pass
     finally:
         os.close(descriptor)
+
+
+def _fsync_directory_required(path: Path) -> None:
+    """Confirm a rollback directory update, raising when durability is unknown."""
+
+    if os.name == "nt":
+        _fsync_directory_windows(path)
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _validate_windows_pinned_attributes(
+    path: Path,
+    file_attributes: int,
+    *,
+    directory: bool,
+) -> None:
+    file_attribute_directory = 0x00000010
+    file_attribute_reparse_point = 0x00000400
+    if file_attributes & file_attribute_reparse_point:
+        raise JauntGenerationError(f"Refusing to pin a redirecting workspace entry: {path}")
+    is_directory = bool(file_attributes & file_attribute_directory)
+    if directory != is_directory:
+        error_type = NotADirectoryError if directory else IsADirectoryError
+        raise error_type(path)
+
+
+def _open_windows_handle_with_retry(
+    opener: Callable[[], object],
+    get_last_error: Callable[[], int],
+    invalid_handle: object,
+    *,
+    path: Path,
+    blocking: bool,
+) -> object:
+    while True:
+        handle = opener()
+        if handle != invalid_handle:
+            return handle
+        error = get_last_error()
+        if blocking and error in {32, 33}:  # sharing/lock violation
+            time.sleep(0.01)
+            continue
+        if error in {2, 3}:
+            raise FileNotFoundError(error, "Pinned path does not exist", str(path))
+        raise OSError(error, "CreateFileW could not pin workspace path", str(path))
+
+
+def _windows_open_pinned_path(
+    path: Path,
+    *,
+    directory: bool,
+    create_file: bool = False,
+    writable: bool = True,
+    share_write: bool = False,
+    blocking: bool = True,
+) -> int:
+    """Open one Windows entry without following a reparse point.
+
+    Directory handles share writes because Windows rename opens the target
+    directory for ``FILE_WRITE_DATA``. They deliberately omit
+    ``FILE_SHARE_DELETE``: keeping the root and every descendant handle alive
+    therefore still prevents a junction/symlink swap while path-based Win32
+    publication is in progress.
+    """
+
+    import ctypes
+    from ctypes import wintypes
+
+    class FileAttributeTagInfo(ctypes.Structure):
+        _fields_ = [("FileAttributes", wintypes.DWORD), ("ReparseTag", wintypes.DWORD)]
+
+    win_dll = getattr(ctypes, "WinDLL", None)
+    get_last_error = getattr(ctypes, "get_last_error", None)
+    if not callable(win_dll) or not callable(get_last_error):
+        raise OSError(errno.ENOSYS, "Win32 pinned-directory APIs are unavailable")
+    kernel32 = win_dll("kernel32", use_last_error=True)
+    create = kernel32.CreateFileW
+    create.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create.restype = wintypes.HANDLE
+    get_info = kernel32.GetFileInformationByHandleEx
+    get_info.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+    get_info.restype = wintypes.BOOL
+    close = kernel32.CloseHandle
+    close.argtypes = [wintypes.HANDLE]
+    close.restype = wintypes.BOOL
+
+    generic_read = 0x80000000
+    generic_write = 0x40000000
+    share_read = 0x00000001
+    file_share_write = 0x00000002
+    open_existing = 3
+    open_always = 4
+    backup_semantics = 0x02000000
+    open_reparse_point = 0x00200000
+    invalid_handle = wintypes.HANDLE(-1).value
+    handle = _open_windows_handle_with_retry(
+        lambda: create(
+            str(path),
+            generic_read | (generic_write if writable else 0),
+            share_read | (file_share_write if share_write else 0),
+            None,
+            open_always if create_file else open_existing,
+            open_reparse_point | (backup_semantics if directory else 0),
+            None,
+        ),
+        cast("Callable[[], int]", get_last_error),
+        invalid_handle,
+        path=path,
+        blocking=blocking,
+    )
+    try:
+        info = FileAttributeTagInfo()
+        file_attribute_tag_info = 9
+        if not get_info(handle, file_attribute_tag_info, ctypes.byref(info), ctypes.sizeof(info)):
+            error = get_last_error()
+            raise OSError(error, "Could not inspect pinned workspace path", str(path))
+        _validate_windows_pinned_attributes(
+            path,
+            int(info.FileAttributes),
+            directory=directory,
+        )
+    except BaseException:
+        close(handle)
+        raise
+    return cast(int, handle)
+
+
+def _windows_close_pinned_handle(handle: object) -> None:
+    _create, _flush, close, get_last_error, _invalid = _windows_directory_sync_calls()
+    if not close(handle):
+        error = get_last_error()
+        raise OSError(error, "CloseHandle failed for pinned workspace directory")
+
+
+def _windows_flush_pinned_handle(handle: object, path: Path) -> None:
+    _create, flush, _close, get_last_error, _invalid = _windows_directory_sync_calls()
+    if not flush(handle):
+        error = get_last_error()
+        raise OSError(error, "FlushFileBuffers could not sync directory", str(path))
+
+
+@dataclass(slots=True)
+class _PinnedDirectory:
+    """One directory pinned against redirect traversal for a transaction."""
+
+    path: Path
+    descriptor: int | None = None
+    windows_handle: object | None = None
+    blocking: bool = True
+
+    @staticmethod
+    def _leaf(name: str) -> str:
+        if _unsafe_portable_leaf(name):
+            raise JauntGenerationError(f"Unsafe pinned-directory leaf name: {name!r}")
+        return name
+
+    def close(self) -> None:
+        first_error: OSError | None = None
+        if self.descriptor is not None:
+            descriptor = self.descriptor
+            self.descriptor = None
+            try:
+                os.close(descriptor)
+            except OSError as error:
+                first_error = error
+        if self.windows_handle is not None:
+            handle = self.windows_handle
+            self.windows_handle = None
+            try:
+                _windows_close_pinned_handle(handle)
+            except OSError as error:
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            raise first_error
+
+    def fsync_required(self) -> None:
+        if self.windows_handle is not None:
+            _windows_flush_pinned_handle(self.windows_handle, self.path)
+            return
+        if self.descriptor is None:  # pragma: no cover - defensive
+            raise RuntimeError("Pinned directory is closed")
+        os.fsync(self.descriptor)
+
+    def _open_regular_read(self, name: str) -> int:
+        leaf = self._leaf(name)
+        if self.windows_handle is not None:
+            import msvcrt
+
+            open_osfhandle = cast(
+                "Callable[[int, int], int]",
+                getattr(msvcrt, "open_osfhandle", None),
+            )
+            if not callable(open_osfhandle):  # pragma: no cover - Windows runtime invariant
+                raise OSError(errno.ENOSYS, "msvcrt.open_osfhandle is unavailable")
+            handle = _windows_open_pinned_path(
+                self.path / leaf,
+                directory=False,
+                writable=False,
+                blocking=self.blocking,
+            )
+            try:
+                return open_osfhandle(
+                    handle,
+                    os.O_RDONLY | getattr(os, "O_BINARY", 0),
+                )
+            except BaseException:
+                _windows_close_pinned_handle(handle)
+                raise
+        if self.descriptor is None:  # pragma: no cover - defensive
+            raise RuntimeError("Pinned directory is closed")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags |= getattr(os, "O_NONBLOCK", 0)
+        return os.open(leaf, flags, dir_fd=self.descriptor)
+
+    def read_bytes_with_stat(self, name: str) -> tuple[bytes, os.stat_result]:
+        descriptor = self._open_regular_read(name)
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise IsADirectoryError(self.path / name)
+            with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                content = stream.read()
+            return content, metadata
+        finally:
+            os.close(descriptor)
+
+    def read_bytes(self, name: str) -> bytes:
+        return self.read_bytes_with_stat(name)[0]
+
+    def stat(self, name: str) -> os.stat_result | None:
+        try:
+            descriptor = self._open_regular_read(name)
+        except FileNotFoundError:
+            return None
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise IsADirectoryError(self.path / name)
+            return metadata
+        finally:
+            os.close(descriptor)
+
+    def path_hash(self, name: str) -> str | None:
+        try:
+            return _sha256(self.read_bytes(name))
+        except FileNotFoundError:
+            return None
+
+    def iter_names(self, pattern: str) -> tuple[str, ...]:
+        if not pattern or any(character in pattern for character in ("\0", "/", "\\", ":")):
+            raise JauntGenerationError(f"Unsafe pinned-directory match pattern: {pattern!r}")
+        if self.windows_handle is not None:
+            names = os.listdir(self.path)
+        else:
+            if self.descriptor is None:  # pragma: no cover - defensive
+                raise RuntimeError("Pinned directory is closed")
+            names = os.listdir(self.descriptor)
+        matched = [name for name in names if fnmatch.fnmatchcase(name, pattern)]
+        for name in matched:
+            self._leaf(name)
+        return tuple(sorted(matched))
+
+    def create_temp(self, prefix: str, suffix: str = "") -> tuple[int, str]:
+        for _attempt in range(128):
+            leaf = self._leaf(f"{prefix}{uuid.uuid4().hex}{suffix}")
+            flags = (
+                os.O_CREAT
+                | os.O_EXCL
+                | os.O_RDWR
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            try:
+                if self.windows_handle is not None:
+                    return os.open(self.path / leaf, flags, 0o600), leaf
+                if self.descriptor is None:  # pragma: no cover - defensive
+                    raise RuntimeError("Pinned directory is closed")
+                return os.open(leaf, flags, 0o600, dir_fd=self.descriptor), leaf
+            except FileExistsError:
+                continue
+        raise FileExistsError(errno.EEXIST, "Could not reserve a unique transaction temp name")
+
+    def open_lock(self, name: str, flags: int, mode: int, *, blocking: bool) -> int:
+        leaf = self._leaf(name)
+        if self.windows_handle is not None:
+            import msvcrt
+
+            open_osfhandle = cast(
+                "Callable[[int, int], int]",
+                getattr(msvcrt, "open_osfhandle", None),
+            )
+            if not callable(open_osfhandle):  # pragma: no cover - Windows runtime invariant
+                raise OSError(errno.ENOSYS, "msvcrt.open_osfhandle is unavailable")
+            handle = _windows_open_pinned_path(
+                self.path / leaf,
+                directory=False,
+                create_file=bool(flags & os.O_CREAT),
+                share_write=True,
+                blocking=blocking,
+            )
+            try:
+                return open_osfhandle(
+                    handle,
+                    os.O_RDWR | getattr(os, "O_BINARY", 0),
+                )
+            except BaseException:
+                _windows_close_pinned_handle(handle)
+                raise
+        if self.descriptor is None:  # pragma: no cover - defensive
+            raise RuntimeError("Pinned directory is closed")
+        return os.open(
+            leaf,
+            flags | getattr(os, "O_NOFOLLOW", 0),
+            mode,
+            dir_fd=self.descriptor,
+        )
+
+    def replace(self, source: str, destination: str) -> None:
+        source_leaf = self._leaf(source)
+        destination_leaf = self._leaf(destination)
+        if self.windows_handle is not None:
+            os.replace(self.path / source_leaf, self.path / destination_leaf)
+            return
+        if self.descriptor is None:  # pragma: no cover - defensive
+            raise RuntimeError("Pinned directory is closed")
+        os.replace(
+            source_leaf,
+            destination_leaf,
+            src_dir_fd=self.descriptor,
+            dst_dir_fd=self.descriptor,
+        )
+
+    def unlink(self, name: str, *, missing_ok: bool = False) -> bool:
+        leaf = self._leaf(name)
+        try:
+            if self.windows_handle is not None:
+                os.unlink(self.path / leaf)
+            else:
+                if self.descriptor is None:  # pragma: no cover - defensive
+                    raise RuntimeError("Pinned directory is closed")
+                os.unlink(leaf, dir_fd=self.descriptor)
+        except FileNotFoundError:
+            if not missing_ok:
+                raise
+            return False
+        return True
+
+
+class _PinnedWorkspace:
+    """Hold a no-follow directory chain for one publication transaction."""
+
+    def __init__(self, root: Path, *, blocking: bool = True) -> None:
+        self.root = Path(os.path.abspath(root))
+        self.blocking = blocking
+        self.created_directories: list[Path] = []
+        if os.name == "nt":
+            root_directory = _PinnedDirectory(
+                path=self.root,
+                windows_handle=_windows_open_pinned_path(
+                    self.root,
+                    directory=True,
+                    share_write=True,
+                    blocking=blocking,
+                ),
+                blocking=blocking,
+            )
+        else:
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            root_directory = _PinnedDirectory(
+                path=self.root,
+                descriptor=os.open(self.root, flags),
+                blocking=blocking,
+            )
+        self._directories: dict[Path, _PinnedDirectory] = {self.root: root_directory}
+
+    def __enter__(self) -> _PinnedWorkspace:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    @property
+    def root_directory(self) -> _PinnedDirectory:
+        """Return the pinned workspace root while this workspace is open."""
+
+        try:
+            return self._directories[self.root]
+        except KeyError as error:
+            raise RuntimeError("Pinned workspace is closed") from error
+
+    def close(self) -> None:
+        first_error: OSError | None = None
+        for directory in reversed(tuple(self._directories.values())):
+            try:
+                directory.close()
+            except OSError as error:
+                if first_error is None:
+                    first_error = error
+        self._directories.clear()
+        if first_error is not None:
+            raise first_error
+
+    def verify_namespace(self) -> None:
+        """Fail if a pinned POSIX directory is no longer bound to its lexical name."""
+
+        if os.name == "nt":
+            # Windows pins deny delete/rename sharing, so the live handles are
+            # themselves the namespace guard.
+            return
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        verification: dict[Path, int] = {}
+        try:
+            verification[self.root] = os.open(self.root, flags)
+            ordered = sorted(
+                (path for path in self._directories if path != self.root),
+                key=lambda path: (len(path.relative_to(self.root).parts), path.as_posix()),
+            )
+            for path in ordered:
+                parent_descriptor = verification[path.parent]
+                verification[path] = os.open(path.name, flags, dir_fd=parent_descriptor)
+            for path, pinned in self._directories.items():
+                if pinned.descriptor is None:  # pragma: no cover - defensive
+                    raise RuntimeError("Pinned directory is closed")
+                expected = os.fstat(pinned.descriptor)
+                observed = os.fstat(verification[path])
+                if (expected.st_dev, expected.st_ino) != (observed.st_dev, observed.st_ino):
+                    raise JauntGenerationError(
+                        f"Pinned workspace directory is no longer bound to its name: {path}"
+                    )
+        except JauntGenerationError:
+            raise
+        except OSError as error:
+            raise JauntGenerationError(
+                "Pinned workspace directory is no longer bound to its name"
+            ) from error
+        finally:
+            for descriptor in reversed(tuple(verification.values())):
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
+
+    def directory(self, path: Path, *, create: bool = True) -> _PinnedDirectory:
+        absolute = Path(os.path.abspath(path if path.is_absolute() else self.root / path))
+        try:
+            relative = absolute.relative_to(self.root)
+        except ValueError as error:
+            raise JauntGenerationError(
+                f"Refusing to pin a directory outside the workspace: {path}"
+            ) from error
+        if ".." in relative.parts:
+            raise JauntGenerationError(f"Refusing to pin an unsafe workspace directory: {path}")
+
+        current_path = self.root
+        current = self._directories[self.root]
+        for part in relative.parts:
+            _PinnedDirectory._leaf(part)
+            current_path /= part
+            cached = self._directories.get(current_path)
+            if cached is not None:
+                current = cached
+                continue
+            created_now = False
+            if os.name == "nt":
+                if create:
+                    try:
+                        current_path.mkdir()
+                    except FileExistsError:
+                        pass
+                    else:
+                        created_now = True
+                child = _PinnedDirectory(
+                    path=current_path,
+                    windows_handle=_windows_open_pinned_path(
+                        current_path,
+                        directory=True,
+                        share_write=True,
+                        blocking=self.blocking,
+                    ),
+                    blocking=self.blocking,
+                )
+            else:
+                if current.descriptor is None:  # pragma: no cover - defensive
+                    raise RuntimeError("Pinned directory is closed")
+                if create:
+                    try:
+                        os.mkdir(part, dir_fd=current.descriptor)
+                    except FileExistsError:
+                        pass
+                    else:
+                        created_now = True
+                flags = (
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                )
+                try:
+                    descriptor = os.open(part, flags, dir_fd=current.descriptor)
+                except OSError as error:
+                    if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+                        raise JauntGenerationError(
+                            f"Refusing to pin a redirecting workspace directory: {current_path}"
+                        ) from error
+                    raise
+                child = _PinnedDirectory(
+                    path=current_path,
+                    descriptor=descriptor,
+                    blocking=self.blocking,
+                )
+            try:
+                current.fsync_required()
+            except BaseException:
+                child.close()
+                raise
+            self._directories[current_path] = child
+            if created_now:
+                self.created_directories.append(current_path)
+            current = child
+        return current
+
+
+def _ensure_durable_directory(
+    root: Path,
+    directory: Path,
+    *,
+    synced_directories: set[Path] | None = None,
+) -> tuple[Path, ...]:
+    """Compatibility wrapper around a pinned, no-follow directory walk."""
+
+    with _PinnedWorkspace(root) as workspace:
+        workspace.directory(directory)
+        created = tuple(workspace.created_directories)
+        if synced_directories is not None:
+            synced_directories.update(workspace._directories)
+        return created
+
+
+_TRANSACTION_HASH = re.compile(r"sha256:[0-9a-f]{64}")
+_TRANSACTION_SCHEME = "jaunt-ts-artifact-transaction/2"
+_TRANSACTION_LOCK_NAME = ".atomic-write.lock"
+
+
+@dataclass(slots=True)
+class _TransactionLease:
+    """One persistent-inode advisory lock held by a live transaction writer."""
+
+    descriptor: int
+    windows: bool
+    released: bool = False
+
+    def release(self) -> None:
+        if self.released:
+            return
+        descriptor = self.descriptor
+        self.released = True
+        try:
+            with contextlib.suppress(OSError):
+                if self.windows:
+                    import msvcrt
+
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    locking = getattr(msvcrt, "locking", None)
+                    unlock_mode = getattr(msvcrt, "LK_UNLCK", None)
+                    if callable(locking) and isinstance(unlock_mode, int):
+                        locking(descriptor, unlock_mode, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
+def _transaction_lock_path(directory: Path) -> Path:
+    return directory / _TRANSACTION_LOCK_NAME
+
+
+def _acquire_transaction_lease(
+    directory: Path,
+    *,
+    blocking: bool,
+    pinned_directory: _PinnedDirectory | None = None,
+    authority_directory: _PinnedDirectory | None = None,
+) -> _TransactionLease | None:
+    """Acquire the workspace's transaction lease, or ``None`` if busy.
+
+    POSIX pinned callers lock a separately opened description of the workspace
+    root inode. A transaction-directory rename therefore cannot split writers
+    across two lock-file inodes. Windows keeps the lock file below its pinned
+    no-write/no-delete directory chain.
+    """
+
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    windows = os.name == "nt"
+    if not windows and authority_directory is not None:
+        if authority_directory.descriptor is None:
+            raise RuntimeError("Pinned authority directory is closed")
+        authority_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(
+            ".",
+            authority_flags,
+            dir_fd=authority_directory.descriptor,
+        )
+    elif pinned_directory is None:
+        if not directory.is_dir():
+            raise FileNotFoundError(errno.ENOENT, "Transaction directory does not exist", directory)
+        descriptor = os.open(_transaction_lock_path(directory), flags, 0o600)
+    else:
+        descriptor = pinned_directory.open_lock(
+            _TRANSACTION_LOCK_NAME,
+            flags,
+            0o600,
+            blocking=blocking,
+        )
+    try:
+        if windows:
+            import msvcrt
+
+            if os.fstat(descriptor).st_size == 0:
+                os.write(descriptor, b"\0")
+                os.fsync(descriptor)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            locking = getattr(msvcrt, "locking", None)
+            lock_mode = getattr(msvcrt, "LK_LOCK" if blocking else "LK_NBLCK", None)
+            if not callable(locking) or not isinstance(lock_mode, int):
+                raise RuntimeError("This Python runtime cannot lock TypeScript transactions")
+            locking(descriptor, lock_mode, 1)
+        else:
+            import fcntl
+
+            operation = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+            fcntl.flock(descriptor, operation)
+    except OSError as error:
+        os.close(descriptor)
+        busy_errors = {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}
+        if not blocking and error.errno in busy_errors:
+            return None
+        raise
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return _TransactionLease(descriptor=descriptor, windows=windows)
+
+
+def _write_transaction_manifest(
+    manifest: Path,
+    payload: Mapping[str, Any],
+    *,
+    pinned_directory: _PinnedDirectory | None = None,
+) -> None:
+    """Atomically replace one transaction marker and durably publish its state."""
+
+    if pinned_directory is None and not manifest.parent.is_dir():
+        raise FileNotFoundError(
+            errno.ENOENT,
+            "Transaction directory does not exist",
+            manifest.parent,
+        )
+    if pinned_directory is None:
+        fd, raw_temporary = tempfile.mkstemp(
+            prefix=f".{manifest.name}.", suffix=".tmp", dir=manifest.parent
+        )
+        temporary_name = Path(raw_temporary).name
+    else:
+        fd, temporary_name = pinned_directory.create_temp(
+            prefix=f".{manifest.name}.", suffix=".tmp"
+        )
+    try:
+        try:
+            with os.fdopen(
+                fd,
+                "w",
+                encoding="utf-8",
+                newline="\n",
+                closefd=False,
+            ) as handle:
+                json.dump(payload, handle, sort_keys=True, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            os.close(fd)
+        if pinned_directory is None:
+            os.replace(manifest.parent / temporary_name, manifest)
+            _fsync_directory_required(manifest.parent)
+        else:
+            pinned_directory.replace(temporary_name, manifest.name)
+            pinned_directory.fsync_required()
+    finally:
+        if pinned_directory is None:
+            with contextlib.suppress(FileNotFoundError):
+                (manifest.parent / temporary_name).unlink()
+        else:
+            pinned_directory.unlink(temporary_name, missing_ok=True)
+
+
+def _retire_transaction_manifest(
+    manifest: Path,
+    payload: Mapping[str, Any],
+    *,
+    pinned_directory: _PinnedDirectory | None = None,
+    require_present: bool = False,
+) -> bool:
+    """Durably remove a marker, restoring it when the directory sync fails."""
+
+    try:
+        if pinned_directory is None:
+            if require_present:
+                manifest.unlink()
+            else:
+                manifest.unlink(missing_ok=True)
+        else:
+            removed = pinned_directory.unlink(manifest.name, missing_ok=not require_present)
+            if require_present and not removed:  # pragma: no cover - defensive
+                return False
+    except OSError:
+        return False
+    try:
+        if pinned_directory is None:
+            _fsync_directory_required(manifest.parent)
+        else:
+            pinned_directory.fsync_required()
+    except OSError:
+        # The unlink is not a durable fact. Re-publish the exact conservative
+        # marker so this process also continues to report the transaction.
+        with contextlib.suppress(OSError):
+            _write_transaction_manifest(
+                manifest,
+                payload,
+                pinned_directory=pinned_directory,
+            )
+        return False
+    return True
+
+
+def _recorded_transaction_hash(value: object) -> str | None:
+    if value == MISSING_INPUT:
+        return None
+    if isinstance(value, str) and _TRANSACTION_HASH.fullmatch(value) is not None:
+        return value
+    raise ValueError("invalid transaction hash")
+
+
+def _recover_atomic_write_manifests(root: Path) -> tuple[Path, ...]:
+    """Retire conclusively committed or unapplied ``atomic_write_manifest`` markers.
+
+    ``prepared`` plus unanimous before-hashes proves that no replacement is
+    visible. ``committed`` plus unanimous after-hashes proves both byte
+    convergence and that the transaction's final runtime seal completed. Legacy
+    markers without the persistent-lease scheme are deliberately left blocking:
+    their hashes cannot prove that no older writer is still live, and proposed
+    output bytes do not prove that the final seal ran.
+    """
+
+    root = root.resolve()
+    directory = root / ".jaunt" / "transactions"
+    try:
+        workspace = _PinnedWorkspace(root, blocking=False)
+    except OSError:
+        return ()
+    with workspace:
+        try:
+            pinned_directory = workspace.directory(directory, create=False)
+        except FileNotFoundError:
+            return ()
+        try:
+            lease = _acquire_transaction_lease(
+                directory,
+                blocking=False,
+                pinned_directory=pinned_directory,
+                authority_directory=workspace.root_directory,
+            )
+        except OSError:
+            return ()
+        if lease is None:
+            return ()
+        recovered: list[Path] = []
+        try:
+            for manifest_name in pinned_directory.iter_names("ts-*.json"):
+                manifest = directory / manifest_name
+                try:
+                    raw_payload = json.loads(
+                        pinned_directory.read_bytes(manifest_name).decode("utf-8")
+                    )
+                    if not isinstance(raw_payload, Mapping):
+                        continue
+                    payload = {str(key): value for key, value in raw_payload.items()}
+                    if payload.get("scheme") != _TRANSACTION_SCHEME:
+                        continue
+                    state = payload.get("state")
+                    if state not in {"prepared", "committed"}:
+                        continue
+                    raw_writes = payload.get("writes")
+                    if not isinstance(raw_writes, list) or not raw_writes:
+                        continue
+                    entries: list[tuple[Path, str | None, str | None]] = []
+                    seen: set[Path] = set()
+                    for raw_write in raw_writes:
+                        if not isinstance(raw_write, Mapping):
+                            raise ValueError("invalid transaction write")
+                        relative = raw_write.get("path")
+                        kind = raw_write.get("kind")
+                        module_id = raw_write.get("moduleId")
+                        if (
+                            not isinstance(relative, str)
+                            or not relative
+                            or relative == "."
+                            or not isinstance(kind, str)
+                            or not kind
+                            or not isinstance(module_id, str)
+                            or not module_id
+                        ):
+                            raise ValueError("invalid transaction write")
+                        _safe_path(root, relative)
+                        path = root / Path(relative)
+                        if path in seen:
+                            raise ValueError("duplicate transaction path")
+                        seen.add(path)
+                        entries.append(
+                            (
+                                path,
+                                _recorded_transaction_hash(raw_write.get("before")),
+                                _recorded_transaction_hash(raw_write.get("after")),
+                            )
+                        )
+                    expected = (
+                        tuple((path, after) for path, _before, after in entries)
+                        if state == "committed"
+                        else tuple((path, before) for path, before, _after in entries)
+                    )
+                    current: list[tuple[Path, str | None]] = []
+                    for path, _digest in expected:
+                        try:
+                            output_directory = workspace.directory(path.parent, create=False)
+                        except FileNotFoundError:
+                            digest = None
+                        else:
+                            digest = output_directory.path_hash(path.name)
+                        current.append((path, digest))
+                    if any(
+                        digest != expected_digest
+                        for (_path, digest), (_expected_path, expected_digest) in zip(
+                            current, expected, strict=True
+                        )
+                    ):
+                        continue
+                    workspace.verify_namespace()
+                except (
+                    JauntConfigError,
+                    JauntGenerationError,
+                    OSError,
+                    UnicodeError,
+                    ValueError,
+                    json.JSONDecodeError,
+                ):
+                    continue
+                if _retire_transaction_manifest(
+                    manifest,
+                    payload,
+                    pinned_directory=pinned_directory,
+                ):
+                    recovered.append(manifest)
+        finally:
+            lease.release()
+        return tuple(recovered)
+
+
+def _has_pending_atomic_write_manifests(root: Path) -> bool:
+    """Fail closed when an artifact transaction is active or unresolved."""
+
+    root = root.resolve()
+    directory = root / ".jaunt" / "transactions"
+    try:
+        workspace = _PinnedWorkspace(root, blocking=False)
+    except OSError:
+        return True
+    with workspace:
+        try:
+            pinned_directory = workspace.directory(directory, create=False)
+        except FileNotFoundError:
+            return False
+        try:
+            lease = _acquire_transaction_lease(
+                directory,
+                blocking=False,
+                pinned_directory=pinned_directory,
+                authority_directory=workspace.root_directory,
+            )
+        except OSError:
+            return True
+        if lease is None:
+            return True
+        try:
+            return bool(pinned_directory.iter_names("*.json"))
+        except OSError:
+            return True
+        finally:
+            lease.release()
 
 
 def _artifact_preconditions(root: Path, modules: Sequence[Mapping[str, Any]]) -> dict[str, str]:
@@ -326,6 +1405,7 @@ async def worker_session(
     entered = False
     enter = getattr(client, "__aenter__", None)
     exit_ = getattr(client, "__aexit__", None)
+    active_exception: BaseException | None = None
     try:
         if callable(enter):
             entered_client = await enter()
@@ -343,9 +1423,19 @@ async def worker_session(
         )
         validate_worker_capabilities(initialized)
         yield client, initialized
+    except BaseException as exc:
+        active_exception = exc
+        raise
     finally:
         if entered and callable(exit_):
-            await exit_(None, None, None)
+            if active_exception is None:
+                await exit_(None, None, None)
+            else:
+                await exit_(
+                    type(active_exception),
+                    active_exception,
+                    active_exception.__traceback__,
+                )
         elif not entered:
             close = getattr(client, "close", None)
             if callable(close):
@@ -543,148 +1633,269 @@ def atomic_write_manifest(
     expected_inputs: Mapping[str, str] | None = None,
     preserve_existing_facades: bool = False,
     preserve_real_implementations: bool = False,
+    pre_commit_guard: Callable[[], None] | None = None,
+    commit_seal: Callable[[], None] | None = None,
+    allowed_transaction_manifests: Sequence[str] = (),
 ) -> tuple[_Write, ...]:
     """Replace a validated artifact manifest with preconditions and rollback.
 
     ``os.replace`` is atomic per path.  The explicit rollback makes the multi-file
-    transaction recoverable if a later replacement fails.
+    transaction recoverable if a later replacement fails. ``pre_commit_guard``
+    validates external state before replacement; ``commit_seal`` finalizes that
+    state after byte convergence while originals are still available for rollback.
     """
 
     root = root.resolve()
     expected_inputs = expected_inputs or {}
     _assert_inputs_unchanged(root, expected_inputs)
-    filtered: list[_Write] = []
-    seen: set[Path] = set()
-    for write in writes:
-        path = _safe_path(root, write.path)
-        if write.kind == "facade" and preserve_existing_facades and path.exists():
-            continue
-        if write.kind in {"implementation", "placeholder"} and preserve_real_implementations:
-            if path.exists():
-                existing = path.read_text(encoding="utf-8")
-                if not any(marker in existing for marker in _PLACEHOLDER_MARKERS):
-                    continue
-        if path in seen:
-            raise JauntGenerationError(f"Duplicate TypeScript artifact path: {write.path}")
-        seen.add(path)
-        filtered.append(write)
-    if not filtered:
-        return ()
 
-    original: dict[Path, bytes | None] = {}
-    observed: dict[Path, str | None] = {}
-    staged: dict[Path, Path] = {}
-    manifest: Path | None = None
-    try:
-        for write in filtered:
-            path = _safe_path(root, write.path)
-            path.parent.mkdir(parents=True, exist_ok=True)
+    with _PinnedWorkspace(root) as workspace:
+        filtered: list[_Write] = []
+        paths: dict[int, Path] = {}
+        seen: set[Path] = set()
+        for write in writes:
+            # Keep the worker-supplied lexical path. The pinned walk, rather
+            # than a resolved string path, is the publication authority.
+            _safe_path(root, write.path)
+            path = root / Path(write.path)
             try:
-                old = path.read_bytes()
+                existing_directory = workspace.directory(path.parent, create=False)
             except FileNotFoundError:
-                old = None
-            original[path] = old
-            observed[path] = _sha256(old) if old is not None else None
-            if write.content is None:
-                continue
-            fd, raw_temp = tempfile.mkstemp(prefix=f".{path.name}.jaunt-", dir=path.parent)
-            temp = Path(raw_temp)
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(write.content.encode("utf-8"))
-                handle.flush()
-                os.fsync(handle.fileno())
-            staged[path] = temp
+                existing_metadata = None
+                existing_directory = None
+            else:
+                existing_metadata = existing_directory.stat(path.name)
+            if write.kind == "facade" and preserve_existing_facades:
+                if existing_metadata is not None:
+                    continue
+            if write.kind in {"implementation", "placeholder"} and preserve_real_implementations:
+                if existing_metadata is not None and existing_directory is not None:
+                    existing = existing_directory.read_bytes(path.name).decode("utf-8")
+                    if not any(marker in existing for marker in _PLACEHOLDER_MARKERS):
+                        continue
+            if path in seen:
+                raise JauntGenerationError(f"Duplicate TypeScript artifact path: {write.path}")
+            seen.add(path)
+            paths[id(write)] = path
+            filtered.append(write)
+        if not filtered:
+            return ()
 
-        _assert_inputs_unchanged(root, expected_inputs)
-        for path, expected in observed.items():
-            if _path_hash(path) != expected:
-                raise JauntGenerationError(
-                    f"TypeScript artifact changed during validation: {path.relative_to(root)}"
-                )
-
-        writes_by_path = {_safe_path(root, write.path): write for write in filtered}
-        manifest_directory = root / ".jaunt" / "transactions"
-        manifest_directory.mkdir(parents=True, exist_ok=True)
-        manifest = manifest_directory / f"ts-{uuid.uuid4().hex}.json"
-        manifest_payload = {
-            "state": "prepared",
-            "writes": [
-                {
-                    "path": path.relative_to(root).as_posix(),
-                    "kind": writes_by_path[path].kind,
-                    "moduleId": writes_by_path[path].module_id,
-                    "before": observed[path] or MISSING_INPUT,
-                    "after": (
-                        _sha256(cast(str, writes_by_path[path].content).encode("utf-8"))
-                        if writes_by_path[path].content is not None
-                        else MISSING_INPUT
-                    ),
-                }
-                for path in sorted(writes_by_path, key=lambda item: item.as_posix())
-            ],
-        }
-        fd, raw_manifest = tempfile.mkstemp(
-            prefix=f".{manifest.name}.", suffix=".tmp", dir=manifest_directory
-        )
-        manifest_temp = Path(raw_manifest)
+        original: dict[Path, bytes | None] = {}
+        observed: dict[Path, str | None] = {}
+        output_directories: dict[Path, _PinnedDirectory] = {}
+        staged: dict[Path, tuple[_PinnedDirectory, str]] = {}
+        manifest: Path | None = None
+        manifest_payload: dict[str, Any] | None = None
+        transaction_lease: _TransactionLease | None = None
         try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-                json.dump(manifest_payload, handle, sort_keys=True, indent=2)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(manifest_temp, manifest)
-            _fsync_directory(manifest_directory)
-        finally:
-            with contextlib.suppress(FileNotFoundError):
-                manifest_temp.unlink()
-
-        replaced: list[Path] = []
-        try:
-            for path in sorted(writes_by_path, key=lambda item: item.as_posix()):
-                write = writes_by_path[path]
-                if write.content is None:
-                    path.unlink(missing_ok=True)
-                else:
-                    os.replace(staged[path], path)
-                _fsync_directory(path.parent)
-                replaced.append(path)
-        except BaseException:
-            rollback_ok = True
-            for path in reversed(replaced):
-                old = original[path]
+            for write in filtered:
+                path = paths[id(write)]
+                directory = workspace.directory(path.parent)
+                output_directories[path] = directory
                 try:
-                    if old is None:
-                        path.unlink(missing_ok=True)
+                    old = directory.read_bytes(path.name)
+                except FileNotFoundError:
+                    old = None
+                original[path] = old
+                observed[path] = _sha256(old) if old is not None else None
+                if write.content is None:
+                    continue
+                descriptor, temporary_name = directory.create_temp(f".{path.name}.jaunt-")
+                staged[path] = (directory, temporary_name)
+                try:
+                    with os.fdopen(descriptor, "wb", closefd=False) as handle:
+                        handle.write(write.content.encode("utf-8"))
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                finally:
+                    os.close(descriptor)
+
+            writes_by_path = {paths[id(write)]: write for write in filtered}
+            manifest_directory = root / ".jaunt" / "transactions"
+            pinned_manifest_directory = workspace.directory(manifest_directory)
+            manifest = manifest_directory / f"ts-{uuid.uuid4().hex}.json"
+            transaction_lease = _acquire_transaction_lease(
+                manifest_directory,
+                blocking=True,
+                pinned_directory=pinned_manifest_directory,
+                authority_directory=workspace.root_directory,
+            )
+            if transaction_lease is None:  # pragma: no cover - blocking acquisition
+                raise JauntGenerationError("Could not acquire TypeScript transaction lease")
+
+            # Recheck every publication precondition under the global lease.
+            allowed_manifests = set(allowed_transaction_manifests)
+            if any(
+                Path(name).name != name or _unsafe_portable_leaf(name) for name in allowed_manifests
+            ):
+                raise JauntGenerationError("Invalid TypeScript transaction manifest allowlist")
+            present_manifests = pinned_manifest_directory.iter_names("*.json")
+            missing_allowed_manifests = tuple(sorted(allowed_manifests - set(present_manifests)))
+            if missing_allowed_manifests:
+                raise JauntGenerationError(
+                    "An allowed TypeScript transaction manifest is missing: "
+                    + ", ".join(missing_allowed_manifests)
+                )
+            pending_manifests = tuple(
+                name for name in present_manifests if name not in allowed_manifests
+            )
+            if pending_manifests:
+                raise JauntGenerationError(
+                    "An unresolved TypeScript artifact transaction blocks publication: "
+                    + ", ".join(pending_manifests)
+                )
+            _assert_inputs_unchanged(root, expected_inputs)
+            for path, expected in observed.items():
+                if output_directories[path].path_hash(path.name) != expected:
+                    raise JauntGenerationError(
+                        f"TypeScript artifact changed during validation: {path.relative_to(root)}"
+                    )
+            if pre_commit_guard is not None:
+                pre_commit_guard()
+            workspace.verify_namespace()
+
+            manifest_payload = {
+                "scheme": _TRANSACTION_SCHEME,
+                "state": "prepared",
+                "writes": [
+                    {
+                        "path": path.relative_to(root).as_posix(),
+                        "kind": writes_by_path[path].kind,
+                        "moduleId": writes_by_path[path].module_id,
+                        "before": observed[path] or MISSING_INPUT,
+                        "after": (
+                            _sha256(cast(str, writes_by_path[path].content).encode("utf-8"))
+                            if writes_by_path[path].content is not None
+                            else MISSING_INPUT
+                        ),
+                    }
+                    for path in sorted(writes_by_path, key=lambda item: item.as_posix())
+                ],
+            }
+            _write_transaction_manifest(
+                manifest,
+                manifest_payload,
+                pinned_directory=pinned_manifest_directory,
+            )
+
+            replaced: list[Path] = []
+            committed_payload: dict[str, Any] | None = None
+            try:
+                for path in sorted(writes_by_path, key=lambda item: item.as_posix()):
+                    write = writes_by_path[path]
+                    directory = output_directories[path]
+                    if write.content is None:
+                        directory.unlink(path.name, missing_ok=True)
                     else:
-                        fd, raw_temp = tempfile.mkstemp(
-                            prefix=f".{path.name}.rollback-", dir=path.parent
+                        directory.replace(staged[path][1], path.name)
+                    # The path is visible now, so include it in rollback before
+                    # the required durability check.
+                    replaced.append(path)
+                    directory.fsync_required()
+                unconverged = [
+                    path
+                    for path, write in writes_by_path.items()
+                    if output_directories[path].path_hash(path.name)
+                    != (
+                        _sha256(write.content.encode("utf-8"))
+                        if write.content is not None
+                        else None
+                    )
+                ]
+                if unconverged:
+                    module_ids = sorted({writes_by_path[path].module_id for path in unconverged})
+                    raise JauntGenerationError(
+                        "TypeScript artifact transaction did not converge after commit for "
+                        + ", ".join(module_ids)
+                        + ": "
+                        + ", ".join(
+                            path.relative_to(root).as_posix() for path in sorted(unconverged)
                         )
-                        temp = Path(raw_temp)
-                        try:
-                            with os.fdopen(fd, "wb") as handle:
-                                handle.write(old)
-                                handle.flush()
-                                os.fsync(handle.fileno())
-                            os.replace(temp, path)
-                            _fsync_directory(path.parent)
-                        finally:
-                            with contextlib.suppress(FileNotFoundError):
-                                temp.unlink()
-                except OSError:
-                    rollback_ok = False
-            if rollback_ok and manifest is not None:
-                manifest.unlink(missing_ok=True)
-                _fsync_directory(manifest.parent)
-            raise
-        else:
-            manifest.unlink(missing_ok=True)
-            _fsync_directory(manifest.parent)
-    finally:
-        for temp in staged.values():
-            with contextlib.suppress(FileNotFoundError):
-                temp.unlink()
-    return tuple(filtered)
+                    )
+                workspace.verify_namespace()
+                if commit_seal is not None:
+                    commit_seal()
+                workspace.verify_namespace()
+                committed_payload = {**manifest_payload, "state": "committed"}
+                _write_transaction_manifest(
+                    manifest,
+                    committed_payload,
+                    pinned_directory=pinned_manifest_directory,
+                )
+                workspace.verify_namespace()
+            except BaseException:
+                rollback_ok = True
+                for path in reversed(replaced):
+                    old = original[path]
+                    directory = output_directories[path]
+                    try:
+                        if old is None:
+                            directory.unlink(path.name, missing_ok=True)
+                            directory.fsync_required()
+                        else:
+                            descriptor, temporary_name = directory.create_temp(
+                                f".{path.name}.rollback-"
+                            )
+                            try:
+                                try:
+                                    with os.fdopen(descriptor, "wb", closefd=False) as handle:
+                                        handle.write(old)
+                                        handle.flush()
+                                        os.fsync(handle.fileno())
+                                finally:
+                                    os.close(descriptor)
+                                directory.replace(temporary_name, path.name)
+                                directory.fsync_required()
+                            finally:
+                                directory.unlink(temporary_name, missing_ok=True)
+                    except OSError:
+                        rollback_ok = False
+                if rollback_ok and manifest is not None and manifest_payload is not None:
+                    _retire_transaction_manifest(
+                        manifest,
+                        manifest_payload,
+                        pinned_directory=pinned_manifest_directory,
+                    )
+                raise
+            else:
+                if (
+                    manifest is None or manifest_payload is None or committed_payload is None
+                ):  # pragma: no cover - defensive
+                    raise JauntGenerationError("TypeScript artifact transaction lost its manifest")
+                if not _retire_transaction_manifest(
+                    manifest,
+                    committed_payload,
+                    pinned_directory=pinned_manifest_directory,
+                ):
+                    raise JauntGenerationError(
+                        "TypeScript artifact transaction committed, but its recovery marker "
+                        "could not be durably retired"
+                    )
+        finally:
+            active_error = sys.exception()
+            cleanup_error: OSError | None = None
+            try:
+                for directory, temporary_name in staged.values():
+                    try:
+                        directory.unlink(temporary_name, missing_ok=True)
+                    except OSError as error:
+                        if cleanup_error is None:
+                            cleanup_error = error
+            finally:
+                if transaction_lease is not None:
+                    try:
+                        transaction_lease.release()
+                    except OSError as error:
+                        if cleanup_error is None:
+                            cleanup_error = error
+            if cleanup_error is not None:
+                if active_error is None:
+                    raise cleanup_error
+                active_error.add_note(
+                    f"TypeScript transaction cleanup also failed: {cleanup_error}"
+                )
+        return tuple(filtered)
 
 
 def _module_id(module: Mapping[str, Any]) -> str:
@@ -698,8 +1909,15 @@ def _model_contract(module: Mapping[str, Any]) -> dict[str, Any]:
     """Return analyzer contract data without tool-only provenance records."""
 
     contract = {
-        str(key): value for key, value in module.items() if key != "toolingProvenanceRecords"
+        str(key): value
+        for key, value in module.items()
+        if key not in {"toolingProvenanceRecords", "typeContext"}
     }
+    authored_context, _imported_context = _split_context_source(contract.get("contextSource"))
+    if authored_context is None:
+        contract.pop("contextSource", None)
+    else:
+        contract["contextSource"] = authored_context
     sidecar = contract.get("sidecar")
     if isinstance(sidecar, str):
         try:
@@ -715,6 +1933,33 @@ def _model_contract(module: Mapping[str, Any]) -> dict[str, Any]:
             else:
                 contract.pop("sidecar", None)
     return contract
+
+
+def _split_context_source(value: object) -> tuple[str | None, str | None]:
+    """Separate authored context from the worker's appended type transport."""
+
+    if not isinstance(value, str):
+        return None, None
+    candidates = [
+        (value.rfind(marker), marker)
+        for marker in (
+            _LEGACY_IMPORTED_TYPE_CONTEXT_BEGIN,
+            _IMPORTED_TYPE_CONTEXT_BEGIN,
+        )
+        if marker in value
+    ]
+    if not candidates:
+        return value, None
+    begin, marker = max(candidates, key=lambda item: item[0])
+    end = value.find(
+        _IMPORTED_TYPE_CONTEXT_END,
+        begin + len(marker),
+    )
+    if end < 0:
+        return value, None
+    authored = value[:begin].rstrip()
+    imported = value[begin + len(marker) : end]
+    return (f"{authored}\n" if authored else None), imported
 
 
 def _module_path(module: Mapping[str, Any], key: str) -> str:
@@ -787,6 +2032,8 @@ async def run_sync(
             },
             preserve_existing_facades=True,
             preserve_real_implementations=True,
+            pre_commit_guard=lambda: _verify_worker_runtime_identity(client),
+            commit_seal=lambda: _seal_worker_runtime_identity(client),
         )
 
     append_events(
@@ -982,29 +2229,11 @@ def _progress_reset(progress: object | None, total: int = 0) -> None:
 
 def _clear_recovered_build_manifests(
     root: Path,
-    modules: Sequence[Mapping[str, Any]],
+    _modules: Sequence[Mapping[str, Any]],
 ) -> None:
-    """Clear crash markers only after every module named by them is healthy."""
+    """Clear only transaction outcomes proven by their recorded byte hashes."""
 
-    from jaunt.typescript.artifacts import incomplete_transaction_manifests
-    from jaunt.typescript.status import classify_modules
-
-    state = classify_modules(root, modules)
-    known = {_module_id(module) for module in modules}
-    unhealthy = set(state.stale) | set(state.unbuilt) | set(state.invalid)
-    for manifest in incomplete_transaction_manifests(root):
-        try:
-            value = json.loads(manifest.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            continue
-        writes = value.get("writes", []) if isinstance(value, Mapping) else []
-        module_ids = {
-            str(write.get("moduleId"))
-            for write in writes
-            if isinstance(write, Mapping) and isinstance(write.get("moduleId"), str)
-        }
-        if module_ids and module_ids <= known and not module_ids.intersection(unhealthy):
-            manifest.unlink(missing_ok=True)
+    _recover_atomic_write_manifests(root)
 
 
 def _reserved_bindings(module: Mapping[str, Any]) -> tuple[str, ...]:
@@ -1212,9 +2441,11 @@ def _build_request(
         "_context/spec.ts": str(module.get("specSource", "")),
         "_context/api.ts": str(module.get("apiSource", "")),
     }
-    context_source = module.get("contextSource")
-    if isinstance(context_source, str):
-        context["_context/context.ts"] = context_source
+    authored_context_source, _imported_type_context = _split_context_source(
+        module.get("contextSource")
+    )
+    if authored_context_source is not None:
+        context["_context/context.ts"] = authored_context_source
     dependency_context: list[dict[str, Any]] = []
     for dependency_id in _dependency_module_ids(module):
         other = dependency_modules.get(dependency_id)
@@ -1325,6 +2556,12 @@ async def _gate_prose_change(
                     reasoning_effort=config.semantic_gate.reasoning_effort,
                     ignore_user_config=True,
                 )
+        except JauntQuotaGenerationError:
+            # Usage-limit exhaustion is not evidence that the prose changed.
+            # The caller's command-wide quota policy has already retried the
+            # judge, so preserve that terminal error instead of paying for a
+            # full implementation rebuild that will hit the same limit.
+            raise
         except Exception:
             return False
         usage_input = getattr(result, "usage_input", None)
@@ -1402,6 +2639,7 @@ async def run_build_in_session(
     target_ids: Sequence[str] = (),
     force: bool = False,
     generator: GeneratorBackend | None = None,
+    generator_factory: Callable[[], GeneratorBackend] | None = None,
     cost_tracker: CostTracker | None = None,
     response_cache: ResponseCache | None = None,
     progress: object | None = None,
@@ -1417,6 +2655,7 @@ async def run_build_in_session(
     builtin_skill_names: Sequence[str] | None = None,
     generation_fingerprint: str | None = None,
     reuse_proof_sink: dict[str, dict[str, str]] | None = None,
+    validate_committed_batteries: bool = True,
 ) -> TargetBuildReport:
     """Build against an already initialized analyzer session.
 
@@ -1426,14 +2665,40 @@ async def run_build_in_session(
 
     from jaunt.typescript.status import classify_modules
 
+    if generator is not None and generator_factory is not None:
+        raise JauntConfigError("Pass either generator or generator_factory, not both")
     root = root.resolve()
     if response_cache is None:
         response_cache = ResponseCache(root / ".jaunt" / "cache")
     effective_jobs = config.build.jobs if jobs is None else jobs
     if effective_jobs < 1:
         raise JauntConfigError("TypeScript build jobs must be >= 1")
-    backend = generator or _default_backend(config)
     cost = cost_tracker or CostTracker(max_cost=config.llm.max_cost_per_build)
+
+    backend = generator
+
+    def model_backend() -> GeneratorBackend:
+        nonlocal backend
+        if backend is None:
+            backend = (
+                generator_factory() if generator_factory is not None else _default_backend(config)
+            )
+        return backend
+
+    def default_semantic_gate_exec(module_id: str) -> Callable[..., Awaitable[Any]]:
+        async def run(**kwargs: Any) -> Any:
+            return await model_backend().run_with_quota_retry(
+                lambda: run_codex_exec(**kwargs),
+                progress=lambda stage, detail: _progress_phase(
+                    progress,
+                    module_id,
+                    stage,
+                    detail,
+                ),
+            )
+
+        return run
+
     effective_builtin_skills = (
         tuple(builtin_skill_names)
         if builtin_skill_names is not None
@@ -1488,6 +2753,10 @@ async def run_build_in_session(
             "TypeScript declarations still require reviewable design; run "
             "`jaunt design --target <module#symbol>` first: " + ", ".join(sorted(pending_designs))
         )
+    # Prose semantic gates are model calls too. Reject dependency cycles before
+    # judging any stale prose, then retain the later selected ordering pass for
+    # deterministic scheduling.
+    _topological_modules(analysis.modules)
     output_preconditions = _artifact_preconditions(root, analysis.modules)
     status = classify_modules(root, analysis.modules)
     gate_enabled = (
@@ -1507,7 +2776,11 @@ async def run_build_in_session(
                 module,
                 config,
                 cost=cost,
-                run_exec=semantic_gate_exec,
+                run_exec=(
+                    semantic_gate_exec
+                    if semantic_gate_exec is not None
+                    else default_semantic_gate_exec(module_id)
+                ),
             ):
                 refrozen.add(module_id)
         elif not force and module_id in status.invalid:
@@ -1572,7 +2845,7 @@ async def run_build_in_session(
             config,
             analysis.modules,
             repo_map_block=repo_map_block,
-            backend=backend,
+            backend=model_backend(),
             cost_tracker=cost,
             enabled=overview_enabled,
         )
@@ -1598,8 +2871,14 @@ async def run_build_in_session(
 
     async def generate_one(
         module_id: str,
-    ) -> tuple[str, GenerationRequest, GenerationResult]:
+    ) -> tuple[
+        str,
+        GenerationRequest,
+        GenerationResult,
+        tuple[str, ...],
+    ]:
         module = by_id[module_id]
+        active_backend = model_backend()
 
         async def candidate_validator(source: str) -> list[str]:
             proposed = {**candidate_dependencies(module_id), module_id: source}
@@ -1611,6 +2890,25 @@ async def run_build_in_session(
                 scoped_validation=True,
             )
             if validation.valid:
+                if validate_committed_batteries:
+                    from jaunt.typescript.tester import _validate_committed_target_batteries
+
+                    try:
+                        return await _validate_committed_target_batteries(
+                            client,
+                            initialized,
+                            root,
+                            config,
+                            analysis,
+                            module_ids=(module_id,),
+                            artifact_overlays={
+                                write.path: write.content or ""
+                                for write in _artifact_writes(validation)
+                            },
+                        )
+                    except _CommittedBatteryInfrastructureError as error:
+                        error.attach_candidate(source)
+                        raise
                 return []
             return [
                 f"{diagnostic.code}: {diagnostic.message}"
@@ -1632,17 +2930,75 @@ async def run_build_in_session(
         )
         async with semaphore:
             _progress_phase(progress, module_id, "generating")
-            result = await generate_request_cached(
-                backend,
-                request,
-                max_attempts=max_attempts,
-                generation_fingerprint=request_fingerprint,
-                response_cache=(None if force else response_cache),
-                cost_tracker=cost,
-                usage_label=module_id,
-                progress=lambda stage, detail: _progress_phase(progress, module_id, stage, detail),
-            )
-        return module_id, request, result
+            attempt_count = 0
+            attempt_usage: list[TokenUsage] = []
+            cached_source_failed_infrastructure = False
+
+            def request_progress(stage: str, detail: str) -> None:
+                nonlocal attempt_count
+                if stage == "attempt":
+                    attempt_count += 1
+                _progress_phase(progress, module_id, stage, detail)
+
+            def record_request_usage(usage: TokenUsage) -> None:
+                attempt_usage.append(usage)
+                cost.record(module_id, usage)
+                cost.check_budget()
+
+            async def validate_cached_source(source: str) -> list[str]:
+                nonlocal cached_source_failed_infrastructure
+                try:
+                    return await candidate_validator(source)
+                except _CommittedBatteryInfrastructureError:
+                    cached_source_failed_infrastructure = True
+                    raise
+
+            try:
+                result = await generate_request_cached(
+                    active_backend,
+                    request,
+                    max_attempts=max_attempts,
+                    generation_fingerprint=request_fingerprint,
+                    response_cache=(None if force else response_cache),
+                    cost_tracker=cost,
+                    usage_callback=record_request_usage,
+                    usage_label=module_id,
+                    progress=request_progress,
+                    cached_validator=validate_cached_source,
+                )
+            except _CommittedBatteryInfrastructureError as error:
+                # The candidate may have been generated once, but a runner outage
+                # must never be presented to Codex as implementation feedback or
+                # consume the remaining candidate-attempt budget.
+                usage = (
+                    TokenUsage(
+                        prompt_tokens=sum(item.prompt_tokens for item in attempt_usage),
+                        completion_tokens=sum(item.completion_tokens for item in attempt_usage),
+                        model=attempt_usage[-1].model,
+                        provider=attempt_usage[-1].provider,
+                        cached_prompt_tokens=sum(
+                            item.cached_prompt_tokens for item in attempt_usage
+                        ),
+                    )
+                    if attempt_usage
+                    else None
+                )
+                result = GenerationResult(
+                    attempts=0 if cached_source_failed_infrastructure else max(1, attempt_count),
+                    source=error.candidate_source,
+                    errors=list(error.errors),
+                    usage=usage,
+                )
+                if result.source is not None and result.attempts > 0:
+                    store_generation_result(
+                        response_cache,
+                        active_backend,
+                        request,
+                        replace(result, errors=[]),
+                        generation_fingerprint=request_fingerprint,
+                    )
+                return module_id, request, result, error.errors
+        return module_id, request, result, ()
 
     while pending:
         propagated = False
@@ -1667,7 +3023,7 @@ async def run_build_in_session(
             # defensive guard against malformed dependency data changing mid-run.
             raise JauntConfigError("TypeScript dependency scheduler made no progress")
         results = await asyncio.gather(*(generate_one(module_id) for module_id in ready))
-        for module_id, request, result in results:
+        for module_id, request, result, battery_infrastructure_errors in results:
             pending.remove(module_id)
             requests[module_id] = request
             candidate_attempts[module_id] = result.attempts
@@ -1681,9 +3037,13 @@ async def run_build_in_session(
                 failed[module_id] = tuple(
                     TargetDiagnostic(
                         code=(
-                            "JAUNT_TS_GENERATION_INFRASTRUCTURE"
-                            if result.infrastructure_exhausted
-                            else "JAUNT_TS_GENERATION"
+                            "JAUNT_TS_COMMITTED_BATTERY_INFRASTRUCTURE"
+                            if battery_infrastructure_errors
+                            else (
+                                "JAUNT_TS_GENERATION_INFRASTRUCTURE"
+                                if result.infrastructure_exhausted
+                                else "JAUNT_TS_GENERATION"
+                            )
                         ),
                         message=error,
                     )
@@ -1750,9 +3110,52 @@ async def run_build_in_session(
                 baseline_unselected=True,
             )
 
+        unit_battery_proof: dict[str, Any] = {}
+
+        async def final_battery_errors(
+            result: ValidateOverlayResult,
+            *,
+            active_analysis: TypeScriptAnalysis = analysis,
+            active_candidates: dict[str, str] = unit_candidates,
+            battery_proof: dict[str, Any] = unit_battery_proof,
+        ) -> list[str]:
+            battery_proof.clear()
+            if not validate_committed_batteries or not result.valid:
+                return []
+            from jaunt.typescript.tester import _validate_committed_target_batteries
+
+            return await _validate_committed_target_batteries(
+                client,
+                initialized,
+                root,
+                config,
+                active_analysis,
+                module_ids=tuple(sorted(active_candidates)),
+                artifact_overlays={
+                    write.path: write.content or "" for write in _artifact_writes(result)
+                },
+                proof_sink=battery_proof,
+            )
+
         validated = await validate_unit(unit_candidates)
-        while not validated.valid:
-            diagnostics = _diagnostics(validated.diagnostics)
+        battery_infrastructure_errors: tuple[str, ...] = ()
+        try:
+            battery_errors = await final_battery_errors(validated)
+        except _CommittedBatteryInfrastructureError as error:
+            battery_errors = []
+            battery_infrastructure_errors = error.errors
+        while (not validated.valid or battery_errors) and not battery_infrastructure_errors:
+            diagnostics = (
+                _diagnostics(validated.diagnostics)
+                if not validated.valid
+                else tuple(
+                    TargetDiagnostic(
+                        code="JAUNT_TS_COMMITTED_BATTERY",
+                        message=error,
+                    )
+                    for error in battery_errors
+                )
+            )
             implementation_owners = {
                 _module_path(by_id[module_id], "implementationPath"): module_id
                 for module_id in unit_candidates
@@ -1789,10 +3192,29 @@ async def run_build_in_session(
                 *,
                 module_id: str = repairable,
                 current_candidates: dict[str, str] = unit_candidates,
+                active_analysis: TypeScriptAnalysis = analysis,
             ) -> list[str]:
                 proposed = {**current_candidates, module_id: source}
                 result = await validate_unit(proposed)
                 if result.valid:
+                    if validate_committed_batteries:
+                        from jaunt.typescript.tester import _validate_committed_target_batteries
+
+                        try:
+                            return await _validate_committed_target_batteries(
+                                client,
+                                initialized,
+                                root,
+                                config,
+                                active_analysis,
+                                module_ids=(module_id,),
+                                artifact_overlays={
+                                    write.path: write.content or ""
+                                    for write in _artifact_writes(result)
+                                },
+                            )
+                        except _CommittedBatteryInfrastructureError as infrastructure_error:
+                            raise infrastructure_error.attach_candidate(source) from None
                     return []
                 return [
                     f"{diagnostic.code}: {diagnostic.message}"
@@ -1812,22 +3234,52 @@ async def run_build_in_session(
                 reasons[0] if reasons else "unit overlay failed",
             )
             async with semaphore:
+                repair_attempt_count = 0
+                repair_usage: list[TokenUsage] = []
 
-                def record_repair_usage(usage: TokenUsage, item: str = repairable) -> None:
+                def record_repair_usage(
+                    usage: TokenUsage,
+                    item: str = repairable,
+                    usages: list[TokenUsage] = repair_usage,
+                ) -> None:
+                    usages.append(usage)
                     cost.record(item, usage)
                     cost.check_budget()
 
-                repaired = await backend.generate_request_with_retry(
-                    repair_request,
-                    max_attempts=1,
-                    initial_error_context=[
-                        f"previous output errors: {reason}" for reason in reasons
-                    ],
-                    progress=lambda stage, detail, item=repairable: _progress_phase(
-                        progress, item, stage, detail
-                    ),
-                    usage_callback=record_repair_usage,
-                )
+                def repair_progress(
+                    stage: str,
+                    detail: str,
+                    item: str = repairable,
+                ) -> None:
+                    nonlocal repair_attempt_count
+                    if stage == "attempt":
+                        repair_attempt_count += 1
+                    _progress_phase(progress, item, stage, detail)
+
+                try:
+                    repaired = await model_backend().generate_request_with_retry(
+                        repair_request,
+                        max_attempts=1,
+                        initial_error_context=[
+                            f"previous output errors: {reason}" for reason in reasons
+                        ],
+                        progress=repair_progress,
+                        usage_callback=record_repair_usage,
+                    )
+                except _CommittedBatteryInfrastructureError as error:
+                    battery_infrastructure_errors = error.errors
+                    paid_attempts = max(1, repair_attempt_count, len(repair_usage))
+                    candidate_attempts[repairable] = (
+                        candidate_attempts.get(repairable, 0) + paid_attempts
+                    )
+                    candidate_retries[repairable] = (
+                        candidate_retries.get(repairable, 0) + paid_attempts
+                    )
+                    if error.candidate_source is not None:
+                        unit_candidates[repairable] = error.candidate_source
+                        candidates[repairable] = error.candidate_source
+                        validated = await validate_unit(unit_candidates)
+                    break
             candidate_attempts[repairable] = (
                 candidate_attempts.get(repairable, 0) + repaired.attempts
             )
@@ -1849,8 +3301,44 @@ async def run_build_in_session(
             if repaired.advisories:
                 advisories[repairable] = repaired.advisories
             validated = await validate_unit(unit_candidates)
-        if not validated.valid:
-            diagnostics = _diagnostics(validated.diagnostics)
+            try:
+                battery_errors = await final_battery_errors(validated)
+            except _CommittedBatteryInfrastructureError as error:
+                battery_errors = []
+                battery_infrastructure_errors = error.errors
+        if not validated.valid or battery_errors or battery_infrastructure_errors:
+            if battery_infrastructure_errors:
+                if validated.valid:
+                    for module_id in sorted(unit_candidates):
+                        store_generation_result(
+                            response_cache,
+                            model_backend(),
+                            requests[module_id],
+                            GenerationResult(
+                                attempts=candidate_attempts.get(module_id, 0),
+                                source=unit_candidates[module_id],
+                                errors=[],
+                                advisories=advisories.get(module_id, ()),
+                            ),
+                            generation_fingerprint=request_fingerprint,
+                        )
+                diagnostics = tuple(
+                    TargetDiagnostic(
+                        code="JAUNT_TS_COMMITTED_BATTERY_INFRASTRUCTURE",
+                        message=error,
+                    )
+                    for error in battery_infrastructure_errors
+                )
+            elif not validated.valid:
+                diagnostics = _diagnostics(validated.diagnostics)
+            else:
+                diagnostics = tuple(
+                    TargetDiagnostic(
+                        code="JAUNT_TS_COMMITTED_BATTERY",
+                        message=error,
+                    )
+                    for error in battery_errors
+                )
             for module_id in unit_ids:
                 failed[module_id] = diagnostics
             continue
@@ -1859,13 +3347,80 @@ async def run_build_in_session(
             for module_id in unit_ids
             for key in ("facadePath", "apiMirrorPath", "implementationPath", "sidecarPath")
         }
+        unit_expected_inputs = {
+            **immutable_inputs,
+            **{path: output_preconditions[path] for path in sorted(unit_artifact_paths)},
+        }
+        raw_battery_preconditions = unit_battery_proof.get("preconditions", {})
+        if not isinstance(raw_battery_preconditions, Mapping):
+            raise JauntGenerationError("Committed battery validation returned an invalid proof")
+        for path, digest in raw_battery_preconditions.items():
+            if not isinstance(path, str) or not isinstance(digest, str):
+                raise JauntGenerationError("Committed battery validation returned an invalid proof")
+            previous = unit_expected_inputs.setdefault(path, digest)
+            if previous != digest:
+                raise JauntGenerationError(
+                    "Committed battery validation conflicts with an analyzed input: " + path
+                )
+
+        def verify_unit_commit_environment(
+            battery_proof: Mapping[str, Any] = unit_battery_proof,
+        ) -> None:
+            if not battery_proof:
+                _verify_worker_runtime_identity(client)
+                return
+            from jaunt.typescript.tester import _verify_test_commit_environment
+
+            runner = battery_proof.get("runner_fingerprint")
+            vitest_config = battery_proof.get("vitest_config")
+            config_closure = battery_proof.get("config_closure")
+            if (
+                not isinstance(runner, str)
+                or not isinstance(vitest_config, str)
+                or not isinstance(config_closure, Mapping)
+            ):
+                raise JauntGenerationError("Committed battery validation returned an invalid proof")
+            _verify_test_commit_environment(
+                root,
+                client,
+                initialized,
+                runner,
+                vitest_config=vitest_config,
+                config_closure=cast("Mapping[str, str]", config_closure),
+            )
+
+        def seal_unit_commit_environment(
+            battery_proof: Mapping[str, Any] = unit_battery_proof,
+        ) -> None:
+            if not battery_proof:
+                _seal_worker_runtime_identity(client)
+                return
+            from jaunt.typescript.tester import _seal_test_commit_environment
+
+            runner = battery_proof.get("runner_fingerprint")
+            vitest_config = battery_proof.get("vitest_config")
+            config_closure = battery_proof.get("config_closure")
+            if (
+                not isinstance(runner, str)
+                or not isinstance(vitest_config, str)
+                or not isinstance(config_closure, Mapping)
+            ):
+                raise JauntGenerationError("Committed battery validation returned an invalid proof")
+            _seal_test_commit_environment(
+                root,
+                client,
+                initialized,
+                runner,
+                vitest_config=vitest_config,
+                config_closure=cast("Mapping[str, str]", config_closure),
+            )
+
         unit_writes = atomic_write_manifest(
             root,
             _artifact_writes(validated),
-            expected_inputs={
-                **immutable_inputs,
-                **{path: output_preconditions[path] for path in sorted(unit_artifact_paths)},
-            },
+            expected_inputs=unit_expected_inputs,
+            pre_commit_guard=verify_unit_commit_environment,
+            commit_seal=seal_unit_commit_environment,
         )
         writes.extend(unit_writes)
         generated.update(unit_ids.intersection(candidates))
@@ -1873,7 +3428,7 @@ async def run_build_in_session(
         for module_id in sorted(unit_candidates):
             store_generation_result(
                 None if force else response_cache,
-                backend,
+                model_backend(),
                 requests[module_id],
                 GenerationResult(
                     attempts=candidate_attempts.get(module_id, 0),
@@ -1996,6 +3551,7 @@ async def run_build(
     target_ids: Sequence[str] = (),
     force: bool = False,
     generator: GeneratorBackend | None = None,
+    generator_factory: Callable[[], GeneratorBackend] | None = None,
     cost_tracker: CostTracker | None = None,
     response_cache: ResponseCache | None = None,
     progress: object | None = None,
@@ -2012,9 +3568,12 @@ async def run_build(
     auto_skills_enabled: bool | None = None,
     builtin_skill_names: Sequence[str] | None = None,
     reuse_proof_sink: dict[str, dict[str, str]] | None = None,
+    validate_committed_batteries: bool = True,
 ) -> TargetBuildReport:
     """Generate reserved TypeScript bindings, validate overlays, and commit them."""
 
+    if generator is not None and generator_factory is not None:
+        raise JauntConfigError("Pass either generator or generator_factory, not both")
     root = root.resolve()
     effective_instructions = (
         tuple(build_instructions)
@@ -2077,6 +3636,7 @@ async def run_build(
             target_ids=target_ids,
             force=force,
             generator=generator,
+            generator_factory=generator_factory,
             cost_tracker=cost_tracker,
             response_cache=response_cache,
             progress=progress,
@@ -2092,6 +3652,7 @@ async def run_build(
             builtin_skill_names=effective_builtin_skills,
             generation_fingerprint=request_fingerprint,
             reuse_proof_sink=reuse_proof_sink,
+            validate_committed_batteries=validate_committed_batteries,
         )
     if npm_skill_metadata:
         return TargetBuildReport(

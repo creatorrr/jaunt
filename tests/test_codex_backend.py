@@ -9,7 +9,11 @@ from typing import cast
 import pytest
 
 from jaunt.config import CodexConfig, LLMConfig
-from jaunt.errors import JauntGenerationError, JauntTransientGenerationError
+from jaunt.errors import (
+    JauntGenerationError,
+    JauntQuotaGenerationError,
+    JauntTransientGenerationError,
+)
 from jaunt.generate.base import TokenUsage
 from jaunt.generate.codex_backend import CodexBackend, _is_model_config_error
 
@@ -281,6 +285,28 @@ async def test_run_codex_exec_classifies_known_capacity_failure_as_transient(
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
     with pytest.raises(JauntTransientGenerationError, match="Selected model is at capacity"):
+        await cb.run_codex_exec(
+            prompt="work",
+            cwd="/tmp",
+            sandbox="read-only",
+            model="gpt-5.6-sol",
+            reasoning_effort="medium",
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_codex_exec_classifies_plan_usage_limit_as_quota(monkeypatch) -> None:
+    import jaunt.generate.codex_backend as cb
+
+    async def fake_exec(*_args, **_kwargs):
+        return _FakeProc(
+            _failed_jsonl(
+                "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage."
+            ),
+        )
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    with pytest.raises(JauntQuotaGenerationError, match="hit your usage limit"):
         await cb.run_codex_exec(
             prompt="work",
             cwd="/tmp",

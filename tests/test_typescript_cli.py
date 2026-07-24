@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
 from jaunt.cli import (
+    _cmd_mixed_check,
+    _cmd_typescript_build_loaded,
     _cmd_typescript_test_loaded,
     _cmd_mixed_status,
     _aggregate_cost_payloads,
@@ -18,9 +21,15 @@ from jaunt.cli import (
 )
 from jaunt.config import JauntConfig, load_config
 from jaunt.errors import JauntConfigError
-from jaunt.targets.base import TargetBuildReport, TargetDiagnostic, TargetTestReport
+from jaunt.targets.base import (
+    TargetBuildReport,
+    TargetCheckReport,
+    TargetDiagnostic,
+    TargetTestReport,
+)
 from jaunt.typescript.cli_bridge import (
     build_payload,
+    check_payload,
     human_lines,
     test_payload as _test_payload,
 )
@@ -73,13 +82,105 @@ def test_mixed_status_preserves_typescript_diagnostics(tmp_path: Path, monkeypat
     assert payload["targets"]["ts"]["diagnostics"] == payload["diagnostics"]
 
 
+def test_check_payload_keeps_invalid_blockers_that_differ_only_by_target() -> None:
+    shared = TargetDiagnostic(
+        code="JAUNT_TS_API_DRIFT",
+        message="The generated API mirror drifted.",
+    )
+    payload = check_payload(
+        TargetCheckReport(
+            language="ts",
+            invalid={
+                "ts:src/alpha": (shared,),
+                "ts:src/beta": (shared,),
+            },
+            exit_code=4,
+        )
+    )
+
+    blockers = [item for item in payload["diagnostics"] if item["code"] == "JAUNT_TS_API_DRIFT"]
+    assert [item["data"]["target"] for item in blockers] == [
+        "ts:src/alpha",
+        "ts:src/beta",
+    ]
+
+
+def test_mixed_check_reports_language_scoped_magic_diagnostics(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from jaunt.typescript import status as status_module
+
+    monkeypatch.setattr(
+        "jaunt.cli._capture_python_json",
+        lambda _command, _args: (
+            4,
+            {
+                "command": "check",
+                "ok": False,
+                "blocked": [],
+                "checked": [],
+                "orphans": [],
+                "magic": {
+                    "fresh": [],
+                    "stale": {"pkg.specs": "prose"},
+                    "unbuilt": ["pkg.new"],
+                    "orphans": [],
+                },
+            },
+        ),
+    )
+
+    async def fake_check(*_args, **_kwargs):
+        return TargetCheckReport(
+            language="ts",
+            stale={"ts:src/slug": "structural"},
+            unbuilt=frozenset({"ts:src/new"}),
+            exit_code=4,
+        )
+
+    monkeypatch.setattr(status_module, "run_check", fake_check)
+    args = argparse.Namespace(
+        target=[],
+        magic_only=False,
+        contracts_only=False,
+        json_output=True,
+    )
+
+    assert _cmd_mixed_check(args, tmp_path, cast(JauntConfig, object())) == 4
+    payload = json.loads(capsys.readouterr().out)
+
+    assert [item["code"] for item in payload["diagnostics"]] == [
+        "JAUNT_MAGIC_STALE",
+        "JAUNT_MAGIC_UNBUILT",
+        "JAUNT_MAGIC_STALE",
+        "JAUNT_MAGIC_UNBUILT",
+    ]
+    assert [item["data"]["language"] for item in payload["diagnostics"]] == [
+        "py",
+        "py",
+        "ts",
+        "ts",
+    ]
+    assert [item["data"]["target"] for item in payload["diagnostics"]] == [
+        "py:pkg.specs",
+        "py:pkg.new",
+        "ts:src/slug",
+        "ts:src/new",
+    ]
+    assert payload["targets"]["py"]["diagnostics"] == payload["diagnostics"][:2]
+    assert payload["targets"]["ts"]["diagnostics"] == payload["diagnostics"][2:]
+    assert payload["blocked"] == []
+    assert payload["magic"]["py"]["stale"] == {"pkg.specs": "prose"}
+    assert payload["magic"]["ts"]["stale"] == {"src/slug": "structural"}
+
+
 def test_init_typescript_scaffolds_v2_without_mutating_package_json(tmp_path: Path, capsys) -> None:
     assert main(["init", "--language", "ts", "--root", str(tmp_path), "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
 
     assert payload["language"] == "ts"
     assert payload["package_init_command"] == "npm init -y && npm pkg set type=module"
-    assert payload["install_command"].startswith("npm install -D @usejaunt/ts@^0.1.0 ")
+    assert payload["install_command"].startswith("npm install -D @usejaunt/ts@^0.1.2 ")
     assert not (tmp_path / "package.json").exists()
     assert (tmp_path / "src" / "index.jaunt.ts").is_file()
     assert (tmp_path / "src" / "index.context.ts").is_file()
@@ -315,10 +416,17 @@ projects = ["tsconfig.json"]
     )
     config = load_config(root=tmp_path)
     observed: dict[str, object] = {}
+    backend = object()
+    backend_calls = 0
+
+    def build_backend(_config: JauntConfig) -> object:
+        nonlocal backend_calls
+        backend_calls += 1
+        return backend
 
     async def fake_test(*_args, **kwargs):
+        observed.update(kwargs)
         progress = kwargs["progress"]
-        observed["progress"] = progress
         progress.set_total(2)
         progress.phase("tests/math.example.test.ts", "generating", "example")
         progress.advance("tests/math.example.test.ts", ok=True)
@@ -326,14 +434,70 @@ projects = ["tsconfig.json"]
         return TargetTestReport(language="ts")
 
     monkeypatch.setattr("jaunt.typescript.tester.run_test", fake_test)
+    monkeypatch.setattr("jaunt.cli._build_backend", build_backend)
     args = parse_args(["test", "--language", "ts", "--progress", "plain", "--json"])
 
     assert _cmd_typescript_test_loaded(args, tmp_path, config) == 0
     captured = capsys.readouterr()
     assert json.loads(captured.out)["ok"] is True
     assert observed["progress"] is not None
+    assert callable(observed["generator_factory"])
+    assert "generator" not in observed
+    assert backend_calls == 0
+    factory = cast("Callable[[], object]", observed["generator_factory"])
+    assert factory() is backend
+    assert factory() is backend
+    assert backend_calls == 1
+    assert observed["cost_tracker"] is args._command_cost_trackers["ts"]
+    assert callable(observed["semantic_gate_exec"])
     assert "[ts test] tests/math.example.test.ts: generating (example)" in captured.err
     assert "[ts test] 1/2" in captured.err
+
+
+def test_typescript_build_passes_a_lazy_cached_backend_factory(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tsconfig.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "jaunt.toml").write_text(
+        """version = 2
+[target.ts]
+source_roots = ["src"]
+test_roots = ["tests"]
+projects = ["tsconfig.json"]
+""",
+        encoding="utf-8",
+    )
+    config = load_config(root=tmp_path)
+    observed: dict[str, object] = {}
+    backend = object()
+    backend_calls = 0
+
+    async def fake_build(*_args, **kwargs):
+        observed.update(kwargs)
+        return TargetBuildReport(language="ts")
+
+    def build_backend(_config: JauntConfig) -> object:
+        nonlocal backend_calls
+        backend_calls += 1
+        return backend
+
+    monkeypatch.setattr("jaunt.typescript.builder.run_build", fake_build)
+    monkeypatch.setattr("jaunt.cli._build_backend", build_backend)
+    args = parse_args(["build", "--language", "ts", "--json"])
+
+    assert _cmd_typescript_build_loaded(args, tmp_path, config) == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+    assert callable(observed["generator_factory"])
+    assert "generator" not in observed
+    assert backend_calls == 0
+    factory = cast("Callable[[], object]", observed["generator_factory"])
+    assert factory() is backend
+    assert factory() is backend
+    assert backend_calls == 1
 
 
 def test_mixed_cost_payloads_sum_language_usage() -> None:

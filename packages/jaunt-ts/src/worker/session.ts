@@ -67,6 +67,81 @@ import type {
   SessionMetadata,
 } from "../analyzer/types.js";
 
+const IMPORTED_TYPE_CONTEXT_BEGIN =
+  "// <jaunt:imported-type-context version=2 encoding=base64-json>";
+const IMPORTED_TYPE_CONTEXT_END = "// </jaunt:imported-type-context>";
+const IMPORTED_TYPE_RECORD_PREFIX = "// jaunt:imported-type-record=";
+const IMPORTED_TYPE_CONTEXT_LIMIT = 64 * 1024;
+
+function compareCodeUnits(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function contextSourceWithImportedTypes(
+  authored: string | undefined,
+  records: TypeEnvironmentSnapshot["modelTypeSources"],
+): string | undefined {
+  if (records.length === 0) return authored;
+  const ordered = [...records].sort((left, right) => {
+    const byPriority =
+      (left.priority === "requested" ? 0 : 1) -
+      (right.priority === "requested" ? 0 : 1);
+    return byPriority || compareCodeUnits(left.id, right.id);
+  });
+  const rendered = ordered.map((record) => {
+    // Encode the complete record so authored declarations cannot inject the
+    // transport delimiters. Consumers decode this payload before exposing the
+    // declaration source to a model.
+    const payload = Buffer.from(
+      JSON.stringify({
+        id: record.id,
+        priority: record.priority,
+        source: record.source.trimEnd(),
+      }),
+      "utf8",
+    ).toString("base64");
+    return `${IMPORTED_TYPE_RECORD_PREFIX}${payload}\n`;
+  });
+  const fixed = `${IMPORTED_TYPE_CONTEXT_BEGIN}\n${IMPORTED_TYPE_CONTEXT_END}\n`;
+  const fullBytes =
+    Buffer.byteLength(fixed, "utf8") +
+    rendered.reduce(
+      (total, source) => total + Buffer.byteLength(source, "utf8"),
+      0,
+    );
+  const omissionTemplate = `// Jaunt omitted ${rendered.length} imported type-context records to stay within ${IMPORTED_TYPE_CONTEXT_LIMIT} UTF-8 bytes.\n`;
+  const available =
+    fullBytes <= IMPORTED_TYPE_CONTEXT_LIMIT
+      ? IMPORTED_TYPE_CONTEXT_LIMIT - Buffer.byteLength(fixed, "utf8")
+      : IMPORTED_TYPE_CONTEXT_LIMIT -
+        Buffer.byteLength(fixed, "utf8") -
+        Buffer.byteLength(omissionTemplate, "utf8");
+  const selected: string[] = [];
+  let used = 0;
+  let omitted = 0;
+  for (const source of rendered) {
+    const size = Buffer.byteLength(source, "utf8");
+    if (used + size > available) {
+      omitted += 1;
+      continue;
+    }
+    selected.push(source.trimEnd());
+    used += size;
+  }
+  const block = [
+    IMPORTED_TYPE_CONTEXT_BEGIN,
+    ...selected,
+    ...(omitted > 0
+      ? [
+          `// Jaunt omitted ${omitted} imported type-context records to stay within ${IMPORTED_TYPE_CONTEXT_LIMIT} UTF-8 bytes.`,
+        ]
+      : []),
+    IMPORTED_TYPE_CONTEXT_END,
+  ].join("\n");
+  const prefix = authored?.trimEnd();
+  return prefix ? `${prefix}\n\n${block}\n` : `${block}\n`;
+}
+
 function packageVersion(): string {
   const metadata = JSON.parse(
     readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
@@ -676,6 +751,7 @@ export class AnalyzerSession {
         "recompose",
         "baseline-unselected",
         "release-programs",
+        "test-runner-overlay-roots",
       ],
     };
   }
@@ -780,9 +856,16 @@ export class AnalyzerSession {
       .filter((module) => !selectedModules || selectedModules.has(module))
       .map((module) => {
         const ir = this.contractIr(module);
-        const contextSource = ir.contextPath
+        const typeContext =
+          this.#typeEnvironments.get(module.route.moduleId)?.modelTypeSources ??
+          [];
+        const authoredContextSource = ir.contextPath
           ? readOptional(resolve(this.root, ir.contextPath))
           : undefined;
+        const contextSource = contextSourceWithImportedTypes(
+          authoredContextSource,
+          typeContext,
+        );
         return {
           ...ir,
           routes: module.route,
@@ -1204,7 +1287,7 @@ export class AnalyzerSession {
       valid,
       artifacts: valid ? artifacts : [],
       diagnostics: diagnostics.sort((left, right) =>
-        JSON.stringify(left).localeCompare(JSON.stringify(right)),
+        compareCodeUnits(JSON.stringify(left), JSON.stringify(right)),
       ),
       affectedProjects,
     };

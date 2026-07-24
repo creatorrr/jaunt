@@ -285,6 +285,28 @@ describe("protocol-v1 golden fixtures", () => {
     }
   });
 
+  test("marked imported declarations remain backward-compatible contextSource", () => {
+    const module = structuredClone(
+      fixture("analyze-contracts.response.json").result.modules[0],
+    );
+    module.contextSource = `${module.contextSource ?? ""}
+// <jaunt:imported-type-context version=1>
+// <jaunt:imported-type-source {"id":"workspace:src/types.ts","priority":"requested"}>
+export interface ImportedShape { value: string; }
+// </jaunt:imported-type-source>
+// </jaunt:imported-type-context>
+`;
+    const validateAnalysis = ajv.compile({
+      $ref: `${contractSchema.$id}#/definitions/contractAnalysisRecord`,
+    });
+    expect(
+      validateAnalysis(module),
+      JSON.stringify(validateAnalysis.errors),
+    ).toBe(true);
+    module.typeContext = [];
+    expect(validateAnalysis(module)).toBe(false);
+  });
+
   test("every currently serialized TypeScript type family satisfies typeNode", () => {
     const source = ts.createSourceFile(
       "schema-types.ts",

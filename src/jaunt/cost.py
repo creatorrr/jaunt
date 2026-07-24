@@ -96,11 +96,11 @@ class CostTracker:
         return len(self._records)
 
     def check_budget(self) -> None:
-        """Raise JauntGenerationError if estimated cost exceeds max_cost."""
+        """Raise JauntBudgetExceededError if estimated cost exceeds max_cost."""
         if self.max_cost is not None and self.estimated_cost > self.max_cost:
-            from jaunt.errors import JauntGenerationError
+            from jaunt.errors import JauntBudgetExceededError
 
-            raise JauntGenerationError(
+            raise JauntBudgetExceededError(
                 f"Build cost ${self.estimated_cost:.4f} exceeds budget "
                 f"limit ${self.max_cost:.4f}. Aborting."
             )

@@ -175,6 +175,7 @@ engine = "codex"          # the only supported engine
 model = "gpt-5.6-sol"
 reasoning_effort = "medium"  # low | medium | high
 sandbox = "workspace-write"
+quota_wait_minutes = 0        # command-wide usage-limit budget; 0 fails immediately
 
 # [llm] is retained but informational under Codex: Codex authenticates via
 # `codex login` / CODEX_API_KEY, not `llm.api_key_env`.

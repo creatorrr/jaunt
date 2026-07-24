@@ -14,6 +14,7 @@ import { afterEach, expect, test } from "vitest";
 import { sha256Bytes } from "../../src/analyzer/canonical.js";
 import {
   MAX_CAPTURED_STREAM_BYTES,
+  MAX_RUNNER_STARTUP_ERROR_CHARS,
   readBoundedInput,
   runTestRunner,
 } from "../../src/test/runner.js";
@@ -73,6 +74,18 @@ test("runner rejects files and overlays outside its workspace", async () => {
       compilerModulePath: workspace.compilerModulePath,
     }),
   ).rejects.toThrow(/escapes workspace root/);
+  await expect(
+    runTestRunner({
+      root: workspace.root,
+      files: [],
+      overlays: {},
+      rootOverlayPaths: ["src/not-an-overlay.ts"],
+      timeoutMs: 5_000,
+      redactDerived: true,
+      mode: "typecheck",
+      compilerModulePath: workspace.compilerModulePath,
+    }),
+  ).rejects.toThrow(/must identify an overlay/);
 });
 
 test("symlink-installed runner executes its protected CLI entrypoint", async () => {
@@ -173,6 +186,116 @@ test("typed", () => {
     compilerModulePath: workspace.compilerModulePath,
   });
   expect(result.ok, JSON.stringify(result.diagnostics)).toBe(true);
+});
+
+test("runner keeps support overlays out of typecheck roots", async () => {
+  const workspace = createFixtureWorkspace();
+  roots.push(workspace.root);
+  write(
+    workspace.root,
+    "src/valid.ts",
+    'import { support } from "./support.js";\nexport const valid = support;\n',
+  );
+  write(
+    workspace.root,
+    "src/slug/index.ts",
+    "export const slugify = (value: string): string => value;\n",
+  );
+  const configPath = "vitest.config.ts";
+  const supportPath = "src/support.ts";
+  const candidatePath = "src/candidate.ts";
+  const overlays = {
+    [configPath]: "const invalidConfig: string = 1;\n",
+    [supportPath]: 'export const support: string = "available";\n',
+    [candidatePath]: "export const invalidCandidate: string = 1;\n",
+  };
+  const supportOnly = await runTestRunner({
+    root: workspace.root,
+    files: ["src/valid.ts"],
+    timeoutMs: 5_000,
+    redactDerived: false,
+    mode: "typecheck",
+    overlays,
+    rootOverlayPaths: [],
+    compilerModulePath: workspace.compilerModulePath,
+  });
+  expect(supportOnly.ok, JSON.stringify(supportOnly.diagnostics)).toBe(true);
+
+  const candidateRoot = await runTestRunner({
+    root: workspace.root,
+    files: ["src/valid.ts"],
+    timeoutMs: 5_000,
+    redactDerived: false,
+    mode: "typecheck",
+    overlays,
+    rootOverlayPaths: [candidatePath],
+    compilerModulePath: workspace.compilerModulePath,
+  });
+  expect(candidateRoot.ok).toBe(false);
+  expect(candidateRoot.diagnostics).toEqual(
+    expect.arrayContaining([expect.objectContaining({ path: candidatePath })]),
+  );
+  expect(candidateRoot.diagnostics).not.toEqual(
+    expect.arrayContaining([expect.objectContaining({ path: configPath })]),
+  );
+});
+
+test("runner typechecks imported JSON identically from disk and a support overlay", async () => {
+  const workspace = createFixtureWorkspace();
+  roots.push(workspace.root);
+  const configPath = "tsconfig.runner.json";
+  const consumerPath = "src/config-consumer.ts";
+  const settingsPath = "src/settings.json";
+  const settings = '{"retries":3}\n';
+  write(
+    workspace.root,
+    configPath,
+    JSON.stringify(
+      {
+        compilerOptions: {
+          target: "ES2022",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+          strict: true,
+          noEmit: true,
+          resolveJsonModule: true,
+          types: [],
+        },
+        files: [consumerPath],
+      },
+      null,
+      2,
+    ),
+  );
+  write(
+    workspace.root,
+    consumerPath,
+    'import settings from "./settings.json" with { type: "json" };\nexport const retries: number = settings.retries;\n',
+  );
+  write(workspace.root, settingsPath, settings);
+
+  const baseInput = {
+    root: workspace.root,
+    files: [consumerPath],
+    tsconfigPath: configPath,
+    timeoutMs: 5_000,
+    redactDerived: false,
+    mode: "typecheck" as const,
+    compilerModulePath: workspace.compilerModulePath,
+  };
+  const diskResult = await runTestRunner(baseInput);
+  expect(diskResult.ok, JSON.stringify(diskResult.diagnostics)).toBe(true);
+
+  rmSync(resolve(workspace.root, settingsPath));
+  const overlayResult = await runTestRunner({
+    ...baseInput,
+    overlays: { [settingsPath]: settings },
+    rootOverlayPaths: [],
+  });
+  expect(overlayResult.ok, JSON.stringify(overlayResult.diagnostics)).toBe(
+    true,
+  );
+  expect(overlayResult.diagnostics).toEqual(diskResult.diagnostics);
 });
 
 test("generated batteries audit undeclared workspace aliases before execution", async () => {
@@ -565,6 +688,14 @@ new (makeFunction as unknown as { new (body: string): () => unknown })("return g
     "JAUNT_TS_TEST_DYNAMIC_LOADER",
   ],
   [
+    "const-bound constructor escape",
+    `const key: string = "constructor";
+const makeFunction = (() => undefined)[key];
+new (makeFunction as unknown as { new (body: string): () => unknown })("return globalThis")();
+`,
+    "JAUNT_TS_TEST_DYNAMIC_LOADER",
+  ],
+  [
     "runtime-computed constructor escape",
     `const key = "constructor".slice(0) as "constructor";
 const makeFunction = (() => undefined)[key];
@@ -688,6 +819,162 @@ void Reflect.get(root, ["pro", "cess"].join(""));
     expect(result.diagnostics).toContainEqual(
       expect.objectContaining({ code: expectedCode, path }),
     );
+  },
+);
+
+test("typecheck accepts same-file const string keys on ordinary records", async () => {
+  const workspace = createFixtureWorkspace();
+  roots.push(workspace.root);
+  const path = "tests/record-key.example.test.ts";
+  write(
+    workspace.root,
+    "tsconfig.runner.json",
+    JSON.stringify({
+      compilerOptions: {
+        target: "ES2022",
+        module: "NodeNext",
+        moduleResolution: "NodeNext",
+        strict: true,
+        noEmit: true,
+        types: [],
+      },
+      include: ["tests/**/*.ts"],
+    }),
+  );
+  const result = await runTestRunner({
+    root: workspace.root,
+    files: [path],
+    timeoutMs: 5_000,
+    redactDerived: false,
+    mode: "typecheck",
+    tsconfigPath: "tsconfig.runner.json",
+    overlays: {
+      [path]: managedTestSource(
+        "example",
+        `const rolesKey: string = "x-hasura-allowed-roles";
+const malformedRolesToken: Record<string, unknown> = { [rolesKey]: "admin" };
+const role = malformedRolesToken[rolesKey];
+const { [rolesKey]: destructuredRole } = malformedRolesToken;
+void role;
+void destructuredRole;
+`,
+      ),
+    },
+    compilerModulePath: workspace.compilerModulePath,
+  });
+
+  expect(result.ok, JSON.stringify(result.diagnostics)).toBe(true);
+  expect(result.diagnostics).toEqual([]);
+});
+
+test.each(["@typescript/typescript58", "@typescript/typescript6"] as const)(
+  "typecheck resolves the referenced same-file const under %s",
+  async (compilerPackage) => {
+    const workspace = createFixtureWorkspace({ compilerPackage });
+    roots.push(workspace.root);
+    const path = "tests/record-key.example.test.ts";
+    write(
+      workspace.root,
+      "tsconfig.runner.json",
+      JSON.stringify({
+        compilerOptions: {
+          target: "ES2022",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+          strict: true,
+          noEmit: true,
+          types: [],
+        },
+        include: ["tests/**/*.ts"],
+      }),
+    );
+    const result = await runTestRunner({
+      root: workspace.root,
+      files: [path],
+      timeoutMs: 5_000,
+      redactDerived: false,
+      mode: "typecheck",
+      tsconfigPath: "tsconfig.runner.json",
+      overlays: {
+        [path]: managedTestSource(
+          "example",
+          `const rolesKey: string = "x-hasura-allowed-roles";
+function unrelatedBinding(): string {
+  const rolesKey: string = "constructor";
+  return rolesKey;
+}
+const malformedRolesToken: Record<string, unknown> = { [rolesKey]: "admin" };
+const role = malformedRolesToken[rolesKey];
+void unrelatedBinding;
+void role;
+`,
+        ),
+      },
+      compilerModulePath: workspace.compilerModulePath,
+    });
+
+    expect(result.ok, JSON.stringify(result.diagnostics)).toBe(true);
+    expect(result.diagnostics).toEqual([]);
+  },
+);
+
+test.each(["@typescript/typescript58", "@typescript/typescript6"] as const)(
+  "typecheck rejects a const literal from an out-of-scope shadow under %s",
+  async (compilerPackage) => {
+    const workspace = createFixtureWorkspace({ compilerPackage });
+    roots.push(workspace.root);
+    const path = "tests/record-key.example.test.ts";
+    write(
+      workspace.root,
+      "tests/globals.d.ts",
+      "declare const rolesKey: string;\n",
+    );
+    write(
+      workspace.root,
+      "tsconfig.runner.json",
+      JSON.stringify({
+        compilerOptions: {
+          target: "ES2022",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+          strict: true,
+          noEmit: true,
+          types: [],
+        },
+        include: ["tests/**/*.ts"],
+      }),
+    );
+    const result = await runTestRunner({
+      root: workspace.root,
+      files: [path],
+      timeoutMs: 5_000,
+      redactDerived: false,
+      mode: "typecheck",
+      tsconfigPath: "tsconfig.runner.json",
+      overlays: {
+        [path]: managedTestSource(
+          "example",
+          `export {};
+{
+  const rolesKey: string = "x-hasura-allowed-roles";
+  void rolesKey;
+}
+const malformedRolesToken: Record<string, unknown> = {};
+const role = malformedRolesToken[rolesKey];
+void role;
+`,
+        ),
+      },
+      compilerModulePath: workspace.compilerModulePath,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.diagnostics).toEqual([
+      expect.objectContaining({
+        code: "JAUNT_TS_TEST_DYNAMIC_LOADER",
+        path,
+      }),
+    ]);
   },
 );
 
@@ -1185,6 +1472,10 @@ test("never exposes teardown", () => {});
   });
   const rendered = JSON.stringify(result);
   expect(result.ok).toBe(false);
+  expect(result.tests.length).toBeGreaterThan(0);
+  for (const record of result.tests) {
+    expect(Object.keys(record).sort()).toEqual(["caseId", "category"]);
+  }
   for (const sentinel of [
     "WARNING-SENTINEL",
     "TEARDOWN-OUTPUT-SENTINEL",
@@ -1202,7 +1493,7 @@ test("never exposes teardown", () => {});
   }
 });
 
-test("redacted config failure returns a minimal opaque fallback", async () => {
+test("startVitest failures preserve bounded startup detail in both redaction modes", async () => {
   const workspace = createFixtureWorkspace();
   roots.push(workspace.root);
   write(
@@ -1218,21 +1509,54 @@ import { test } from "vitest";
 test("not collected", () => {});
 `,
   );
-  const result = await runTestRunner({
+
+  for (const redactDerived of [true, false] as const) {
+    const result = await runTestRunner({
+      root: workspace.root,
+      files: ["tests/__generated__/config.derived.test.ts"],
+      vitestConfigPath: "vitest.secret.config.mjs",
+      timeoutMs: 5_000,
+      redactDerived,
+      mode: "run",
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      tests: [
+        {
+          caseId: "opaque-runner-failure",
+          category: "runner",
+          message: expect.stringContaining("CONFIG-SENTINEL"),
+        },
+      ],
+      captured: { stdout: "", stderr: "" },
+    });
+    const message = result.tests[0]!.message;
+    expect(message).toContain("Error: CONFIG-SENTINEL");
+    expect(message!.indexOf("CONFIG-SENTINEL")).toBeLessThan(
+      message!.indexOf("Error: CONFIG-SENTINEL"),
+    );
+  }
+
+  write(
+    workspace.root,
+    "vitest.long-error.config.mjs",
+    `throw new Error("LONG-CONFIG-SENTINEL-" + "x".repeat(3_000));\n`,
+  );
+  const truncated = await runTestRunner({
     root: workspace.root,
     files: ["tests/__generated__/config.derived.test.ts"],
-    vitestConfigPath: "vitest.secret.config.mjs",
+    vitestConfigPath: "vitest.long-error.config.mjs",
     timeoutMs: 5_000,
     redactDerived: true,
     mode: "run",
   });
-  expect(result).toMatchObject({
-    ok: false,
-    tests: [{ caseId: "opaque-runner-failure", category: "runner" }],
-    captured: { stdout: "", stderr: "" },
-  });
-  expect(Object.keys(result.tests[0]!).sort()).toEqual(["caseId", "category"]);
-  expect(JSON.stringify(result)).not.toContain("CONFIG-SENTINEL");
+  expect(truncated.tests[0]!.message).toContain("LONG-CONFIG-SENTINEL");
+  expect(truncated.tests[0]!.message).toHaveLength(
+    MAX_RUNNER_STARTUP_ERROR_CHARS,
+  );
+  expect(truncated.tests[0]!.message).toMatch(
+    /\[jaunt: runner startup error truncated\]$/,
+  );
 });
 
 test("runner resolves package aliases through the owning referenced source project", async () => {

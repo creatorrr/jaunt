@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import tempfile
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import TypeAlias
 
 from jaunt.agent_runtime import (
     AgentExecutor,
@@ -12,15 +14,28 @@ from jaunt.agent_runtime import (
     AgentTaskResult,
 )
 from jaunt.config import CodexConfig, LLMConfig
+from jaunt.errors import JauntBudgetExceededError, JauntQuotaGenerationError
 from jaunt.generate.base import TokenUsage
-from jaunt.generate.codex_backend import run_codex_exec
+from jaunt.generate.codex_backend import CodexExecResult, run_codex_exec
+
+ModelCallRunner: TypeAlias = Callable[
+    [Callable[[], Awaitable[CodexExecResult]]],
+    Awaitable[CodexExecResult],
+]
 
 
 class CodexExecutor(AgentExecutor):
-    def __init__(self, codex: CodexConfig, llm: LLMConfig) -> None:
+    def __init__(
+        self,
+        codex: CodexConfig,
+        llm: LLMConfig,
+        *,
+        model_call_runner: ModelCallRunner | None = None,
+    ) -> None:
         self._codex = codex
         self._llm = llm
         self._model = codex.model or llm.model
+        self._model_call_runner = model_call_runner
 
     @property
     def engine_name(self) -> str:
@@ -73,15 +88,25 @@ class CodexExecutor(AgentExecutor):
             target_path = self._write_workspace(root, task)
             prompt = self._build_prompt(task)
             try:
-                result = await run_codex_exec(
-                    prompt=prompt,
-                    cwd=str(root),
-                    sandbox=self._codex.sandbox,
-                    model=self._model,
-                    reasoning_effort=self._codex.reasoning_effort,
-                    extra_config=dict(self._codex.config or {}),
-                    ignore_user_config=True,
+
+                async def call() -> CodexExecResult:
+                    return await run_codex_exec(
+                        prompt=prompt,
+                        cwd=str(root),
+                        sandbox=self._codex.sandbox,
+                        model=self._model,
+                        reasoning_effort=self._codex.reasoning_effort,
+                        extra_config=dict(self._codex.config or {}),
+                        ignore_user_config=True,
+                    )
+
+                result = (
+                    await self._model_call_runner(call)
+                    if self._model_call_runner is not None
+                    else await call()
                 )
+            except (JauntBudgetExceededError, JauntQuotaGenerationError):
+                raise
             except Exception as e:
                 output = ""
                 try:

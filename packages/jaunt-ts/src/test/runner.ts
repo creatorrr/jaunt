@@ -11,7 +11,14 @@ import {
   rmdirSync,
   unlinkSync,
 } from "node:fs";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import {
+  dirname,
+  extname,
+  isAbsolute,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type ts from "@typescript/typescript6";
 import { startVitest } from "vitest/node";
@@ -33,7 +40,10 @@ import {
 export const RUNNER_PROTOCOL = "jaunt-ts-test-runner/1" as const;
 export const MAX_RUNNER_INPUT_BYTES = 16 * 1024 * 1024;
 export const MAX_CAPTURED_STREAM_BYTES = 64 * 1024;
+export const MAX_RUNNER_STARTUP_ERROR_CHARS = 2_000;
 const TRUNCATION_MARKER = "\n[jaunt: captured output truncated]\n";
+const STARTUP_ERROR_TRUNCATION_MARKER =
+  "\n[jaunt: runner startup error truncated]";
 
 export interface TestRunnerInput {
   readonly root: string;
@@ -50,6 +60,7 @@ export interface TestRunnerInput {
   readonly deletedFiles?: readonly string[];
   readonly packageRoot?: string;
   readonly overlays?: Readonly<Record<string, string>>;
+  readonly rootOverlayPaths?: readonly string[];
   readonly compilerModulePath?: string;
   readonly generatedDir?: string;
   readonly permissionSandbox?: boolean;
@@ -69,6 +80,7 @@ export interface TestRunnerOutput {
 export interface ProtectedDerivedTestResultRecord {
   readonly caseId: string;
   readonly category: FailureCategory;
+  readonly message?: string;
 }
 
 export type RunnerTestResultRecord =
@@ -91,6 +103,7 @@ export function projectTestResults(
 
 export function redactedRunnerFailure(
   mode: "typecheck" | "run",
+  startupError?: string,
 ): TestRunnerOutput {
   return {
     ok: false,
@@ -100,10 +113,21 @@ export function redactedRunnerFailure(
       {
         caseId: "opaque-runner-failure",
         category: "runner",
+        ...(startupError === undefined ? {} : { message: startupError }),
       },
     ],
     captured: { stdout: "", stderr: "" },
   };
+}
+
+function runnerStartupError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const stack = error instanceof Error ? error.stack : undefined;
+  const rendered = [message, stack].filter(Boolean).join("\n");
+  if (rendered.length <= MAX_RUNNER_STARTUP_ERROR_CHARS) return rendered;
+  const limit =
+    MAX_RUNNER_STARTUP_ERROR_CHARS - STARTUP_ERROR_TRUNCATION_MARKER.length;
+  return rendered.slice(0, limit) + STARTUP_ERROR_TRUNCATION_MARKER;
 }
 
 function redactTypecheckResult(result: TestRunnerOutput): TestRunnerOutput {
@@ -170,6 +194,24 @@ function parseInput(value: unknown): TestRunnerInput {
   if (overlays !== undefined) {
     for (const path of Object.keys(overlays))
       assertWithinRoot(root, resolve(root, path));
+  }
+  if (
+    input.rootOverlayPaths !== undefined &&
+    (!Array.isArray(input.rootOverlayPaths) ||
+      input.rootOverlayPaths.some((path) => typeof path !== "string"))
+  ) {
+    throw new Error("rootOverlayPaths must be an array of strings");
+  }
+  const overlayPaths = new Set(
+    Object.keys((overlays as Record<string, string> | undefined) ?? {}).map(
+      (path) => resolve(root, path),
+    ),
+  );
+  for (const path of (input.rootOverlayPaths as string[] | undefined) ?? []) {
+    const resolved = assertWithinRoot(root, resolve(root, path));
+    if (!overlayPaths.has(resolved)) {
+      throw new Error("rootOverlayPaths entries must identify an overlay");
+    }
   }
   if (typeof input.configPath === "string") {
     assertWithinRoot(root, resolve(root, input.configPath));
@@ -268,6 +310,9 @@ function parseInput(value: unknown): TestRunnerInput {
     ...(overlays === undefined
       ? {}
       : { overlays: overlays as Record<string, string> }),
+    ...(Array.isArray(input.rootOverlayPaths)
+      ? { rootOverlayPaths: input.rootOverlayPaths as string[] }
+      : {}),
   };
 }
 
@@ -522,8 +567,47 @@ function tripleSlashDirectiveRanges(
   return ranges;
 }
 
+function sameFileConstString(
+  compiler: typeof import("@typescript/typescript6"),
+  checker: ts.TypeChecker,
+  identifier: ts.Identifier,
+): string | undefined {
+  // Resolve this use rather than its spelling: an inaccessible scope may
+  // contain a same-named const whose literal does not govern this expression.
+  const symbol = checker.getSymbolAtLocation(identifier);
+  const declarations = symbol?.declarations;
+  if (!symbol || !declarations || declarations.length !== 1) return undefined;
+  const declaration = declarations[0];
+  if (
+    !declaration ||
+    !compiler.isVariableDeclaration(declaration) ||
+    declaration.getSourceFile() !== identifier.getSourceFile() ||
+    !compiler.isIdentifier(declaration.name) ||
+    !compiler.isVariableDeclarationList(declaration.parent) ||
+    (declaration.parent.flags & compiler.NodeFlags.Const) === 0
+  ) {
+    return undefined;
+  }
+
+  let current = declaration.initializer;
+  while (
+    current &&
+    (compiler.isParenthesizedExpression(current) ||
+      compiler.isNonNullExpression(current) ||
+      compiler.isAsExpression(current) ||
+      compiler.isTypeAssertionExpression(current) ||
+      compiler.isSatisfiesExpression(current))
+  ) {
+    current = current.expression;
+  }
+  return current && compiler.isStringLiteralLike(current)
+    ? current.text
+    : undefined;
+}
+
 function staticallyKnownString(
   compiler: typeof import("@typescript/typescript6"),
+  checker: ts.TypeChecker,
   expression: ts.Expression,
   depth = 0,
 ): string | undefined {
@@ -538,12 +622,25 @@ function staticallyKnownString(
     current = current.expression;
   }
   if (compiler.isStringLiteralLike(current)) return current.text;
+  if (compiler.isIdentifier(current)) {
+    return sameFileConstString(compiler, checker, current);
+  }
   if (
     compiler.isBinaryExpression(current) &&
     current.operatorToken.kind === compiler.SyntaxKind.PlusToken
   ) {
-    const left = staticallyKnownString(compiler, current.left, depth + 1);
-    const right = staticallyKnownString(compiler, current.right, depth + 1);
+    const left = staticallyKnownString(
+      compiler,
+      checker,
+      current.left,
+      depth + 1,
+    );
+    const right = staticallyKnownString(
+      compiler,
+      checker,
+      current.right,
+      depth + 1,
+    );
     if (left === undefined || right === undefined) return undefined;
     const joined = left + right;
     return joined.length <= 256 ? joined : undefined;
@@ -553,6 +650,7 @@ function staticallyKnownString(
     for (const span of current.templateSpans) {
       const expressionValue = staticallyKnownString(
         compiler,
+        checker,
         span.expression,
         depth + 1,
       );
@@ -573,22 +671,32 @@ function staticallyKnownString(
       current.arguments.length <= 1
     ) {
       const separator = current.arguments[0]
-        ? staticallyKnownString(compiler, current.arguments[0], depth + 1)
+        ? staticallyKnownString(
+            compiler,
+            checker,
+            current.arguments[0],
+            depth + 1,
+          )
         : ",";
       if (separator === undefined) return undefined;
       const values = receiver.elements.map((element) =>
         compiler.isSpreadElement(element)
           ? undefined
-          : staticallyKnownString(compiler, element, depth + 1),
+          : staticallyKnownString(compiler, checker, element, depth + 1),
       );
       if (values.some((value) => value === undefined)) return undefined;
       const joined = (values as string[]).join(separator);
       return joined.length <= 256 ? joined : undefined;
     }
     if (current.expression.name.text === "concat") {
-      const first = staticallyKnownString(compiler, receiver, depth + 1);
+      const first = staticallyKnownString(
+        compiler,
+        checker,
+        receiver,
+        depth + 1,
+      );
       const rest = current.arguments.map((argument) =>
-        staticallyKnownString(compiler, argument, depth + 1),
+        staticallyKnownString(compiler, checker, argument, depth + 1),
       );
       if (first === undefined || rest.some((value) => value === undefined))
         return undefined;
@@ -601,19 +709,23 @@ function staticallyKnownString(
 
 function staticallyKnownPropertyName(
   compiler: typeof import("@typescript/typescript6"),
+  checker: ts.TypeChecker,
   expression: ts.Expression,
 ): string | undefined {
   // Only syntax can establish a safe property name. Checker types are not
   // evidence about runtime values because generated tests may use assertions
   // to claim that an opaque string is a harmless literal.
-  return staticallyKnownString(compiler, expression);
+  return staticallyKnownString(compiler, checker, expression);
 }
 
 function staticallySafePropertyKey(
   compiler: typeof import("@typescript/typescript6"),
+  checker: ts.TypeChecker,
   expression: ts.Expression,
 ): boolean {
-  if (staticallyKnownPropertyName(compiler, expression) !== undefined) {
+  if (
+    staticallyKnownPropertyName(compiler, checker, expression) !== undefined
+  ) {
     return true;
   }
   let current = expression;
@@ -639,6 +751,7 @@ function staticallySafePropertyKey(
 
 function directReflectCall(
   compiler: typeof import("@typescript/typescript6"),
+  checker: ts.TypeChecker,
   node: ts.Identifier,
 ):
   { readonly call: ts.CallExpression; readonly operation: string } | undefined {
@@ -653,7 +766,11 @@ function directReflectCall(
   const operation = compiler.isPropertyAccessExpression(access)
     ? access.name.text
     : access.argumentExpression
-      ? staticallyKnownPropertyName(compiler, access.argumentExpression)
+      ? staticallyKnownPropertyName(
+          compiler,
+          checker,
+          access.argumentExpression,
+        )
       : undefined;
   if (operation === undefined) return undefined;
   let outer: ts.Expression = access;
@@ -700,6 +817,7 @@ function runtimeModuleReference(
 
 function forbiddenDynamicExecutionReference(
   compiler: typeof import("@typescript/typescript6"),
+  checker: ts.TypeChecker,
   node: ts.Node,
 ): ts.Node | undefined {
   // Generated batteries have one intentionally narrow loading surface: static
@@ -715,7 +833,7 @@ function forbiddenDynamicExecutionReference(
     return node;
   }
   if (compiler.isIdentifier(node) && node.text === "Reflect") {
-    const direct = directReflectCall(compiler, node);
+    const direct = directReflectCall(compiler, checker, node);
     if (!direct) return node;
     if (FORBIDDEN_REFLECT_OPERATIONS.has(direct.operation)) {
       return direct.call.expression;
@@ -724,9 +842,9 @@ function forbiddenDynamicExecutionReference(
       const property = direct.call.arguments[1];
       if (
         !property ||
-        !staticallySafePropertyKey(compiler, property) ||
+        !staticallySafePropertyKey(compiler, checker, property) ||
         FORBIDDEN_DYNAMIC_PROPERTIES.has(
-          staticallyKnownPropertyName(compiler, property) ?? "",
+          staticallyKnownPropertyName(compiler, checker, property) ?? "",
         )
       ) {
         return property ?? direct.call;
@@ -737,7 +855,8 @@ function forbiddenDynamicExecutionReference(
     compiler.isElementAccessExpression(node) &&
     node.argumentExpression &&
     FORBIDDEN_DYNAMIC_PROPERTIES.has(
-      staticallyKnownPropertyName(compiler, node.argumentExpression) ?? "",
+      staticallyKnownPropertyName(compiler, checker, node.argumentExpression) ??
+        "",
     )
   ) {
     return node.argumentExpression;
@@ -745,7 +864,7 @@ function forbiddenDynamicExecutionReference(
   if (
     compiler.isElementAccessExpression(node) &&
     node.argumentExpression &&
-    !staticallySafePropertyKey(compiler, node.argumentExpression)
+    !staticallySafePropertyKey(compiler, checker, node.argumentExpression)
   ) {
     return node.argumentExpression;
   }
@@ -761,7 +880,7 @@ function forbiddenDynamicExecutionReference(
       (compiler.isIdentifier(node.name) ? node.name : undefined);
     const name = property
       ? compiler.isComputedPropertyName(property)
-        ? staticallyKnownPropertyName(compiler, property.expression)
+        ? staticallyKnownPropertyName(compiler, checker, property.expression)
         : compiler.isIdentifier(property) ||
             compiler.isStringLiteralLike(property)
           ? property.text
@@ -771,7 +890,7 @@ function forbiddenDynamicExecutionReference(
     if (
       property &&
       compiler.isComputedPropertyName(property) &&
-      !staticallySafePropertyKey(compiler, property.expression)
+      !staticallySafePropertyKey(compiler, checker, property.expression)
     ) {
       return property;
     }
@@ -901,6 +1020,7 @@ function testModulePolicyDiagnostics(
   options: ts.CompilerOptions,
 ): readonly DiagnosticRecord[] {
   const diagnostics: DiagnosticRecord[] = [];
+  const checker = program.getTypeChecker();
   for (const relativePath of input.files) {
     const sourceFile = program.getSourceFile(resolve(input.root, relativePath));
     if (!sourceFile) continue;
@@ -973,7 +1093,11 @@ function testModulePolicyDiagnostics(
       }
     }
     function visit(node: ts.Node): void {
-      const forbidden = forbiddenDynamicExecutionReference(compiler, node);
+      const forbidden = forbiddenDynamicExecutionReference(
+        compiler,
+        checker,
+        node,
+      );
       if (forbidden) {
         diagnostics.push(
           diagnostic(
@@ -1095,6 +1219,26 @@ async function typecheck(input: TestRunnerInput): Promise<TestRunnerOutput> {
       : {}),
   };
   const base = compiler.createCompilerHost(options, true);
+  const overlayScriptKind = (path: string): ts.ScriptKind => {
+    switch (extname(path).toLowerCase()) {
+      case ".json":
+        return compiler.ScriptKind.JSON;
+      case ".js":
+      case ".mjs":
+      case ".cjs":
+        return compiler.ScriptKind.JS;
+      case ".jsx":
+        return compiler.ScriptKind.JSX;
+      case ".tsx":
+        return compiler.ScriptKind.TSX;
+      case ".ts":
+      case ".mts":
+      case ".cts":
+        return compiler.ScriptKind.TS;
+      default:
+        return compiler.ScriptKind.Unknown;
+    }
+  };
   const host: ts.CompilerHost = {
     ...base,
     fileExists: (path) =>
@@ -1114,16 +1258,18 @@ async function typecheck(input: TestRunnerInput): Promise<TestRunnerOutput> {
             source,
             target,
             true,
-            path.endsWith(".tsx")
-              ? compiler.ScriptKind.TSX
-              : compiler.ScriptKind.TS,
+            overlayScriptKind(path),
           );
     },
   };
   const roots = [
     ...parsed.fileNames,
     ...input.files.map((path) => resolve(input.root, path)),
-    ...(input.normalEmit === true ? [] : overlays.keys()),
+    ...(input.normalEmit === true
+      ? []
+      : input.rootOverlayPaths === undefined
+        ? overlays.keys()
+        : input.rootOverlayPaths.map((path) => resolve(input.root, path))),
   ].filter((path) => !deleted.has(resolve(path)));
   const program = compiler.createProgram({
     rootNames: [...new Set(roots)],
@@ -1409,48 +1555,57 @@ async function run(input: TestRunnerInput): Promise<TestRunnerOutput> {
     stderrTruncated ||= captured.truncated;
     return true;
   }) as typeof process.stderr.write;
+  let startupError: string | undefined;
   try {
     const sourceResolver = await projectSourceResolver(input);
-    const instance = await startVitest(
-      "test",
-      input.files.map((path) => resolve(input.root, path)),
-      {
-        root: input.root,
-        run: true,
-        watch: false,
-        passWithNoTests: false,
-        reporters: [reporter],
-        include: [...input.files],
-        testTimeout: input.timeoutMs,
-        hookTimeout: input.timeoutMs,
-        ...(input.tier ? { pool: "threads" as const } : {}),
-        config: input.vitestConfigPath
-          ? resolve(input.root, input.vitestConfigPath)
-          : false,
-      },
-      {
-        cacheDir: resolve(input.root, ".jaunt-vitest-cache"),
-        server: { fs: { allow: [input.root], strict: true } },
-        plugins: [
-          ...(sourceResolver ? [sourceResolver] : []),
-          {
-            name: "jaunt-test-overlays",
-            enforce: "pre",
-            load(id: string) {
-              return (
-                overlayAbsolute.get(comparableEntryPath(id.split("?")[0]!)) ??
-                null
-              );
+    let instance: Awaited<ReturnType<typeof startVitest>> | undefined;
+    try {
+      instance = await startVitest(
+        "test",
+        input.files.map((path) => resolve(input.root, path)),
+        {
+          root: input.root,
+          run: true,
+          watch: false,
+          passWithNoTests: false,
+          reporters: [reporter],
+          include: [...input.files],
+          testTimeout: input.timeoutMs,
+          hookTimeout: input.timeoutMs,
+          ...(input.tier ? { pool: "threads" as const } : {}),
+          config: input.vitestConfigPath
+            ? resolve(input.root, input.vitestConfigPath)
+            : false,
+        },
+        {
+          cacheDir: resolve(input.root, ".jaunt-vitest-cache"),
+          server: { fs: { allow: [input.root], strict: true } },
+          plugins: [
+            ...(sourceResolver ? [sourceResolver] : []),
+            {
+              name: "jaunt-test-overlays",
+              enforce: "pre",
+              load(id: string) {
+                return (
+                  overlayAbsolute.get(comparableEntryPath(id.split("?")[0]!)) ??
+                  null
+                );
+              },
             },
-          },
-        ],
-      },
-    );
+          ],
+        },
+      );
+    } catch (error) {
+      startupError = runnerStartupError(error);
+    }
     await instance?.close();
   } finally {
     process.stdout.write = originalOut;
     process.stderr.write = originalErr;
     removeOverlayPlaceholders(placeholders);
+  }
+  if (startupError !== undefined) {
+    return redactedRunnerFailure("run", startupError);
   }
   const ok =
     reporter.results.length > 0 &&

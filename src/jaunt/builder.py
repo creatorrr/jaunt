@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import ast
 import copy
+import errno
 import hashlib
 import heapq
 import importlib.metadata
@@ -18,7 +19,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Sequence
+from contextlib import contextmanager
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
@@ -69,6 +71,7 @@ from jaunt.validation import (
 )
 
 _TY_CHECK_TIMEOUT_S = 20.0
+_STUB_EMIT_CONVERGENCE_ATTEMPTS = 3
 NEEDS_DEP_MARKER = "JAUNT-NEEDS-DEP:"
 
 # These releases could re-stamp a module after a spec was removed, replacing the
@@ -96,6 +99,60 @@ _UNSAFE_REMOVAL_RESTAMP_TOOL_VERSIONS = frozenset(
         "1.6.2",
     }
 )
+
+
+@contextmanager
+def _stub_publish_lock(stub_path: Path, *, metadata_root: Path) -> Iterator[None]:
+    """Serialize Jaunt publishers for one stub path across processes.
+
+    The persistent lock inode lives under ``.jaunt`` rather than beside the source
+    file. Keeping it in place avoids the unlink/recreate split-lock race.
+    """
+
+    # Use the lexical absolute path so the lock identity does not change if an
+    # external writer swaps a symlink at the target.
+    identity_path = os.path.normcase(os.path.abspath(os.fspath(stub_path)))
+    identity = hashlib.sha256(identity_path.encode("utf-8")).hexdigest()
+    lock_path = metadata_root.resolve() / ".jaunt" / "stub-locks" / f"{identity}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    locked = False
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            if os.fstat(descriptor).st_size == 0:
+                os.write(descriptor, b"\0")
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            locking = getattr(msvcrt, "locking", None)
+            lock_mode = getattr(msvcrt, "LK_LOCK", None)
+            if not callable(locking) or not isinstance(lock_mode, int):
+                raise RuntimeError("This Python runtime cannot lock emitted stubs")
+            locking(descriptor, lock_mode, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        locked = True
+        yield
+    finally:
+        try:
+            if locked:
+                if os.name == "nt":
+                    import msvcrt
+
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    locking = getattr(msvcrt, "locking", None)
+                    unlock_mode = getattr(msvcrt, "LK_UNLCK", None)
+                    if not callable(locking) or not isinstance(unlock_mode, int):
+                        raise RuntimeError("This Python runtime cannot unlock emitted stubs")
+                    locking(descriptor, unlock_mode, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
 
 def _scan_needs_dep_markers(source: str) -> list[str]:
@@ -1958,71 +2015,498 @@ async def run_build(
             if not entries:
                 continue
             source_file = entries[0].source_file
-            gen_source = _read_generated(
+            initial_gen_source = _read_generated(
                 package_dir,
                 generated_dir,
                 module_name,
                 module_output_bases=module_output_bases,
             )
-            if gen_source is None:
+            if initial_gen_source is None:
                 continue
             expected, _ = _build_expected_names(entries)
             try:
-                spec_source = Path(source_file).read_text(encoding="utf-8")
+                source_path = Path(source_file)
                 stub_path = stub_emitter.stub_path_for_source(source_file)
-                if stub_path.exists() and not stub_emitter.is_jaunt_stub(stub_path):
-                    stub_warnings.append(
-                        f"{module_name}: existing hand-authored {stub_path.name} not overwritten"
+
+                def _read_stub_inputs(
+                    current_source_path: Path = source_path,
+                    current_module_name: str = module_name,
+                ) -> tuple[str, str]:
+                    spec_source = current_source_path.read_text(encoding="utf-8")
+                    generated_source = _read_generated(
+                        package_dir,
+                        generated_dir,
+                        current_module_name,
+                        module_output_bases=module_output_bases,
                     )
-                    continue
-                # Stub freshness covers both semantic inputs and the exact rendered
-                # bytes recorded in the provenance header. Owner-format or manual
-                # byte drift therefore takes the deterministic re-emission path.
-                if (
-                    stub_emitter.stub_staleness(
-                        source_file=source_file, generated_source=gen_source
-                    )
-                    is None
-                    and stub_path.exists()
-                ):
-                    emitted_stubs[module_name] = str(stub_path)
-                    continue
-                stub_header = header.format_stub_header(
-                    tool_version=_tool_version(),
-                    source_module=module_name,
-                    generated_digest=stub_emitter.generated_content_digest(gen_source),
-                    inputs_digest=stub_emitter.stub_inputs_digest(spec_source, gen_source),
-                )
-                new_stub = stub_emitter.build_stub_source(
-                    spec_source,
-                    gen_source,
-                    set(expected),
-                    stub_header,
-                    generated_module=paths.spec_module_to_generated_module(
-                        module_name, generated_dir=generated_dir
-                    ),
-                )
-                new_stub = stub_emitter.format_stub_best_effort(new_stub, filename=stub_path)
-                if not (stub_path.exists() and stub_path.read_bytes() == new_stub.encode("utf-8")):
-                    stub_path.parent.mkdir(parents=True, exist_ok=True)
-                    fd, tmp = tempfile.mkstemp(
-                        dir=str(stub_path.parent),
-                        prefix=".jaunt-stub-tmp-",
-                        suffix=".pyi",
-                        text=True,
-                    )
+                    if generated_source is None:
+                        raise RuntimeError("generated module disappeared during stub emission")
+                    return spec_source, generated_source
+
+                def _read_stub_state(
+                    current_stub_path: Path = stub_path,
+                ) -> tuple[bytes | None, bool]:
+                    if current_stub_path.is_symlink():
+                        try:
+                            return current_stub_path.read_bytes(), False
+                        except OSError:
+                            return b"", False
                     try:
-                        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
-                            f.write(new_stub)
-                            f.flush()
-                            os.fsync(f.fileno())
-                        os.replace(tmp, stub_path)
+                        stub_bytes = current_stub_path.read_bytes()
+                    except FileNotFoundError:
+                        return None, False
+                    try:
+                        stub_text = stub_bytes.decode("utf-8")
+                    except UnicodeDecodeError:
+                        return stub_bytes, False
+                    return stub_bytes, header.parse_stub_header(stub_text) is not None
+
+                def _preserve_hand_authored_stub(
+                    state: tuple[bytes | None, bool],
+                    current_module_name: str = module_name,
+                    current_stub_path: Path = stub_path,
+                ) -> bool:
+                    stub_bytes, managed = state
+                    if stub_bytes is None or managed:
+                        return False
+                    _record_hand_authored_stub(
+                        current_module_name=current_module_name,
+                        current_stub_path=current_stub_path,
+                    )
+                    return True
+
+                def _record_hand_authored_stub(
+                    *,
+                    recovery_path: Path | None = None,
+                    current_module_name: str = module_name,
+                    current_stub_path: Path = stub_path,
+                ) -> None:
+                    warning = (
+                        f"{current_module_name}: existing hand-authored "
+                        f"{current_stub_path.name} not overwritten"
+                    )
+                    if recovery_path is not None:
+                        warning += f"; displaced bytes preserved at {recovery_path}"
+                    if warning not in stub_warnings:
+                        stub_warnings.append(warning)
+
+                def _classify_stub_conflict(state: tuple[bytes | None, bool]) -> str:
+                    stub_bytes, managed = state
+                    return "hand-authored" if stub_bytes is not None and not managed else "retry"
+
+                def _create_stub_exclusive(
+                    source_path: Path,
+                    source_bytes: bytes,
+                    destination_path: Path = stub_path,
+                ) -> None:
+                    """Create a stub path without replacing an external writer's path.
+
+                    Prefer an atomic hard link to the already-fsynced source. Some
+                    otherwise writable filesystems reject hard links, so fall back to
+                    an exclusive create and exact, fsynced copy. ``O_EXCL`` preserves
+                    the same no-overwrite boundary for both publication paths.
+                    """
+
+                    try:
+                        os.link(source_path, destination_path)
+                        return
+                    except FileExistsError:
+                        raise
+                    except OSError:
+                        pass
+
+                    def _quarantine_failed_copy(
+                        created_identity: tuple[int, int] | None,
+                    ) -> tuple[Path | None, OSError | None]:
+                        """Remove only the failed copy created by this invocation.
+
+                        A path-based identity check alone leaves a stat/unlink race in
+                        which an external replacement can be deleted. Move the public
+                        name atomically to a private adjacent path first, then inspect
+                        the inode that was actually moved. An external replacement that
+                        wins either side of the move is preserved at its public name or
+                        at the returned quarantine path.
+                        """
+
+                        try:
+                            current = destination_path.lstat()
+                        except FileNotFoundError:
+                            return None, None
+                        except OSError as error:
+                            return destination_path, error
+                        if (
+                            created_identity is not None
+                            and (
+                                current.st_dev,
+                                current.st_ino,
+                            )
+                            != created_identity
+                        ):
+                            return destination_path, None
+
+                        quarantine_fd = -1
+                        quarantine_path: Path | None = None
+                        try:
+                            quarantine_fd, quarantine_name = tempfile.mkstemp(
+                                dir=str(destination_path.parent),
+                                prefix=".jaunt-stub-quarantine-",
+                                suffix=".pyi",
+                            )
+                            quarantine_path = Path(quarantine_name)
+                            os.close(quarantine_fd)
+                            quarantine_fd = -1
+                            os.replace(destination_path, quarantine_path)
+                        except FileNotFoundError:
+                            if quarantine_path is not None:
+                                quarantine_path.unlink(missing_ok=True)
+                            return None, None
+                        except OSError as error:
+                            if quarantine_fd >= 0:
+                                try:
+                                    os.close(quarantine_fd)
+                                except OSError:
+                                    pass
+                            if quarantine_path is not None:
+                                quarantine_path.unlink(missing_ok=True)
+                            return destination_path, error
+
+                        try:
+                            moved = quarantine_path.lstat()
+                        except OSError as error:
+                            return quarantine_path, error
+                        if created_identity is None:
+                            # fstat itself failed, so retain rather than guessing
+                            # whether these bytes belong to this publisher.
+                            return quarantine_path, None
+                        if (moved.st_dev, moved.st_ino) != created_identity:
+                            # A foreign replacement landed after the first identity
+                            # check. Keep the bytes at the private path and report it.
+                            return quarantine_path, None
+                        try:
+                            quarantine_path.unlink()
+                        except OSError as error:
+                            return quarantine_path, error
+                        return None, None
+
+                    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+                    descriptor = os.open(destination_path, flags, 0o600)
+                    copy_error: OSError | None = None
+                    created_identity: tuple[int, int] | None = None
+                    try:
+                        created = os.fstat(descriptor)
+                        created_identity = (created.st_dev, created.st_ino)
+                        remaining = memoryview(source_bytes)
+                        while remaining:
+                            written = os.write(descriptor, remaining)
+                            if written <= 0:
+                                raise OSError(
+                                    errno.EIO,
+                                    "short write while publishing emitted stub",
+                                )
+                            remaining = remaining[written:]
+                        os.fsync(descriptor)
+                    except OSError as error:
+                        copy_error = error
                     finally:
                         try:
-                            os.unlink(tmp)
-                        except FileNotFoundError:
-                            pass
-                emitted_stubs[module_name] = str(stub_path)
+                            os.close(descriptor)
+                        except OSError as error:
+                            if copy_error is None:
+                                copy_error = error
+                    if copy_error is not None:
+                        preserved_path, cleanup_error = _quarantine_failed_copy(created_identity)
+                        details = str(copy_error)
+                        if preserved_path is not None:
+                            details += f"; bytes preserved at {preserved_path}"
+                        if cleanup_error is not None:
+                            details += f"; failed-copy cleanup also failed: {cleanup_error}"
+                        raise OSError(copy_error.errno or errno.EIO, details) from copy_error
+
+                def _restore_displaced_stub(
+                    recovery_path: Path,
+                    displaced_state: tuple[bytes | None, bool],
+                    current_stub_path: Path = stub_path,
+                ) -> tuple[str, bool, OSError | None]:
+                    """Restore displaced bytes without replacing a concurrent path.
+
+                    Hard-link restoration is atomic. Filesystems that reject hard
+                    links fall back to an exclusive create and exact byte copy. If
+                    that copy cannot finish, the recovery path is retained and the
+                    caller reports it instead of deleting the only complete copy.
+                    """
+
+                    displaced_bytes, displaced_managed = displaced_state
+
+                    def _public_conflict(
+                        public_state: tuple[bytes | None, bool],
+                    ) -> tuple[str, bool, OSError | None]:
+                        if public_state == displaced_state:
+                            return _classify_stub_conflict(displaced_state), False, None
+                        # The public path now names different bytes (or vanished).
+                        # Preserve the complete displaced copy at recovery_path.
+                        if (displaced_bytes is not None and not displaced_managed) or (
+                            public_state[0] is not None and not public_state[1]
+                        ):
+                            return "hand-authored", True, None
+                        return _classify_stub_conflict(public_state), True, None
+
+                    public_state = _read_stub_state()
+                    if public_state[0] is not None:
+                        return _public_conflict(public_state)
+
+                    try:
+                        _create_stub_exclusive(
+                            recovery_path,
+                            displaced_bytes or b"",
+                            current_stub_path,
+                        )
+                    except FileExistsError:
+                        return _public_conflict(_read_stub_state())
+                    except OSError as error:
+                        return _classify_stub_conflict(displaced_state), True, error
+
+                    restored_state = _read_stub_state()
+                    if restored_state == displaced_state:
+                        return _classify_stub_conflict(displaced_state), False, None
+                    return _public_conflict(restored_state)
+
+                def _publish_stub_candidate(
+                    prior_state: tuple[bytes | None, bool],
+                    candidate: bytes,
+                    current_stub_path: Path = stub_path,
+                    current_project_root: Path | None = project_root,
+                    current_package_dir: Path = package_dir,
+                ) -> tuple[str, Path | None]:
+                    """Publish without clobbering a path that changed after rendering.
+
+                    The advisory lock serializes Jaunt publishers. Missing targets use
+                    hard-link create-if-absent, or an exclusive-create copy when hard
+                    links are unavailable. Existing managed targets are moved to a
+                    private recovery path and verified there before the candidate is
+                    published into the now-empty public path. Path-based external
+                    creates and replacements do not need to honor the lock: their path
+                    wins, and displaced non-Jaunt bytes are restored or retained at the
+                    reported recovery path.
+                    """
+
+                    metadata_root = (
+                        current_project_root
+                        if current_project_root is not None
+                        else current_package_dir
+                    )
+                    with _stub_publish_lock(current_stub_path, metadata_root=metadata_root):
+                        current_state = _read_stub_state()
+                        if current_state != prior_state:
+                            return _classify_stub_conflict(current_state), None
+
+                        fd, candidate_name = tempfile.mkstemp(
+                            dir=str(current_stub_path.parent),
+                            prefix=".jaunt-stub-candidate-",
+                            suffix=".pyi",
+                        )
+                        candidate_path = Path(candidate_name)
+                        try:
+                            with os.fdopen(fd, "wb") as stream:
+                                stream.write(candidate)
+                                stream.flush()
+                                os.fsync(stream.fileno())
+
+                            if prior_state[0] is None:
+                                try:
+                                    _create_stub_exclusive(
+                                        candidate_path,
+                                        candidate,
+                                        current_stub_path,
+                                    )
+                                except FileExistsError:
+                                    conflict = _read_stub_state()
+                                    return _classify_stub_conflict(conflict), None
+                                return "published", None
+
+                            if not prior_state[1]:
+                                return "hand-authored", None
+
+                            recovery_fd, recovery_name = tempfile.mkstemp(
+                                dir=str(current_stub_path.parent),
+                                prefix=".jaunt-stub-recovery-",
+                                suffix=".pyi",
+                            )
+                            os.close(recovery_fd)
+                            recovery_path = Path(recovery_name)
+                            keep_recovery = False
+                            try:
+                                try:
+                                    os.replace(current_stub_path, recovery_path)
+                                except FileNotFoundError:
+                                    return "retry", None
+                                # From this point the recovery path is the only known
+                                # complete copy until publication or restoration is
+                                # conclusively successful.
+                                keep_recovery = True
+
+                                displaced_state = _read_stub_state(recovery_path)
+                                if displaced_state != prior_state:
+                                    state, keep_recovery, restore_error = _restore_displaced_stub(
+                                        recovery_path, displaced_state
+                                    )
+                                    if keep_recovery:
+                                        if state == "hand-authored":
+                                            return state, recovery_path
+                                        raise RuntimeError(
+                                            "stub publication stopped safely; complete bytes "
+                                            f"remain at {recovery_path}: "
+                                            f"{restore_error or 'restore raced'}"
+                                        ) from restore_error
+                                    return state, None
+
+                                try:
+                                    _create_stub_exclusive(
+                                        candidate_path,
+                                        candidate,
+                                        current_stub_path,
+                                    )
+                                except FileExistsError:
+                                    state, keep_recovery, restore_error = _restore_displaced_stub(
+                                        recovery_path, displaced_state
+                                    )
+                                    if keep_recovery:
+                                        if state == "hand-authored":
+                                            return state, recovery_path
+                                        raise RuntimeError(
+                                            "stub publication raced safely; prior bytes "
+                                            f"remain at {recovery_path}: "
+                                            f"{restore_error or 'public path changed'}"
+                                        ) from restore_error
+                                    return state, None
+                                except OSError as publish_error:
+                                    state, keep_recovery, restore_error = _restore_displaced_stub(
+                                        recovery_path, displaced_state
+                                    )
+                                    if keep_recovery:
+                                        if state == "hand-authored":
+                                            return state, recovery_path
+                                        raise RuntimeError(
+                                            "stub publication failed safely; prior bytes "
+                                            f"remain at {recovery_path}: "
+                                            f"{restore_error or publish_error}"
+                                        ) from publish_error
+                                    if state == "hand-authored":
+                                        return state, None
+                                    raise
+                                keep_recovery = False
+                                return "published", None
+                            finally:
+                                if not keep_recovery:
+                                    recovery_path.unlink(missing_ok=True)
+                        finally:
+                            candidate_path.unlink(missing_ok=True)
+
+                for _attempt in range(_STUB_EMIT_CONVERGENCE_ATTEMPTS):
+                    spec_source, gen_source = _read_stub_inputs()
+                    stub_before = _read_stub_state()
+                    if _preserve_hand_authored_stub(stub_before):
+                        break
+
+                    # Stub freshness covers both semantic inputs and the exact rendered
+                    # bytes recorded in the provenance header. Owner-format or manual
+                    # byte drift therefore takes the deterministic re-emission path.
+                    if (
+                        stub_before[0] is not None
+                        and stub_emitter.stub_staleness(
+                            source_file=source_file, generated_source=gen_source
+                        )
+                        is None
+                    ):
+                        # Do not report an existing stub as fresh when either an input
+                        # or the exact managed stub bytes changed during validation.
+                        stub_after = _read_stub_state()
+                        if _preserve_hand_authored_stub(stub_after):
+                            break
+                        if (
+                            _read_stub_inputs() == (spec_source, gen_source)
+                            and stub_after == stub_before
+                        ):
+                            emitted_stubs[module_name] = str(stub_path)
+                            break
+                        continue
+
+                    stub_header = header.format_stub_header(
+                        tool_version=_tool_version(),
+                        source_module=module_name,
+                        generated_digest=stub_emitter.generated_content_digest(gen_source),
+                        inputs_digest=stub_emitter.stub_inputs_digest(spec_source, gen_source),
+                    )
+                    new_stub = stub_emitter.build_stub_source(
+                        spec_source,
+                        gen_source,
+                        set(expected),
+                        stub_header,
+                        generated_module=paths.spec_module_to_generated_module(
+                            module_name, generated_dir=generated_dir
+                        ),
+                    )
+                    new_stub = stub_emitter.format_stub_best_effort(new_stub, filename=stub_path)
+                    new_stub_bytes = new_stub.encode("utf-8")
+                    expected_stub_state = (new_stub_bytes, True)
+
+                    # Formatting can be slow. Treat the source pair used to render the
+                    # candidate and the exact stub path state as CAS preconditions.
+                    # A user-created stub wins the race and is never overwritten.
+                    stub_pre_publish = _read_stub_state()
+                    if _preserve_hand_authored_stub(stub_pre_publish):
+                        break
+                    if (
+                        _read_stub_inputs() != (spec_source, gen_source)
+                        or stub_pre_publish != stub_before
+                    ):
+                        continue
+
+                    if stub_pre_publish != expected_stub_state:
+                        stub_path.parent.mkdir(parents=True, exist_ok=True)
+                        publish_state, recovery_path = _publish_stub_candidate(
+                            stub_pre_publish,
+                            new_stub_bytes,
+                        )
+                        if publish_state == "hand-authored":
+                            _record_hand_authored_stub(recovery_path=recovery_path)
+                            break
+                        if publish_state != "published":
+                            continue
+
+                    # Re-read after publication. A concurrent generated-module
+                    # replacement invalidates this candidate even when it is fresh
+                    # against the earlier snapshot; retry from the new bytes.
+                    stub_after_publish = _read_stub_state()
+                    if _preserve_hand_authored_stub(stub_after_publish):
+                        break
+                    if (
+                        _read_stub_inputs() != (spec_source, gen_source)
+                        or stub_after_publish != expected_stub_state
+                    ):
+                        continue
+                    remaining_staleness = stub_emitter.stub_staleness(
+                        source_file=source_file,
+                        generated_source=gen_source,
+                    )
+                    final_stub_state = _read_stub_state()
+                    if _preserve_hand_authored_stub(final_stub_state):
+                        break
+                    if (
+                        _read_stub_inputs() != (spec_source, gen_source)
+                        or final_stub_state != expected_stub_state
+                    ):
+                        continue
+                    if remaining_staleness is not None:
+                        raise RuntimeError(
+                            f"emitted stub did not converge to fresh state ({remaining_staleness})"
+                        )
+                    emitted_stubs[module_name] = str(stub_path)
+                    break
+                else:
+                    raise RuntimeError(
+                        "stub inputs did not stabilize after "
+                        f"{_STUB_EMIT_CONVERGENCE_ATTEMPTS} attempts"
+                    )
             except Exception as e:
                 stub_failures[module_name] = [f"failed to emit stub: {e}"]
         return emitted_stubs, stub_warnings, stub_failures

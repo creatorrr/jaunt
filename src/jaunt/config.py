@@ -124,7 +124,15 @@ _PROMPTS_KEYS = frozenset(
 )
 _AGENT_KEYS = frozenset({"engine"})
 _CODEX_KEYS = frozenset(
-    {"model", "reasoning_effort", "sandbox", "fingerprint_cli_version", "features", "config"}
+    {
+        "model",
+        "reasoning_effort",
+        "sandbox",
+        "quota_wait_minutes",
+        "fingerprint_cli_version",
+        "features",
+        "config",
+    }
 )
 _DAEMON_KEYS = frozenset({"poll_interval", "max_jobs", "notify_command", "auto_commit"})
 _SKILLS_KEYS = frozenset(
@@ -254,12 +262,14 @@ class CodexConfig:
 
     Every field defaults to Jaunt's canonical Codex configuration: model
     ``gpt-5.6-sol`` at ``medium`` reasoning effort, the ``workspace-write`` sandbox,
-    CLI-version fingerprinting off, and empty ``features``/``config`` overrides.
+    no quota waiting, CLI-version fingerprinting off, and empty ``features``/``config``
+    overrides.
 
     Examples:
     - CodexConfig().model == "gpt-5.6-sol"
     - CodexConfig().reasoning_effort == "medium"
     - CodexConfig().sandbox == "workspace-write"
+    - CodexConfig().quota_wait_minutes == 0.0
     - CodexConfig().fingerprint_cli_version == False
     """
 
@@ -272,6 +282,8 @@ class CodexConfig:
     fingerprint_cli_version: bool = False
     features: list[str] = field(default_factory=list)
     config: dict[str, Any] = field(default_factory=dict)
+    # Appended to preserve the positional order of every pre-1.7.11 field.
+    quota_wait_minutes: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -1055,6 +1067,13 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     else:
         codex_sandbox = "workspace-write"
 
+    if "quota_wait_minutes" in codex_tbl:
+        codex_quota_wait_minutes = _as_float(
+            codex_tbl["quota_wait_minutes"], name="codex.quota_wait_minutes"
+        )
+    else:
+        codex_quota_wait_minutes = 0.0
+
     if "fingerprint_cli_version" in codex_tbl:
         codex_fingerprint_cli_version = _as_bool(
             codex_tbl["fingerprint_cli_version"],
@@ -1250,6 +1269,8 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
         raise JauntConfigError("Invalid config: jobs must be >= 1.")
     if build_ty_retry_attempts < 0:
         raise JauntConfigError("Invalid config: build.ty_retry_attempts must be >= 0.")
+    if not math.isfinite(codex_quota_wait_minutes) or codex_quota_wait_minutes < 0:
+        raise JauntConfigError("Invalid config: codex.quota_wait_minutes must be finite and >= 0.")
     if skills_max_chars_per_skill < 0:
         raise JauntConfigError("Invalid config: skills.max_chars_per_skill must be >= 0.")
     if async_runner not in _VALID_ASYNC_RUNNERS:
@@ -1320,6 +1341,7 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             model=codex_model,
             reasoning_effort=codex_reasoning_effort,
             sandbox=codex_sandbox,
+            quota_wait_minutes=codex_quota_wait_minutes,
             fingerprint_cli_version=codex_fingerprint_cli_version,
             features=codex_features,
             config=codex_config,

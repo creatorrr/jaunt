@@ -30,7 +30,7 @@ check_generated_imports = true
 # generated_import_allowlist = ["intentional_extra"]
 # Emit provenance-headed .pyi stubs next to each spec module (opt-out).
 emit_stubs = true
-# Add persistent extra instructions that apply to build generation.
+# Add persistent extra instructions for implementation generation and TypeScript batteries.
 # instructions = [
 #   "Prefer small composable helpers over monolithic functions.",
 # ]
@@ -54,6 +54,8 @@ engine = "codex"
 model = "gpt-5.6-sol"
 reasoning_effort = "medium"
 sandbox = "workspace-write"
+# Command-wide wait budget for plan-level Codex usage limits (0 = fail immediately).
+quota_wait_minutes = 0
 # Opt-in: include `codex --version` in freshness fingerprints. Couples
 # `jaunt check` to environments that have the codex binary installed.
 # fingerprint_cli_version = false
@@ -96,7 +98,7 @@ async_runner = "asyncio"       # asyncio | anyio
 include_target_tests = false   # keep target test source out of build prompts
 check_generated_imports = true # reject undeclared imports in generated code
 generated_import_allowlist = [] # extra top-level imports to permit in generated code
-instructions = []              # persistent extra build-generation instructions
+instructions = []              # persistent implementation + TS battery instructions
 emit_stubs = true              # emit provenance-headed .pyi stubs (opt-out)
 
 [test]
@@ -122,6 +124,7 @@ engine = "codex"               # the only supported engine
 model = "gpt-5.6-sol"
 reasoning_effort = "medium"    # low | medium | high
 sandbox = "workspace-write"
+quota_wait_minutes = 0          # command-wide usage-limit budget; 0 fails immediately
 # Opt-in: embed `codex --version` in freshness fingerprints. Couples `jaunt
 # check` to environments that have the codex binary installed.
 fingerprint_cli_version = false
@@ -209,6 +212,7 @@ jobs = 4
 model = "gpt-5.6-sol"
 reasoning_effort = "medium"
 sandbox = "workspace-write"
+quota_wait_minutes = 0
 
 [semantic_gate]
 enabled = true

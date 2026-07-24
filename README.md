@@ -21,6 +21,9 @@ contracts and Jaunt writes implementations under `__generated__/` using the Open
 Codex CLI (`codex exec`). Python and TypeScript are supported targets; TypeScript uses
 version-2 configuration and a project-local analyzer package.
 
+> **Windows:** support is currently best-effort and flaky. Some build and artifact
+> publication paths may fail on Windows; use Linux or macOS for reliable workflows.
+
 Call `jaunt.magic_module(__name__)` once at the top of a file and every top-level
 stub below it becomes a spec, with no per-symbol decorators:
 
@@ -117,7 +120,7 @@ export function slugify(title: string): string {
 ```bash
 uvx jaunt init --language ts
 npm init -y && npm pkg set type=module
-npm install -D @usejaunt/ts@^0.1.0 'typescript@^5.9' vitest fast-check @types/node
+npm install -D @usejaunt/ts@^0.1.2 'typescript@^5.9' vitest fast-check @types/node
 uvx jaunt sync
 uvx jaunt migrate --language ts       # upgrade preview; plan-only and model-free
 uvx jaunt build --language ts
@@ -147,6 +150,13 @@ Apply only when the plan contains `free-recompose` actions and an empty
 the current declaration environment and carries the validated API transition
 into the battery check; it does not call a model. Contract changes and failed
 validation remain rebuilds.
+
+The same test/check sequence also handles a battery whose target API and aggregate
+battery stamps changed. It remains eligible when the embedded prompt, protected
+runner, or Vitest fingerprint changed at the same time. The test command applies the
+current safety scan, typechecks, and runs the committed body against the current
+target, then reheaders it when green without calling a model. Do not add `--no-run`:
+runtime verification is the proof that makes the free reheader safe.
 
 Generated programs use ordinary imports and keep running without Jaunt installed. See
 the [TypeScript guide](https://jaunt.ing/docs/guides/typescript) for the facade layout,

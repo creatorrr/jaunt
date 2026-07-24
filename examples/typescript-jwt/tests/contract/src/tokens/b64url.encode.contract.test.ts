@@ -3,6 +3,9 @@
 // jaunt:source_digest=sha256:0438748771e2aee3474d083c87b5aaf8ab3f72d3b41fcc561d3a811df6079a0c
 // jaunt:property_scheme=jaunt-ts-property/2
 // jaunt:property_digest=sha256:490814509e5610d6152e6bbb4e049571a58ecc96379e4bace8f6dd36ef7cbea3
+// jaunt:fixture_path=tests/fixtures.ts
+// jaunt:fixture_digest=sha256:c32ec5f5c70a85bd7592d29dad10ecc821f73933526c8d247cb5026feba316ac
+// jaunt:fixture_topology={"tests/contract/fixtures.ts":"<missing>","tests/contract/fixtures.tsx":"<missing>","tests/contract/src/fixtures.ts":"<missing>","tests/contract/src/fixtures.tsx":"<missing>","tests/contract/src/tokens/fixtures.ts":"<missing>","tests/contract/src/tokens/fixtures.tsx":"<missing>","tests/fixtures.ts":"sha256:c32ec5f5c70a85bd7592d29dad10ecc821f73933526c8d247cb5026feba316ac","tests/fixtures.tsx":"<missing>"}
 // jaunt:body_digest=sha256:83871aa231561f7b61be87a682fa323dbbdf0b00671bb50c58d2e8db2c85bede
 // jaunt:strength_scheme=jaunt-ts-mutation/1
 // jaunt:strength=1/1

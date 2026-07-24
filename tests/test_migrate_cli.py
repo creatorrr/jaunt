@@ -308,7 +308,7 @@ def test_migrate_preflights_stub_format_before_writing_sources(
     original_source = source_path.read_bytes()
     stub_path = tmp_path / "src" / "legpkg" / "specs.pyi"
     stub_path.write_bytes(stub_path.read_bytes() + b"\n")
-    monkeypatch.setattr("shutil.which", lambda _name: None)
+    monkeypatch.setattr("jaunt.stub_emitter._ruff_command", lambda: None)
 
     rc = _run(["migrate", "--apply", "--force", "--json", "--root", str(tmp_path)])
     payload = json.loads(capsys.readouterr().out)

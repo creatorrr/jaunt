@@ -12,6 +12,99 @@ invalidate built modules. The exception is a correctness repair for artifacts
 whose provenance was previously marked fresh incorrectly; that safety migration
 is called out explicitly below.
 
+## 1.7.11 / `@usejaunt/ts` 0.1.2
+
+TypeScript batteries whose only mismatches are `target_api_digest` and
+`battery_fingerprint` no longer require a model call merely to refresh their stamps.
+Use the committed battery as the proof:
+
+```bash
+jaunt build --language ts --no-semantic-gate
+jaunt test --language ts --no-build
+jaunt check --language ts
+```
+
+The test command typechecks and runs the old body against the current target, then
+reheaders it when green. Do not use `--no-run` for this recovery: without runtime
+verification Jaunt regenerates rather than trusting the old body. A successful
+reheader can land even when a sibling battery exhausts its attempts. Target-API drift
+may also change the embedded prompt or runner fingerprint; those combinations use the
+same safety-first verification path rather than forcing generation. The protected
+scanner accepts a computed record key only when it can prove a unique same-file `const`
+string-literal binding, while forbidden loader properties and unknown dynamic keys
+remain fail-closed.
+
+Legacy batteries created before `fixture_fingerprint` was recorded can use this
+verification path when the current request has no fixture. Jaunt proves the missing
+field means an empty fixture, then typechecks and executes the unchanged body under the
+current runner before reheadering it. A newly added or changed real fixture remains a
+content change and regenerates normally.
+
+Regenerated implementations now have an additional pre-commit gate: compatible
+committed Jaunt batteries for the target run against the candidate overlay. Native
+project tests remain a separate repository gate. TypeScript test `--instruction`
+values reach both battery tiers but stay invocation-only; persistent
+`[build].instructions` remain provenance-bearing.
+
+When generation exhausts its candidate budget, inspect the exact saved source and
+JSON metadata under `.jaunt/typescript/rejected-tests/`. The structured diagnostic is
+`JAUNT_TS_TEST_GENERATION_EXHAUSTED`; a later successful run removes the matching
+record. A prompt-only fingerprint change preserves that diagnostic; changing the test
+contract or target API resets it.
+
+Jaunt 1.7.11 requires the matching protected-runner capability from
+`@usejaunt/ts` 0.1.2. Upgrade the project-local worker so Vitest config snapshots stay
+available to imports without becoming standalone typecheck roots:
+
+```bash
+npm install -D @usejaunt/ts@^0.1.2 'typescript@^5.9' vitest fast-check @types/node
+```
+
+No contract-IR migration is required for this release.
+
+This release also broadens the local tool identity used by TypeScript builds and tests:
+Jaunt now fingerprints all shipped files and the full parsed manifests of the protected
+runner, compiler, Vitest, and statically imported Vitest-config packages, including their
+declared and statically loaded runtime dependency closure. The config scan includes
+hoisted undeclared loads, `require.resolve()`, legal comment trivia, and imports inside
+executable template expressions; it captures static `join`/`resolve` config paths and
+rejects indirect or computed module loads it cannot prove safe. A proven `createRequire`
+loader, factory, or Node module namespace cannot be exported across captured config files;
+keep the static package load in the same helper so its provenance remains auditable.
+Existing artifacts may therefore show one toolchain, runner, or Vitest transition after
+upgrading even when their behavior is unchanged. The `build` → `test --no-build` →
+`check` sequence above validates and reheaders those committed artifacts without a model
+call; `--no-semantic-gate` makes the model-free intent explicit for the build step.
+
+Contract mutation scoring now runs from a disposable workspace. On supported Linux hosts
+Jaunt adds a namespace boundary; all hosts apply Node's filesystem permissions. Trusted
+runner hosts may start infrastructure children such as Vitest 3's esbuild service, but the
+preloaded guard removes that permission from generated battery workers. Battery code cannot
+create processes or read or write outside the isolated workspace. External dependency links
+are materialized into that workspace instead of granting access to their package-store
+parent; any link that still escapes the copy fails before the runner starts. Mutation
+timeouts and runner failures are excluded and leave the strength report incomplete rather
+than increasing its score. This changes no committed contract format.
+
+Codex plan-level usage limits still fail immediately unless you opt in to waiting. Set a
+project default or override it for one command:
+
+```toml
+[codex]
+quota_wait_minutes = 15
+```
+
+```bash
+jaunt build --quota-wait 15
+jaunt test --quota-wait 15
+```
+
+The wait budget is one command-wide total shared by modules, batteries, and mixed
+targets. Concurrent waits reserve from that total before sleeping. The bounded
+exponential backoff does not consume generation attempts. Vitest startup failures now
+retain a bounded message and stack so runner installation or configuration problems are
+actionable; failures from executed held-out cases remain redacted.
+
 ## 1.7.10 / `@usejaunt/ts` 0.1.1
 
 Tagged-template text no longer participates in the TypeScript semantic

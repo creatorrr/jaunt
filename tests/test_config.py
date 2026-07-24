@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from jaunt.config import find_project_root, load_config
+from jaunt.config import CodexConfig, find_project_root, load_config
 from jaunt.errors import JauntConfigError
 
 
@@ -41,6 +41,7 @@ def test_load_minimal_config_defaults_apply(tmp_path: Path) -> None:
     assert cfg.prompts.test_system == ""
     assert cfg.prompts.test_module == ""
     assert cfg.agent.engine == "codex"
+    assert cfg.codex.quota_wait_minutes == 0.0
     assert cfg.codex.fingerprint_cli_version is False
     assert cfg.daemon.poll_interval == 2.0
     assert cfg.daemon.max_jobs == 0
@@ -147,6 +148,7 @@ def test_codex_config_parsing(tmp_path: Path) -> None:
                 'model = "gpt-5.2-codex"',
                 'reasoning_effort = "medium"',
                 'sandbox = "workspace-write"',
+                "quota_wait_minutes = 12.5",
                 'features = ["multi_agent", "search"]',
                 "",
                 "[codex.config]",
@@ -165,6 +167,7 @@ def test_codex_config_parsing(tmp_path: Path) -> None:
     assert cfg.codex.model == "gpt-5.2-codex"
     assert cfg.codex.reasoning_effort == "medium"
     assert cfg.codex.sandbox == "workspace-write"
+    assert cfg.codex.quota_wait_minutes == 12.5
     assert cfg.codex.fingerprint_cli_version is False
     assert cfg.codex.features == ["multi_agent", "search"]
     assert cfg.codex.config == {
@@ -185,8 +188,42 @@ def test_codex_engine_defaults_load(tmp_path: Path) -> None:
     assert cfg.codex.model == "gpt-5.6-sol"
     assert cfg.codex.reasoning_effort == "medium"
     assert cfg.codex.sandbox == "workspace-write"
+    assert cfg.codex.quota_wait_minutes == 0.0
     assert cfg.codex.features == []
     assert cfg.codex.config == {}
+
+
+def test_codex_config_preserves_legacy_positional_field_order() -> None:
+    config = CodexConfig(
+        "legacy-model",
+        "high",
+        "read-only",
+        True,
+        ["legacy-feature"],
+        {"legacy": "value"},
+    )
+
+    assert config.model == "legacy-model"
+    assert config.reasoning_effort == "high"
+    assert config.sandbox == "read-only"
+    assert config.fingerprint_cli_version is True
+    assert config.features == ["legacy-feature"]
+    assert config.config == {"legacy": "value"}
+    assert config.quota_wait_minutes == 0.0
+
+
+@pytest.mark.parametrize("value", ["-1", "inf", "nan"])
+def test_codex_quota_wait_minutes_must_be_finite_and_nonnegative(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    (tmp_path / "jaunt.toml").write_text(
+        f"version = 1\n\n[codex]\nquota_wait_minutes = {value}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(JauntConfigError, match="quota_wait_minutes"):
+        load_config(root=tmp_path)
 
 
 def test_daemon_config_defaults_and_parses(tmp_path: Path) -> None:

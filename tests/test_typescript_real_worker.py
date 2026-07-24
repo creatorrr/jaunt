@@ -26,7 +26,12 @@ from jaunt.typescript.migrate import apply_typescript_migration, plan_typescript
 from jaunt.typescript.design import run_design
 from jaunt.typescript.protocol import ProtocolDiagnostic
 from jaunt.typescript.status import run_check, run_status
-from jaunt.typescript.tester import run_test
+from jaunt.typescript.tester import (
+    _strip_test_header,
+    _test_header_metadata,
+    _with_test_header,
+    run_test,
+)
 
 
 class _SlugGenerator(GeneratorBackend):
@@ -186,7 +191,48 @@ class _EjectLifecycleGenerator(GeneratorBackend):
         )
 
 
-def _copy_tooling(root: Path) -> None:
+class _ImportedTypeContextGenerator(GeneratorBackend):
+    def __init__(self) -> None:
+        self.targets: set[str] = set()
+
+    async def generate_module(self, ctx: ModuleSpecContext, **_kwargs: Any):
+        raise AssertionError(ctx)
+
+    async def generate_request(self, request: GenerationRequest, **_kwargs: Any):
+        assert request.kind == "test"
+        imported_paths = tuple(
+            path for path in request.context_files if path.startswith("_context/imported-types/")
+        )
+        assert len(imported_paths) == 1
+        assert imported_paths[0].endswith("-entity-highlights.tsx")
+        imported = request.context_files[imported_paths[0]]
+        assert "interface MemoryEntityItem" in imported
+        for field in (
+            "id",
+            "canonical_name",
+            "one_liner",
+            "context",
+            "aliases",
+            "entity_type",
+            "source_label",
+            "provenance",
+        ):
+            assert f"{field}:" in imported
+        contract = request.context_files["_context/contract.json"]
+        assert "contextSource" not in contract
+        assert "<jaunt:imported-type-context" not in contract
+        self.targets.add(request.target_path)
+        tier = str(request.cache_payload["tier"])
+        return (
+            'import { expect, test } from "vitest";\n'
+            'import { entityLabel } from "../../src/entity.js";\n'
+            f'test("{tier} entity label", () => expect(typeof entityLabel).toBe("function"));\n',
+            None,
+            (),
+        )
+
+
+def _copy_tooling(root: Path, *, symlink: bool = False) -> None:
     repository = Path(__file__).resolve().parents[1]
     package = repository / "packages" / "jaunt-ts"
     # The official side-by-side package resolves its stable 6.x API through
@@ -197,6 +243,14 @@ def _copy_tooling(root: Path) -> None:
         pytest.skip("real TypeScript worker dependencies are not built; run npm ci && npm test")
 
     installed = root / "node_modules" / "@usejaunt" / "ts"
+    if symlink:
+        installed.parent.mkdir(parents=True)
+        installed.symlink_to(package, target_is_directory=True)
+        (root / "node_modules" / "typescript").symlink_to(
+            compiler,
+            target_is_directory=True,
+        )
+        return
     installed.mkdir(parents=True)
     shutil.copy2(package / "package.json", installed / "package.json")
     shutil.copytree(package / "dist", installed / "dist")
@@ -421,6 +475,123 @@ jaunt.magicModule();
 /** Cover punctuation, surrounding whitespace, and an already-clean slug. */
 export function slugExamples(): void {
   jaunt.testSpec({ targets: [slugify] });
+}
+""",
+        encoding="utf-8",
+    )
+
+
+def _write_imported_type_context_project(root: Path) -> None:
+    (root / "src/components/memory").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "package.json").write_text(
+        """{
+  "name": "jaunt-imported-type-context-fixture",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@usejaunt/ts": "0.1.1",
+    "typescript": "6.0.2",
+    "vitest": "4.1.10"
+  }
+}
+""",
+        encoding="utf-8",
+    )
+    (root / "node_modules/vitest").mkdir()
+    (root / "node_modules/vitest/package.json").write_text(
+        '{"name":"vitest","version":"4.1.10"}\n',
+        encoding="utf-8",
+    )
+    (root / "jaunt.toml").write_text(
+        """\
+version = 2
+
+[target.ts]
+source_roots = ["src"]
+test_roots = ["tests"]
+projects = ["tsconfig.json"]
+test_projects = ["tsconfig.test.json"]
+tool_owner = "."
+
+[codex]
+model = "gpt-5.6-sol"
+
+[skills]
+builtin = false
+""",
+        encoding="utf-8",
+    )
+    (root / "tsconfig.json").write_text(
+        """{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "declaration": true,
+    "jsx": "preserve",
+    "rootDir": "src",
+    "outDir": "dist",
+    "verbatimModuleSyntax": true
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx"],
+  "exclude": ["**/*.jaunt.ts", "**/*.jaunt.tsx"]
+}
+""",
+        encoding="utf-8",
+    )
+    (root / "tsconfig.test.json").write_text(
+        """{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "tests/**/*.ts"],
+  "exclude": ["**/*.jaunt.ts", "**/*.jaunt.tsx", "**/*.jaunt-test.ts"]
+}
+""",
+        encoding="utf-8",
+    )
+    (root / "src/components/memory/entity-highlights.tsx").write_text(
+        """export interface MemoryEntityItem {
+  id: string;
+  canonical_name: string;
+  one_liner: string;
+  context: string;
+  aliases: string[];
+  entity_type: string;
+  source_label: string;
+  provenance: { source: string };
+}
+
+export const runtimeOnly = (): string => "do not expose runtime bodies";
+""",
+        encoding="utf-8",
+    )
+    (root / "src/entity.jaunt.ts").write_text(
+        """import * as jaunt from "@usejaunt/ts/spec";
+import type { MemoryEntityItem } from "./components/memory/entity-highlights.js";
+
+jaunt.magicModule();
+
+/** Return the canonical label for one memory entity. */
+export function entityLabel(item: MemoryEntityItem): string {
+  return jaunt.magic();
+}
+""",
+        encoding="utf-8",
+    )
+    (root / "tests/entity.jaunt-test.ts").write_text(
+        """import * as jaunt from "@usejaunt/ts/spec";
+import { entityLabel } from "../src/entity.jaunt.js";
+
+jaunt.magicModule();
+
+/** Exercise the public entity label contract. */
+export function entityExamples(): void {
+  jaunt.testSpec({ targets: [entityLabel] });
 }
 """,
         encoding="utf-8",
@@ -653,6 +824,228 @@ async def test_real_worker_migration_validates_recomposed_modules_together(
 
 
 @pytest.mark.asyncio
+async def test_real_worker_imported_types_drive_test_request_and_freshness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _copy_tooling(tmp_path)
+    _write_imported_type_context_project(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    config = load_config(root=tmp_path)
+    generator = _ImportedTypeContextGenerator()
+
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        no_run=True,
+        generator=generator,
+        auto_skills_enabled=False,
+        builtin_skill_names=(),
+    )
+
+    battery_paths = frozenset(
+        {
+            "tests/__generated__/entity.example.test.ts",
+            "tests/__generated__/entity.derived.test.ts",
+        }
+    )
+    assert report.exit_code == 0, report.failed
+    assert generator.targets == battery_paths
+    before = {
+        path: dict(_test_header_metadata((tmp_path / path).read_text(encoding="utf-8")) or {})
+        for path in battery_paths
+    }
+    assert all(metadata.get("imported_type_context_fingerprint") for metadata in before.values())
+
+    fresh = await run_status(tmp_path, config)
+    assert not [diagnostic for diagnostic in fresh.diagnostics if diagnostic.path in battery_paths]
+    stable_generator = _ImportedTypeContextGenerator()
+    stable = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        no_run=True,
+        generator=stable_generator,
+        auto_skills_enabled=False,
+        builtin_skill_names=(),
+    )
+    assert stable.exit_code == 0, stable.failed
+    assert stable_generator.targets == set()
+    assert stable.skipped == battery_paths
+
+    imported_source = tmp_path / "src/components/memory/entity-highlights.tsx"
+    original = imported_source.read_text(encoding="utf-8")
+    changed = original.replace(
+        "  source_label: string;\n",
+        "  source_label: string;\n  required_label: string;\n",
+    )
+    assert changed != original
+    imported_source.write_text(changed, encoding="utf-8")
+
+    stale = await run_status(tmp_path, config)
+    stale_batteries = [
+        diagnostic for diagnostic in stale.diagnostics if diagnostic.path in battery_paths
+    ]
+    assert len(stale_batteries) == 2
+    assert all(diagnostic.code == "JAUNT_TS_TEST_BATTERY_STALE" for diagnostic in stale_batteries)
+    mismatch_sets = [set(diagnostic.data.get("mismatches", ())) for diagnostic in stale_batteries]
+    assert mismatch_sets == [
+        {
+            "battery_fingerprint",
+            "imported_type_context_fingerprint",
+            "target_api_digest",
+        },
+        {
+            "battery_fingerprint",
+            "imported_type_context_fingerprint",
+            "target_api_digest",
+        },
+    ]
+
+    regenerated_generator = _ImportedTypeContextGenerator()
+    regenerated = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        no_run=True,
+        generator=regenerated_generator,
+        auto_skills_enabled=False,
+        builtin_skill_names=(),
+    )
+    assert regenerated.exit_code == 0, regenerated.failed
+    assert regenerated_generator.targets == battery_paths
+    assert regenerated.generated == battery_paths
+    assert regenerated.refrozen == frozenset()
+    after = {
+        path: dict(_test_header_metadata((tmp_path / path).read_text(encoding="utf-8")) or {})
+        for path in battery_paths
+    }
+    for path in battery_paths:
+        assert (
+            after[path]["imported_type_context_fingerprint"]
+            != before[path]["imported_type_context_fingerprint"]
+        )
+        assert after[path]["battery_fingerprint"] != before[path]["battery_fingerprint"]
+
+    refreshed = await run_status(tmp_path, config)
+    assert not [
+        diagnostic for diagnostic in refreshed.diagnostics if diagnostic.path in battery_paths
+    ]
+
+
+@pytest.mark.asyncio
+async def test_real_worker_free_verification_accepts_const_bound_record_keys(
+    tmp_path: Path,
+) -> None:
+    _copy_tooling(tmp_path)
+    package_root = Path(__file__).resolve().parents[1] / "packages/jaunt-ts"
+    vitest = package_root / "node_modules/vitest"
+    if not vitest.is_dir():
+        pytest.skip("Vitest is not installed in packages/jaunt-ts")
+    (tmp_path / "node_modules/vitest").symlink_to(vitest, target_is_directory=True)
+    node_types = package_root / "node_modules/@types/node"
+    (tmp_path / "node_modules/@types").mkdir()
+    (tmp_path / "node_modules/@types/node").symlink_to(
+        node_types,
+        target_is_directory=True,
+    )
+    _write_eject_lifecycle_project(tmp_path)
+    config = load_config(root=tmp_path)
+
+    built = await run_build(tmp_path, config, generator=_EjectLifecycleGenerator())
+    assert built.exit_code == 0, built.failed
+
+    class RecordKeyBatteryGenerator(GeneratorBackend):
+        async def generate_module(self, ctx: ModuleSpecContext, **_kwargs: Any):
+            raise AssertionError(ctx)
+
+        async def generate_request(self, request: GenerationRequest, **_kwargs: Any):
+            assert request.kind == "test"
+            tier = str(request.cache_payload["tier"])
+            return (
+                'import { expect, test } from "vitest";\n'
+                'import { slugify } from "../../src/slug.js";\n'
+                "const rolesKey = 'x-hasura-allowed-roles';\n"
+                f'test("{tier} const-bound record key", () => {{\n'
+                "  const value: Record<string, string> = {\n"
+                '    [rolesKey]: slugify(" Admin "),\n'
+                "  };\n"
+                '  expect(value[rolesKey]).toBe("admin");\n'
+                "});\n",
+                None,
+                (),
+            )
+
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=RecordKeyBatteryGenerator(),
+    )
+    assert seeded.exit_code == 0, seeded.failed
+
+    example_relative = "tests/__generated__/slug.example.test.ts"
+    example = tmp_path / example_relative
+    original = example.read_text(encoding="utf-8")
+    original_body = _strip_test_header(original)
+    original_metadata = dict(_test_header_metadata(original) or {})
+    drifted_metadata = {
+        **original_metadata,
+        "target_api_digest": "sha256:" + "f" * 64,
+        "battery_fingerprint": "sha256:" + "e" * 64,
+    }
+    example.write_text(
+        _with_test_header(
+            original_body,
+            tier="example",
+            source_path="tests/slug.jaunt-test.ts",
+            provenance=drifted_metadata,
+        ),
+        encoding="utf-8",
+    )
+
+    class NoGenerationExpected(GeneratorBackend):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate_module(self, ctx: ModuleSpecContext, **_kwargs: Any):
+            raise AssertionError(ctx)
+
+        async def generate_request(self, request: GenerationRequest, **_kwargs: Any):
+            self.calls += 1
+            raise AssertionError(f"unexpected model generation: {request.target_path}")
+
+    generator = NoGenerationExpected()
+    verified = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=generator,
+    )
+
+    assert verified.exit_code == 0, verified.failed
+    assert generator.calls == 0
+    assert verified.generated == frozenset()
+    assert verified.refrozen == frozenset({example_relative})
+    outcomes = {item["path"]: item for item in verified.runner["batteries"]}
+    assert outcomes[example_relative]["state"] == "verified"
+    refreshed = example.read_text(encoding="utf-8")
+    refreshed_metadata = dict(_test_header_metadata(refreshed) or {})
+    assert _strip_test_header(refreshed) == original_body
+    assert refreshed_metadata["target_api_digest"] == original_metadata["target_api_digest"]
+    assert refreshed_metadata["battery_fingerprint"] == original_metadata["battery_fingerprint"]
+
+
+@pytest.mark.asyncio
 async def test_python_adapter_drives_real_worker_compile_and_runtime(tmp_path: Path) -> None:
     _copy_tooling(tmp_path)
     _write_project(tmp_path)
@@ -692,6 +1085,45 @@ async def test_python_adapter_drives_real_worker_compile_and_runtime(tmp_path: P
     )
     assert "@usejaunt/ts" not in emitted
     assert ".jaunt.js" not in emitted
+
+
+@pytest.mark.asyncio
+async def test_repeated_magic_checks_are_stable_with_symlinked_tooling_and_imported_type(
+    tmp_path: Path,
+) -> None:
+    _copy_tooling(tmp_path, symlink=True)
+    _write_project(tmp_path)
+    (tmp_path / "src/model.ts").write_text(
+        "export type CaseValue = string;\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src/case.jaunt.ts").write_text(
+        """import * as jaunt from "@usejaunt/ts/spec";
+import type { CaseValue } from "./model.js";
+
+jaunt.magicModule();
+
+/** Return the uppercase form of `value`. */
+export function upper(value: CaseValue): string {
+  return jaunt.magic();
+}
+""",
+        encoding="utf-8",
+    )
+    config = load_config(root=tmp_path)
+
+    synchronized = await run_sync(tmp_path, config)
+    assert synchronized.exit_code == 0
+    built = await run_build(tmp_path, config, generator=_SlugGenerator())
+    assert built.exit_code == 0, built.failed
+
+    first = await run_check(tmp_path, config, magic_only=True)
+    second = await run_check(tmp_path, config, magic_only=True)
+
+    assert first == second
+    assert first.exit_code == 0
+    assert first.fresh == frozenset({"ts:src/case", "ts:src/slug"})
+    assert all(diagnostic.code != "TS2307" for diagnostic in first.diagnostics)
 
 
 @pytest.mark.asyncio
