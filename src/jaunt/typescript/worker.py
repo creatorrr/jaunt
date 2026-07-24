@@ -1021,6 +1021,8 @@ def _brace_lexical_scope_kind(
             return "class"
         if declaration_head == "function":
             return "function"
+        if declaration_head in {"module", "namespace"}:
+            return "namespace"
         return "block"
     expected_openings: list[str] = []
     opening_for = {")": "(", "]": "[", "}": "{", ">": "<"}
@@ -1066,6 +1068,7 @@ def _function_scope_start(
 
     arrow = bool(tokens and tokens[-1] == ("punctuation", "=>"))
     cursor = len(tokens) - (2 if arrow else 1)
+    saw_arrow_type_boundary = False
     while cursor >= 0:
         kind, value = tokens[cursor]
         if value == ")":
@@ -1081,7 +1084,18 @@ def _function_scope_start(
                 return opening
             cursor = opening - 1
             continue
-        if arrow and kind == "identifier":
+        if arrow and value == ":":
+            saw_arrow_type_boundary = True
+            cursor -= 1
+            continue
+        if (
+            arrow
+            and kind == "identifier"
+            and (
+                saw_arrow_type_boundary
+                or (cursor == len(tokens) - 2 and (cursor == 0 or tokens[cursor - 1][1] != ":"))
+            )
+        ):
             # A single unparenthesized arrow parameter owns the body scope.
             return max(-1, cursor - 1)
         if value in {";", "{"}:
@@ -2607,11 +2621,12 @@ def _create_require_module_specifiers(
     scope_control_parentheses: list[str | None] = []
     scope_parenthesis_indices: list[int] = []
     scope_paren_open_for_close: dict[int, int] = {}
+    scope_enclosing_paren_at_token: list[int] = []
     scope_brace_indices: list[int] = []
     scope_brace_open_for_close: dict[int, int] = {}
     scope_statement_braces: list[bool] = []
     scope_lexical_braces: list[bool] = []
-    scope_prebody_overrides: dict[int, int] = {}
+    scope_prebody_ranges: list[tuple[int, int, int, int]] = []
     scope_nonstatement_brace_indices: set[int] = set()
     scope_closed_control_before: list[bool] = []
     scope_previous_closed_control: str | None = None
@@ -2628,6 +2643,9 @@ def _create_require_module_specifiers(
     scope_decorator_candidates = _DecoratorCandidateTracker()
     for token_index, (kind, value) in enumerate(tokens):
         scope_at_token.append(scope_stack[-1])
+        scope_enclosing_paren_at_token.append(
+            scope_parenthesis_indices[-1] if scope_parenthesis_indices else -1
+        )
         scope_closed_control_before.append(scope_previous_closed_control is not None)
         closes_control: str | None = None
         closes_statement = False
@@ -2665,6 +2683,22 @@ def _create_require_module_specifiers(
                 opens_statement=opens_statement,
                 enclosing_statement_brace=enclosing_statement_brace,
             )
+            if (
+                lexical_scope_kind == "function"
+                and len(scope_tokens) >= 2
+                and scope_tokens[-1][1] == "=>"
+                and scope_tokens[-2][1] == "}"
+            ):
+                return_type_open = scope_brace_open_for_close.get(len(scope_tokens) - 2)
+                if (
+                    return_type_open is not None
+                    and return_type_open > 0
+                    and scope_tokens[return_type_open - 1][1] == ":"
+                ):
+                    function_scope_start = _function_scope_start(
+                        scope_tokens[: return_type_open - 1],
+                        scope_paren_open_for_close,
+                    )
             if (
                 lexical_scope_kind in {"block", "function"}
                 and scope_tokens
@@ -2710,14 +2744,14 @@ def _create_require_module_specifiers(
                 scope_kinds.append(lexical_scope_kind or "block")
                 scope_var_owner.append(
                     new_scope
-                    if lexical_scope_kind in {"function", "static"}
+                    if lexical_scope_kind in {"function", "namespace", "static"}
                     else scope_var_owner[parent_scope]
                 )
                 scope_stack.append(new_scope)
                 if scope_start < token_index:
-                    for prebody_index in range(scope_start + 1, token_index):
-                        if scope_at_token[prebody_index] == parent_scope:
-                            scope_prebody_overrides.setdefault(prebody_index, new_scope)
+                    scope_prebody_ranges.append(
+                        (scope_start + 1, token_index, new_scope, parent_scope)
+                    )
             else:
                 scope_nonstatement_brace_indices.add(token_index)
         elif value == "}":
@@ -2745,8 +2779,71 @@ def _create_require_module_specifiers(
             conditional_colon=(token_index in conditional_expression_colons),
         )
 
+    scope_prebody_at_token = [-1] * len(tokens)
+    prebody_ranges_by_start: dict[int, list[tuple[int, int, int]]] = {}
+    for start, end, scope, parent_scope in scope_prebody_ranges:
+        prebody_ranges_by_start.setdefault(start, []).append((end, scope, parent_scope))
+    active_prebody_ranges: list[tuple[int, int, int]] = []
+    for token_index, base_scope in enumerate(scope_at_token):
+        while active_prebody_ranges and active_prebody_ranges[-1][0] <= token_index:
+            active_prebody_ranges.pop()
+        starting_ranges = prebody_ranges_by_start.get(token_index, ())
+        for prebody_range in sorted(starting_ranges, reverse=True):
+            active_prebody_ranges.append(prebody_range)
+        if active_prebody_ranges and active_prebody_ranges[-1][2] == base_scope:
+            scope_prebody_at_token[token_index] = active_prebody_ranges[-1][1]
+    scope_paren_close_for_open = {
+        opening: closing for closing, opening in scope_paren_open_for_close.items()
+    }
+
     def token_value(index: int) -> str:
         return tokens[index][1] if 0 <= index < len(tokens) else ""
+
+    simple_declaration_kinds: list[str | None] = [None] * len(tokens)
+    declaration_kind_frames: list[str | None] = [None]
+    declaration_expects_binding = [False]
+    for index, (kind, value) in enumerate(tokens):
+        if value in {"(", "[", "{"}:
+            if declaration_expects_binding[-1]:
+                # A destructuring pattern consumes the pending binding slot;
+                # its aliases are handled by the dedicated provenance pass.
+                declaration_expects_binding[-1] = False
+            declaration_kind_frames.append(None)
+            declaration_expects_binding.append(False)
+            continue
+        if value in {")", "]", "}"}:
+            if len(declaration_kind_frames) > 1:
+                declaration_kind_frames.pop()
+                declaration_expects_binding.pop()
+            continue
+        if (
+            kind == "identifier"
+            and value in {"const", "let", "var"}
+            and token_value(index - 1) not in {".", "?.", "as"}
+        ):
+            declaration_kind_frames[-1] = value
+            declaration_expects_binding[-1] = True
+            continue
+        if kind == "identifier" and declaration_expects_binding[-1]:
+            simple_declaration_kinds[index] = declaration_kind_frames[-1]
+            declaration_expects_binding[-1] = False
+            continue
+        if value == "," and declaration_kind_frames[-1] is not None:
+            declaration_expects_binding[-1] = True
+        elif value == ";":
+            declaration_kind_frames[-1] = None
+            declaration_expects_binding[-1] = False
+
+    def owned_scope_at(index: int) -> int:
+        prebody_scope = scope_prebody_at_token[index]
+        return scope_at_token[index] if prebody_scope < 0 else prebody_scope
+
+    var_declared_names_by_scope: dict[int, set[str]] = {}
+    for index, declaration_kind in enumerate(simple_declaration_kinds):
+        if declaration_kind != "var" or tokens[index][0] != "identifier":
+            continue
+        owner = scope_var_owner[owned_scope_at(index)]
+        var_declared_names_by_scope.setdefault(owner, set()).add(tokens[index][1])
 
     def matching_close(open_index: int, opening: str = "(", closing: str = ")") -> int | None:
         if token_value(open_index) != opening:
@@ -2880,6 +2977,9 @@ def _create_require_module_specifiers(
     def binding_declaration_kind(index: int) -> str | None:
         """Return the lexical declaration keyword owning a simple binding."""
 
+        indexed = simple_declaration_kinds[index]
+        if indexed is not None:
+            return indexed
         previous = token_value(index - 1)
         if previous in {"const", "let", "var"}:
             return previous
@@ -2897,14 +2997,49 @@ def _create_require_module_specifiers(
             cursor -= 1
         return None
 
-    def set_capability(name: str, capability: str, binding_index: int) -> bool:
-        binding_scope = scope_prebody_overrides.get(
-            binding_index,
-            scope_at_token[binding_index],
-        )
-        declaration_kind = binding_declaration_kind(binding_index)
+    def unsupported_prebody_binding(index: int, declaration_kind: str | None) -> str | None:
+        """Return an unmodeled parameter/loop lifetime that must fail closed."""
+
+        if scope_prebody_at_token[index] >= 0:
+            return None
+        opening = scope_enclosing_paren_at_token[index]
+        if opening < 0:
+            return None
+        closing = scope_paren_close_for_open.get(opening)
+        if closing is None:
+            return None
+        if token_value(opening - 1) == "for" and declaration_kind in {"const", "let"}:
+            return "an unbraced for-head lexical binding"
+        cursor = closing + 1
+        while cursor < len(tokens) and token_value(cursor) not in {";", "="}:
+            if token_value(cursor) == "=>":
+                if token_value(cursor + 1) != "{":
+                    return "an expression-bodied arrow parameter"
+                return "an arrow parameter whose body scope could not be proven"
+            cursor += 1
+        return None
+
+    def set_capability(
+        name: str,
+        capability: str,
+        binding_index: int,
+        *,
+        declaration_kind_override: str | None = None,
+    ) -> bool:
+        binding_scope = owned_scope_at(binding_index)
+        declaration_kind = declaration_kind_override or binding_declaration_kind(binding_index)
+        unsupported_context = unsupported_prebody_binding(binding_index, declaration_kind)
+        if unsupported_context is not None:
+            raise TypeScriptWorkerError(
+                f"Runtime package stores module-loading capability {name!r} in "
+                f"{unsupported_context}; this lifetime is unsupported: {source_path}"
+            )
         if declaration_kind == "var":
             binding_scope = scope_var_owner[binding_scope]
+        elif declaration_kind is None:
+            var_owner = scope_var_owner[binding_scope]
+            if name in var_declared_names_by_scope.get(var_owner, ()):
+                binding_scope = var_owner
         if scope_kinds[binding_scope] == "class":
             raise TypeScriptWorkerError(
                 f"Runtime package stores module-loading capability {name!r} in a class field; "
@@ -2939,7 +3074,9 @@ def _create_require_module_specifiers(
         bindings = capability_bindings.get(name)
         if bindings is None:
             return None
-        reference_scope = scope_prebody_overrides.get(index, scope_at_token[index])
+        reference_scope = scope_prebody_at_token[index]
+        if reference_scope < 0:
+            reference_scope = scope_at_token[index]
         exact = bindings.get(reference_scope)
         if exact is not None:
             return exact[1]
@@ -3220,10 +3357,23 @@ def _create_require_module_specifiers(
                 local_index = cursor + 2
                 local = tokens[local_index][1]
                 cursor += 2
+            if token[1] == "var":
+                owner = scope_var_owner[owned_scope_at(local_index)]
+                var_declared_names_by_scope.setdefault(owner, set()).add(local)
             if imported == "createRequire":
-                set_capability(local, "factory", local_index)
+                set_capability(
+                    local,
+                    "factory",
+                    local_index,
+                    declaration_kind_override=token[1],
+                )
             elif imported in {"Module", "default"}:
-                set_capability(local, "namespace", local_index)
+                set_capability(
+                    local,
+                    "namespace",
+                    local_index,
+                    declaration_kind_override=token[1],
+                )
             cursor += 1
 
     uninitialized_bindings = {
