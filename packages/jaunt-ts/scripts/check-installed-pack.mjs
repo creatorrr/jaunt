@@ -383,26 +383,30 @@ export function slugify(value: string): string { return jaunt.magic(); }
 
   const installedPackagePath = resolve(project, "node_modules/@usejaunt/ts");
   const mutationPath = resolve(installedPackagePath, "dist/test/mutation.js");
-  const mutationReport = JSON.parse(
-    run(process.execPath, [mutationPath], project, {
-      input: JSON.stringify({
-        root: project,
-        sourcePath: "src/index.ts",
-        symbol: "__jaunt_pack_smoke_missing_symbol__",
-        batteryFiles: [],
-        overlays: {},
-        tsconfigPath: "tsconfig.json",
-        compilerModulePath: resolve(
-          project,
-          "node_modules/typescript/lib/typescript.js",
-        ),
-        timeoutMs: 1_000,
-        globalTimeoutMs: 3_000,
-        maxMutants: 1,
-      }),
-      timeout: 10_000,
+  const mutationOutput = run(process.execPath, [mutationPath], project, {
+    input: JSON.stringify({
+      root: project,
+      sourcePath: "src/index.ts",
+      symbol: "__jaunt_pack_smoke_missing_symbol__",
+      batteryFiles: [],
+      overlays: {},
+      tsconfigPath: "tsconfig.json",
+      compilerModulePath: resolve(
+        project,
+        "node_modules/typescript/lib/typescript.js",
+      ),
+      timeoutMs: 1_000,
+      globalTimeoutMs: 3_000,
+      maxMutants: 1,
     }),
+    timeout: 10_000,
+  });
+  assert.notEqual(
+    mutationOutput.trim(),
+    "",
+    "installed mutation coordinator exited without a protocol response",
   );
+  const mutationReport = JSON.parse(mutationOutput);
   assert.deepEqual(
     {
       protocol: mutationReport.protocol,

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type ts from "@typescript/typescript6";
@@ -743,8 +743,16 @@ export async function runSingleMutant(
   };
 }
 
-const invokedPath = process.argv[1] ? resolve(process.argv[1]) : "";
-if (invokedPath === resolve(fileURLToPath(import.meta.url))) {
+function comparableEntryPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+const invokedPath = process.argv[1] ? comparableEntryPath(process.argv[1]) : "";
+if (invokedPath === comparableEntryPath(fileURLToPath(import.meta.url))) {
   if (!process.argv.includes("--mutant")) {
     const terminate = (): never => {
       for (const child of activeMutationProcesses) killProcessGroup(child);

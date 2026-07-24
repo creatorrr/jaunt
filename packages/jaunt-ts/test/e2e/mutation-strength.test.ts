@@ -3,6 +3,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -122,6 +123,53 @@ test("@prop: strict positivity excludes zero", () => {
   expect(report.score.killed).toBe(report.score.applicable);
   expect(readFileSync(source)).toEqual(before);
 }, 45_000);
+
+test("the built mutation coordinator runs through a filesystem alias", async () => {
+  const workspace = createFixtureWorkspace();
+  roots.push(workspace.root);
+  write(
+    workspace.root,
+    "src/empty.ts",
+    "/** Empty contract with no mutable site. @jauntContract */\nexport class Empty {}\n",
+  );
+  const aliasRoot = `${workspace.root}-package-alias`;
+  roots.push(aliasRoot);
+  symlinkSync(
+    packageRoot,
+    aliasRoot,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  const result = await runMutationProcess(
+    process.execPath,
+    [resolve(aliasRoot, "dist/test/mutation.js")],
+    {
+      cwd: workspace.root,
+      timeoutMs: 10_000,
+      stdin: JSON.stringify({
+        root: workspace.root,
+        sourcePath: "src/empty.ts",
+        symbol: "Empty",
+        batteryFiles: [],
+        overlays: {},
+        tsconfigPath: "tsconfig.json",
+        compilerModulePath: workspace.compilerModulePath,
+        timeoutMs: 1_000,
+        globalTimeoutMs: 3_000,
+        maxMutants: 1,
+      }),
+    },
+  );
+
+  const diagnostic = `${result.stdout}\n${result.stderr}`;
+  expect(result.timedOut, diagnostic).toBe(false);
+  expect(result.exitCode, diagnostic).toBe(0);
+  expect(result.stdout, diagnostic).not.toBe("");
+  const report = JSON.parse(result.stdout) as MutationStrengthResult;
+  expect(report.protocol).toBe(MUTATION_PROTOCOL);
+  expect(report.excluded).toEqual([
+    expect.objectContaining({ outcome: "excluded", reason: "no-mutable-site" }),
+  ]);
+}, 15_000);
 
 test("mutant batteries cannot read or write outside the protected workspace", async () => {
   const workspace = createFixtureWorkspace();
