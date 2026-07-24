@@ -3068,6 +3068,22 @@ def _create_require_module_specifiers(
     }
     runtime_close_for_open = _runtime_delimiter_close_indices(tokens)
 
+    delimiter_close_for_open: dict[int, int] = {}
+    delimiter_open_for_close: dict[int, int] = {}
+    delimiter_stack: list[tuple[int, str]] = []
+    opening_for = {")": "(", "]": "[", "}": "{"}
+    for token_index, (_kind, value) in enumerate(tokens):
+        if value in {"(", "[", "{"}:
+            delimiter_stack.append((token_index, value))
+        elif (
+            value in opening_for
+            and delimiter_stack
+            and delimiter_stack[-1][1] == opening_for[value]
+        ):
+            open_index, _opening = delimiter_stack.pop()
+            delimiter_close_for_open[open_index] = token_index
+            delimiter_open_for_close[token_index] = open_index
+
     def token_value(index: int) -> str:
         return tokens[index][1] if 0 <= index < len(tokens) else ""
 
@@ -3120,10 +3136,8 @@ def _create_require_module_specifiers(
     def matching_close(open_index: int, opening: str = "(", closing: str = ")") -> int | None:
         if token_value(open_index) != opening:
             return None
-        if opening == "(" and closing == ")":
-            return scope_paren_close_for_open.get(open_index)
-        if opening == "{" and closing == "}":
-            return scope_brace_close_for_open.get(open_index)
+        if (opening, closing) in {("(", ")"), ("[", "]"), ("{", "}")}:
+            return delimiter_close_for_open.get(open_index)
         depth = 1
         cursor = open_index + 1
         while cursor < len(tokens):
@@ -3140,10 +3154,8 @@ def _create_require_module_specifiers(
     def matching_open(close_index: int, opening: str = "(", closing: str = ")") -> int | None:
         if token_value(close_index) != closing:
             return None
-        if opening == "(" and closing == ")":
-            return scope_paren_open_for_close.get(close_index)
-        if opening == "{" and closing == "}":
-            return scope_brace_open_for_close.get(close_index)
+        if (opening, closing) in {("(", ")"), ("[", "]"), ("{", "}")}:
+            return delimiter_open_for_close.get(close_index)
         depth = 1
         cursor = close_index - 1
         while cursor >= 0:
@@ -3156,6 +3168,204 @@ def _create_require_module_specifiers(
                     return cursor
             cursor -= 1
         return None
+
+    erased_type_declaration_indices: set[int] = set()
+    for index, (kind, _value) in enumerate(tokens):
+        if kind != "identifier":
+            continue
+        previous = token_value(index - 1)
+        following = token_value(index + 1)
+        if previous == "type" and following in {"<", "="}:
+            erased_type_declaration_indices.add(index)
+        elif previous == "interface" and following in {"<", "extends", "{"}:
+            erased_type_declaration_indices.add(index)
+
+    # Type parameters occupy TypeScript's erased namespace. Record only
+    # declaration names at the top level of generic heads; constraints and
+    # defaults may contain arbitrary type references, but none creates a
+    # runtime binding. Runtime enum/module/namespace declarations deliberately
+    # remain outside this set because they introduce values.
+    angle_stack: list[int] = []
+    angle_close_for_open: dict[int, int] = {}
+    for index, (_kind, value) in enumerate(tokens):
+        if value == "<":
+            angle_stack.append(index)
+        elif value == ">" and angle_stack:
+            angle_close_for_open[angle_stack.pop()] = index
+
+    type_parameter_modifiers = {"const", "in", "out"}
+    for open_index, close_index in angle_close_for_open.items():
+        following = token_value(close_index + 1)
+        declaration_prefix = token_value(open_index - 2)
+        if following != "(" and not (
+            tokens[open_index - 1 : open_index]
+            and tokens[open_index - 1][0] == "identifier"
+            and declaration_prefix in {"class", "function", "interface", "type"}
+        ):
+            continue
+        expect_name = True
+        cursor = open_index + 1
+        nested_angle_depth = 0
+        while cursor < close_index:
+            kind, value = tokens[cursor]
+            if value in {"(", "[", "{"}:
+                nested_close = delimiter_close_for_open.get(cursor)
+                if nested_close is not None and nested_close < close_index:
+                    cursor = nested_close + 1
+                    continue
+            if value == "<":
+                nested_angle_depth += 1
+            elif value == ">" and nested_angle_depth:
+                nested_angle_depth -= 1
+            elif not nested_angle_depth and value == ",":
+                expect_name = True
+            elif not nested_angle_depth and expect_name and kind == "identifier":
+                if value not in type_parameter_modifiers:
+                    erased_type_declaration_indices.add(cursor)
+                    expect_name = False
+            cursor += 1
+
+    def binding_pattern_names(start: int, end: int) -> set[str]:
+        """Collect runtime names declared by one arrow parameter pattern."""
+
+        while start < end and token_value(start) in {
+            "...",
+            "accessor",
+            "override",
+            "private",
+            "protected",
+            "public",
+            "readonly",
+        }:
+            start += 1
+        if start >= end:
+            return set()
+        if tokens[start][0] == "identifier":
+            return {tokens[start][1]}
+        close = delimiter_close_for_open.get(start)
+        if token_value(start) not in {"{", "["} or close is None or close >= end:
+            return set()
+        names: set[str] = set()
+        segment_start = start + 1
+        cursor = segment_start
+        while cursor <= close:
+            at_end = cursor == close
+            if not at_end and token_value(cursor) in {"(", "[", "{"}:
+                cursor = delimiter_close_for_open.get(cursor, cursor)
+            if at_end or token_value(cursor) == ",":
+                segment_end = cursor
+                colon: int | None = None
+                nested = segment_start
+                while nested < segment_end:
+                    if token_value(nested) in {"(", "[", "{"}:
+                        nested = delimiter_close_for_open.get(nested, nested)
+                    elif token_value(nested) == ":":
+                        colon = nested
+                        break
+                    nested += 1
+                binding_start = colon + 1 if colon is not None else segment_start
+                names.update(binding_pattern_names(binding_start, segment_end))
+                segment_start = cursor + 1
+            cursor += 1
+        return names
+
+    def arrow_parameter_names(open_index: int, close_index: int) -> set[str]:
+        names: set[str] = set()
+        segment_start = open_index + 1
+        cursor = segment_start
+        while cursor <= close_index:
+            at_end = cursor == close_index
+            if not at_end and token_value(cursor) in {"(", "[", "{"}:
+                cursor = delimiter_close_for_open.get(cursor, cursor)
+            if at_end or token_value(cursor) == ",":
+                names.update(binding_pattern_names(segment_start, cursor))
+                segment_start = cursor + 1
+            cursor += 1
+        return names
+
+    delimiter_depths: list[tuple[int, int, int]] = []
+    paren_depth = bracket_depth = brace_depth = 0
+    for _kind, value in tokens:
+        delimiter_depths.append((paren_depth, bracket_depth, brace_depth))
+        if value == "(":
+            paren_depth += 1
+        elif value == "[":
+            bracket_depth += 1
+        elif value == "{":
+            brace_depth += 1
+        elif value == ")" and paren_depth:
+            paren_depth -= 1
+        elif value == "]" and bracket_depth:
+            bracket_depth -= 1
+        elif value == "}" and brace_depth:
+            brace_depth -= 1
+
+    parameter_close_before_arrow: dict[int, int] = {}
+    last_parameter_close_by_depth: dict[tuple[int, int, int], int] = {}
+    for index, (_kind, value) in enumerate(tokens):
+        depth = delimiter_depths[index]
+        if value in {",", ";", "="}:
+            last_parameter_close_by_depth.pop(depth, None)
+        if value == ")":
+            candidate_open = delimiter_open_for_close.get(index)
+            if candidate_open is not None and token_value(candidate_open - 1) not in {
+                ":",
+                "<",
+                "[",
+                "|",
+                "&",
+                "=>",
+            }:
+                after_close_depth = (max(0, depth[0] - 1), depth[1], depth[2])
+                last_parameter_close_by_depth[after_close_depth] = index
+        elif value == "=>":
+            candidate = last_parameter_close_by_depth.get(depth)
+            if candidate is not None:
+                parameter_close_before_arrow[index] = candidate
+
+    expression_end_at = [len(tokens)] * len(tokens)
+    next_boundary_by_depth: dict[tuple[int, int, int], int] = {}
+    for index in range(len(tokens) - 1, -1, -1):
+        depth = delimiter_depths[index]
+        expression_end_at[index] = next_boundary_by_depth.get(depth, len(tokens))
+        value = token_value(index)
+        line_break_boundary = (
+            bool(token_line_breaks[index])
+            and index > 0
+            and tokens[index][0] == "identifier"
+            and _can_end_statement_before_label(*tokens[index - 1])
+        )
+        if value in {",", ";", ")", "]", "}"} or line_break_boundary:
+            next_boundary_by_depth[depth] = index
+
+    expression_arrow_shadow_indices: dict[str, _ScopeCapabilityIndex] = {}
+    for arrow_index, token in enumerate(tokens):
+        if token != ("punctuation", "=>") or token_value(arrow_index + 1) == "{":
+            continue
+        parameter_open: int | None = None
+        parameter_close: int | None = None
+        candidate_close = parameter_close_before_arrow.get(arrow_index)
+        if candidate_close is not None:
+            parameter_open = delimiter_open_for_close.get(candidate_close)
+            parameter_close = candidate_close
+        names: set[str]
+        range_start: int
+        if parameter_open is not None and parameter_close is not None:
+            names = arrow_parameter_names(parameter_open, parameter_close)
+            range_start = parameter_open
+        elif arrow_index > 0 and tokens[arrow_index - 1][0] == "identifier":
+            names = {tokens[arrow_index - 1][1]}
+            range_start = arrow_index - 2
+        else:
+            continue
+        body_start = arrow_index + 1
+        body_end = expression_end_at[body_start]
+        for name in names:
+            index = expression_arrow_shadow_indices.get(name)
+            if index is None:
+                index = _ScopeCapabilityIndex({}, (), ())
+                expression_arrow_shadow_indices[name] = index
+            index.add(start=range_start, end=body_end, capability="shadow")
 
     def static_computed_property(
         open_index: int,
@@ -3444,6 +3654,9 @@ def _create_require_module_specifiers(
 
         if not 0 <= index < len(scope_at_token):
             return None
+        expression_shadow = expression_arrow_shadow_indices.get(name)
+        if expression_shadow is not None and expression_shadow.capability_at(index) is not None:
+            return "shadow"
         bindings = capability_bindings.get(name)
         if bindings is None:
             return None
@@ -3839,6 +4052,8 @@ def _create_require_module_specifiers(
     for index, token in enumerate(tokens):
         if token[0] != "identifier" or token_value(index - 1) in {".", "?."}:
             continue
+        if index in erased_type_declaration_indices:
+            continue
         initializer = assignment_initializer(index)
         if (
             initializer is None
@@ -3942,6 +4157,8 @@ def _create_require_module_specifiers(
     }
     for index, token in enumerate(tokens):
         if token[0] != "identifier" or token[1] not in capability_names or index in safe_indices:
+            continue
+        if index in erased_type_declaration_indices:
             continue
         declaration_kind = simple_declaration_kinds[index]
         shadow_scope: int | None = None
@@ -4251,13 +4468,7 @@ def _create_require_module_specifiers(
     def ambient_name_is_type_declaration(index: int) -> bool:
         """Recognize an erased declaration name without hiding later values."""
 
-        previous = token_value(index - 1)
-        following = token_value(index + 1)
-        if previous == "type":
-            return following in {"<", "="}
-        if previous == "interface":
-            return following in {"<", "extends", "{"}
-        return False
+        return index in erased_type_declaration_indices
 
     def ambient_name_is_declaration(index: int) -> bool:
         """Exclude declarations/keys whose spelling does not read the global."""
@@ -4357,13 +4568,13 @@ def _create_require_module_specifiers(
                 "Runtime package passes or ambiguously uses an ambient CommonJS loader "
                 f"member {member_name!r}: {source_path}"
             )
+        if token_value(index - 1) == "return" and inside_require_getter(index):
+            continue
         if token_value(index - 1) == "typeof" or inside_export_clause(index):
             continue
         map_name = stored_in_map(index)
         if map_name is not None:
             loader_maps.add(map_name)
-            continue
-        if token_value(index - 1) == "return" and inside_require_getter(index):
             continue
         raise TypeScriptWorkerError(
             f"Runtime package passes or ambiguously uses an ambient CommonJS loader: {source_path}"
@@ -4371,6 +4582,8 @@ def _create_require_module_specifiers(
 
     for index, token in enumerate(tokens):
         if token[0] != "identifier" or index in safe_indices:
+            continue
+        if index in erased_type_declaration_indices:
             continue
         name = token[1]
         capability = capability_at(index, name)
@@ -4391,6 +4604,10 @@ def _create_require_module_specifiers(
                 continue
             if loader_forward_call(index):
                 continue
+            if token_value(index - 1) == "return" and inside_require_getter(index):
+                # Vitest exposes a memoized Node-compatible ``require`` getter.
+                # Calls through its local Map are scanned below when static.
+                continue
             if inside_export_clause(index):
                 # Same-package export plumbing is runtime-selected. The source
                 # package identity seals the local forwarding module while the
@@ -4408,10 +4625,6 @@ def _create_require_module_specifiers(
             map_name = stored_in_map(index)
             if map_name is not None:
                 loader_maps.add(map_name)
-                continue
-            if token_value(index - 1) == "return" and inside_require_getter(index):
-                # Vitest exposes a memoized Node-compatible ``require`` getter.
-                # Calls through its local Map are scanned below when static.
                 continue
             raise TypeScriptWorkerError(
                 f"Runtime package passes or ambiguously uses loader alias {name!r}: {source_path}"

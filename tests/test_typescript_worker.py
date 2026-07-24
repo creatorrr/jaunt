@@ -347,6 +347,7 @@ def test_runtime_package_scanner_ignores_private_loader_names(
         'class require { static value = require("inert-class-name"); }',
         'class module { static value = module.require("inert-class-name"); }',
         'enum require { value } require("inert-enum-name");',
+        'module require { export const value = 1; } require("inert-module-name");',
         'namespace require { export const value = 1; } require("inert-namespace-name");',
         'import require from "runtime-loader-shim"; require("inert-import");',
         'import {value as module} from "runtime-module-shim"; module.require("inert-import");',
@@ -367,6 +368,7 @@ def test_runtime_package_scanner_ignores_shadowed_native_loaders(
         "type require = { value: string };",
         "interface require { value: string }",
         "enum require { value }",
+        "module require { export const value = 1; }",
         "namespace require { export const value = 1; }",
     ],
 )
@@ -393,6 +395,22 @@ def test_runtime_package_scanner_keeps_ambient_loader_after_type_only_require_de
     assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (
         "runtime-after-type-declaration",
     )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'const load = require; type load = string; load("real");',
+        'const load = require; interface load {} load("real");',
+        'const load = require; function f<load>() {} load("real");',
+        'function f<require>() {} require("real");',
+    ],
+)
+def test_runtime_package_scanner_keeps_value_loaders_across_type_namespace_collisions(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == ("real",)
 
 
 def test_runtime_package_scanner_restores_ambient_loader_after_nested_shadow(
@@ -2161,6 +2179,23 @@ def test_runtime_package_scanner_respects_non_capability_loader_shadows(
     }
 
 
+@pytest.mark.parametrize(
+    "arrow",
+    [
+        '(load = local) => load("inert")',
+        '(load = local): string => load("inert")',
+        'load => load("inert")',
+    ],
+)
+def test_runtime_package_scanner_scopes_expression_arrow_parameter_shadows(
+    tmp_path: Path,
+    arrow: str,
+) -> None:
+    source = f'const load = require; const f = {arrow}; load("real");'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == ("real",)
+
+
 def test_runtime_package_scanner_rejects_expression_arrow_loader_lifetime(
     tmp_path: Path,
 ) -> None:
@@ -2977,6 +3012,51 @@ def test_create_require_scope_scan_does_not_rescan_require_getter_bodies(
                     ("identifier", "return"),
                     ("identifier", "load"),
                     ("punctuation", ";"),
+                )
+            ],
+            ("punctuation", "}"),
+            ("punctuation", "}"),
+            ("punctuation", ";"),
+        ]
+    )
+
+    assert (
+        _create_require_module_specifiers(
+            tokens,
+            source_path=tmp_path / "runtime.js",
+            shadowed_native_loaders=frozenset(),
+        )
+        == ()
+    )
+    assert tokens.indexed_items < len(tokens) * 40
+
+
+def test_create_require_scope_scan_does_not_rescan_semicolonless_getter_returns(
+    tmp_path: Path,
+) -> None:
+    return_count = 1_000
+    tokens = _AccessCountingTokens(
+        [
+            ("identifier", "const"),
+            ("identifier", "load"),
+            ("punctuation", "="),
+            ("identifier", "require"),
+            ("punctuation", ";"),
+            ("identifier", "const"),
+            ("identifier", "wrapper"),
+            ("punctuation", "="),
+            ("punctuation", "{"),
+            ("identifier", "get"),
+            ("identifier", "require"),
+            ("punctuation", "("),
+            ("punctuation", ")"),
+            ("punctuation", "{"),
+            *[
+                token
+                for _ in range(return_count)
+                for token in (
+                    ("identifier", "return"),
+                    ("identifier", "load"),
                 )
             ],
             ("punctuation", "}"),
