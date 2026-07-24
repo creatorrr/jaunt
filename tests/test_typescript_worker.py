@@ -191,6 +191,100 @@ def test_runtime_package_scanner_ignores_type_only_static_clauses(
     assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == ()
 
 
+@pytest.mark.parametrize(
+    "type_import",
+    [
+        'import type Foo from "inert-types"',
+        'import type Foo = require("inert-types")',
+    ],
+)
+def test_type_only_import_does_not_capture_later_semicolonless_require(
+    tmp_path: Path,
+    type_import: str,
+) -> None:
+    source = f'{type_import}\nconst runtime = require("real-runtime")'
+
+    assert _runtime_module_specifiers(source, source_path=tmp_path / "runtime.ts") == (
+        "real-runtime",
+    )
+
+
+def test_type_only_import_assignment_detection_reads_constant_local_context() -> None:
+    tokens_list: list[tuple[str, str]] = []
+    require_indices: list[tuple[int, bool]] = []
+    for index in range(2_000):
+        if index % 2:
+            prefix = [
+                ("identifier", "import"),
+                ("identifier", "type"),
+                ("identifier", f"Type{index}"),
+                ("punctuation", "="),
+            ]
+            type_only = True
+        else:
+            prefix = [
+                ("identifier", "const"),
+                ("identifier", f"runtime{index}"),
+                ("punctuation", "="),
+            ]
+            type_only = False
+        tokens_list.extend(prefix)
+        require_indices.append((len(tokens_list), type_only))
+        tokens_list.extend(
+            [
+                ("identifier", "require"),
+                ("punctuation", "("),
+                ("string", f"package-{index}"),
+                ("punctuation", ")"),
+            ]
+        )
+    tokens = _AccessCountingTokens(tokens_list)
+
+    assert [
+        typescript_worker._type_only_import_assignment_require(tokens, require_index)
+        for require_index, _type_only in require_indices
+    ] == [type_only for _require_index, type_only in require_indices]
+    assert tokens.indexed_items <= len(require_indices) * 5
+
+
+@pytest.mark.parametrize("declaration", ["export", "import-equals"])
+def test_semicolonless_static_clause_scans_read_linear_tokens(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    declaration: str,
+) -> None:
+    tokens_list: list[tuple[str, str]] = []
+    for index in range(2_000):
+        if declaration == "export":
+            tokens_list.extend(
+                [
+                    ("identifier", "export"),
+                    ("identifier", "const"),
+                    ("identifier", f"value{index}"),
+                    ("punctuation", "="),
+                    ("number", str(index)),
+                ]
+            )
+        else:
+            tokens_list.extend(
+                [
+                    ("identifier", "import"),
+                    ("identifier", f"Alias{index}"),
+                    ("punctuation", "="),
+                    ("identifier", f"Namespace{index}"),
+                ]
+            )
+    tokens = _AccessCountingTokens(tokens_list)
+    monkeypatch.setattr(
+        typescript_worker,
+        "_runtime_javascript_tokens",
+        lambda *_args, **_kwargs: tokens,
+    )
+
+    assert _runtime_module_specifiers("ignored", source_path=tmp_path / "runtime.ts") == ()
+    assert tokens.indexed_items < len(tokens) * 40
+
+
 def test_runtime_package_scanner_handles_regex_inside_template_expression(
     tmp_path: Path,
 ) -> None:

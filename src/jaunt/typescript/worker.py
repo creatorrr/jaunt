@@ -372,18 +372,18 @@ def _type_only_import_assignment_require(
 ) -> bool:
     """Recognize the erased ``import type Name = require(...)`` form."""
 
-    if require_index < 4 or tokens[require_index - 1] != ("punctuation", "="):
-        return False
-    cursor = require_index - 2
-    while cursor >= 0 and tokens[cursor][1] not in {";", "{", "}"}:
-        if tokens[cursor] == ("identifier", "import"):
-            return (
-                cursor + 2 < require_index
-                and tokens[cursor + 1] == ("identifier", "type")
-                and tokens[cursor + 2] != ("punctuation", "=")
-            )
-        cursor -= 1
-    return False
+    # Comments and whitespace are absent from the executable token stream, so
+    # the external-module-reference grammar has a fixed local shape. Keeping
+    # this check local avoids both crossing an ASI boundary into an earlier
+    # ``import type`` and rescanning every preceding statement in semicolonless
+    # CommonJS bundles.
+    return (
+        require_index >= 4
+        and tokens[require_index - 4] == ("identifier", "import")
+        and tokens[require_index - 3] == ("identifier", "type")
+        and tokens[require_index - 2][0] == "identifier"
+        and tokens[require_index - 1] == ("punctuation", "=")
+    )
 
 
 def _control_flow_parenthesis_head(
@@ -2838,6 +2838,11 @@ def _create_require_module_specifiers(
             return next_index, next_index, tokens[next_index][1]
         cursor = next_index
         while cursor < len(tokens) and token_value(cursor) != ";":
+            if token_value(cursor) == "=":
+                # TypeScript import assignments have no ``from`` clause. In
+                # semicolonless source, stopping here also prevents every
+                # alias declaration from scanning the remainder of the file.
+                return None
             if (
                 tokens[cursor] == ("identifier", "from")
                 and cursor + 1 < len(tokens)
@@ -3663,6 +3668,48 @@ def _runtime_module_specifiers(source: str, *, source_path: Path) -> tuple[str, 
             close += 1
         return depth == 0 and close == end and named_clause_is_type_only(start, close - 1)
 
+    def static_export_clause(index: int) -> tuple[int, int, str] | None:
+        """Return one syntax-bounded re-export clause, if present."""
+
+        clause_start = index + 1
+        body_start = clause_start
+        if body_start < len(tokens) and tokens[body_start] == ("identifier", "type"):
+            body_start += 1
+        if body_start >= len(tokens):
+            return None
+        if tokens[body_start] == ("punctuation", "{"):
+            depth = 1
+            cursor = body_start + 1
+            while cursor < len(tokens) and depth:
+                if tokens[cursor] == ("punctuation", "{"):
+                    depth += 1
+                elif tokens[cursor] == ("punctuation", "}"):
+                    depth -= 1
+                cursor += 1
+            if depth:
+                return None
+            from_index = cursor
+        elif tokens[body_start] == ("punctuation", "*"):
+            from_index = body_start + 1
+            if (
+                from_index + 1 < len(tokens)
+                and tokens[from_index] == ("identifier", "as")
+                and tokens[from_index + 1][0] == "identifier"
+            ):
+                from_index += 2
+        else:
+            # ``export const``, declarations, assignments, and object keys
+            # cannot introduce a package re-export.
+            return None
+        if (
+            from_index + 1 < len(tokens)
+            and tokens[from_index] == ("identifier", "from")
+        ):
+            specifier = literal(from_index + 1)
+            if specifier is not None:
+                return clause_start, from_index, specifier
+        return None
+
     for index, (kind, value) in enumerate(tokens):
         if kind != "identifier":
             continue
@@ -3681,6 +3728,8 @@ def _runtime_module_specifiers(source: str, *, source_path: Path) -> tuple[str, 
                 specifiers.add(specifier)
                 continue
             for cursor in range(index + 1, len(tokens) - 1):
+                if tokens[cursor] == ("punctuation", "="):
+                    break
                 if tokens[cursor] == ("identifier", "from"):
                     specifier = literal(cursor + 1)
                     if specifier is not None and not clause_is_type_only(index + 1, cursor):
@@ -3692,14 +3741,11 @@ def _runtime_module_specifiers(source: str, *, source_path: Path) -> tuple[str, 
             ("punctuation", "."),
             ("punctuation", "?."),
         }:
-            for cursor in range(index + 1, len(tokens) - 1):
-                if tokens[cursor] == ("identifier", "from"):
-                    specifier = literal(cursor + 1)
-                    if specifier is not None and not clause_is_type_only(index + 1, cursor):
-                        specifiers.add(specifier)
-                    break
-                if tokens[cursor] == ("punctuation", ";"):
-                    break
+            clause = static_export_clause(index)
+            if clause is not None:
+                clause_start, from_index, specifier = clause
+                if not clause_is_type_only(clause_start, from_index):
+                    specifiers.add(specifier)
         elif value == "require":
             if _type_only_import_assignment_require(tokens, index):
                 continue
