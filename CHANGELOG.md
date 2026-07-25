@@ -4,6 +4,17 @@ All notable changes to Jaunt and `@usejaunt/ts`. Generated from conventional
 commits by [git-cliff](https://git-cliff.org), with one section per published
 Python or TypeScript release.
 
+## [1.7.12] - 2026-07-24
+
+### Fixes
+
+- Let third-party runtime packages use ordinary CommonJS loader patterns such as
+  jsdom's conditional `require.resolve` probe. Unsupported ecosystem source remains
+  opaque to source-assisted dependency discovery; manifest dependencies and each
+  package's complete content and filesystem identity are still pinned for the command.
+- Preserve the underlying cause when a runtime closure cannot be pinned, and include
+  aborted TypeScript operations in standalone and mixed `check --json` diagnostics.
+
 ## [1.7.11 / @usejaunt/ts 0.1.2] - 2026-07-23
 
 ### Fixes
