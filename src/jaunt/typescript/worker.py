@@ -6325,8 +6325,18 @@ def _shadowed_native_loader_indices(
     return frozenset(shadowed)
 
 
-def _runtime_module_specifiers(source: str, *, source_path: Path) -> tuple[str, ...]:
-    """Extract statically named native ESM and CommonJS runtime loads."""
+def _runtime_module_specifiers(
+    source: str,
+    *,
+    source_path: Path,
+    tolerate_unsupported_loader_flows: bool = False,
+) -> tuple[str, ...]:
+    """Extract statically named native ESM and CommonJS runtime loads.
+
+    Package-closure discovery may retain the direct imports found by this pass
+    when the stricter capability-flow analysis encounters ecosystem loader
+    syntax it does not model. Generated-code policy callers remain fail-closed.
+    """
 
     tokens = _runtime_javascript_tokens(source, source_path=source_path)
     specifiers: set[str] = set()
@@ -6529,13 +6539,17 @@ def _runtime_module_specifiers(source: str, *, source_path: Path) -> tuple[str, 
                 specifier = literal_call_argument(call_index)
                 if specifier is not None:
                     specifiers.add(specifier)
-    specifiers.update(
-        _create_require_module_specifiers(
+    try:
+        forwarded_specifiers = _create_require_module_specifiers(
             tokens,
             source_path=source_path,
             shadowed_native_loaders=shadowed_native_loaders,
         )
-    )
+    except TypeScriptWorkerError:
+        if not tolerate_unsupported_loader_flows:
+            raise
+    else:
+        specifiers.update(forwarded_specifiers)
     return tuple(sorted(specifiers))
 
 
@@ -6756,7 +6770,12 @@ def _runtime_package_static_dependencies(
             raise TypeScriptWorkerError(
                 f"Could not decode runtime package source at {path}: {exc}"
             ) from exc
-        for specifier in _runtime_module_specifiers(source, source_path=path):
+        specifiers = _runtime_module_specifiers(
+            source,
+            source_path=path,
+            tolerate_unsupported_loader_flows=True,
+        )
+        for specifier in specifiers:
             if specifier.startswith("#"):
                 scope = _runtime_package_scope(physical_root, path)
                 for package in _runtime_package_import_targets(scope, specifier):
@@ -6846,7 +6865,7 @@ def _runtime_package_dependencies(package_root: Path) -> tuple[tuple[str, bool],
 def _runtime_package_dependency_edges(
     package_root: Path,
 ) -> tuple[_RuntimePackageDependencyEdge, ...]:
-    """Merge manifest declarations with actual static runtime package loads.
+    """Merge manifest declarations with discoverable runtime package loads.
 
     A static edge keeps its importing file so Node resolution starts from the
     same physical location execution would use (important for pnpm stores).
@@ -7942,8 +7961,7 @@ class WorkerClient:
             )
         except TypeScriptWorkerError as exc:
             raise WorkerToolchainChangedError(
-                f"The {label} dependency closure could not be pinned for this command. "
-                "Rerun after the toolchain is stable."
+                f"The {label} dependency closure could not be pinned for this command: {exc}"
             ) from exc
         for edge_number, edge in enumerate(closure, start=1):
             edge_label = (

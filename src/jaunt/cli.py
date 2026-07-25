@@ -917,23 +917,30 @@ def _typescript_error(command: str, error: Exception, *, json_mode: bool, code: 
     if json_mode:
         diagnostic_code = getattr(error, "code", type(error).__name__)
         diagnostics = getattr(error, "diagnostics", ())
+        nested_diagnostics = [
+            {
+                "code": getattr(item, "code", "JAUNT_TS_DIAGNOSTIC"),
+                "message": getattr(item, "message", str(item)),
+                "severity": getattr(item, "severity", "error"),
+                "path": getattr(item, "path", None),
+            }
+            for item in diagnostics
+        ]
+        primary_diagnostic = {
+            "code": str(diagnostic_code),
+            "message": str(error),
+            "severity": "error",
+        }
         _emit_json(
             {
                 "schema_version": 2,
                 "command": command,
                 "ok": False,
+                "diagnostics": [primary_diagnostic, *nested_diagnostics],
                 "error": {
                     "code": str(diagnostic_code),
                     "message": str(error),
-                    "diagnostics": [
-                        {
-                            "code": getattr(item, "code", "JAUNT_TS_DIAGNOSTIC"),
-                            "message": getattr(item, "message", str(item)),
-                            "severity": getattr(item, "severity", "error"),
-                            "path": getattr(item, "path", None),
-                        }
-                        for item in diagnostics
-                    ],
+                    "diagnostics": nested_diagnostics,
                 },
             }
         )
@@ -1515,9 +1522,14 @@ def _mixed_operation_error(
     diagnostic = {
         "code": str(getattr(error, "code", type(error).__name__)),
         "message": str(error),
+        "severity": "error",
     }
     python_target: dict[str, object] = dict(python_payload)
-    typescript_target: dict[str, object] = {"ok": False, "error": diagnostic}
+    typescript_target: dict[str, object] = {
+        "ok": False,
+        "error": diagnostic,
+        "diagnostics": [diagnostic],
+    }
     runtime = getattr(args, "_mixed_runtime", None)
     aggregate_cost: dict[str, object] = {}
     if runtime is not None:
@@ -1531,6 +1543,7 @@ def _mixed_operation_error(
         "command": command,
         "ok": False,
         "error": diagnostic,
+        "diagnostics": [diagnostic],
         "targets": {
             "py": python_target,
             "ts": typescript_target,

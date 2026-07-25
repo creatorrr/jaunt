@@ -12,6 +12,18 @@ invalidate built modules. The exception is a correctness repair for artifacts
 whose provenance was previously marked fresh incorrectly; that safety migration
 is called out explicitly below.
 
+## 1.7.12
+
+Vitest projects using the jsdom environment can pin the protected runner again.
+Jaunt no longer applies its generated-code CommonJS loader policy as a hard gate to
+third-party package source. Unsupported loader flows do not discard other static imports
+from the same file. Jaunt still follows manifest dependencies and pins every resolved
+package's full runtime identity through the final command boundary.
+
+This is a Python-only patch. Keep `@usejaunt/ts` at 0.1.2; no npm upgrade is needed.
+Errors raised before a normal TypeScript check report now appear in the top-level
+`diagnostics` array from standalone and mixed `check --json` commands.
+
 ## 1.7.11 / `@usejaunt/ts` 0.1.2
 
 TypeScript batteries whose only mismatches are `target_api_digest` and

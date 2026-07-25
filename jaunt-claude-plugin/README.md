@@ -4,7 +4,7 @@ This plugin packages Jaunt's workspace-aware Python and TypeScript authoring
 loop for Claude Code: generated-file guards, session freshness, build and
 conversion skills, a read-only doctor, and a first-build reviewer.
 
-Version 1.2.6 understands version-2 TypeScript targets as well as Python
+Version 1.2.7 understands version-2 TypeScript targets as well as Python
 workspace routing. One root `jaunt.toml` may cover several Python and
 JavaScript packages; ownership follows the nearest `pyproject.toml` or
 `package.json` for the target.
@@ -74,7 +74,11 @@ candidates for recovery instead of spending another attempt or evicting them.
 
 The SessionStart hook reports the nearest active Jaunt workspace, including
 TypeScript unbuilt, invalid, and diagnostic state. If no parent `jaunt.toml`
-exists, it falls back to bounded descendant discovery. The PreToolUse hook
+exists, it falls back to bounded descendant discovery. Python probes use
+`status --magic-only`, so startup never runs committed contract batteries. Each
+workspace gets eight seconds by default (`JAUNT_PLUGIN_STATUS_TIMEOUT_SECONDS`
+overrides it), and missing Python or TypeScript tooling produces an actionable
+install diagnostic. The PreToolUse hook
 keeps Claude's approval-style guard for each target's generated directory and
 existing provenance-headed `.pyi` files. TypeScript API mirrors,
 implementations, and sidecars point back to their private `*.jaunt.ts[x]`
@@ -91,3 +95,5 @@ and repositories. It runs `jaunt status`, which imports discovered spec modules;
 enable it only for workspaces whose Python code you trust.
 CLI calls prefer a compatible installed `jaunt`, use the existing uv environment for a uv
 project, and otherwise use `uvx jaunt` in JavaScript-only projects.
+SessionStart uses only cached `uvx --offline` as its final fallback, so the
+passive hook never downloads a Python package.

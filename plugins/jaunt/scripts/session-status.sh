@@ -83,26 +83,70 @@ print("mixed" if has_py and has_ts else "ts" if has_ts else "py")
 PY
 }
 
-status_timeout="${JAUNT_PLUGIN_STATUS_TIMEOUT_SECONDS:-20}"
+status_timeout="${JAUNT_PLUGIN_STATUS_TIMEOUT_SECONDS:-8}"
+
+emit_error_json() {
+  python3 - "$1" "$2" <<'PY' 2>/dev/null || true
+import json, sys
+kind, message = sys.argv[1:3]
+print(json.dumps({"command": "status", "ok": False, "error": {"kind": kind, "message": message}}))
+PY
+}
 
 status_json() {
   local dir="$1"
   shift
-  local output status
-  output=$(
-    (
-      cd "$dir" &&
-        UV_CACHE_DIR="$uv_cache" run_timeout "$status_timeout" \
-          bash "$script_dir/resolve-workspace.sh" --run . status "$@" --json --progress none
-    ) 2>/dev/null
-  )
+  local output status stderr_file stderr_text
+  stderr_file=$(mktemp "${TMPDIR:-/tmp}/jaunt-session-status.XXXXXX" 2>/dev/null || true)
+  if [ -n "$stderr_file" ]; then
+    output=$(
+      (
+        cd "$dir" &&
+          UV_CACHE_DIR="$uv_cache" run_timeout "$status_timeout" \
+            bash "$script_dir/resolve-workspace.sh" --run --offline-fallback . \
+              status "$@" --magic-only --json --progress none
+      ) 2>"$stderr_file"
+    )
+  else
+    output=$(
+      (
+        cd "$dir" &&
+          UV_CACHE_DIR="$uv_cache" run_timeout "$status_timeout" \
+            bash "$script_dir/resolve-workspace.sh" --run --offline-fallback . \
+              status "$@" --magic-only --json --progress none
+      ) 2>/dev/null
+    )
+  fi
   status=$?
-  if [ -n "$output" ]; then
+  stderr_text=""
+  if [ -n "$stderr_file" ]; then
+    stderr_text=$(python3 - "$stderr_file" <<'PY' 2>/dev/null || true
+import pathlib, sys
+try:
+    lines = [line.strip() for line in pathlib.Path(sys.argv[1]).read_text(errors="replace").splitlines()]
+except OSError:
+    lines = []
+lines = [line for line in lines if line and not line.startswith("WARNING:")]
+preferred = next((line for line in lines if line.lower().startswith("error:")), None)
+message = preferred or (lines[0] if lines else "")
+if message.lower().startswith("error:"):
+    message = message[6:].strip()
+print(message[:600])
+PY
+    )
+    rm -f "$stderr_file"
+  fi
+  if [ -n "$output" ] && printf '%s' "$output" | python3 -c '
+import json, sys
+raise SystemExit(0 if isinstance(json.load(sys.stdin), dict) else 1)
+' >/dev/null 2>&1; then
     printf '%s' "$output"
   elif [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
-    printf '{"command":"status","ok":false,"error":{"kind":"timeout","message":"status timed out after %s seconds"}}\n' "$status_timeout"
+    emit_error_json "timeout" "status timed out after $status_timeout seconds"
   elif [ "$status" -ne 0 ]; then
-    printf '{"command":"status","ok":false,"error":{"kind":"process","message":"status command exited %s"}}\n' "$status"
+    emit_error_json "process" "${stderr_text:-status command exited $status}"
+  elif [ -n "$output" ]; then
+    emit_error_json "process" "${stderr_text:-status command produced invalid JSON}"
   fi
 }
 
@@ -119,6 +163,11 @@ if status.get("ok") is not True:
     diagnostics = error.get("diagnostics", []) if isinstance(error, dict) else []
     codes = [str(item.get("code") or "diagnostic") for item in diagnostics if isinstance(item, dict)]
     suffix = " [" + ", ".join(dict.fromkeys(codes[:3])) + "]" if codes else ""
+    if isinstance(message, str):
+        if "must directly declare devDependencies:" in message:
+            message += "; run npm install -D @usejaunt/ts typescript in that package"
+        elif "Could not resolve project-local" in message and "install dependencies first" in message:
+            message = message.replace("install dependencies first", "run npm install in that package")
     print("status unavailable" + (f": {message}" if message else "") + suffix)
     sys.exit(0)
 fresh = status.get("fresh") or []
@@ -161,6 +210,11 @@ if status.get("ok") is not True and (not target or target_failed):
     diagnostics = error.get("diagnostics", []) if isinstance(error, dict) else []
     codes = [str(item.get("code") or "diagnostic") for item in diagnostics if isinstance(item, dict)]
     suffix = " [" + ", ".join(dict.fromkeys(codes[:3])) + "]" if codes else ""
+    if isinstance(message, str):
+        if "must directly declare devDependencies:" in message:
+            message += "; run npm install -D @usejaunt/ts typescript in that package"
+        elif "Could not resolve project-local" in message and "install dependencies first" in message:
+            message = message.replace("install dependencies first", "run npm install in that package")
     print("TS status unavailable" + (f": {message}" if message else "") + suffix)
     sys.exit(0)
 unbuilt = target.get("unbuilt", status.get("unbuilt", []))
@@ -245,9 +299,15 @@ while IFS= read -r cfg; do
       ts_out="$out"
     fi
   fi
-  line=$(printf '%s' "$out" | summarize_status || true)
-  [ -n "$line" ] || line="status unavailable"
-  if [ "$mode" = "ts" ] || [ "$mode" = "mixed" ]; then
+  if [ "$mode" = "ts" ]; then
+    ts_line=$(printf '%s' "$ts_out" | summarize_typescript || true)
+    [ -n "$ts_line" ] || ts_line="TS status unavailable"
+    line="$ts_line"
+  else
+    line=$(printf '%s' "$out" | summarize_status || true)
+    [ -n "$line" ] || line="status unavailable"
+  fi
+  if [ "$mode" = "mixed" ]; then
     ts_line=$(printf '%s' "$ts_out" | summarize_typescript || true)
     [ -n "$ts_line" ] || ts_line="TS status unavailable"
     line="$line; $ts_line"

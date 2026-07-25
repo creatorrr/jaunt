@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from argparse import Namespace
 
 import pytest
 
@@ -10,6 +11,7 @@ from pathlib import Path
 from jaunt import cli
 from jaunt.contract.battery import render_battery
 from jaunt.digest import contract_digests
+from jaunt.typescript.worker import WorkerToolchainChangedError
 
 SRC = '''
 import jaunt
@@ -80,6 +82,56 @@ def test_check_passes_when_in_sync(tmp_path: Path, capsys, monkeypatch) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     args = cli.parse_args(["check", "--root", str(root)])
     assert cli.cmd_check(args) == cli.EXIT_OK
+
+
+def test_typescript_check_json_reports_aborted_toolchain_diagnostic(capsys) -> None:
+    error = WorkerToolchainChangedError("Vitest closure failed: jsdom loader detail")
+
+    assert (
+        cli._typescript_error(
+            "check",
+            error,
+            json_mode=True,
+            code=cli.EXIT_CONFIG_OR_DISCOVERY,
+        )
+        == cli.EXIT_CONFIG_OR_DISCOVERY
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["diagnostics"] == [
+        {
+            "code": "JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+            "message": str(error),
+            "severity": "error",
+        }
+    ]
+
+
+def test_mixed_check_json_reports_aborted_toolchain_diagnostic(capsys) -> None:
+    error = WorkerToolchainChangedError("Vitest closure failed: jsdom loader detail")
+
+    assert (
+        cli._mixed_operation_error(
+            "check",
+            error,
+            Namespace(json_output=True),
+            python_code=cli.EXIT_OK,
+            python_payload={"command": "check", "ok": True},
+        )
+        == cli.EXIT_CONFIG_OR_DISCOVERY
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["diagnostics"] == [
+        {
+            "code": "JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+            "message": str(error),
+            "severity": "error",
+        }
+    ]
+    assert payload["targets"]["ts"]["diagnostics"] == payload["diagnostics"]
 
 
 def test_check_blocks_on_stale_prose(tmp_path: Path) -> None:

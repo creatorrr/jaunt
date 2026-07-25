@@ -168,3 +168,11 @@
 - [x] Obtain an independent final Codex review and address every actionable finding.
 - [x] Re-run the completed patch in the adopter dashboard workspace before release.
 - [x] Merge PR #97, close superseded PR #96, and publish both 1.7.11 packages.
+
+## Cycle 18 — 2026-07-24
+
+- [x] Treat unsupported loader syntax in third-party runtime packages as opaque closure input.
+- [x] Keep manifest dependencies and full package identities pinned across the command.
+- [x] Preserve closure-pin causes and emit aborted TypeScript checks as JSON diagnostics.
+- [x] Add a jsdom-shaped regression that proves pinning and mutation detection both work.
+- [x] Run the full repository validation suite.

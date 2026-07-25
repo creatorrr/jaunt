@@ -5,7 +5,7 @@ expects: edit specs, preview stale or unbuilt work, build through the CLI, and
 review generated output without hand-editing machine-owned files.
 
 It is CLI-backed. There is no MCP server, app connector, or public-directory
-submission in version 1.1.6.
+submission in version 1.1.7.
 
 ## Install
 
@@ -85,6 +85,11 @@ candidates for recovery instead of spending another attempt or evicting them.
 The SessionStart hook reads the session `cwd` and reports the nearest active
 Jaunt workspace, including TypeScript unbuilt, invalid, and diagnostic counts.
 If no parent `jaunt.toml` exists, it falls back to bounded descendant discovery.
+Python probes use `status --magic-only`, so passive startup never runs committed
+contract batteries. Each workspace gets eight seconds by default
+(`JAUNT_PLUGIN_STATUS_TIMEOUT_SECONDS` overrides it). Missing local Python or
+TypeScript tooling is reported with an install command instead of a bare process
+exit, and TypeScript-only failures are printed once.
 Doctor also checks Node, npm, the project-local
 `@usejaunt/ts` worker, and the supported compiler range without a model call.
 
@@ -103,4 +108,5 @@ and repositories. It runs `jaunt status`, which imports discovered spec modules;
 trust this hook only for workspaces whose Python code you trust.
 CLI calls prefer a compatible installed `jaunt`, use the existing uv environment for a uv
 project, and otherwise use `uvx jaunt`, so JavaScript-only projects do not need
-a `pyproject.toml`.
+a `pyproject.toml`. SessionStart is deliberately stricter: its final fallback is
+cached `uvx --offline`, so opening a session never downloads a Python package.

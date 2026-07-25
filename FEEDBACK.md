@@ -2,6 +2,394 @@
 
 Running notes from real adopters. Newest section first.
 
+## 2026-07-24 (follow-up 5): root cause of the released pin failure — the closure scan lints jsdom and fails closed, so every vitest+jsdom project is blocked
+
+We traced follow-up 4 to its exact origin with the released `jaunt==1.7.11`
+(verified: our lockfile integrity matches the npm registry tarball for
+`@usejaunt/ts@0.1.2`, and the venv resolves PyPI jaunt 1.7.11). The
+top-level resolution and identity are fine; the failure is inside the
+dependency-closure walk. Reproduction against our workspace, no jaunt
+command needed:
+
+    from jaunt.typescript.worker import (
+        resolve_node_package, _runtime_package_resolution_closure)
+    root = resolve_node_package(<runner dir>, "vitest", module_path=True)
+    _runtime_package_resolution_closure(Path(root), root_label="vitest")
+
+    TypeScriptWorkerError: Runtime package passes or ambiguously uses an
+    ambient CommonJS loader member 'resolve':
+    .../node_modules/.pnpm/jsdom@27.4.0/node_modules/jsdom/lib/jsdom/living/
+    xhr/XMLHttpRequest-impl.js
+
+So the ambient-CommonJS-loader scan is applied to every third-party
+package in the protected runner's runtime closure, and jsdom — the
+standard Vitest DOM environment — legitimately uses `require.resolve` in
+its own internals. Any project whose vitest closure includes jsdom (that
+is, most frontend test suites) cannot pin, `jaunt test`/`jaunt check` exit
+with `JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD`, and there is no
+environment variable, config key, or allowlist we could find in the
+shipped code to get past it. This also explains the verification gap:
+a node-environment project pins fine; a jsdom-environment project is
+blocked on arrival. It is not pnpm-specific after all — pnpm layouts were
+a red herring once the closure walk got far enough to read jsdom.
+
+Two requests:
+
+- Don't apply generated-code policy to ecosystem code. The closure pin
+  exists to detect the toolchain changing mid-command; pinning each
+  package's identity (resolved path + content digest) achieves that
+  without any opinion about how jsdom loads its modules. A third-party
+  runtime package using `require`/`require.resolve` internally is normal
+  CommonJS, not a mutation hazard.
+- The diagnostic needs to carry its cause. We only found jsdom by calling
+  the private closure function directly; the CLI surfaces a generic
+  "could not be pinned … rerun after the toolchain is stable" for a
+  deterministic, permanent condition, and `check --json` still reports it
+  with an empty diagnostics array.
+
+Status unchanged from follow-up 4 otherwise: our waiver-drop PR stays
+blocked; a Python-side 1.7.12 with the closure scan scoped down would
+unblock us (no npm change appears necessary for this specific issue).
+Waiver expiry 2026-08-11.
+
+## 2026-07-24 (follow-up 4): the released 1.7.11 / 0.1.2 pair is dead on arrival for pnpm consumers — the Vitest pin failure shipped, and it silently disables the battery gate
+
+We ran the real upgrade the release exists for, with zero local hacks: a
+fresh worktree off our main, `jaunt>=1.7.11` from PyPI via `uv lock`,
+`"@usejaunt/ts": "0.1.2"` from the npm registry via plain `pnpm install`.
+Three findings, in decreasing severity:
+
+**1. The follow-up-3 pin failure is not `file+`-specific — a standard
+registry install hits it.** `jaunt test --language ts` and `jaunt check`
+both fail immediately with `JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD: The
+Vitest package resolved by the protected runner dependency closure could
+not be pinned for this command.` Same signature, same persistence, on
+pnpm's ordinary peer-suffixed `.pnpm` layout
+(`.pnpm/@usejaunt+ts@0.1.2_<peerhash>/`). As far as we can tell, every
+pnpm consumer of the released pair is dead on arrival, and there is no
+workaround on the adopter side. This was the exact pre-publication
+question at the end of follow-up 3; the answer turned out to be the bad
+branch.
+
+**2. The pin failure silently disables the new committed-battery gate —
+`jaunt build` still exits 0 and writes paid regenerations.** Upgrading
+restaled all 20 governed modules, and `jaunt build` regenerated all of
+them with model calls (60 generated files, ±9,400 lines) while the Vitest
+pin failure meant the battery gate that is supposed to verify candidates
+against committed batteries cannot have run — nothing failed, nothing
+warned. We got lucky: all 46 vitest files / 748 tests pass against the new
+implementations. But "the safety gate is unavailable, so proceed and
+report success" is exactly the silent-degrade shape the gate was built to
+prevent. If build cannot run the committed-battery verification it
+promises, it should fail (or at minimum emit a loud structured warning),
+not stamp done.
+
+**3. The upgrade itself cost a full paid rebuild rather than a restamp.**
+1.7.10 → 1.7.11 restaled every governed TypeScript module into `generated`
+(paid), not `refrozen` (free). If the contract-IR/digest schema change
+makes that unavoidable, the release notes should say so — an adopter with
+hundreds of governed modules is looking at a real bill for what reads like
+a patch upgrade. If it is not intended, it is a bug worth fixing before
+more adopters upgrade.
+
+Our status: the waiver-drop PR on our side is blocked on a fixed release.
+Our CI waiver hard-expires 2026-08-11; if a corrected pair is not
+published well before then, we will have to extend the expiry instead of
+removing the wrapper.
+
+## 2026-07-23 (follow-up 3): the sanctioned packed-tarball install cannot pin the runner's Vitest resolution — pre-release blocker for the 0.1.2 verification flow
+
+We moved our branch verification to the workflow your reply prescribed:
+built the committed `packages/jaunt-ts`, `pnpm pack`ed it, and installed
+the tarball into the app with `pnpm add -D file:/tmp/usejaunt-ts-0.1.2.tgz`
+— a real pnpm install, no symlinks, immutable bytes. Results:
+
+- `jaunt build` is healthy under it: 20 modules refroze model-free,
+  idempotent on rerun. (This also retro-confirms follow-up 2's postscript:
+  the 8 paid module regenerations we saw in an intermediate attempt were
+  caused by our earlier broken `cp -a` copy whose relative `node_modules`
+  symlinks dangled — with a real install they never recur.)
+- `jaunt test --language ts` and `jaunt check` both fail immediately with
+  `JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD: The Vitest package resolved by
+  the protected runner dependency closure could not be pinned for this
+  command. Rerun after the toolchain is stable.` It is fully persistent —
+  identical across reruns and after moving `.jaunt/` aside for a clean
+  session — so nothing is actually changing during the command; the
+  "changed during build" phrasing is misleading for what looks like a
+  resolution failure inside the pin itself.
+- Node-level resolution is fine on disk. pnpm materialized
+  `.pnpm/@usejaunt+ts@file+...+tmp+usejaunt-ts-0.1.2.tgz_<peerhash>/
+  node_modules/vitest` as a symlink to the project's `vitest@4.0.17`, and
+  `require.resolve('vitest')` succeeds both from the app and from the
+  runner's realpath. So the failure is in the Python-side
+  `resolve_node_package` / session-identity path
+  (`pin_package_resolution_closure` with `module_path=True` from
+  `_runner_path`), which apparently does not follow pnpm's `file+`
+  tarball-install layout (or is tripped by the inner `node_modules`
+  directory a tarball install materializes inside the package dir).
+- This failure class is also invisible to JSON consumers: `check --json`
+  returns an empty `diagnostics` array and empty stale maps while the
+  human output says `TypeScript check: failed` (exit 2). Same
+  wrapper-blindness family as the freshness gap you're already fixing —
+  please emit it as a structured diagnostic too.
+
+The question that matters before you publish 0.1.2: does the pin's
+resolver mishandle only the `file+` specifier encoding, or peer-suffixed
+`.pnpm` directories generally? A registry install of `@usejaunt/ts@0.1.2`
+lands in `.pnpm/@usejaunt+ts@0.1.2_<peerhash>/` with the same shape — if
+the resolver chokes on that too, every pnpm consumer hits this on day one;
+if it is `file+`-specific, it "only" breaks the documented pre-release
+verification flow. Easy to check with one registry-style install before
+the release goes out.
+
+## 2026-07-23 (follow-up 2): scanner and exhausted-code fixes verified — one remaining split-brain, now at the toolchain level
+
+Re-verified the updated branch worktree against the same dashboard
+workspace. The follow-up-1 findings are resolved:
+
+- The four previously-exhausted batteries now go through `verifying
+  (example)` / `verifying (derived)` and reheader model-free. Full run:
+  `done 30/30 ok=30 fail=0`, `generated: 0, refrozen: 30`. Zero paid calls,
+  all 46 vitest files / 622 tests green afterwards. The const-backed
+  computed-key rule unblocked exactly the batteries it should have.
+- The intermittent TS2307 reproduced once more before going quiet:
+  the run immediately after a fresh `dist` rebuild failed one module
+  (`workspace/paths-core`, `TS2307: Cannot find module '@usejaunt/ts/spec'`
+  — exports map and all `dist/spec.*` files present), and the two runs
+  after that were clean. Both occurrences we have seen were the first run
+  after the worker package's `dist/` was rewritten; that may narrow the
+  race.
+
+**Remaining blocker: `build` refreezes what `check` still calls
+toolchain-stale, in a stable loop.** With the branch toolchain active
+(editable Python install + locally built `@usejaunt/ts` symlinked into the
+app's `node_modules`):
+
+    jaunt build  → exit 0, "TypeScript build: refrozen: 20"
+    jaunt check  → exit 4, magic.ts.stale = all 20 modules, reason 'toolchain'
+    jaunt build  → exit 0, "TypeScript build: refrozen: 20"   (again — not idempotent)
+    jaunt check  → exit 4                                      (again)
+
+If build's refreeze persisted, the second build would report zero work.
+It reports the same 20 refreezes every cycle, so either the toolchain
+restamp never lands on disk, or check derives the current toolchain
+identity differently than build stamps it. The Python side has the same
+shape in miniature: `memory_store_reranker.client` stays `stale: 'stub'`
+through repeated exit-0 builds. This is the same test/check family as the
+morning report, one layer up.
+
+One honest caveat: our setup is a dev-built toolchain (symlinked package,
+not the published tarball). If toolchain identity is derived from package
+provenance (lockfile integrity/version) rather than the resolved worker
+content, a dev build can never be fresh by design — but then build should
+not claim `refrozen: 20` and exit 0, and there should be a documented way
+to run a branch toolchain against a real workspace for exactly this kind
+of pre-release verification.
+
+**Secondary: freshness-state failures are invisible in `check --json`.**
+When the only problems are stale modules (no diagnostics), `check` exits 4
+with an empty `diagnostics` array — stale state lives only under
+`magic.<lang>.stale`. Our CI wrapper iterates diagnostics and printed
+nothing while failing the job. Please emit stale modules as structured
+diagnostics (or a top-level `problems` list) in JSON mode so wrappers can
+report and selectively waive them.
+
+Adopter-side conclusion we'll act on regardless: committed stamps must be
+produced by the same toolchain CI resolves, so our dashboard repo can only
+drop its waiver after a fixed release ships to PyPI/npm and the lockfiles
+bump — the branch verification here validates the fix, not shippable
+artifacts.
+
+**Postscript — root causes confirmed, full convergence reached.** Your
+reply's diagnosis of all three follow-up-2 items checks out on our side.
+We froze an immutable copy of the built worker package, repointed the
+app's `node_modules` symlink at it, and ran everything through one
+consistent environment: the first `build` refroze 20 modules, the second
+refroze zero (idempotent), the Python `stub` flap disappeared with a
+single consistent Ruff resolution, and after one `jaunt test` pass the
+workspace converged to `check` exit 0 with zero diagnostics and zero
+stale modules in both languages. All 660 vitest tests across
+`jaunt-tests/` and `src/pure/` pass. The mutable-`dist` hazard you
+identified was exactly our mistake; the planned mid-command identity
+guard would have turned both of our phantom reports into a clear error.
+One residual observation: the 16 batteries that drifted when we swapped
+toolchains were regenerated (paid) rather than model-free reheadered,
+even though their committed bodies were behaviorally valid — if
+runner/Vitest fingerprint co-drift is meant to ride along with the free
+verification proof, that path did not engage across a toolchain change.
+Low priority for us given how self-inflicted the trigger was, but worth a
+look while you're in the code.
+
+## 2026-07-23 (follow-up): verified `codex/ts-battery-freshness-recovery` against the dashboard workspace — headline fix works, the new dynamic-code scan regresses committed batteries
+
+We ran the uncommitted branch worktree directly (Python editable install +
+locally built `@usejaunt/ts` symlinked into the dashboard `node_modules`)
+against the same 20-module / 30-battery dashboard workspace from the
+morning report. Results, in order:
+
+**What now works.** `jaunt test --language ts` rewrites battery files and
+their headers (26 battery files changed on disk where the published 1.7.10
+wrote zero bytes), modules recompose for free (`recomposed`, no model
+calls), a later `jaunt check` agrees with what test stamped, and the
+diagnostic count went 30 → 4. Rejected candidates are persisted under
+`.jaunt/typescript/rejected-tests/` with exact bytes and errors, and
+exhausted generation reports `JAUNT_TS_TEST_GENERATION_EXHAUSTED` in the
+test output. The transient codex capacity error was absorbed by
+`infrastructure-retry (1/2)` and the run still converged. All 46 vitest
+files / 622 tests across `jaunt-tests/` and `src/pure/` pass afterwards.
+
+**The free verification pass never succeeded once — the new dynamic-code
+scan retroactively fails committed batteries.** Summary for the run:
+`generated: 26, failed: 4`, zero model-free reheaders on a fleet whose
+batteries were all behaviorally valid (they pass vitest as committed). The
+mechanism: `forbiddenDynamicExecutionReference` in
+`packages/jaunt-ts/src/test/runner.ts` rejects any element access or
+computed property key whose key expression is not a syntactic literal, and
+`staticallySafePropertyKey` deliberately refuses identifier keys — including
+a same-file `const rolesKey = 'x-hasura-allowed-roles'`. Committed
+batteries that test records with long URL-shaped keys (Hasura JWT claims)
+use exactly that idiom:
+
+    const rolesKey: string = 'x-hasura-allowed-roles'
+    const malformedRolesToken: DecodedToken = { [rolesKey]: 'admin' }
+
+So verification fails, every battery routes to paid regeneration, and three
+batteries (`auth/user-roles#example`, `dashboard/home-data#derived`,
+`workspace/blocks/blockTreatments#example`) exhausted their attempts
+because fresh candidates keep expressing the same natural idiom the scanner
+forbids. A fourth (`workspace/brief/digest-model#example`) exhausted on
+ordinary fixture type errors (TS2322 against `BriefSection`/`BriefKind`),
+unrelated to the scanner. Requests:
+
+- Accept, as syntax-only evidence, an identifier key that resolves to a
+  same-file `const` with a string-literal initializer (`const` guarantees
+  no reassignment; no checker types involved). Or, narrower and probably
+  better: scope the fail-closed scan to loader-relevant references (the
+  `FORBIDDEN_DYNAMIC_BINDINGS` / `FORBIDDEN_DYNAMIC_PROPERTIES` surfaces)
+  instead of all computed access — an arbitrary object key on a plain
+  record cannot load code.
+- Whatever rule survives, the free verification pass should not apply a
+  *new* lint retroactively as grounds to discard a committed battery that
+  typechecks and passes. Verification proving the contract should be the
+  bar; candidate-generation policy can be stricter than acceptance of
+  existing proof.
+
+**`jaunt check` does not preserve the exhausted code.** The reply promised
+a later check in the same worktree keeps `JAUNT_TS_TEST_GENERATION_EXHAUSTED`
+and points at the saved candidate. Observed: the four exhausted batteries
+come back from `jaunt check --json` as plain `JAUNT_TS_TEST_BATTERY_STALE`
+(mismatches now `[battery_fingerprint, prompt_fingerprint,
+target_api_digest]`), with no pointer to `.jaunt/typescript/rejected-tests/`.
+So a CI wrapper still cannot waive precisely; it sees the same code as any
+stale battery. This is the one promised behavior we could not reproduce.
+
+**One intermittent module diagnostic.** A single `jaunt check` run reported
+`TS2307` (cannot find module) against a spec module
+(`src/pure/dashboard/home-data/index.jaunt.ts`); the immediately following
+run with no intervening change reported only the four battery diagnostics.
+One occurrence, not reproduced since — possibly a worker race in our
+symlinked setup, noting it in case it rings a bell.
+
+Net: with the scanner issue and the check-side exhausted code fixed, this
+branch fully resolves the morning report for our workspace — 26/30
+batteries are already genuinely fresh and green through plain vitest.
+
+## 2026-07-23: full paid regeneration cannot clear battery staleness on 1.7.10 — test and check disagree about the same stamps
+
+Follow-up to the 2026-07-21 entry. We upgraded to published Jaunt 1.7.10 /
+`@usejaunt/ts` 0.1.1 expecting the battery false-staleness fix, and then
+tried to do the honest thing the diagnostic prescribes: pay for
+`jaunt test --language ts` once on a clean branch off main and commit the
+result. It does not terminate. There is no sequence of client-side jaunt
+commands on 1.7.10 that takes `jaunt check` from exit 4 back to exit 0.
+
+Setup: dashboard workspace with 20 governed TS modules under
+`apps/dashboard/src/pure/**` and 15 test specs (30 batteries, example +
+derived) under `apps/dashboard/jaunt-tests/**`. All 30 batteries were stale
+(`battery_fingerprint, target_api_digest`) after an ordinary app-module edit
+landed on main — same wide-closure trigger as the 2026-07-21 entry, an edit
+in `src/services/mcp/briefs.ts` that touched no governed module.
+
+What five paid runs (~60 generation attempts) actually did:
+
+- Run 1 rebuilt all 20 module implementations (the modules themselves were
+  flagged, not only the batteries) and regenerated batteries: 24/30
+  validated. Run 2 converged to 29/30. Every candidate compiled, passed
+  conformance, and ran green under vitest before being accepted.
+- After all runs, `git status` under `apps/dashboard/jaunt-tests/**` is
+  empty. The battery files are byte-identical, including every
+  `// jaunt:battery_fingerprint=` / `// jaunt:target_api_digest=` header.
+  The refreshed digests were written only to the module sidecars
+  (`src/pure/**/__generated__/index.jaunt.json`).
+- From that point the two verbs disagree permanently. `jaunt test
+  --language ts` reports `generated: 0, skipped: 0, refrozen: 0` — it
+  considers 29/30 batteries fresh. `jaunt check --json` reports 30
+  `JAUNT_TS_TEST_BATTERY_STALE` diagnostics, mismatches
+  `[battery_fingerprint, target_api_digest]`, and exits 4. Test appears to
+  trust the sidecar record; check appears to recompute against the battery
+  file headers, which nothing ever rewrites.
+
+So the remedy named in the diagnostic message ("run `jaunt test --language
+ts`") is a paid no-op for CI: any spend leaves check exactly as red as
+before. We are keeping our CI waiver (now covering 1.7.10, hard expiry
+2026-08-11) because there is nothing else we can do from this side.
+
+Two more findings from the same exercise, both worth their own attention:
+
+**Regeneration under an unchanged spec shipped a real behavioral regression
+through green gates.** The rebuilt `dashboard/home-data` implementation
+dropped a contract sentence that the spec states verbatim ("Skip null
+buckets and rows whose trimmed `one_liner` and native summary are both
+empty") and started returning a whitespace-only-summary candidate from
+`buildHomeRecentFallbackSection`. The build reported done (attempt 2); the
+violation was caught only because a handwritten vitest test in `src/pure`
+and the previously committed example battery both pin the correct behavior
+and failed at plain vitest runtime. A forced targeted rebuild with an
+`--instruction` restating the spec sentence produced a conforming
+implementation. If module regeneration ran the repo's native tests (or at
+minimum the already-committed battery for that target) before stamping the
+module done, this could not have shipped.
+
+**One derived battery is ungenerable: 8/8 attempts failed across four
+invocations, and `--instruction` does not reach the test tier.** The
+`briefs/entity-mention-menu` derived battery alternated between two
+rejections: TS2739 fixture literals carrying only `{id, name, one_liner}`
+for `MemoryEntityItem` (8 required fields, type-imported from a
+non-governed `.tsx` app module, `components/memory/entity-highlights.tsx`)
+and `JAUNT_TS_TEST_DYNAMIC_LOADER` for generated `require()`/dynamic-import
+code. An `--instruction` that explicitly enumerated all eight required
+field names and banned every dynamic-loader form changed nothing — the
+flag's help says it appends to the build prompt, and derived-tier
+generation behaves as if it never sees it. Our best guess at the mechanism:
+the derived generator's workspace does not include the `.tsx` source that
+defines the type, so the model reconstructs the shape from spec prose and
+keeps guessing wrong. The committed battery (stamped by an earlier jaunt)
+solves the same problem correctly with `type Entity = Parameters<typeof
+entityMentionInsertContent>[0]` plus a `makeEntity` helper, which is what
+the generator should converge on. The rejected candidates are also not
+persisted anywhere we can read, so each diagnosis costs another paid run.
+
+Requests, in order of value to us:
+
+- Make paid regeneration actually clear check: either `jaunt test` rewrites
+  the battery-file stamps it has just validated, or `jaunt check` trusts
+  the same record `jaunt test` trusts. One source of truth for battery
+  freshness; the current split-brain means exit 4 is unrecoverable at any
+  spend.
+- (Reiterated from 2026-07-21) a free restamp/verification path usable on a
+  PR branch in CI, so digest-level staleness never demands model calls.
+- Gate module regeneration on the repo's native tests and the committed
+  batteries for that target before stamping done — the home-data regression
+  shipped through every gate jaunt runs today.
+- Propagate `--instruction` to example/derived battery generation, include
+  type definitions for type-only imports from non-governed files in the
+  test-tier workspace, and persist rejected candidates (or their diff)
+  somewhere readable so a repeated failure can be diagnosed without another
+  paid attempt.
+- After N consecutive failed attempts for one battery, emit a distinct
+  structured diagnostic (not plain stale) so CI wrappers can waive that one
+  target precisely instead of version-gating the whole signature.
+
 ## 2026-07-21: a one-line gql string edit restales four unrelated batteries and hard-fails PR CI
 
 Under published Jaunt 1.7.8 / `@usejaunt/ts` 0.1.0-alpha.7, adding one field

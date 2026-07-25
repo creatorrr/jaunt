@@ -3,17 +3,28 @@
 # ancestor containing jaunt.toml. One workspace may route several packages.
 # With --run, execute Jaunt from that workspace using the first suitable
 # runner: an installed `jaunt`, a uv project environment, or `uvx jaunt`.
+# --offline-fallback keeps the final uvx probe cache-only for passive hooks.
 set -eu
 uv_cache="${UV_CACHE_DIR:-${PLUGIN_DATA:-${CLAUDE_PLUGIN_DATA:-${TMPDIR:-/tmp}/jaunt-plugin-uv-cache-${UID:-user}}}}"
 export UV_CACHE_DIR="$uv_cache"
 
 run_mode=0
-if [ "${1:-}" = "--run" ]; then
-  run_mode=1
-  shift
-fi
+offline_fallback=0
+while [ "$#" -gt 0 ]; do
+  case "${1:-}" in
+    --run)
+      run_mode=1
+      shift
+      ;;
+    --offline-fallback)
+      offline_fallback=1
+      shift
+      ;;
+    *) break ;;
+  esac
+done
 
-p="${1:?usage: resolve-workspace.sh [--run] <path> [jaunt-arguments ...]}"
+p="${1:?usage: resolve-workspace.sh [--run] [--offline-fallback] <path> [jaunt-arguments ...]}"
 shift
 if [ -d "$p" ]; then
   dir=$(cd "$p" && pwd)
@@ -68,6 +79,11 @@ compatible_uv_jaunt() {
   output=$(uv run --no-sync jaunt --version 2>/dev/null) || return 1
   version_is_compatible "$output"
 }
+compatible_offline_uvx_jaunt() {
+  local output
+  output=$(uvx --offline jaunt --version 2>/dev/null) || return 1
+  version_is_compatible "$output"
+}
 has_uv_project() {
   local candidate="$root"
   while [ "$candidate" != "/" ]; do
@@ -86,7 +102,19 @@ if command -v uv >/dev/null 2>&1 && has_uv_project && compatible_uv_jaunt; then
   exec uv run --no-sync jaunt "$@"
 fi
 if command -v uvx >/dev/null 2>&1; then
+  if [ "$offline_fallback" -eq 1 ]; then
+    if compatible_offline_uvx_jaunt; then
+      exec uvx --offline jaunt "$@"
+    fi
+    echo "no compatible Jaunt CLI is available for SessionStart; run the project's install/sync command or 'uv tool install jaunt' (SessionStart does not download packages)" >&2
+    exit 127
+  fi
   exec uvx jaunt "$@"
+fi
+
+if [ "$offline_fallback" -eq 1 ]; then
+  echo "no compatible Jaunt CLI is available for SessionStart; run the project's install/sync command or 'uv tool install jaunt' (SessionStart does not download packages)" >&2
+  exit 127
 fi
 
 echo "jaunt unavailable: install it, use a uv project, or install uvx" >&2
