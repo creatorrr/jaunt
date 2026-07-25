@@ -6756,7 +6756,16 @@ def _runtime_package_static_dependencies(
             raise TypeScriptWorkerError(
                 f"Could not decode runtime package source at {path}: {exc}"
             ) from exc
-        for specifier in _runtime_module_specifiers(source, source_path=path):
+        try:
+            specifiers = _runtime_module_specifiers(source, source_path=path)
+        except TypeScriptWorkerError:
+            # Ecosystem packages may use dynamic CommonJS loader patterns that
+            # are forbidden in generated code. Their full package bytes are
+            # already identity-pinned, and manifest dependencies still enter
+            # the closure, so an unsupported source pattern is opaque rather
+            # than a reason to reject the installed toolchain.
+            continue
+        for specifier in specifiers:
             if specifier.startswith("#"):
                 scope = _runtime_package_scope(physical_root, path)
                 for package in _runtime_package_import_targets(scope, specifier):
@@ -6846,7 +6855,7 @@ def _runtime_package_dependencies(package_root: Path) -> tuple[tuple[str, bool],
 def _runtime_package_dependency_edges(
     package_root: Path,
 ) -> tuple[_RuntimePackageDependencyEdge, ...]:
-    """Merge manifest declarations with actual static runtime package loads.
+    """Merge manifest declarations with discoverable runtime package loads.
 
     A static edge keeps its importing file so Node resolution starts from the
     same physical location execution would use (important for pnpm stores).
@@ -7942,8 +7951,7 @@ class WorkerClient:
             )
         except TypeScriptWorkerError as exc:
             raise WorkerToolchainChangedError(
-                f"The {label} dependency closure could not be pinned for this command. "
-                "Rerun after the toolchain is stable."
+                f"The {label} dependency closure could not be pinned for this command: {exc}"
             ) from exc
         for edge_number, edge in enumerate(closure, start=1):
             edge_label = (

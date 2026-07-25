@@ -4411,6 +4411,83 @@ def test_package_resolution_closure_handles_vite_module_constructor_projection(
     ]
 
 
+def test_package_resolution_closure_pins_jsdom_without_linting_commonjs_source(
+    tmp_path: Path,
+) -> None:
+    installation = _installation(tmp_path, "console.log('worker');\n")
+    vitest = tmp_path / "node_modules/vitest"
+    (vitest / "dist").mkdir(parents=True)
+    (vitest / "dist/index.js").write_text("export {};\n", encoding="utf-8")
+    (vitest / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "vitest",
+                "version": "4.0.17",
+                "dependencies": {"jsdom": "27.4.0"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    jsdom = tmp_path / "node_modules/jsdom"
+    xhr = jsdom / "lib/jsdom/living/xhr/XMLHttpRequest-impl.js"
+    xhr.parent.mkdir(parents=True)
+    xhr.write_text(
+        "const syncWorkerFile = require.resolve "
+        '? require.resolve("./xhr-sync-worker.js") : null;\n',
+        encoding="utf-8",
+    )
+    (jsdom / "package.json").write_text(
+        json.dumps({"name": "jsdom", "version": "27.4.0", "main": "./lib/api.js"}),
+        encoding="utf-8",
+    )
+    client = WorkerClient(root=tmp_path, installation=installation)
+
+    client.pin_package_resolution_closure(
+        "Vitest package",
+        tmp_path,
+        "vitest",
+        boundary=tmp_path,
+        expected_name="vitest",
+    )
+
+    xhr.write_text("module.exports = {};\n", encoding="utf-8")
+    with pytest.raises(
+        WorkerToolchainChangedError,
+        match="JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+    ):
+        client.verify_runtime_identity()
+
+
+def test_package_resolution_closure_error_preserves_underlying_cause(tmp_path: Path) -> None:
+    installation = _installation(tmp_path, "console.log('worker');\n")
+    vitest = tmp_path / "node_modules/vitest"
+    vitest.mkdir(parents=True)
+    (vitest / "index.js").write_text("export {};\n", encoding="utf-8")
+    (vitest / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "vitest",
+                "version": "4.0.17",
+                "dependencies": ["jsdom"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = WorkerClient(root=tmp_path, installation=installation)
+
+    with pytest.raises(
+        WorkerToolchainChangedError,
+        match="Invalid 'dependencies'.*node_modules/vitest/package.json",
+    ):
+        client.pin_package_resolution_closure(
+            "Vitest package",
+            tmp_path,
+            "vitest",
+            boundary=tmp_path,
+            expected_name="vitest",
+        )
+
+
 def test_package_resolution_closure_resolves_all_package_import_mapping_forms(
     tmp_path: Path,
 ) -> None:
