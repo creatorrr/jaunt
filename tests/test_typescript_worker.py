@@ -4458,6 +4458,62 @@ def test_package_resolution_closure_pins_jsdom_without_linting_commonjs_source(
         client.verify_runtime_identity()
 
 
+def test_package_resolution_closure_retains_static_load_beside_opaque_loader_flow(
+    tmp_path: Path,
+) -> None:
+    installation = _installation(tmp_path, "console.log('worker');\n")
+    vitest = tmp_path / "node_modules/vitest"
+    (vitest / "dist").mkdir(parents=True)
+    (vitest / "dist/index.js").write_text("export {};\n", encoding="utf-8")
+    (vitest / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "vitest",
+                "version": "4.0.17",
+                "dependencies": {"jsdom": "27.4.0"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    jsdom = tmp_path / "node_modules/jsdom"
+    xhr = jsdom / "lib/jsdom/living/xhr/XMLHttpRequest-impl.js"
+    xhr.parent.mkdir(parents=True)
+    xhr.write_text(
+        "const syncWorkerFile = require.resolve "
+        '? require.resolve("./xhr-sync-worker.js") : null;\n'
+        'const helper = require("undeclared-helper");\n',
+        encoding="utf-8",
+    )
+    (jsdom / "package.json").write_text(
+        json.dumps({"name": "jsdom", "version": "27.4.0", "main": "./lib/api.js"}),
+        encoding="utf-8",
+    )
+    helper = tmp_path / "node_modules/undeclared-helper"
+    helper.mkdir()
+    helper_runtime = helper / "index.js"
+    helper_runtime.write_text("module.exports = 1;\n", encoding="utf-8")
+    (helper / "package.json").write_text(
+        json.dumps({"name": "undeclared-helper", "version": "1.0.0"}),
+        encoding="utf-8",
+    )
+    client = WorkerClient(root=tmp_path, installation=installation)
+
+    client.pin_package_resolution_closure(
+        "Vitest package",
+        tmp_path,
+        "vitest",
+        boundary=tmp_path,
+        expected_name="vitest",
+    )
+
+    helper_runtime.write_text("module.exports = 2;\n", encoding="utf-8")
+    with pytest.raises(
+        WorkerToolchainChangedError,
+        match="JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+    ):
+        client.verify_runtime_identity()
+
+
 def test_package_resolution_closure_error_preserves_underlying_cause(tmp_path: Path) -> None:
     installation = _installation(tmp_path, "console.log('worker');\n")
     vitest = tmp_path / "node_modules/vitest"

@@ -6325,8 +6325,18 @@ def _shadowed_native_loader_indices(
     return frozenset(shadowed)
 
 
-def _runtime_module_specifiers(source: str, *, source_path: Path) -> tuple[str, ...]:
-    """Extract statically named native ESM and CommonJS runtime loads."""
+def _runtime_module_specifiers(
+    source: str,
+    *,
+    source_path: Path,
+    tolerate_unsupported_loader_flows: bool = False,
+) -> tuple[str, ...]:
+    """Extract statically named native ESM and CommonJS runtime loads.
+
+    Package-closure discovery may retain the direct imports found by this pass
+    when the stricter capability-flow analysis encounters ecosystem loader
+    syntax it does not model. Generated-code policy callers remain fail-closed.
+    """
 
     tokens = _runtime_javascript_tokens(source, source_path=source_path)
     specifiers: set[str] = set()
@@ -6529,13 +6539,17 @@ def _runtime_module_specifiers(source: str, *, source_path: Path) -> tuple[str, 
                 specifier = literal_call_argument(call_index)
                 if specifier is not None:
                     specifiers.add(specifier)
-    specifiers.update(
-        _create_require_module_specifiers(
+    try:
+        forwarded_specifiers = _create_require_module_specifiers(
             tokens,
             source_path=source_path,
             shadowed_native_loaders=shadowed_native_loaders,
         )
-    )
+    except TypeScriptWorkerError:
+        if not tolerate_unsupported_loader_flows:
+            raise
+    else:
+        specifiers.update(forwarded_specifiers)
     return tuple(sorted(specifiers))
 
 
@@ -6756,15 +6770,11 @@ def _runtime_package_static_dependencies(
             raise TypeScriptWorkerError(
                 f"Could not decode runtime package source at {path}: {exc}"
             ) from exc
-        try:
-            specifiers = _runtime_module_specifiers(source, source_path=path)
-        except TypeScriptWorkerError:
-            # Ecosystem packages may use dynamic CommonJS loader patterns that
-            # are forbidden in generated code. Their full package bytes are
-            # already identity-pinned, and manifest dependencies still enter
-            # the closure, so an unsupported source pattern is opaque rather
-            # than a reason to reject the installed toolchain.
-            continue
+        specifiers = _runtime_module_specifiers(
+            source,
+            source_path=path,
+            tolerate_unsupported_loader_flows=True,
+        )
         for specifier in specifiers:
             if specifier.startswith("#"):
                 scope = _runtime_package_scope(physical_root, path)

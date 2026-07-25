@@ -16,9 +16,9 @@ is called out explicitly below.
 
 Vitest projects using the jsdom environment can pin the protected runner again.
 Jaunt no longer applies its generated-code CommonJS loader policy as a hard gate to
-third-party package source. It still discovers supported static edges, follows manifest
-dependencies, and pins every resolved package's full runtime identity through the final
-command boundary.
+third-party package source. Unsupported loader flows do not discard other static imports
+from the same file. Jaunt still follows manifest dependencies and pins every resolved
+package's full runtime identity through the final command boundary.
 
 This is a Python-only patch. Keep `@usejaunt/ts` at 0.1.2; no npm upgrade is needed.
 Errors raised before a normal TypeScript check report now appear in the top-level

@@ -9,9 +9,9 @@ Python or TypeScript release.
 ### Fixes
 
 - Let third-party runtime packages use ordinary CommonJS loader patterns such as
-  jsdom's conditional `require.resolve` probe. Unsupported ecosystem source remains
-  opaque to source-assisted dependency discovery; manifest dependencies and each
-  package's complete content and filesystem identity are still pinned for the command.
+  jsdom's conditional `require.resolve` probe. Unsupported loader flows are omitted
+  without discarding other static imports from the same file; manifest dependencies
+  and each package's complete content and filesystem identity remain pinned.
 - Preserve the underlying cause when a runtime closure cannot be pinned, and include
   aborted TypeScript operations in standalone and mixed `check --json` diagnostics.
 
