@@ -21,7 +21,7 @@ CLAUDE_PLUGIN = REPO / "jaunt-claude-plugin"
 def test_manifest_and_marketplace_shape() -> None:
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text())
     assert manifest["name"] == "jaunt"
-    assert manifest["version"] == "1.1.6"
+    assert manifest["version"] == "1.1.7"
     assert "TypeScript" in manifest["description"]
     assert manifest["skills"] == "./skills/"
     assert "hooks" not in manifest
@@ -705,6 +705,67 @@ printf "uvx:%s\n" "$*" > "$RUNNER_LOG"
     assert js_log.read_text() == "uvx:jaunt status --language ts\n"
 
 
+def test_workspace_runner_offline_fallback_uses_only_cached_uvx(tmp_path: Path) -> None:
+    resolver = PLUGIN / "scripts" / "resolve-workspace.sh"
+    root = tmp_path / "js-only"
+    bin_dir = root / "bin"
+    bin_dir.mkdir(parents=True)
+    (root / "jaunt.toml").write_text("version = 2\n[target.ts]\n")
+    calls = root / "uvx.log"
+    _write_executable(
+        bin_dir / "uvx",
+        f'''printf '%s\n' "$*" >> "{calls}"
+if [ "$*" = "--offline jaunt --version" ]; then echo "jaunt 1.7.11"; exit 0; fi
+''',
+    )
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin"}
+
+    subprocess.run(
+        [
+            "bash",
+            str(resolver),
+            "--run",
+            "--offline-fallback",
+            str(root),
+            "status",
+            "--language",
+            "ts",
+        ],
+        env=env,
+        check=True,
+    )
+
+    assert calls.read_text().splitlines() == [
+        "--offline jaunt --version",
+        "--offline jaunt status --language ts",
+    ]
+
+
+def test_workspace_runner_offline_fallback_explains_missing_python_cli(
+    tmp_path: Path,
+) -> None:
+    resolver = PLUGIN / "scripts" / "resolve-workspace.sh"
+    root = tmp_path / "js-only"
+    bin_dir = root / "bin"
+    bin_dir.mkdir(parents=True)
+    (root / "jaunt.toml").write_text("version = 2\n[target.ts]\n")
+    calls = root / "uvx.log"
+    _write_executable(bin_dir / "uvx", f'''printf '%s\n' "$*" >> "{calls}"\nexit 1\n''')
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin"}
+
+    result = subprocess.run(
+        ["bash", str(resolver), "--run", "--offline-fallback", str(root), "status"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 127
+    assert "no compatible Jaunt CLI is available for SessionStart" in result.stderr
+    assert "SessionStart does not download packages" in result.stderr
+    assert calls.read_text().splitlines() == ["--offline jaunt --version"]
+
+
 def test_session_status_reports_typescript_unbuilt_invalid_and_diagnostics(tmp_path: Path) -> None:
     bin_dir = tmp_path / "fakebin"
     bin_dir.mkdir()
@@ -903,6 +964,129 @@ def test_status_hooks_report_timeouts_without_claiming_compiler_failure(tmp_path
     assert "worker/compiler unavailable" not in doctor.stdout
 
 
+def test_session_status_defaults_to_eight_second_timeout(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    (tmp_path / "jaunt.toml").write_text("version = 1\n")
+    _write_executable(
+        bin_dir / "jaunt",
+        'if [ "$1" = "--version" ]; then echo "jaunt 1.7.11"; exit 0; fi\nexit 124\n',
+    )
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin"}
+
+    result = subprocess.run(
+        ["bash", str(PLUGIN / "scripts" / "session-status.sh")],
+        input=json.dumps({"cwd": str(tmp_path)}),
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+
+    assert "status unavailable: status timed out after 8 seconds" in result.stdout
+
+
+def test_session_status_uses_magic_only_and_skips_contract_probe(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    calls = tmp_path / "calls.log"
+    (tmp_path / "jaunt.toml").write_text("version = 1\n")
+    _write_executable(
+        bin_dir / "jaunt",
+        f'''if [ "$1" = "--version" ]; then echo "jaunt 1.7.11"; exit 0; fi
+printf '%s\n' "$*" >> "{calls}"
+if [[ " $* " != *" --magic-only "* ]]; then exit 124; fi
+echo '{{"command":"status","ok":true,"fresh":[],"stale":[],"orphans":[]}}'
+''',
+    )
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin"}
+
+    result = subprocess.run(
+        ["bash", str(PLUGIN / "scripts" / "session-status.sh")],
+        input=json.dumps({"cwd": str(tmp_path)}),
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+
+    assert "- .: 0 fresh" in result.stdout
+    assert calls.read_text().splitlines() == ["status --magic-only --json --progress none"]
+
+
+@pytest.mark.parametrize(
+    ("message", "guidance"),
+    (
+        (
+            "/repo/package.json must directly declare devDependencies: @usejaunt/ts, typescript",
+            "run npm install -D @usejaunt/ts typescript in that package",
+        ),
+        (
+            "Could not resolve project-local @usejaunt/ts from /repo; install dependencies first",
+            "run npm install in that package",
+        ),
+    ),
+)
+def test_session_status_explains_missing_typescript_packages_once(
+    tmp_path: Path, message: str, guidance: str
+) -> None:
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    (tmp_path / "jaunt.toml").write_text("version = 2\n[target.ts]\n")
+    payload = json.dumps(
+        {
+            "command": "status",
+            "ok": False,
+            "error": {"code": "TypeScriptWorkerError", "message": message},
+        }
+    )
+    _write_executable(
+        bin_dir / "jaunt",
+        f"""if [ "$1" = "--version" ]; then echo "jaunt 1.7.11"; exit 0; fi
+echo '{payload}'
+exit 2
+""",
+    )
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin"}
+
+    result = subprocess.run(
+        ["bash", str(PLUGIN / "scripts" / "session-status.sh")],
+        input=json.dumps({"cwd": str(tmp_path)}),
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+
+    assert result.stdout.count("TS status unavailable:") == 1
+    assert guidance in result.stdout
+    assert "; TS status unavailable:" not in result.stdout
+
+
+def test_session_status_surfaces_offline_runner_stderr(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    calls = tmp_path / "uvx.log"
+    (tmp_path / "jaunt.toml").write_text("version = 1\n")
+    _write_executable(bin_dir / "uvx", f'''printf '%s\n' "$*" >> "{calls}"\nexit 1\n''')
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin"}
+
+    result = subprocess.run(
+        ["bash", str(PLUGIN / "scripts" / "session-status.sh")],
+        input=json.dumps({"cwd": str(tmp_path)}),
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+
+    assert (
+        "status unavailable: no compatible Jaunt CLI is available for SessionStart" in result.stdout
+    )
+    assert "SessionStart does not download packages" in result.stdout
+    assert calls.read_text().splitlines() == ["--offline jaunt --version"]
+
+
 def test_mixed_status_hook_reuses_one_workspace_probe(tmp_path: Path) -> None:
     bin_dir = tmp_path / "fakebin"
     bin_dir.mkdir()
@@ -935,7 +1119,7 @@ echo '"diagnostics":[{{"code":"JAUNT_TS_NOTE","message":"review"}}]}}'
         "status unavailable: Python status failed; TS: 0 unbuilt, 0 invalid, 1 diagnostics "
         "[JAUNT_TS_NOTE]" in result.stdout
     )
-    assert calls.read_text().splitlines() == ["status --json --progress none"]
+    assert calls.read_text().splitlines() == ["status --magic-only --json --progress none"]
 
 
 def _fake_guard_bin(tmp_path: Path, *, fail: bool = False) -> Path:
