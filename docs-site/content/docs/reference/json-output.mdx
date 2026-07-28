@@ -164,12 +164,16 @@ queue paid generation. Failed generation can add `candidate`, `candidate_metadat
 and `terminal`; terminal budget exhaustion uses the structured
 `JAUNT_TS_TEST_GENERATION_EXHAUSTED` diagnostic.
 
-A stale or exhausted TypeScript battery carries three views of the same divergence in
-the `data` mapping of its structured diagnostic: `mismatches`, `gating`, and
-`advisories`. These keys appear only on `JAUNT_TS_TEST_BATTERY_STALE` and
-`JAUNT_TS_TEST_GENERATION_EXHAUSTED`; `JAUNT_TS_TEST_BATTERY_MISSING` carries none of
-them. `mismatches` is every observed provenance divergence and is always present.
-`gating` is the subset that failed the check; it is always present and never empty,
+An existing stale TypeScript battery carries three views of the same divergence in
+the `data` mapping of its structured diagnostic: `mismatches`, `gating`, and optional
+`advisories`. They appear on `JAUNT_TS_TEST_BATTERY_STALE` and on
+`JAUNT_TS_TEST_GENERATION_EXHAUSTED` when generation exhausted while replacing an
+existing stale battery. If initial generation exhausts before the battery file exists,
+the exhausted diagnostic carries candidate metadata but none of these divergence
+fields. `JAUNT_TS_TEST_BATTERY_MISSING` also carries none of them.
+
+When the divergence fields are present, `mismatches` contains every observed
+provenance divergence. `gating` is the subset that failed the check and is never empty,
 because an empty set suppresses the diagnostic. `advisories` is the remainder
 (`mismatches` minus `gating`) and is present only when non-empty. The rendered
 diagnostic message names only the `gating` fields, so CI consumers should read

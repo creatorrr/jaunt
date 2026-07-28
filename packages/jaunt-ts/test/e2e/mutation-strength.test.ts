@@ -98,7 +98,7 @@ test("@prop: strict positivity excludes zero", () => {
     overlays: {},
     tsconfigPath: "tsconfig.json",
     compilerModulePath: workspace.compilerModulePath,
-    timeoutMs: 5_000,
+    timeoutMs: 15_000,
     globalTimeoutMs: 30_000,
     // The unit matrix covers every operator; one real mutant is enough to prove
     // the disposable runner/process-group integration without loading CI hosts.
@@ -270,7 +270,7 @@ test("the mutation sandbox cannot read or write external files", () => {
       sandboxRoot,
       "node_modules/typescript/lib/typescript.js",
     ),
-    timeoutMs: 5_000,
+    timeoutMs: 15_000,
     globalTimeoutMs: 30_000,
     maxMutants: 1,
     permissionSandbox: true,

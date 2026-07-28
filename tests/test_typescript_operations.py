@@ -14187,21 +14187,28 @@ async def test_legacy_skills_header_refreezes_without_a_model_call(
     example_relative = "tests/__generated__/math.example.test.ts"
     example = tmp_path / example_relative
     original = example.read_text(encoding="utf-8")
-    # Rewrite the header the way pre-split Jaunt stamped it: a retired
-    # skills field plus an aggregate computed over a different composition.
+    # Rewrite the header the way pre-split Jaunt stamped it: an aggregate
+    # computed over a different composition plus a now-retired skills field.
     legacy = {
         **dict(_test_header_metadata(original) or {}),
-        "skills_fingerprint": "d" * 64,
         "battery_fingerprint": "sha256:" + "e" * 64,
     }
+    legacy_source = _with_test_header(
+        _strip_test_header(original),
+        tier="example",
+        source_path=worker.test_spec_path,
+        provenance=legacy,
+    ).replace(
+        "\n\n",
+        "\n// jaunt:skills_fingerprint=sha256:" + "d" * 64 + "\n\n",
+        1,
+    )
     example.write_text(
-        _with_test_header(
-            _strip_test_header(original),
-            tier="example",
-            source_path=worker.test_spec_path,
-            provenance=legacy,
-        ),
+        legacy_source,
         encoding="utf-8",
+    )
+    assert (_test_header_metadata(legacy_source) or {}).get("skills_fingerprint") == (
+        "sha256:" + "d" * 64
     )
 
     report = await run_test(
@@ -15462,6 +15469,15 @@ async def test_exhausted_battery_persists_exact_candidate_and_check_diagnostic(
     ]
     assert len(exhausted) == 2
     assert all(item.data["consecutive_attempts"] == 1 for item in exhausted)
+    exhausted_by_path = {str(item.path): item for item in exhausted}
+    stale_data = exhausted_by_path["tests/__generated__/math.example.test.ts"].data
+    missing_data = exhausted_by_path["tests/__generated__/math.derived.test.ts"].data
+    assert stale_data["gating"]
+    assert set(stale_data["gating"]) <= set(stale_data["mismatches"])
+    assert {"mismatches", "gating", "advisories"}.isdisjoint(missing_data)
+    assert all(
+        {"candidate", "metadata", "consecutive_attempts"} <= set(item.data) for item in exhausted
+    )
     assert all(
         "tests/__generated__/math.example.test.ts" not in files for files in checked_typecheck_files
     )

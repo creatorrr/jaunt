@@ -4,6 +4,29 @@ All notable changes to Jaunt and `@usejaunt/ts`. Generated from conventional
 commits by [git-cliff](https://git-cliff.org), with one section per published
 Python or TypeScript release.
 
+## [1.7.13] - 2026-07-28
+
+### Fixes
+
+- Gate committed TypeScript test-battery freshness only on contract inputs and
+  ownership/tamper signals. Installed skills, runner, Vitest, and fast-check identity
+  now affect generation-cache partitioning or diagnostic metadata without forcing
+  regeneration.
+- Re-stamp compatible pre-split battery headers without a model call when Jaunt can
+  reconstruct their legacy fast-check digest. Real contract drift and an independently
+  upgraded legacy fast-check environment continue to regenerate safely.
+- Report every observed battery provenance divergence as `mismatches`, the blocking
+  subset as `gating`, and the remainder as optional `advisories`. Initial generation
+  exhaustion before a battery exists continues to report candidate metadata without
+  synthetic divergence fields.
+- Enforce that every classified provenance field is either committed to the battery
+  header or explicitly non-stamped, preventing future freshness inputs from silently
+  escaping comparison.
+
+### Packages
+
+- Release Jaunt 1.7.13 as a Python-only patch. `@usejaunt/ts` remains at 0.1.2.
+
 ## [1.7.12] - 2026-07-24
 
 ### Fixes
