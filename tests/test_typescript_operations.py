@@ -14046,6 +14046,7 @@ async def test_skill_drift_changes_cache_identity_but_not_committed_freshness(
         provenance=before,
     )
     assert "cache_fingerprint" not in (_test_header_metadata(rendered) or {})
+    assert "legacy_fast_check_fingerprint" not in (_test_header_metadata(rendered) or {})
 
 
 @pytest.mark.asyncio
@@ -14115,6 +14116,16 @@ async def test_fast_check_install_version_does_not_gate_freshness(
     assert installed["fast_check_fingerprint"] == absent["fast_check_fingerprint"]
     assert installed["battery_fingerprint"] == absent["battery_fingerprint"]
     assert installed["cache_fingerprint"] != absent["cache_fingerprint"]
+    # Deliberately hardcoded: this is the real pre-split ``fast_check_fingerprint``
+    # for this fixture at fast-check 3.23.0. ``_legacy_fast_check_fingerprint`` must
+    # keep reproducing it byte for byte so a battery committed by an older Jaunt can
+    # be re-stamped for free. A mismatch means either the legacy composition drifted
+    # or ``PROPERTY_RENDERER_SCHEME`` changed -- both must fail loudly here rather
+    # than silently re-stamping a battery with genuine content drift.
+    assert (
+        installed["legacy_fast_check_fingerprint"]
+        == "sha256:ab1369222d10e48c4d35581262f7e3e6f7c1f549936a07f30e9669cf007d885b"
+    )
 
 
 @pytest.mark.asyncio

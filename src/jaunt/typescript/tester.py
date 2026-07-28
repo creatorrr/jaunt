@@ -82,6 +82,7 @@ from jaunt.typescript.builder import (
     run_build_in_session,
     worker_session,
 )
+from jaunt.typescript.config import TypeScriptTargetConfig
 from jaunt.typescript.properties import (
     PROPERTY_RENDERER_SCHEME,
     attach_property_block,
@@ -159,11 +160,11 @@ _BATTERY_ENVIRONMENT_FIELDS = frozenset({"runner_fingerprint", "vitest_fingerpri
 # Retired inputs may appear in batteries committed by an older Jaunt. They are
 # ignored on read and dropped on the next write.
 _BATTERY_RETIRED_FIELDS = frozenset({"skills_fingerprint"})
-# Cache-only values are deliberately excluded from the committed aggregate and
-# from ``_TEST_PROVENANCE_FIELDS``. They are produced after classification, so
-# they are never members of ``values``. ``cache_fingerprint`` partitions the
-# response cache; ``legacy_fast_check_fingerprint`` recognizes pre-split headers.
-_BATTERY_CACHE_ONLY_FIELDS = frozenset({"cache_fingerprint", "legacy_fast_check_fingerprint"})
+# These values are produced after classification, so they are never members of
+# ``values``, stamped into a battery header, or used to gate freshness.
+# ``cache_fingerprint`` partitions the response cache; ``legacy_fast_check_fingerprint``
+# exists only for legacy-header detection.
+_BATTERY_NON_STAMPED_FIELDS = frozenset({"cache_fingerprint", "legacy_fast_check_fingerprint"})
 
 _TEST_IMPORT_POLICY = "static-esm-only-resolved-boundary-v3"
 _REJECTED_TEST_DIR = Path(".jaunt/typescript/rejected-tests")
@@ -3172,7 +3173,8 @@ def _test_provenance(
             f"{', '.join(sorted(unclassified))}. Add each to _BATTERY_CONTRACT_FIELDS "
             "(committed freshness gate) or _BATTERY_ENVIRONMENT_FIELDS (stamped, "
             "non-gating), or compute it outside `values` as a member of "
-            f"_BATTERY_CACHE_ONLY_FIELDS ({', '.join(sorted(_BATTERY_CACHE_ONLY_FIELDS))})."
+            "_BATTERY_NON_STAMPED_FIELDS (never stamped, never gating): "
+            f"{', '.join(sorted(_BATTERY_NON_STAMPED_FIELDS))}."
         )
     skills = skills_fingerprint(
         project_root=root,
@@ -3212,7 +3214,7 @@ def _test_provenance(
 
 def _legacy_fast_check_fingerprint(
     request: GenerationRequest,
-    target: object,
+    target: TypeScriptTargetConfig,
     *,
     version: str,
 ) -> str:
@@ -3227,7 +3229,7 @@ def _legacy_fast_check_fingerprint(
     return _canonical_digest(
         {
             "rendererScheme": PROPERTY_RENDERER_SCHEME,
-            "runs": cast(Any, target).fast_check_runs,
+            "runs": target.fast_check_runs,
             "seed": request.cache_payload.get("propertySeed"),
             "version": version,
             "renderedBlockDigest": _sha256(
