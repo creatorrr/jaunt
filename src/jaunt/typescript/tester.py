@@ -141,11 +141,7 @@ _TEST_PROVENANCE_FIELDS = (
 _TEST_REHEADER_FINGERPRINTS = frozenset({"runner_fingerprint", "vitest_fingerprint"})
 
 # Contract inputs are the only freshness gate. Each is a pure function of
-# committed bytes, ``jaunt.toml``, and Jaunt's packaged prompt templates, with
-# one exception at this commit: ``fast_check_fingerprint`` also embeds the
-# installed fast-check version, an installed-environment input. A later task
-# removes that version from the contract digest, after which the rule holds
-# without exception.
+# committed bytes, ``jaunt.toml``, and Jaunt's packaged prompt templates.
 _BATTERY_CONTRACT_FIELDS = frozenset(
     {
         "test_spec_digest",
@@ -163,11 +159,11 @@ _BATTERY_ENVIRONMENT_FIELDS = frozenset({"runner_fingerprint", "vitest_fingerpri
 # Retired inputs may appear in batteries committed by an older Jaunt. They are
 # ignored on read and dropped on the next write.
 _BATTERY_RETIRED_FIELDS = frozenset({"skills_fingerprint"})
-# Cache-only inputs are deliberately excluded from the committed aggregate and
-# from ``_TEST_PROVENANCE_FIELDS``: they partition the response cache without
-# ever gating committed freshness. They are produced after classification, so
-# they are never members of ``values``.
-_BATTERY_CACHE_ONLY_FIELDS = frozenset({"cache_fingerprint"})
+# Cache-only values are deliberately excluded from the committed aggregate and
+# from ``_TEST_PROVENANCE_FIELDS``. They are produced after classification, so
+# they are never members of ``values``. ``cache_fingerprint`` partitions the
+# response cache; ``legacy_fast_check_fingerprint`` recognizes pre-split headers.
+_BATTERY_CACHE_ONLY_FIELDS = frozenset({"cache_fingerprint", "legacy_fast_check_fingerprint"})
 
 _TEST_IMPORT_POLICY = "static-esm-only-resolved-boundary-v3"
 _REJECTED_TEST_DIR = Path(".jaunt/typescript/rejected-tests")
@@ -3149,7 +3145,6 @@ def _test_provenance(
                 "rendererScheme": PROPERTY_RENDERER_SCHEME,
                 "runs": target.fast_check_runs,
                 "seed": request.cache_payload.get("propertySeed"),
-                "version": _read_package_version(roots, "fast-check"),
                 "renderedBlockDigest": _sha256(
                     str(request.cache_payload.get("propertyBlock", "")).encode("utf-8")
                 ),
@@ -3197,11 +3192,9 @@ def _test_provenance(
     return {
         **values,
         "battery_fingerprint": committed,
-        # Not stamped. Skill guidance changes model output without changing the
-        # contract, so it partitions the response cache instead of gating
-        # freshness. The installed fast-check version also participates in cache
-        # identity here, but it still feeds ``fast_check_fingerprint`` (a contract
-        # field) until a later task removes it from the contract digest.
+        # Not stamped. Skill guidance and the installed fast-check version are
+        # environment inputs that partition the response cache and never gate
+        # committed freshness.
         "cache_fingerprint": _canonical_digest(
             {
                 "committed": committed,
@@ -3209,7 +3202,44 @@ def _test_provenance(
                 "fast_check_version": fast_check_version,
             }
         ),
+        # Non-stamped. Lets the comparator recognize a pre-split header's
+        # property digest and re-stamp it without a model call.
+        "legacy_fast_check_fingerprint": _legacy_fast_check_fingerprint(
+            request, target, version=fast_check_version
+        ),
     }
+
+
+def _legacy_fast_check_fingerprint(
+    request: GenerationRequest,
+    target: object,
+    *,
+    version: str,
+) -> str:
+    """Recompute the pre-split property digest, which embedded the install version.
+
+    Batteries committed before the freshness split hashed the installed
+    ``fast-check`` version into their property digest. Reproducing that value
+    lets a reader prove an old header differs only by composition, so it can be
+    re-stamped for free instead of regenerated.
+    """
+
+    return _canonical_digest(
+        {
+            "rendererScheme": PROPERTY_RENDERER_SCHEME,
+            "runs": cast(Any, target).fast_check_runs,
+            "seed": request.cache_payload.get("propertySeed"),
+            "version": version,
+            "renderedBlockDigest": _sha256(
+                str(request.cache_payload.get("propertyBlock", "")).encode("utf-8")
+            ),
+            **(
+                {"cases": request.cache_payload["propertyCases"]}
+                if request.cache_payload.get("propertyCases")
+                else {}
+            ),
+        }
+    )
 
 
 def _strip_test_header(source: str) -> str:

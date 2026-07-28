@@ -14049,6 +14049,75 @@ async def test_skill_drift_changes_cache_identity_but_not_committed_freshness(
 
 
 @pytest.mark.asyncio
+async def test_fast_check_install_version_does_not_gate_freshness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fast-check install version affects caching, not battery freshness.
+
+    With no node_modules, _read_package_version returns "unresolved"; that
+    environment difference must not make a committed property battery stale.
+    """
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    fast_check_version = {"value": "3.23.0"}
+
+    def fake_version(_roots: object, package: str) -> str:
+        if package == "fast-check":
+            return fast_check_version["value"]
+        return "1.0.0"
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    monkeypatch.setattr("jaunt.typescript.tester._read_package_version", fake_version)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert seeded.exit_code == 0
+
+    captured: dict[str, Mapping[str, str]] = {}
+
+    def capturing_provenance(*args: Any, **kwargs: Any) -> Mapping[str, str]:
+        provenance = _test_provenance(*args, **kwargs)
+        captured.setdefault(str(kwargs["tier"]), dict(provenance))
+        return provenance
+
+    monkeypatch.setattr("jaunt.typescript.tester._test_provenance", capturing_provenance)
+
+    async def observed_provenance() -> Mapping[str, str]:
+        captured.clear()
+        report = await run_test(
+            tmp_path,
+            config,
+            no_build=True,
+            generator=FakeGenerator(),
+            worker_factory=lambda *_: worker,
+        )
+        assert report.exit_code == 0
+        return captured["example"]
+
+    installed = await observed_provenance()
+    fast_check_version["value"] = "unresolved"
+    absent = await observed_provenance()
+
+    assert installed["fast_check_fingerprint"] == absent["fast_check_fingerprint"]
+    assert installed["battery_fingerprint"] == absent["battery_fingerprint"]
+    assert installed["cache_fingerprint"] != absent["cache_fingerprint"]
+
+
+@pytest.mark.asyncio
 async def test_api_and_runner_drift_never_executes_an_unsafe_existing_body(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
