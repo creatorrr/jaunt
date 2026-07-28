@@ -135,11 +135,31 @@ _TEST_PROVENANCE_FIELDS = (
     "runner_fingerprint",
     "prompt_fingerprint",
     "policy_fingerprint",
-    "skills_fingerprint",
     "battery_fingerprint",
     "body_digest",
 )
 _TEST_REHEADER_FINGERPRINTS = frozenset({"runner_fingerprint", "vitest_fingerprint"})
+
+# Contract inputs are the only freshness gate: each is a pure function of
+# committed bytes, ``jaunt.toml``, and Jaunt's packaged prompt templates.
+_BATTERY_CONTRACT_FIELDS = frozenset(
+    {
+        "test_spec_digest",
+        "target_api_digest",
+        "imported_type_context_fingerprint",
+        "fixture_fingerprint",
+        "fast_check_fingerprint",
+        "prompt_fingerprint",
+        "policy_fingerprint",
+    }
+)
+# Environment inputs are stamped as diagnostic metadata but never gate: they
+# describe the installed toolchain, not the behavioral contract.
+_BATTERY_ENVIRONMENT_FIELDS = frozenset({"runner_fingerprint", "vitest_fingerprint"})
+# Retired inputs may appear in batteries committed by an older Jaunt. They are
+# ignored on read and dropped on the next write.
+_BATTERY_RETIRED_FIELDS = frozenset({"skills_fingerprint"})
+
 _TEST_IMPORT_POLICY = "static-esm-only-resolved-boundary-v3"
 _REJECTED_TEST_DIR = Path(".jaunt/typescript/rejected-tests")
 _REJECTED_TEST_STEM_MAX_CHARS = 96
@@ -3134,18 +3154,30 @@ def _test_provenance(
         "runner_fingerprint": runner_fingerprint or _runner_fingerprint(root, client, initialized),
         "prompt_fingerprint": _sha256(request.prompt.encode("utf-8")),
         "policy_fingerprint": _sha256(_TEST_IMPORT_POLICY.encode("utf-8")),
-        "skills_fingerprint": skills_fingerprint(
-            project_root=root,
-            builtin_names=(
-                tuple(builtin_skill_names)
-                if builtin_skill_names is not None
-                else (tuple(config.skills.builtin_skills) if config.skills.builtin else ())
-            ),
-        ),
     }
+    skills = skills_fingerprint(
+        project_root=root,
+        builtin_names=(
+            tuple(builtin_skill_names)
+            if builtin_skill_names is not None
+            else (tuple(config.skills.builtin_skills) if config.skills.builtin else ())
+        ),
+    )
+    fast_check_version = _read_package_version(roots, "fast-check")
+    committed = _canonical_digest({"tier": tier, **values})
     return {
         **values,
-        "battery_fingerprint": _canonical_digest({"tier": tier, **values}),
+        "battery_fingerprint": committed,
+        # Not stamped. Skill guidance and the installed fast-check version can
+        # change model output without changing the contract, so they partition
+        # the response cache instead of gating freshness.
+        "cache_fingerprint": _canonical_digest(
+            {
+                "committed": committed,
+                "skills_fingerprint": skills,
+                "fast_check_version": fast_check_version,
+            }
+        ),
     }
 
 
@@ -3580,7 +3612,14 @@ def _test_provenance_mismatches(
 ) -> set[str]:
     """Compare current provenance without losing removed optional inputs."""
 
-    mismatches = {key for key, value in provenance.items() if metadata.get(key) != value}
+    # Only stamped fields are comparable: an unstamped provenance value (for
+    # example ``cache_fingerprint``) has no committed counterpart and would
+    # otherwise mismatch on every battery.
+    mismatches = {
+        key
+        for key, value in provenance.items()
+        if key in _TEST_PROVENANCE_FIELDS and metadata.get(key) != value
+    }
     if (
         "imported_type_context_fingerprint" in metadata
         and "imported_type_context_fingerprint" not in provenance
@@ -8101,7 +8140,7 @@ async def run_test(
                     raise error.attach_candidate(source)
                 return _runner_validation_errors(checked)
 
-            cache_fingerprint = str(provenance["battery_fingerprint"])
+            cache_fingerprint = str(provenance["cache_fingerprint"])
             cache_for_request = None if force else response_cache
             validated_request = replace(request, validator=validate_candidate)
             async with semaphore:

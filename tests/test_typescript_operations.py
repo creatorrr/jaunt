@@ -13973,6 +13973,72 @@ async def test_api_transition_with_content_policy_drift_still_regenerates(
 
 
 @pytest.mark.asyncio
+async def test_skill_drift_changes_cache_identity_but_not_committed_freshness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skill content partitions the response cache without gating freshness.
+
+    A Python library's auto-generated skill must never restale a TypeScript
+    battery, but it must still prevent a stale cached completion from being
+    reused after the guidance changed.
+    """
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+    skill_dir = tmp_path / ".agents" / "skills" / "julep"
+    skill_dir.mkdir(parents=True)
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text("---\nname: julep\n---\nfirst\n", encoding="utf-8")
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert seeded.exit_code == 0
+
+    captured: dict[str, Mapping[str, str]] = {}
+
+    def capturing_provenance(*args: Any, **kwargs: Any) -> Mapping[str, str]:
+        provenance = _test_provenance(*args, **kwargs)
+        captured.setdefault(str(kwargs["tier"]), dict(provenance))
+        return provenance
+
+    monkeypatch.setattr("jaunt.typescript.tester._test_provenance", capturing_provenance)
+
+    async def observed_provenance() -> Mapping[str, str]:
+        captured.clear()
+        report = await run_test(
+            tmp_path,
+            config,
+            no_build=True,
+            generator=FakeGenerator(),
+            worker_factory=lambda *_: worker,
+        )
+        assert report.exit_code == 0
+        return captured["example"]
+
+    before = await observed_provenance()
+    skill_file.write_text("---\nname: julep\n---\nsecond\n", encoding="utf-8")
+    after = await observed_provenance()
+
+    assert "skills_fingerprint" not in before
+    assert before["battery_fingerprint"] == after["battery_fingerprint"]
+    assert before["cache_fingerprint"] != after["cache_fingerprint"]
+
+
+@pytest.mark.asyncio
 async def test_api_and_runner_drift_never_executes_an_unsafe_existing_body(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
