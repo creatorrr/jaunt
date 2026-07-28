@@ -140,8 +140,12 @@ _TEST_PROVENANCE_FIELDS = (
 )
 _TEST_REHEADER_FINGERPRINTS = frozenset({"runner_fingerprint", "vitest_fingerprint"})
 
-# Contract inputs are the only freshness gate: each is a pure function of
-# committed bytes, ``jaunt.toml``, and Jaunt's packaged prompt templates.
+# Contract inputs are the only freshness gate. Each is a pure function of
+# committed bytes, ``jaunt.toml``, and Jaunt's packaged prompt templates, with
+# one exception at this commit: ``fast_check_fingerprint`` also embeds the
+# installed fast-check version, an installed-environment input. A later task
+# removes that version from the contract digest, after which the rule holds
+# without exception.
 _BATTERY_CONTRACT_FIELDS = frozenset(
     {
         "test_spec_digest",
@@ -3805,12 +3809,14 @@ def _existing_test_battery_action(
 ) -> tuple[str, str | None]:
     """Classify an existing managed battery without trusting its header alone.
 
-    A runner or Vitest change cannot alter the authored test body, so those two
-    fingerprints may be deterministically reheadered. Every content-bearing
-    input, malformed ownership field, or body mismatch goes back through the
-    generator. The aggregate battery fingerprint must drift alongside an
-    allowed tooling fingerprint; an isolated aggregate mismatch is not a valid
-    restamp case.
+    Identity is pinned before classification is reached: the tier, source path,
+    ``body_digest``, and current static validation must all hold, or the battery
+    goes back through the generator. A runner or Vitest change cannot alter the
+    authored test body, so those two fingerprints may be deterministically
+    reheadered. Every other content-bearing input, malformed ownership field, or
+    body mismatch is generation-only: a free re-stamp requires the mismatch set
+    to intersect the allowed tooling set and to be a subset of that set plus the
+    aggregate battery fingerprint.
     """
 
     if force:
