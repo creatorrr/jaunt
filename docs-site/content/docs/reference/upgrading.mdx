@@ -12,6 +12,31 @@ invalidate built modules. The exception is a correctness repair for artifacts
 whose provenance was previously marked fresh incorrectly; that safety migration
 is called out explicitly below.
 
+## 1.7.13 (unreleased)
+
+Installed skill content and installed-toolchain identity (runner, Vitest, and
+fast-check) no longer gate committed TypeScript battery freshness; only
+contract inputs do. A battery stamped by an older Jaunt whose contract fields
+still match is re-stamped for free by the next `jaunt test --language ts`, with
+no model call and no API key. `jaunt check` now agrees with `jaunt test`: it
+reports non-gating divergence as an advisory on the diagnostic instead of
+failing the gate. This covers TypeScript *test batteries*; module sidecars still
+hash skill content into their generation fingerprint.
+
+`jaunt status` no longer reports environment-only battery drift, even
+informationally, because it and `check` share one diagnostic implementation.
+Repo-map drift is the inverse precedent: `status` notes it while `build` and
+`check` ignore it. A separate battery advisory channel is future work.
+
+This removes skills and toolchain identity as causes of staleness, but it does
+not promise that upgrading across releases needs no regeneration. A repo whose
+artifacts were stamped by an older Jaunt can still see genuine contract-field
+drift in `fixture_fingerprint`, `prompt_fingerprint`, `target_api_digest`, or
+`imported_type_context_fingerprint` for reasons unrelated to this fix. That
+drift requires regeneration.
+
+This is a Python-only change; no `@usejaunt/ts` upgrade is needed.
+
 ## 1.7.12
 
 Vitest projects using the jsdom environment can pin the protected runner again.

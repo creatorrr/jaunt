@@ -85,9 +85,16 @@ Before each generation call, Jaunt copies the enabled builtin skills plus your
 project's `.agents/skills/` directories into the Codex workspace under
 `.agents/skills/`. Project skills override builtins of the same name. The build
 prompt then simply tells Codex that relevant skills are available there — Codex
-reads the ones it needs. Note that skill content is not part of module
-freshness: editing a `SKILL.md` does not mark already-built modules stale, so
-rebuild with `jaunt build --force` (or change the spec) to pick up skill edits.
+reads the ones it needs.
+
+Skill content is not part of freshness: editing a `SKILL.md` does not mark an
+already-built module stale, and — as of 1.7.13 — it does not restale a committed
+TypeScript test battery either. What it does do is partition the model-response
+cache, so an edited skill is never served a stale cached completion. To pick up
+new skill guidance, change the spec or rebuild with `--force`; otherwise the
+next contract-driven rebuild will use it. (TypeScript module sidecars are the
+one remaining exception: skill content still feeds their generation
+fingerprint.)
 
 ## Builtin Skills
 
