@@ -18,10 +18,20 @@ Installed skill content and installed-toolchain identity (runner, Vitest, and
 fast-check) no longer gate committed TypeScript battery freshness; only
 contract inputs and ownership/tamper signals (`provenance`, `tier`, `source`, and
 `body_digest`) do: a tampered body, wrong tier, wrong source path, or unparseable
-provenance still fails `check`. A battery stamped by an older Jaunt whose contract
-fields still match is re-stamped for free by the next `jaunt test --language ts`, with
-no model call and no API key. `jaunt check` now agrees with `jaunt test`: it reports
-non-gating divergence as an advisory on the diagnostic instead of failing the gate.
+provenance still fails `check`. From this release on, the installed fast-check
+version is not a freshness input at all. A battery stamped by an older Jaunt whose
+contract fields still match is re-stamped for free by the next
+`jaunt test --language ts`, with no model call and no API key — but only if the
+installed fast-check version is also unchanged since that battery was stamped. The
+pre-split property digest embedded the version, so Jaunt recognizes such a header by
+recomputing the old composition against the currently installed version; if
+fast-check was upgraded too, the committed digest cannot be reconstructed and those
+batteries regenerate once, with a model call. Nothing is falsely declared fresh — the
+mismatch simply falls through to regeneration. So to take the free migration, upgrade
+Jaunt first, run `jaunt test --language ts` to re-stamp, and bump fast-check
+afterwards; the re-stamped header no longer carries the version, so later fast-check
+bumps cost nothing. `jaunt check` now agrees with `jaunt test`: it reports non-gating
+divergence as an advisory on the diagnostic instead of failing the gate.
 This covers TypeScript *test batteries*; module sidecars still hash skill content into
 their generation fingerprint, so a regenerated or edited skill can still make
 `jaunt check` exit 4 for every TypeScript module. That repair is free, though:
@@ -36,7 +46,8 @@ This removes skills and toolchain identity as causes of staleness, but it does
 not promise that upgrading across releases needs no regeneration. A repo whose
 artifacts were stamped by an older Jaunt can still see genuine contract-field
 drift in `fixture_fingerprint`, `prompt_fingerprint`, `target_api_digest`, or
-`imported_type_context_fingerprint` for reasons unrelated to this fix. That
+`imported_type_context_fingerprint` for reasons unrelated to this fix — and the
+pre-split fast-check case above is one more instance of the same point. That
 drift requires regeneration.
 
 This is a Python-only change; no `@usejaunt/ts` upgrade is needed.
