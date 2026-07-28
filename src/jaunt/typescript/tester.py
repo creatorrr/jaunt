@@ -3691,6 +3691,30 @@ def _test_provenance_mismatches(
     return mismatches
 
 
+def _battery_contract_mismatches(
+    metadata: Mapping[str, str],
+    provenance: Mapping[str, str],
+    mismatches: set[str],
+) -> set[str]:
+    """Reduce raw provenance mismatches to those that may gate freshness.
+
+    Environment and retired fields describe the installed toolchain or a prior
+    Jaunt release, not the behavioral contract. A pre-split property digest is
+    recognized by recomputing the old composition, so a legacy header proves it
+    differs only by composition rather than by content.
+    """
+
+    contract = mismatches & _BATTERY_CONTRACT_FIELDS
+    legacy_property_digest = provenance.get("legacy_fast_check_fingerprint")
+    if (
+        "fast_check_fingerprint" in contract
+        and legacy_property_digest is not None
+        and metadata.get("fast_check_fingerprint") == legacy_property_digest
+    ):
+        contract.discard("fast_check_fingerprint")
+    return contract
+
+
 def _read_current_target_artifact_snapshot(
     root: Path,
     modules: Sequence[Mapping[str, Any]],
@@ -3874,6 +3898,21 @@ def _existing_test_battery_action(
     mismatches = _test_provenance_mismatches(metadata, provenance)
     if not mismatches:
         return "skip", source
+
+    # The committed aggregate is a pure function of the stamped contract fields
+    # plus the tier. If every contract field matches, an aggregate mismatch is a
+    # composition change from a Jaunt upgrade -- provably not content drift --
+    # so re-stamp it for free rather than paying for regeneration.
+    if not _battery_contract_mismatches(metadata, provenance, mismatches):
+        return (
+            "refreeze",
+            _with_test_header(
+                body,
+                tier=tier,
+                source_path=source_path,
+                provenance=provenance,
+            ),
+        )
 
     allowed_tooling = set(_TEST_REHEADER_FINGERPRINTS)
     # ``fixture_fingerprint`` was added after committed batteries already

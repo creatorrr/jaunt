@@ -131,6 +131,7 @@ from jaunt.typescript.tester import (
     _test_header_metadata,
     _test_dependency_runtime_identity,
     _test_provenance,
+    _test_provenance_mismatches,
     _test_request,
     _valid_runner_dto,
     _validate_test_owner_dependencies,
@@ -14126,6 +14127,217 @@ async def test_fast_check_install_version_does_not_gate_freshness(
         installed["legacy_fast_check_fingerprint"]
         == "sha256:ab1369222d10e48c4d35581262f7e3e6f7c1f549936a07f30e9669cf007d885b"
     )
+
+
+@pytest.mark.asyncio
+async def test_legacy_skills_header_refreezes_without_a_model_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-split header re-stamps for free.
+
+    The committed aggregate is a pure function of the stamped contract fields
+    plus the tier, so an aggregate mismatch while every contract field matches
+    is a composition change, never content drift.
+    """
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert seeded.exit_code == 0
+
+    example_relative = "tests/__generated__/math.example.test.ts"
+    example = tmp_path / example_relative
+    original = example.read_text(encoding="utf-8")
+    # Rewrite the header the way pre-split Jaunt stamped it: a retired
+    # skills field plus an aggregate computed over a different composition.
+    legacy = {
+        **dict(_test_header_metadata(original) or {}),
+        "skills_fingerprint": "d" * 64,
+        "battery_fingerprint": "sha256:" + "e" * 64,
+    }
+    example.write_text(
+        _with_test_header(
+            _strip_test_header(original),
+            tier="example",
+            source_path=worker.test_spec_path,
+            provenance=legacy,
+        ),
+        encoding="utf-8",
+    )
+
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=ExplodingGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 0
+    assert report.generated == frozenset()
+    assert example_relative in report.refrozen
+    refreshed = example.read_text(encoding="utf-8")
+    assert _strip_test_header(refreshed) == _strip_test_header(original)
+    assert "skills_fingerprint" not in (_test_header_metadata(refreshed) or {})
+
+
+@pytest.mark.asyncio
+async def test_real_spec_edit_still_requires_the_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gating power is preserved: contract drift is never re-stamped."""
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    assert (
+        await run_test(
+            tmp_path,
+            config,
+            no_build=True,
+            generator=FakeGenerator(),
+            worker_factory=lambda *_: worker,
+        )
+    ).exit_code == 0
+
+    example = tmp_path / "tests/__generated__/math.example.test.ts"
+    original = example.read_text(encoding="utf-8")
+    drifted = {
+        **dict(_test_header_metadata(original) or {}),
+        "test_spec_digest": "sha256:" + "a" * 64,
+        "battery_fingerprint": "sha256:" + "b" * 64,
+    }
+    example.write_text(
+        _with_test_header(
+            _strip_test_header(original),
+            tier="example",
+            source_path=worker.test_spec_path,
+            provenance=drifted,
+        ),
+        encoding="utf-8",
+    )
+
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert report.exit_code == 0
+    assert "tests/__generated__/math.example.test.ts" in report.generated
+
+
+@pytest.mark.asyncio
+async def test_upgrade_aggregate_only_drift_refreezes_without_a_model_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An older aggregate alone must re-stamp without paid regeneration.
+
+    A battery stamped by an older Jaunt carries the old conflated aggregate. Every
+    contract field still matches, so the only mismatch is ``battery_fingerprint``.
+    Upgrading must re-stamp it for free rather than cost one paid model regeneration
+    per battery.
+    """
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    captured: dict[str, Mapping[str, str]] = {}
+
+    def capturing_provenance(*args: Any, **kwargs: Any) -> Mapping[str, str]:
+        provenance = _test_provenance(*args, **kwargs)
+        captured.setdefault(str(kwargs["tier"]), dict(provenance))
+        return provenance
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    monkeypatch.setattr("jaunt.typescript.tester._test_provenance", capturing_provenance)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert seeded.exit_code == 0
+    captured_example_provenance = captured["example"]
+
+    example_relative = "tests/__generated__/math.example.test.ts"
+    example = tmp_path / example_relative
+    original = example.read_text(encoding="utf-8")
+    legacy = {
+        **dict(_test_header_metadata(original) or {}),
+        "battery_fingerprint": "sha256:" + "c" * 64,
+    }
+    assert "skills_fingerprint" not in legacy
+    example.write_text(
+        _with_test_header(
+            _strip_test_header(original),
+            tier="example",
+            source_path=worker.test_spec_path,
+            provenance=legacy,
+        ),
+        encoding="utf-8",
+    )
+    assert _test_provenance_mismatches(
+        dict(_test_header_metadata(example.read_text(encoding="utf-8")) or {}),
+        captured_example_provenance,
+    ) == {"battery_fingerprint"}
+
+    # A cold response cache is deliberate: on a real upgrade ``cache_fingerprint``
+    # moves too, so no cached completion is available. Without it the seeded run's
+    # cache would silently satisfy a regeneration and ``ExplodingGenerator`` would
+    # never fire, turning the "no model call" claim into a formality.
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=ExplodingGenerator(),
+        response_cache=ResponseCache(tmp_path / ".upgrade-aggregate-cache"),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 0
+    assert report.generated == frozenset()
+    assert example_relative in report.refrozen
+    refreshed = example.read_text(encoding="utf-8")
+    assert _strip_test_header(refreshed) == _strip_test_header(original)
+    assert (_test_header_metadata(refreshed) or {})[
+        "battery_fingerprint"
+    ] == captured_example_provenance["battery_fingerprint"]
 
 
 @pytest.mark.asyncio
