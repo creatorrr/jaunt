@@ -3161,21 +3161,33 @@ def _test_provenance(
         "policy_fingerprint": _sha256(_TEST_IMPORT_POLICY.encode("utf-8")),
     }
     # Every provenance input must be classified as either a committed contract
-    # input or a stamped-but-non-gating environment input. An unclassified key
-    # would silently escape the committed aggregate below and the stamped-field
-    # comparison in ``_test_provenance_mismatches`` -- a freshness input that
-    # stops being checked with no signal. Fail loudly instead. This is not an
-    # ``assert``: it must survive ``python -O``.
+    # input or a stamped-but-non-gating environment input, and every classified
+    # input must be stamped. An unclassified key would escape the committed
+    # aggregate below; an unstamped-but-classified key is never written or
+    # compared, so it silently stops gating. Fail loudly instead. This is not
+    # an ``assert``: it must survive ``python -O``.
     unclassified = set(values) - _BATTERY_CONTRACT_FIELDS - _BATTERY_ENVIRONMENT_FIELDS
-    if unclassified:
-        raise RuntimeError(
-            "unclassified TypeScript battery provenance field(s): "
-            f"{', '.join(sorted(unclassified))}. Add each to _BATTERY_CONTRACT_FIELDS "
-            "(committed freshness gate) or _BATTERY_ENVIRONMENT_FIELDS (stamped, "
-            "non-gating), or compute it outside `values` as a member of "
-            "_BATTERY_NON_STAMPED_FIELDS (never stamped, never gating): "
-            f"{', '.join(sorted(_BATTERY_NON_STAMPED_FIELDS))}."
-        )
+    unstamped = set(values) - set(_TEST_PROVENANCE_FIELDS)
+    if unclassified or unstamped:
+        failures: list[str] = []
+        if unclassified:
+            failures.append(
+                "unclassified TypeScript battery provenance field(s): "
+                f"{', '.join(sorted(unclassified))}. Add each to "
+                "_BATTERY_CONTRACT_FIELDS (committed freshness gate) or "
+                "_BATTERY_ENVIRONMENT_FIELDS (stamped, non-gating), or compute it "
+                "outside `values` as a member of _BATTERY_NON_STAMPED_FIELDS "
+                "(never stamped, never gating): "
+                f"{', '.join(sorted(_BATTERY_NON_STAMPED_FIELDS))}."
+            )
+        if unstamped:
+            failures.append(
+                "unstamped TypeScript battery provenance field(s): "
+                f"{', '.join(sorted(unstamped))}. Add each to "
+                "_TEST_PROVENANCE_FIELDS so it is written to the header and "
+                "compared on read."
+            )
+        raise RuntimeError("invalid TypeScript battery provenance fields: " + " ".join(failures))
     skills = skills_fingerprint(
         project_root=root,
         builtin_names=(
@@ -3224,6 +3236,13 @@ def _legacy_fast_check_fingerprint(
     ``fast-check`` version into their property digest. Reproducing that value
     lets a reader prove an old header differs only by composition, so it can be
     re-stamped for free instead of regenerated.
+
+    The composition below duplicates the live ``fast_check_fingerprint`` payload
+    verbatim except for the extra ``version`` key. That duplication is deliberate:
+    the legacy shape describes headers already committed on disk and must stay
+    frozen even as the live payload evolves. Do not factor the two into a shared
+    helper -- coupling them would silently break legacy detection the next time
+    the live payload changes.
     """
 
     return _canonical_digest(
@@ -3445,11 +3464,12 @@ def _write_rejected_test_candidate(
     )
     semantic_identity = _rejected_test_semantic_identity(expected_provenance)
     marker_identity = semantic_identity or fingerprint
+    # Marker identity uses only stamped semantic fields, so filtering preserves it.
     stored_provenance = (
         {
             str(key): value
             for key, value in expected_provenance.items()
-            if isinstance(key, str) and isinstance(value, str)
+            if (isinstance(key, str) and isinstance(value, str) and key in _TEST_PROVENANCE_FIELDS)
         }
         if expected_provenance is not None
         else None

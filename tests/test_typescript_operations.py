@@ -107,6 +107,9 @@ from jaunt.typescript.protocol import (
 from jaunt.typescript.status import run_check, run_clean, run_status
 from jaunt.typescript.tester import (
     _assert_no_held_out_leak,
+    _BATTERY_CONTRACT_FIELDS,
+    _BATTERY_ENVIRONMENT_FIELDS,
+    _BATTERY_NON_STAMPED_FIELDS,
     _battery_contract_mismatches,
     _canonical_digest,
     _fixture_resolution_preconditions,
@@ -131,6 +134,7 @@ from jaunt.typescript.tester import (
     _terminate_runner_process,
     _test_header_metadata,
     _test_dependency_runtime_identity,
+    _TEST_PROVENANCE_FIELDS,
     _test_provenance,
     _test_provenance_mismatches,
     _test_request,
@@ -13900,6 +13904,17 @@ async def test_api_transition_with_safe_drift_verifies_before_run_without_genera
     assert _strip_test_header(refreshed) == _strip_test_header(original)
     assert refreshed_metadata["target_api_digest"] == original_metadata["target_api_digest"]
     assert refreshed_metadata[co_drift_field] == original_metadata[co_drift_field]
+
+
+def test_classified_battery_provenance_fields_are_stamped() -> None:
+    """Prevent classified fields from silently escaping the committed battery header."""
+
+    classified = _BATTERY_CONTRACT_FIELDS | _BATTERY_ENVIRONMENT_FIELDS
+    stamped = set(_TEST_PROVENANCE_FIELDS)
+
+    assert classified <= stamped
+    assert _BATTERY_NON_STAMPED_FIELDS.isdisjoint(stamped)
+    assert _BATTERY_NON_STAMPED_FIELDS.isdisjoint(classified)
 
 
 @pytest.mark.asyncio

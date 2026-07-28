@@ -23,7 +23,9 @@ fields still match is re-stamped for free by the next `jaunt test --language ts`
 no model call and no API key. `jaunt check` now agrees with `jaunt test`: it reports
 non-gating divergence as an advisory on the diagnostic instead of failing the gate.
 This covers TypeScript *test batteries*; module sidecars still hash skill content into
-their generation fingerprint.
+their generation fingerprint, so a regenerated or edited skill can still make
+`jaunt check` exit 4 for every TypeScript module. That repair is free, though:
+`jaunt build` re-stamps those modules with no model call.
 
 `jaunt status` no longer reports environment-only battery drift, even
 informationally, because it and `check` share one diagnostic implementation.
