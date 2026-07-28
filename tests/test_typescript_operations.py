@@ -11368,7 +11368,10 @@ async def test_test_incrementality_refreezes_tooling_only_drift_before_running(
         assert metadata["body_digest"] == before[path][1]["body_digest"]
         assert metadata["runner_fingerprint"] != before[path][1]["runner_fingerprint"]
         assert metadata["vitest_fingerprint"] != before[path][1]["vitest_fingerprint"]
-        assert metadata["battery_fingerprint"] != before[path][1]["battery_fingerprint"]
+        # The committed aggregate is contract-only, so reheader-safe toolchain
+        # drift restamps the diagnostic fingerprints while leaving the aggregate
+        # bit-identical across environments.
+        assert metadata["battery_fingerprint"] == before[path][1]["battery_fingerprint"]
 
 
 @pytest.mark.asyncio
@@ -14036,6 +14039,13 @@ async def test_skill_drift_changes_cache_identity_but_not_committed_freshness(
     assert "skills_fingerprint" not in before
     assert before["battery_fingerprint"] == after["battery_fingerprint"]
     assert before["cache_fingerprint"] != after["cache_fingerprint"]
+    rendered = _with_test_header(
+        "// body\n",
+        tier="example",
+        source_path="src/math.jaunt-test.ts",
+        provenance=before,
+    )
+    assert "cache_fingerprint" not in (_test_header_metadata(rendered) or {})
 
 
 @pytest.mark.asyncio

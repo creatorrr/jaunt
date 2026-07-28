@@ -159,6 +159,11 @@ _BATTERY_ENVIRONMENT_FIELDS = frozenset({"runner_fingerprint", "vitest_fingerpri
 # Retired inputs may appear in batteries committed by an older Jaunt. They are
 # ignored on read and dropped on the next write.
 _BATTERY_RETIRED_FIELDS = frozenset({"skills_fingerprint"})
+# Cache-only inputs are deliberately excluded from the committed aggregate and
+# from ``_TEST_PROVENANCE_FIELDS``: they partition the response cache without
+# ever gating committed freshness. They are produced after classification, so
+# they are never members of ``values``.
+_BATTERY_CACHE_ONLY_FIELDS = frozenset({"cache_fingerprint"})
 
 _TEST_IMPORT_POLICY = "static-esm-only-resolved-boundary-v3"
 _REJECTED_TEST_DIR = Path(".jaunt/typescript/rejected-tests")
@@ -3155,6 +3160,21 @@ def _test_provenance(
         "prompt_fingerprint": _sha256(request.prompt.encode("utf-8")),
         "policy_fingerprint": _sha256(_TEST_IMPORT_POLICY.encode("utf-8")),
     }
+    # Every provenance input must be classified as either a committed contract
+    # input or a stamped-but-non-gating environment input. An unclassified key
+    # would silently escape the committed aggregate below and the stamped-field
+    # comparison in ``_test_provenance_mismatches`` -- a freshness input that
+    # stops being checked with no signal. Fail loudly instead. This is not an
+    # ``assert``: it must survive ``python -O``.
+    unclassified = set(values) - _BATTERY_CONTRACT_FIELDS - _BATTERY_ENVIRONMENT_FIELDS
+    if unclassified:
+        raise RuntimeError(
+            "unclassified TypeScript battery provenance field(s): "
+            f"{', '.join(sorted(unclassified))}. Add each to _BATTERY_CONTRACT_FIELDS "
+            "(committed freshness gate) or _BATTERY_ENVIRONMENT_FIELDS (stamped, "
+            "non-gating), or compute it outside `values` as a member of "
+            f"_BATTERY_CACHE_ONLY_FIELDS ({', '.join(sorted(_BATTERY_CACHE_ONLY_FIELDS))})."
+        )
     skills = skills_fingerprint(
         project_root=root,
         builtin_names=(
@@ -3164,13 +3184,20 @@ def _test_provenance(
         ),
     )
     fast_check_version = _read_package_version(roots, "fast-check")
-    committed = _canonical_digest({"tier": tier, **values})
+    committed = _canonical_digest(
+        {
+            "tier": tier,
+            **{key: value for key, value in values.items() if key in _BATTERY_CONTRACT_FIELDS},
+        }
+    )
     return {
         **values,
         "battery_fingerprint": committed,
-        # Not stamped. Skill guidance and the installed fast-check version can
-        # change model output without changing the contract, so they partition
-        # the response cache instead of gating freshness.
+        # Not stamped. Skill guidance changes model output without changing the
+        # contract, so it partitions the response cache instead of gating
+        # freshness. The installed fast-check version also participates in cache
+        # identity here, but it still feeds ``fast_check_fingerprint`` (a contract
+        # field) until a later task removes it from the contract digest.
         "cache_fingerprint": _canonical_digest(
             {
                 "committed": committed,
@@ -3864,11 +3891,12 @@ def _existing_test_battery_action(
     if api_proof_matches:
         allowed_tooling.add("target_api_digest")
     allowed = allowed_tooling | {"battery_fingerprint"}
-    if (
-        not mismatches.intersection(allowed_tooling)
-        or "battery_fingerprint" not in mismatches
-        or not mismatches.issubset(allowed)
-    ):
+    # Refreeze is reheader-only: at least one reheader-safe tooling field must
+    # have drifted and nothing outside the reheader-safe set may have. Since the
+    # committed aggregate is contract-only, tooling drift no longer moves
+    # ``battery_fingerprint``, so its presence in ``mismatches`` is tolerated but
+    # not required.
+    if not mismatches.intersection(allowed_tooling) or not mismatches.issubset(allowed):
         if allow_verified_api_transition and _is_verifiable_api_transition(
             mismatches,
             additional_allowed=allowed_tooling,
