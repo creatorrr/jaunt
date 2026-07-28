@@ -157,9 +157,9 @@ _BATTERY_CONTRACT_FIELDS = frozenset(
 # Environment inputs are stamped as diagnostic metadata but never gate: they
 # describe the installed toolchain, not the behavioral contract.
 _BATTERY_ENVIRONMENT_FIELDS = frozenset({"runner_fingerprint", "vitest_fingerprint"})
-# Retired inputs may appear in batteries committed by an older Jaunt. They are
-# ignored on read and dropped on the next write.
-_BATTERY_RETIRED_FIELDS = frozenset({"skills_fingerprint"})
+# Retired inputs need no registry: a field dropped from _TEST_PROVENANCE_FIELDS is
+# structurally omitted by _with_test_header on write and never compared on read, so
+# a battery committed by an older Jaunt simply loses it on the next re-stamp.
 # These values are produced after classification, so they are never members of
 # ``values``, stamped into a battery header, or used to gate freshness.
 # ``cache_fingerprint`` partitions the response cache; ``legacy_fast_check_fingerprint``
@@ -5032,6 +5032,23 @@ def _test_battery_diagnostics(
                     mismatches.append("body_digest")
             if mismatches:
                 mismatch_fields = set(mismatches)
+                # ``check`` gates on exactly what ``test`` regenerates for: contract fields,
+                # plus the ownership/tamper signals appended above. Those four are not
+                # provenance fields (``body_digest`` is not even in the mapping), so
+                # ``_battery_contract_mismatches`` would drop them; union them back in or a
+                # tampered body or mis-tiered file would pass ``check`` silently.
+                identity_fields = mismatch_fields & {"provenance", "tier", "source", "body_digest"}
+                gating = (
+                    _battery_contract_mismatches(
+                        dict(metadata or {}),
+                        expected,
+                        mismatch_fields,
+                    )
+                    | identity_fields
+                )
+                advisories = tuple(sorted(mismatch_fields - gating))
+                if not gating:
+                    continue
                 distinct = _rejected_test_diagnostic(
                     root,
                     relative,
@@ -5055,6 +5072,9 @@ def _test_battery_diagnostics(
                     and expected.get("fixture_fingerprint") == _canonical_digest(None)
                     else set()
                 )
+                # ``_is_verifiable_api_transition`` requires the ``battery_fingerprint``
+                # aggregate, which is deliberately not a contract field and so never appears
+                # in ``gating``. It must inspect the raw mismatch set or it never matches.
                 remedy = (
                     "run `jaunt test --language ts --no-build` without `--no-run`, then "
                     "rerun `jaunt check`."
@@ -5069,14 +5089,18 @@ def _test_battery_diagnostics(
                         code=diagnostic_code,
                         message=(
                             f"The {tier} TypeScript battery for {source_path} is{detail} "
-                            f"({', '.join(sorted(mismatch_fields))}); {remedy}"
+                            f"({', '.join(sorted(gating))}); {remedy}"
                         ),
                         path=relative,
                         data={
                             "scope": "magic",
                             "source": source_path,
                             "tier": tier,
+                            # This diagnostic is only emitted when something gates, so report
+                            # the full observed divergence here and name the non-gating
+                            # subset separately; the message renders only what gates.
                             "mismatches": tuple(sorted(mismatch_fields)),
+                            **({"advisories": advisories} if advisories else {}),
                             **(
                                 {
                                     "candidate": distinct["candidate"],
