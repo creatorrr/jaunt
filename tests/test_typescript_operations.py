@@ -107,6 +107,7 @@ from jaunt.typescript.protocol import (
 from jaunt.typescript.status import run_check, run_clean, run_status
 from jaunt.typescript.tester import (
     _assert_no_held_out_leak,
+    _battery_contract_mismatches,
     _canonical_digest,
     _fixture_resolution_preconditions,
     _HeldOutLeakError,
@@ -14186,6 +14187,8 @@ async def test_legacy_skills_header_refreezes_without_a_model_call(
         config,
         no_build=True,
         generator=ExplodingGenerator(),
+        # Use a cold cache for the same reason as the aggregate-only upgrade test below.
+        response_cache=ResponseCache(tmp_path / ".legacy-skills-cache"),
         worker_factory=lambda *_: worker,
     )
 
@@ -14338,6 +14341,180 @@ async def test_upgrade_aggregate_only_drift_refreezes_without_a_model_call(
     assert (_test_header_metadata(refreshed) or {})[
         "battery_fingerprint"
     ] == captured_example_provenance["battery_fingerprint"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_property_digest_refreezes_without_a_model_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-split property digest is recognized and re-stamped for free.
+
+    This is the only case where a contract field is deliberately dropped from the
+    freshness gate, so it is pinned here: the committed ``fast_check_fingerprint``
+    is exactly what the old composition would produce for today's property
+    content, which proves composition drift rather than content drift.
+    """
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    def fake_version(_roots: object, package: str) -> str:
+        return "3.23.0" if package == "fast-check" else "1.0.0"
+
+    captured: dict[str, Mapping[str, str]] = {}
+
+    def capturing_provenance(*args: Any, **kwargs: Any) -> Mapping[str, str]:
+        provenance = _test_provenance(*args, **kwargs)
+        captured.setdefault(str(kwargs["tier"]), dict(provenance))
+        return provenance
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    monkeypatch.setattr("jaunt.typescript.tester._read_package_version", fake_version)
+    monkeypatch.setattr("jaunt.typescript.tester._test_provenance", capturing_provenance)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert seeded.exit_code == 0
+
+    legacy = captured["example"]["legacy_fast_check_fingerprint"]
+    assert legacy == "sha256:ab1369222d10e48c4d35581262f7e3e6f7c1f549936a07f30e9669cf007d885b"
+
+    example_relative = "tests/__generated__/math.example.test.ts"
+    example = tmp_path / example_relative
+    original = example.read_text(encoding="utf-8")
+    example.write_text(
+        _with_test_header(
+            _strip_test_header(original),
+            tier="example",
+            source_path=worker.test_spec_path,
+            provenance={
+                **dict(_test_header_metadata(original) or {}),
+                "fast_check_fingerprint": legacy,
+            },
+        ),
+        encoding="utf-8",
+    )
+    metadata = dict(_test_header_metadata(example.read_text(encoding="utf-8")) or {})
+    mismatches = _test_provenance_mismatches(metadata, captured["example"])
+    assert mismatches == {"fast_check_fingerprint"}
+    assert _battery_contract_mismatches(metadata, captured["example"], mismatches) == set()
+
+    # A cold cache makes ExplodingGenerator prove this did not regenerate.
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=ExplodingGenerator(),
+        response_cache=ResponseCache(tmp_path / ".legacy-property-cache"),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 0
+    assert report.generated == frozenset()
+    assert example_relative in report.refrozen
+    refreshed = example.read_text(encoding="utf-8")
+    assert _strip_test_header(refreshed) == _strip_test_header(original)
+    assert (_test_header_metadata(refreshed) or {})["fast_check_fingerprint"] == captured[
+        "example"
+    ]["fast_check_fingerprint"]
+
+
+@pytest.mark.asyncio
+async def test_mutated_property_block_still_requires_the_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The legacy property-digest allowance is narrow, not a blanket bypass.
+
+    Same header as the positive twin above, but the property block genuinely
+    changed, so the recomputed legacy digest can no longer equal the committed
+    value and the battery must be regenerated.
+    """
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    def fake_version(_roots: object, package: str) -> str:
+        return "3.23.0" if package == "fast-check" else "1.0.0"
+
+    captured: dict[str, Mapping[str, str]] = {}
+
+    def capturing_provenance(*args: Any, **kwargs: Any) -> Mapping[str, str]:
+        provenance = _test_provenance(*args, **kwargs)
+        captured.setdefault(str(kwargs["tier"]), dict(provenance))
+        return provenance
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    monkeypatch.setattr("jaunt.typescript.tester._read_package_version", fake_version)
+    monkeypatch.setattr("jaunt.typescript.tester._test_provenance", capturing_provenance)
+    seeded = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert seeded.exit_code == 0
+
+    legacy = captured["example"]["legacy_fast_check_fingerprint"]
+    assert legacy == "sha256:ab1369222d10e48c4d35581262f7e3e6f7c1f549936a07f30e9669cf007d885b"
+
+    example_relative = "tests/__generated__/math.example.test.ts"
+    example = tmp_path / example_relative
+    original = example.read_text(encoding="utf-8")
+    example.write_text(
+        _with_test_header(
+            _strip_test_header(original),
+            tier="example",
+            source_path=worker.test_spec_path,
+            provenance={
+                **dict(_test_header_metadata(original) or {}),
+                "fast_check_fingerprint": legacy,
+            },
+        ),
+        encoding="utf-8",
+    )
+    metadata = dict(_test_header_metadata(example.read_text(encoding="utf-8")) or {})
+
+    monkeypatch.setattr(
+        "jaunt.typescript.tester.render_property_block",
+        lambda *args, **kwargs: "// mutated property block\n",
+    )
+    captured.clear()
+    report = await run_test(
+        tmp_path,
+        config,
+        no_build=True,
+        generator=FakeGenerator(),
+        response_cache=ResponseCache(tmp_path / ".mutated-property-cache"),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert report.exit_code == 0
+    assert example_relative in report.generated
+    mutated_mismatches = _test_provenance_mismatches(metadata, captured["example"])
+    assert "fast_check_fingerprint" in _battery_contract_mismatches(
+        metadata, captured["example"], mutated_mismatches
+    )
 
 
 @pytest.mark.asyncio

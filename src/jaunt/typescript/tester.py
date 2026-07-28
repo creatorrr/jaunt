@@ -3869,7 +3869,9 @@ def _existing_test_battery_action(
     ``body_digest``, and current static validation must all hold, or the battery
     goes back through the generator. A runner or Vitest change cannot alter the
     authored test body, so those two fingerprints may be deterministically
-    reheadered. Every other content-bearing input, malformed ownership field, or
+    reheadered. When no contract field mismatches, an aggregate difference is a
+    provable composition change from a Jaunt upgrade and is re-stamped for free.
+    Otherwise, every other content-bearing input, malformed ownership field, or
     body mismatch is generation-only: a free re-stamp requires the mismatch set
     to intersect the allowed tooling set and to be a subset of that set plus the
     aggregate battery fingerprint.
@@ -3968,11 +3970,12 @@ def _existing_test_battery_action(
     if api_proof_matches:
         allowed_tooling.add("target_api_digest")
     allowed = allowed_tooling | {"battery_fingerprint"}
-    # Refreeze is reheader-only: at least one reheader-safe tooling field must
-    # have drifted and nothing outside the reheader-safe set may have. Since the
+    # On this path, refreeze is reheader-only: at least one reheader-safe tooling
+    # field must have drifted and nothing outside the reheader-safe set may have.
+    # (The aggregate-only composition case already returned above.) Since the
     # committed aggregate is contract-only, tooling drift no longer moves
-    # ``battery_fingerprint``, so its presence in ``mismatches`` is tolerated but
-    # not required.
+    # ``battery_fingerprint``, so its presence in ``mismatches`` is tolerated here
+    # but not required.
     if not mismatches.intersection(allowed_tooling) or not mismatches.issubset(allowed):
         if allow_verified_api_transition and _is_verifiable_api_transition(
             mismatches,
