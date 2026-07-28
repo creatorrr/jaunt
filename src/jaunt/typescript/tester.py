@@ -5033,8 +5033,8 @@ def _test_battery_diagnostics(
             if mismatches:
                 mismatch_fields = set(mismatches)
                 # ``check`` gates on exactly what ``test`` regenerates for: contract fields,
-                # plus the ownership/tamper signals appended above. Those four are not
-                # provenance fields (``body_digest`` is not even in the mapping), so
+                # plus the ownership/tamper signals appended above. Those four are absent
+                # from the expected-provenance mapping returned by ``_test_provenance``, so
                 # ``_battery_contract_mismatches`` would drop them; union them back in or a
                 # tampered body or mis-tiered file would pass ``check`` silently.
                 identity_fields = mismatch_fields & {"provenance", "tier", "source", "body_digest"}
@@ -5096,10 +5096,14 @@ def _test_battery_diagnostics(
                             "scope": "magic",
                             "source": source_path,
                             "tier": tier,
-                            # This diagnostic is only emitted when something gates, so report
-                            # the full observed divergence here and name the non-gating
-                            # subset separately; the message renders only what gates.
+                            # Three views of the same divergence: ``mismatches`` is everything
+                            # observed; ``gating`` is the nonempty subset that failed the check
+                            # (an empty value hits the ``continue`` above); and ``advisories``
+                            # is the remaining non-gating observation
+                            # (``advisories = mismatches - gating``), omitted when empty. The
+                            # rendered message names only ``gating``.
                             "mismatches": tuple(sorted(mismatch_fields)),
+                            "gating": tuple(sorted(gating)),
                             **({"advisories": advisories} if advisories else {}),
                             **(
                                 {

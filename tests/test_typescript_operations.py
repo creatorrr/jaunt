@@ -16229,3 +16229,143 @@ async def test_check_reports_non_gating_battery_drift_as_advisories(
     )
     assert "(policy_fingerprint)" in diagnostic.message
     assert "runner_fingerprint" not in diagnostic.message
+
+
+@pytest.mark.asyncio
+async def test_check_diagnostic_reports_the_gating_field_subset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`data["gating"]` names what blocked the check, without a `--json` consumer
+    having to compute `set(mismatches) - set(advisories)` itself.
+    """
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert (
+        await run_test(
+            tmp_path,
+            config,
+            no_build=True,
+            generator=FakeGenerator(),
+            worker_factory=lambda *_: worker,
+        )
+    ).exit_code == 0
+
+    example = tmp_path / "tests/__generated__/math.example.test.ts"
+    original = example.read_text(encoding="utf-8")
+    mixed_drift = {
+        **dict(_test_header_metadata(original) or {}),
+        "policy_fingerprint": "sha256:" + "a" * 64,
+        "runner_fingerprint": "sha256:" + "1" * 64,
+        "vitest_fingerprint": "sha256:" + "2" * 64,
+        "battery_fingerprint": "sha256:" + "3" * 64,
+    }
+    example.write_text(
+        _with_test_header(
+            _strip_test_header(original),
+            tier="example",
+            source_path=worker.test_spec_path,
+            provenance=mixed_drift,
+        ),
+        encoding="utf-8",
+    )
+
+    report = await run_check(tmp_path, config, worker_factory=lambda *_: worker)
+
+    diagnostic = next(
+        item
+        for item in report.diagnostics
+        if item.code == "JAUNT_TS_TEST_BATTERY_STALE"
+        and str(item.path).endswith("math.example.test.ts")
+    )
+    assert diagnostic.data["gating"] == ("policy_fingerprint",)
+    assert set(diagnostic.data["mismatches"]) == {
+        "battery_fingerprint",
+        "policy_fingerprint",
+        "runner_fingerprint",
+        "vitest_fingerprint",
+    }
+    assert set(diagnostic.data["gating"]).isdisjoint(diagnostic.data["advisories"])
+    assert set(diagnostic.data["gating"]) | set(diagnostic.data["advisories"]) == set(
+        diagnostic.data["mismatches"]
+    )
+    assert all(name in diagnostic.message for name in diagnostic.data["gating"])
+
+
+@pytest.mark.asyncio
+async def test_status_ignores_environment_only_battery_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`run_status` deliberately shares `run_check`'s non-gating battery behavior.
+
+    This spillover is deliberate: both use `_test_battery_diagnostics`, so
+    environment-only drift is not surfaced even informationally.
+    """
+    config = _config(tmp_path)
+    worker = _TestSpecWorker(tmp_path)
+
+    async def green_batches(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck" if kwargs.get("typecheck_only") else "run",
+            "tests": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr("jaunt.typescript.tester._run_test_batches", green_batches)
+    await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    assert (
+        await run_test(
+            tmp_path,
+            config,
+            no_build=True,
+            generator=FakeGenerator(),
+            worker_factory=lambda *_: worker,
+        )
+    ).exit_code == 0
+
+    example = tmp_path / "tests/__generated__/math.example.test.ts"
+    original = example.read_text(encoding="utf-8")
+    environment_drift = {
+        **dict(_test_header_metadata(original) or {}),
+        "runner_fingerprint": "sha256:" + "1" * 64,
+        "vitest_fingerprint": "sha256:" + "2" * 64,
+        "battery_fingerprint": "sha256:" + "3" * 64,
+    }
+    example.write_text(
+        _with_test_header(
+            _strip_test_header(original),
+            tier="example",
+            source_path=worker.test_spec_path,
+            provenance=environment_drift,
+        ),
+        encoding="utf-8",
+    )
+
+    status = await run_status(tmp_path, config, worker_factory=lambda *_: worker)
+
+    assert not any(
+        diagnostic.code == "JAUNT_TS_TEST_BATTERY_STALE" for diagnostic in status.diagnostics
+    )
