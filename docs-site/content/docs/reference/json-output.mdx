@@ -94,7 +94,8 @@ record; version-1 errors remain strings.
   dependency: `{module: [marker, ...]}`. Declare those deps to reuse the code.
 - `advisories` — present only when Codex flagged a logical issue while
   implementing: `{module: [note, ...]}`. Advisories never touch digests or exit
-  codes.
+  codes. An unrelated `advisories` key — a list of provenance field names — also
+  appears nested in a stale TypeScript battery's diagnostic `data`; see below.
 - `newly_governed` — present only when a `magic_module` scan governed a symbol
   that has no artifact yet: `{module: [symbol, ...]}`. Those modules build on the
   next run.
@@ -162,6 +163,20 @@ state uses `JAUNT_TS_TEST_VERIFICATION_INFRASTRUCTURE`, fails closed, and does n
 queue paid generation. Failed generation can add `candidate`, `candidate_metadata`,
 and `terminal`; terminal budget exhaustion uses the structured
 `JAUNT_TS_TEST_GENERATION_EXHAUSTED` diagnostic.
+
+A stale or exhausted TypeScript battery carries three views of the same divergence in
+the `data` mapping of its structured diagnostic: `mismatches`, `gating`, and
+`advisories`. These keys appear only on `JAUNT_TS_TEST_BATTERY_STALE` and
+`JAUNT_TS_TEST_GENERATION_EXHAUSTED`; `JAUNT_TS_TEST_BATTERY_MISSING` carries none of
+them. `mismatches` is every observed provenance divergence and is always present.
+`gating` is the subset that failed the check; it is always present and never empty,
+because an empty set suppresses the diagnostic. `advisories` is the remainder
+(`mismatches` minus `gating`) and is present only when non-empty. The rendered
+diagnostic message names only the `gating` fields, so CI consumers should read
+`gating` to learn why `jaunt check` failed. This battery-diagnostic `advisories` is a
+list of provenance field names nested in a diagnostic's `data`; the top-level
+`advisories` above is `{module: [note, ...]}`. The same key name has two shapes at two
+nesting levels, so a consumer grepping for `advisories` will hit both.
 
 The protected full-project overlay validates both live attempts and cache hits.
 When the combined overlay still fails, `vitest.partial_landing` lists the compatible

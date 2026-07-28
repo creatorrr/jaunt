@@ -452,10 +452,11 @@ distinct from the top-level `"advisories"` key described above, which has a
 different shape. `mismatches` is every observed provenance divergence.
 `gating` is the subset that actually failed the check; it is never empty when
 the diagnostic is emitted, and the rendered message names only these fields.
-`advisories` is the rest (`mismatches - gating`) — installed toolchain identity
-and the derived `battery_fingerprint` aggregate — and is present only when
-non-empty. So `advisories ⊆ mismatches`, and a CI consumer should read `gating`
-to learn why `check` failed.
+`advisories` is the rest (`mismatches - gating`) — typically installed toolchain
+identity, the derived `battery_fingerprint` aggregate, and a legacy pre-split
+`fast_check_fingerprint` property digest — and is present only when non-empty. So
+`advisories ⊆ mismatches`, and a CI consumer should read `gating` to learn why `check`
+failed.
 
 ## Self-hosting
 
