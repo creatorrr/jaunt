@@ -82,6 +82,7 @@ from jaunt.typescript.builder import (
     run_build_in_session,
     worker_session,
 )
+from jaunt.typescript.config import TypeScriptTargetConfig
 from jaunt.typescript.properties import (
     PROPERTY_RENDERER_SCHEME,
     attach_property_block,
@@ -135,11 +136,36 @@ _TEST_PROVENANCE_FIELDS = (
     "runner_fingerprint",
     "prompt_fingerprint",
     "policy_fingerprint",
-    "skills_fingerprint",
     "battery_fingerprint",
     "body_digest",
 )
 _TEST_REHEADER_FINGERPRINTS = frozenset({"runner_fingerprint", "vitest_fingerprint"})
+
+# Contract inputs are the only freshness gate. Each is a pure function of
+# committed bytes, ``jaunt.toml``, and Jaunt's packaged prompt templates.
+_BATTERY_CONTRACT_FIELDS = frozenset(
+    {
+        "test_spec_digest",
+        "target_api_digest",
+        "imported_type_context_fingerprint",
+        "fixture_fingerprint",
+        "fast_check_fingerprint",
+        "prompt_fingerprint",
+        "policy_fingerprint",
+    }
+)
+# Environment inputs are stamped as diagnostic metadata but never gate: they
+# describe the installed toolchain, not the behavioral contract.
+_BATTERY_ENVIRONMENT_FIELDS = frozenset({"runner_fingerprint", "vitest_fingerprint"})
+# Retired inputs need no registry: a field dropped from _TEST_PROVENANCE_FIELDS is
+# structurally omitted by _with_test_header on write and never compared on read, so
+# a battery committed by an older Jaunt simply loses it on the next re-stamp.
+# These values are produced after classification, so they are never members of
+# ``values``, stamped into a battery header, or used to gate freshness.
+# ``cache_fingerprint`` partitions the response cache; ``legacy_fast_check_fingerprint``
+# exists only for legacy-header detection.
+_BATTERY_NON_STAMPED_FIELDS = frozenset({"cache_fingerprint", "legacy_fast_check_fingerprint"})
+
 _TEST_IMPORT_POLICY = "static-esm-only-resolved-boundary-v3"
 _REJECTED_TEST_DIR = Path(".jaunt/typescript/rejected-tests")
 _REJECTED_TEST_STEM_MAX_CHARS = 96
@@ -3120,7 +3146,6 @@ def _test_provenance(
                 "rendererScheme": PROPERTY_RENDERER_SCHEME,
                 "runs": target.fast_check_runs,
                 "seed": request.cache_payload.get("propertySeed"),
-                "version": _read_package_version(roots, "fast-check"),
                 "renderedBlockDigest": _sha256(
                     str(request.cache_payload.get("propertyBlock", "")).encode("utf-8")
                 ),
@@ -3134,19 +3159,108 @@ def _test_provenance(
         "runner_fingerprint": runner_fingerprint or _runner_fingerprint(root, client, initialized),
         "prompt_fingerprint": _sha256(request.prompt.encode("utf-8")),
         "policy_fingerprint": _sha256(_TEST_IMPORT_POLICY.encode("utf-8")),
-        "skills_fingerprint": skills_fingerprint(
-            project_root=root,
-            builtin_names=(
-                tuple(builtin_skill_names)
-                if builtin_skill_names is not None
-                else (tuple(config.skills.builtin_skills) if config.skills.builtin else ())
-            ),
-        ),
     }
+    # Every provenance input must be classified as either a committed contract
+    # input or a stamped-but-non-gating environment input, and every classified
+    # input must be stamped. An unclassified key would escape the committed
+    # aggregate below; an unstamped-but-classified key is never written or
+    # compared, so it silently stops gating. Fail loudly instead. This is not
+    # an ``assert``: it must survive ``python -O``.
+    unclassified = set(values) - _BATTERY_CONTRACT_FIELDS - _BATTERY_ENVIRONMENT_FIELDS
+    unstamped = set(values) - set(_TEST_PROVENANCE_FIELDS)
+    if unclassified or unstamped:
+        failures: list[str] = []
+        if unclassified:
+            failures.append(
+                "unclassified TypeScript battery provenance field(s): "
+                f"{', '.join(sorted(unclassified))}. Add each to "
+                "_BATTERY_CONTRACT_FIELDS (committed freshness gate) or "
+                "_BATTERY_ENVIRONMENT_FIELDS (stamped, non-gating), or compute it "
+                "outside `values` as a member of _BATTERY_NON_STAMPED_FIELDS "
+                "(never stamped, never gating): "
+                f"{', '.join(sorted(_BATTERY_NON_STAMPED_FIELDS))}."
+            )
+        if unstamped:
+            failures.append(
+                "unstamped TypeScript battery provenance field(s): "
+                f"{', '.join(sorted(unstamped))}. Add each to "
+                "_TEST_PROVENANCE_FIELDS so it is written to the header and "
+                "compared on read."
+            )
+        raise RuntimeError("invalid TypeScript battery provenance fields: " + " ".join(failures))
+    skills = skills_fingerprint(
+        project_root=root,
+        builtin_names=(
+            tuple(builtin_skill_names)
+            if builtin_skill_names is not None
+            else (tuple(config.skills.builtin_skills) if config.skills.builtin else ())
+        ),
+    )
+    fast_check_version = _read_package_version(roots, "fast-check")
+    committed = _canonical_digest(
+        {
+            "tier": tier,
+            **{key: value for key, value in values.items() if key in _BATTERY_CONTRACT_FIELDS},
+        }
+    )
     return {
         **values,
-        "battery_fingerprint": _canonical_digest({"tier": tier, **values}),
+        "battery_fingerprint": committed,
+        # Not stamped. Skill guidance and the installed fast-check version are
+        # environment inputs that partition the response cache and never gate
+        # committed freshness.
+        "cache_fingerprint": _canonical_digest(
+            {
+                "committed": committed,
+                "skills_fingerprint": skills,
+                "fast_check_version": fast_check_version,
+            }
+        ),
+        # Non-stamped. Lets the comparator recognize a pre-split header's
+        # property digest and re-stamp it without a model call.
+        "legacy_fast_check_fingerprint": _legacy_fast_check_fingerprint(
+            request, target, version=fast_check_version
+        ),
     }
+
+
+def _legacy_fast_check_fingerprint(
+    request: GenerationRequest,
+    target: TypeScriptTargetConfig,
+    *,
+    version: str,
+) -> str:
+    """Recompute the pre-split property digest, which embedded the install version.
+
+    Batteries committed before the freshness split hashed the installed
+    ``fast-check`` version into their property digest. Reproducing that value
+    lets a reader prove an old header differs only by composition, so it can be
+    re-stamped for free instead of regenerated.
+
+    The composition below duplicates the live ``fast_check_fingerprint`` payload
+    verbatim except for the extra ``version`` key. That duplication is deliberate:
+    the legacy shape describes headers already committed on disk and must stay
+    frozen even as the live payload evolves. Do not factor the two into a shared
+    helper -- coupling them would silently break legacy detection the next time
+    the live payload changes.
+    """
+
+    return _canonical_digest(
+        {
+            "rendererScheme": PROPERTY_RENDERER_SCHEME,
+            "runs": target.fast_check_runs,
+            "seed": request.cache_payload.get("propertySeed"),
+            "version": version,
+            "renderedBlockDigest": _sha256(
+                str(request.cache_payload.get("propertyBlock", "")).encode("utf-8")
+            ),
+            **(
+                {"cases": request.cache_payload["propertyCases"]}
+                if request.cache_payload.get("propertyCases")
+                else {}
+            ),
+        }
+    )
 
 
 def _strip_test_header(source: str) -> str:
@@ -3350,11 +3464,12 @@ def _write_rejected_test_candidate(
     )
     semantic_identity = _rejected_test_semantic_identity(expected_provenance)
     marker_identity = semantic_identity or fingerprint
+    # Marker identity uses only stamped semantic fields, so filtering preserves it.
     stored_provenance = (
         {
             str(key): value
             for key, value in expected_provenance.items()
-            if isinstance(key, str) and isinstance(value, str)
+            if (isinstance(key, str) and isinstance(value, str) and key in _TEST_PROVENANCE_FIELDS)
         }
         if expected_provenance is not None
         else None
@@ -3580,13 +3695,44 @@ def _test_provenance_mismatches(
 ) -> set[str]:
     """Compare current provenance without losing removed optional inputs."""
 
-    mismatches = {key for key, value in provenance.items() if metadata.get(key) != value}
+    # Only stamped fields are comparable: an unstamped provenance value (for
+    # example ``cache_fingerprint``) has no committed counterpart and would
+    # otherwise mismatch on every battery.
+    mismatches = {
+        key
+        for key, value in provenance.items()
+        if key in _TEST_PROVENANCE_FIELDS and metadata.get(key) != value
+    }
     if (
         "imported_type_context_fingerprint" in metadata
         and "imported_type_context_fingerprint" not in provenance
     ):
         mismatches.add("imported_type_context_fingerprint")
     return mismatches
+
+
+def _battery_contract_mismatches(
+    metadata: Mapping[str, str],
+    provenance: Mapping[str, str],
+    mismatches: set[str],
+) -> set[str]:
+    """Reduce raw provenance mismatches to those that may gate freshness.
+
+    Environment and retired fields describe the installed toolchain or a prior
+    Jaunt release, not the behavioral contract. A pre-split property digest is
+    recognized by recomputing the old composition, so a legacy header proves it
+    differs only by composition rather than by content.
+    """
+
+    contract = mismatches & _BATTERY_CONTRACT_FIELDS
+    legacy_property_digest = provenance.get("legacy_fast_check_fingerprint")
+    if (
+        "fast_check_fingerprint" in contract
+        and legacy_property_digest is not None
+        and metadata.get("fast_check_fingerprint") == legacy_property_digest
+    ):
+        contract.discard("fast_check_fingerprint")
+    return contract
 
 
 def _read_current_target_artifact_snapshot(
@@ -3739,12 +3885,16 @@ def _existing_test_battery_action(
 ) -> tuple[str, str | None]:
     """Classify an existing managed battery without trusting its header alone.
 
-    A runner or Vitest change cannot alter the authored test body, so those two
-    fingerprints may be deterministically reheadered. Every content-bearing
-    input, malformed ownership field, or body mismatch goes back through the
-    generator. The aggregate battery fingerprint must drift alongside an
-    allowed tooling fingerprint; an isolated aggregate mismatch is not a valid
-    restamp case.
+    Identity is pinned before classification is reached: the tier, source path,
+    ``body_digest``, and current static validation must all hold, or the battery
+    goes back through the generator. A runner or Vitest change cannot alter the
+    authored test body, so those two fingerprints may be deterministically
+    reheadered. When no contract field mismatches, an aggregate difference is a
+    provable composition change from a Jaunt upgrade and is re-stamped for free.
+    Otherwise, every other content-bearing input, malformed ownership field, or
+    body mismatch is generation-only: a free re-stamp requires the mismatch set
+    to intersect the allowed tooling set and to be a subset of that set plus the
+    aggregate battery fingerprint.
     """
 
     if force:
@@ -3770,6 +3920,21 @@ def _existing_test_battery_action(
     mismatches = _test_provenance_mismatches(metadata, provenance)
     if not mismatches:
         return "skip", source
+
+    # The committed aggregate is a pure function of the stamped contract fields
+    # plus the tier. If every contract field matches, an aggregate mismatch is a
+    # composition change from a Jaunt upgrade -- provably not content drift --
+    # so re-stamp it for free rather than paying for regeneration.
+    if not _battery_contract_mismatches(metadata, provenance, mismatches):
+        return (
+            "refreeze",
+            _with_test_header(
+                body,
+                tier=tier,
+                source_path=source_path,
+                provenance=provenance,
+            ),
+        )
 
     allowed_tooling = set(_TEST_REHEADER_FINGERPRINTS)
     # ``fixture_fingerprint`` was added after committed batteries already
@@ -3825,11 +3990,13 @@ def _existing_test_battery_action(
     if api_proof_matches:
         allowed_tooling.add("target_api_digest")
     allowed = allowed_tooling | {"battery_fingerprint"}
-    if (
-        not mismatches.intersection(allowed_tooling)
-        or "battery_fingerprint" not in mismatches
-        or not mismatches.issubset(allowed)
-    ):
+    # On this path, refreeze is reheader-only: at least one reheader-safe tooling
+    # field must have drifted and nothing outside the reheader-safe set may have.
+    # (The aggregate-only composition case already returned above.) Since the
+    # committed aggregate is contract-only, tooling drift no longer moves
+    # ``battery_fingerprint``, so its presence in ``mismatches`` is tolerated here
+    # but not required.
+    if not mismatches.intersection(allowed_tooling) or not mismatches.issubset(allowed):
         if allow_verified_api_transition and _is_verifiable_api_transition(
             mismatches,
             additional_allowed=allowed_tooling,
@@ -4885,6 +5052,23 @@ def _test_battery_diagnostics(
                     mismatches.append("body_digest")
             if mismatches:
                 mismatch_fields = set(mismatches)
+                # ``check`` gates on exactly what ``test`` regenerates for: contract fields,
+                # plus the ownership/tamper signals appended above. Those four are absent
+                # from the expected-provenance mapping returned by ``_test_provenance``, so
+                # ``_battery_contract_mismatches`` would drop them; union them back in or a
+                # tampered body or mis-tiered file would pass ``check`` silently.
+                identity_fields = mismatch_fields & {"provenance", "tier", "source", "body_digest"}
+                gating = (
+                    _battery_contract_mismatches(
+                        dict(metadata or {}),
+                        expected,
+                        mismatch_fields,
+                    )
+                    | identity_fields
+                )
+                advisories = tuple(sorted(mismatch_fields - gating))
+                if not gating:
+                    continue
                 distinct = _rejected_test_diagnostic(
                     root,
                     relative,
@@ -4908,6 +5092,9 @@ def _test_battery_diagnostics(
                     and expected.get("fixture_fingerprint") == _canonical_digest(None)
                     else set()
                 )
+                # ``_is_verifiable_api_transition`` requires the ``battery_fingerprint``
+                # aggregate, which is deliberately not a contract field and so never appears
+                # in ``gating``. It must inspect the raw mismatch set or it never matches.
                 remedy = (
                     "run `jaunt test --language ts --no-build` without `--no-run`, then "
                     "rerun `jaunt check`."
@@ -4922,14 +5109,22 @@ def _test_battery_diagnostics(
                         code=diagnostic_code,
                         message=(
                             f"The {tier} TypeScript battery for {source_path} is{detail} "
-                            f"({', '.join(sorted(mismatch_fields))}); {remedy}"
+                            f"({', '.join(sorted(gating))}); {remedy}"
                         ),
                         path=relative,
                         data={
                             "scope": "magic",
                             "source": source_path,
                             "tier": tier,
+                            # Three views of the same divergence: ``mismatches`` is everything
+                            # observed; ``gating`` is the nonempty subset that failed the check
+                            # (an empty value hits the ``continue`` above); and ``advisories``
+                            # is the remaining non-gating observation
+                            # (``advisories = mismatches - gating``), omitted when empty. The
+                            # rendered message names only ``gating``.
                             "mismatches": tuple(sorted(mismatch_fields)),
+                            "gating": tuple(sorted(gating)),
+                            **({"advisories": advisories} if advisories else {}),
                             **(
                                 {
                                     "candidate": distinct["candidate"],
@@ -8101,7 +8296,7 @@ async def run_test(
                     raise error.attach_candidate(source)
                 return _runner_validation_errors(checked)
 
-            cache_fingerprint = str(provenance["battery_fingerprint"])
+            cache_fingerprint = str(provenance["cache_fingerprint"])
             cache_for_request = None if force else response_cache
             validated_request = replace(request, validator=validate_candidate)
             async with semaphore:

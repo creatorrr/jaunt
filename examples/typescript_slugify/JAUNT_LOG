@@ -46,3 +46,4 @@
 2026-07-24 01:20Z migrate  ts:src/index — src/__generated__/index.jaunt.json
 2026-07-24 02:00Z migrate  ts:src/index — src/__generated__/index.jaunt.json
 2026-07-24 06:11Z migrate  ts:src/index — src/__generated__/index.jaunt.json
+2026-07-28 17:11Z recompose ts:src/index — TypeScript candidate recomposed for compatible toolchain

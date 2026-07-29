@@ -445,6 +445,23 @@ per-spec boolean on `jaunt specs`). The `context_stats` seeded-skills block is
 keyed `skills_workspace_seeded`, with the legacy `skills_workspace` alias kept
 for this release.
 
+An existing stale TypeScript battery reports three views of the same divergence
+in the `data` mapping of a `JAUNT_TS_TEST_BATTERY_STALE` diagnostic, or a
+`JAUNT_TS_TEST_GENERATION_EXHAUSTED` diagnostic when replacement generation
+exhausted — *not* at the top level, and distinct from the top-level
+`"advisories"` key described above, which has a different shape. If initial
+generation exhausts before the battery file exists, the exhausted diagnostic
+contains candidate metadata and omits all three divergence keys.
+
+For diagnostics with divergence fields, `mismatches` is every observed
+provenance divergence. `gating` is the subset that actually failed the check; it
+is never empty, and the rendered message names only these fields. `advisories`
+is the rest (`mismatches - gating`) — typically installed toolchain identity,
+the derived `battery_fingerprint` aggregate, and a legacy pre-split
+`fast_check_fingerprint` property digest — and is present only when non-empty.
+So `advisories ⊆ mismatches`, and a CI consumer should read `gating` to learn why
+`check` failed.
+
 ## Self-hosting
 
 As of 1.5.2 Jaunt builds part of itself. The root `jaunt.toml`
