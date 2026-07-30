@@ -74,6 +74,18 @@ describe("type-environment path identity", () => {
     expect(groupSemanticEnvironmentRecords([...records].reverse())).toEqual(
       before,
     );
+
+    const twoFirst = groupSemanticEnvironmentRecords([
+      records[0]!,
+      records[0]!,
+      records[1]!,
+    ]);
+    const twoSecond = groupSemanticEnvironmentRecords([
+      records[0]!,
+      records[1]!,
+      records[1]!,
+    ]);
+    expect(twoSecond).not.toEqual(twoFirst);
   });
 
   test("groups Unicode record IDs by code units rather than locale", () => {

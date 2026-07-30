@@ -71,19 +71,30 @@ export function groupSemanticEnvironmentRecords(
 ): readonly SemanticEnvironmentRecord[] {
   const grouped = new Map<
     string,
-    Map<string, { readonly id: string; readonly digest: string }>
+    { readonly id: string; readonly digest: string }[]
   >();
+  const deduplicatedKeys = new Map<string, Set<string>>();
   for (const record of records) {
     const groupId = compatibilityGroupId(record.id);
-    const members = grouped.get(groupId) ?? new Map();
-    members.set(`${record.id}\0${record.digest}`, record);
+    const members = grouped.get(groupId) ?? [];
+    const key = `${record.id}\0${record.digest}`;
+    const keys = deduplicatedKeys.get(groupId) ?? new Set<string>();
+    // Package records can intentionally share their portable path and digest
+    // while originating from distinct physical installations. Preserve that
+    // multiplicity; unresolved/workspace duplicates are repeated traversal of
+    // the same semantic input and remain collapsed.
+    if (record.id.startsWith("package:") || !keys.has(key)) {
+      members.push(record);
+    }
+    keys.add(key);
+    deduplicatedKeys.set(groupId, keys);
     grouped.set(groupId, members);
   }
   return [...grouped]
     .map(([id, members]) => ({
       id,
       digest: digestCanonical(
-        [...members.values()].sort(
+        members.sort(
           (left, right) =>
             compareCodeUnits(left.id, right.id) ||
             compareCodeUnits(left.digest, right.digest),
@@ -562,6 +573,7 @@ function exportedDocs(
 function moduleSpecifiers(
   compiler: typeof import("@typescript/typescript6"),
   sourceFile: ts.SourceFile,
+  compilerOptions?: ts.CompilerOptions,
 ): readonly string[] {
   const result = new Set<string>();
   function visit(node: ts.Node): void {
@@ -589,6 +601,21 @@ function moduleSpecifiers(
     compiler.forEachChild(node, visit);
   }
   visit(sourceFile);
+  if (compilerOptions && /\.[cm]?tsx$/.test(sourceFile.fileName)) {
+    const automaticRuntime =
+      compilerOptions.jsx === compiler.JsxEmit.ReactJSX ||
+      compilerOptions.jsx === compiler.JsxEmit.ReactJSXDev;
+    if (automaticRuntime || compilerOptions.jsxImportSource) {
+      const base = compilerOptions.jsxImportSource ?? "react";
+      result.add(
+        `${base}/${
+          compilerOptions.jsx === compiler.JsxEmit.ReactJSXDev
+            ? "jsx-dev-runtime"
+            : "jsx-runtime"
+        }`,
+      );
+    }
+  }
   return [...result]
     .filter((value) => !/^@usejaunt\/ts(?:\/spec)?$/.test(value))
     .sort();
@@ -2483,10 +2510,12 @@ export function collectTypeEnvironment(
   const inputPaths = new Set<string>();
   const visited = new Set<string>();
   const pending: { containingFile: string; specifier: string }[] =
-    moduleSpecifiers(compiler, module.sourceFile).map((specifier) => ({
-      containingFile: module.sourceFile.fileName,
-      specifier,
-    }));
+    moduleSpecifiers(compiler, module.sourceFile, compilerOptions).map(
+      (specifier) => ({
+        containingFile: module.sourceFile.fileName,
+        specifier,
+      }),
+    );
 
   const requestedModelTypes = new Map<string, Map<string, ModelTypePriority>>();
   const processedModelTypes = new Map<string, Map<string, ModelTypePriority>>();
@@ -2799,7 +2828,11 @@ export function collectTypeEnvironment(
     if (docs.length > 0) {
       proseRecords.push({ id: stablePathId(root, absolute), exports: docs });
     }
-    for (const specifier of moduleSpecifiers(compiler, sourceFile)) {
+    for (const specifier of moduleSpecifiers(
+      compiler,
+      sourceFile,
+      compilerOptions,
+    )) {
       pending.push({ containingFile: absolute, specifier });
     }
     for (const reference of sourceFile.referencedFiles) {

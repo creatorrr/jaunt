@@ -1540,6 +1540,101 @@ export function slugify(title: string, options: SlugOptions): string {
   expect(lockEdit.environment).toBe(declarationEdit.environment);
 });
 
+test("jsxImportSource runtime declarations participate in structural freshness", async () => {
+  const workspace = createFixtureWorkspace();
+  roots.push(workspace.root);
+  rmSync(resolve(workspace.root, "src/slug/index.jaunt.ts"), { force: true });
+  write(
+    workspace.root,
+    "package.json",
+    `${JSON.stringify({
+      name: "fixture",
+      private: true,
+      type: "module",
+      dependencies: { "@fixture/jsx": "1.0.0" },
+      devDependencies: { typescript: "6.0.2" },
+    })}\n`,
+  );
+  write(
+    workspace.root,
+    "tsconfig.json",
+    `${JSON.stringify({
+      compilerOptions: {
+        target: "ES2022",
+        module: "NodeNext",
+        moduleResolution: "NodeNext",
+        strict: true,
+        noEmit: true,
+        jsx: "react-jsx",
+        jsxImportSource: "@fixture/jsx",
+        types: [],
+      },
+      include: ["src/**/*.ts", "src/**/*.tsx"],
+      exclude: ["src/**/__generated__/**"],
+    })}\n`,
+  );
+  write(
+    workspace.root,
+    "node_modules/@fixture/jsx/package.json",
+    `${JSON.stringify({
+      name: "@fixture/jsx",
+      version: "1.0.0",
+      type: "module",
+      exports: {
+        "./jsx-runtime": {
+          types: "./jsx-runtime.d.ts",
+          default: "./jsx-runtime.js",
+        },
+      },
+    })}\n`,
+  );
+  write(
+    workspace.root,
+    "node_modules/@fixture/jsx/jsx-runtime.js",
+    "export const jsx = () => ({}); export { jsx as jsxs };\n",
+  );
+  write(
+    workspace.root,
+    "node_modules/@fixture/jsx/jsx-runtime.d.ts",
+    `export namespace JSX {
+  interface Element { readonly kind: "first"; }
+  interface IntrinsicElements { div: { label: string }; }
+}
+export function jsx(type: unknown, props: unknown): JSX.Element;
+export { jsx as jsxs };
+`,
+  );
+  write(
+    workspace.root,
+    "src/render/index.jaunt.tsx",
+    `import * as jaunt from "@usejaunt/ts/spec";
+jaunt.magicModule();
+const example = <div label="example" />;
+/** Render one labeled element. */
+export function render(label: string): typeof example {
+  return jaunt.magic();
+}
+`,
+  );
+  const before = await freshnessDigests(workspace);
+
+  write(
+    workspace.root,
+    "node_modules/@fixture/jsx/jsx-runtime.d.ts",
+    `export namespace JSX {
+  interface Element { readonly kind: "second"; }
+  interface IntrinsicElements { div: { label: string }; }
+}
+export function jsx(type: unknown, props: unknown): JSX.Element;
+export { jsx as jsxs };
+`,
+  );
+
+  const after = await freshnessDigests(workspace);
+  expect(after.structural).not.toBe(before.structural);
+  expect(after.environment).not.toBe(before.environment);
+});
+
 test("compatibility identity normalizes only Jaunt tool package metadata", async () => {
   const workspace = createFixtureWorkspace();
   roots.push(workspace.root);
