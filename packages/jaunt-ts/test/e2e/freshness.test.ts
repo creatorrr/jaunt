@@ -1585,6 +1585,12 @@ test("unresolved manifest dependencies do not invalidate module freshness", asyn
         "@fixture/contracts": "1.0.0",
         ...(unrelatedVersion ? { unrelated: unrelatedVersion } : {}),
       },
+      peerDependencies: unrelatedVersion
+        ? { "optional-peer": unrelatedVersion }
+        : {},
+      peerDependenciesMeta: unrelatedVersion
+        ? { "optional-peer": { optional: true, revision: unrelatedVersion } }
+        : {},
     })}\n`;
   write(workspace.root, "package.json", manifest("1.0.0"));
   write(
@@ -1612,6 +1618,68 @@ export function slugify(title: string, options: SlugOptions): string {
 
   write(workspace.root, "package.json", manifest());
   expect(await freshnessDigests(workspace)).toEqual(before);
+});
+
+test("only the manifest owning a resolved package installation affects freshness", async () => {
+  const workspace = createFixtureWorkspace();
+  roots.push(workspace.root);
+  rmSync(resolve(workspace.root, "src/slug/index.jaunt.ts"), { force: true });
+  const rootManifest = (version: string) =>
+    `${JSON.stringify({
+      name: "fixture",
+      private: true,
+      type: "module",
+      dependencies: { "@fixture/contracts": version },
+    })}\n`;
+  const appManifest = (version: string) =>
+    `${JSON.stringify({
+      name: "fixture-app",
+      private: true,
+      type: "module",
+      dependencies: { "@fixture/contracts": version },
+    })}\n`;
+  write(workspace.root, "package.json", rootManifest("2.0.0"));
+  write(workspace.root, "src/app/package.json", appManifest("1.0.0"));
+  write(
+    workspace.root,
+    "node_modules/@fixture/contracts/package.json",
+    `${JSON.stringify({ name: "@fixture/contracts", version: "2.0.0", types: "./index.d.ts" })}\n`,
+  );
+  write(
+    workspace.root,
+    "node_modules/@fixture/contracts/index.d.ts",
+    "export interface SlugOptions { rootOnly: boolean; }\n",
+  );
+  write(
+    workspace.root,
+    "src/app/node_modules/@fixture/contracts/package.json",
+    `${JSON.stringify({ name: "@fixture/contracts", version: "1.0.0", types: "./index.d.ts" })}\n`,
+  );
+  write(
+    workspace.root,
+    "src/app/node_modules/@fixture/contracts/index.d.ts",
+    "export interface SlugOptions { separator: string; }\n",
+  );
+  write(
+    workspace.root,
+    "src/app/slug/index.jaunt.ts",
+    `import * as jaunt from "@usejaunt/ts/spec";
+import type { SlugOptions } from "@fixture/contracts";
+jaunt.magicModule();
+export function slugify(title: string, options: SlugOptions): string {
+  return jaunt.magic();
+}
+`,
+  );
+  const before = await freshnessDigests(workspace);
+
+  write(workspace.root, "package.json", rootManifest("3.0.0"));
+  expect(await freshnessDigests(workspace)).toEqual(before);
+
+  write(workspace.root, "src/app/package.json", appManifest("1.1.0"));
+  expect((await freshnessDigests(workspace)).structural).not.toBe(
+    before.structural,
+  );
 });
 
 test("packageManager is tooling provenance rather than semantic compatibility", async () => {

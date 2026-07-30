@@ -69,20 +69,25 @@ function packageNameFromRecordId(id: string): string {
 export function groupSemanticEnvironmentRecords(
   records: readonly { readonly id: string; readonly digest: string }[],
 ): readonly SemanticEnvironmentRecord[] {
-  const grouped = new Map<string, Map<string, string>>();
+  const grouped = new Map<
+    string,
+    Map<string, { readonly id: string; readonly digest: string }>
+  >();
   for (const record of records) {
     const groupId = compatibilityGroupId(record.id);
-    const members = grouped.get(groupId) ?? new Map<string, string>();
-    members.set(record.id, record.digest);
+    const members = grouped.get(groupId) ?? new Map();
+    members.set(`${record.id}\0${record.digest}`, record);
     grouped.set(groupId, members);
   }
   return [...grouped]
     .map(([id, members]) => ({
       id,
       digest: digestCanonical(
-        [...members]
-          .map(([memberId, digest]) => ({ id: memberId, digest }))
-          .sort((left, right) => compareCodeUnits(left.id, right.id)),
+        [...members.values()].sort(
+          (left, right) =>
+            compareCodeUnits(left.id, right.id) ||
+            compareCodeUnits(left.digest, right.digest),
+        ),
       ),
     }))
     .sort((left, right) => compareCodeUnits(left.id, right.id));
@@ -112,11 +117,47 @@ function isWithin(root: string, path: string): boolean {
   return value !== ".." && !value.startsWith(`..${sep}`) && !isAbsolute(value);
 }
 
-export function stablePathId(root: string, path: string): string {
+interface InstalledPackageLocation {
+  readonly name: string;
+  readonly root: string;
+  readonly relativePath: string;
+}
+
+function installedPackageLocation(
+  path: string,
+): InstalledPackageLocation | undefined {
   const normalized = path.replaceAll("\\", "/");
-  const nodeModules = normalized.lastIndexOf("/node_modules/");
-  if (nodeModules >= 0) {
-    return `package:${normalized.slice(nodeModules + "/node_modules/".length)}`;
+  const marker = "/node_modules/";
+  const nodeModules = normalized.lastIndexOf(marker);
+  if (nodeModules < 0) return undefined;
+  const suffix = normalized.slice(nodeModules + marker.length);
+  const parts = suffix.split("/");
+  const nameParts = suffix.startsWith("@")
+    ? parts.slice(0, 2)
+    : parts.slice(0, 1);
+  if (nameParts.length === 0 || nameParts.some((part) => part === ""))
+    return undefined;
+  const name = nameParts.join("/");
+  const packageRoot = normalized.slice(0, nodeModules + marker.length) + name;
+  let physicalRoot: string;
+  try {
+    physicalRoot = realpathSync(packageRoot);
+  } catch {
+    physicalRoot = resolve(packageRoot);
+  }
+  return {
+    name,
+    root: physicalRoot,
+    relativePath: parts.slice(nameParts.length).join("/"),
+  };
+}
+
+export function stablePathId(root: string, path: string): string {
+  const installedPackage = installedPackageLocation(path);
+  if (installedPackage) {
+    return `package:${installedPackage.name}${
+      installedPackage.relativePath ? `/${installedPackage.relativePath}` : ""
+    }`;
   }
   if (isWithin(root, path)) return `workspace:${toPosix(relative(root, path))}`;
   // An uncommon custom resolver may return a file outside the workspace.  Do
@@ -171,6 +212,7 @@ const MANIFEST_DEPENDENCY_MAPS = new Set([
   "devDependencies",
   "optionalDependencies",
   "peerDependencies",
+  "peerDependenciesMeta",
 ]);
 
 const MANIFEST_BUNDLED_DEPENDENCIES = new Set([
@@ -213,6 +255,21 @@ function normalizePackageManifest(
       return [[key, value]];
     }),
   );
+}
+
+function declaredManifestPackages(syntax: unknown): ReadonlySet<string> {
+  if (syntax === null || typeof syntax !== "object" || Array.isArray(syntax)) {
+    return new Set();
+  }
+  const names = new Set<string>();
+  for (const key of MANIFEST_DEPENDENCY_MAPS) {
+    if (key === "peerDependenciesMeta") continue;
+    const value = (syntax as Record<string, unknown>)[key];
+    if (value === null || typeof value !== "object" || Array.isArray(value))
+      continue;
+    for (const name of Object.keys(value)) names.add(name);
+  }
+  return names;
 }
 
 function toolingProvenanceRecords(
@@ -2422,6 +2479,7 @@ export function collectTypeEnvironment(
   const toolingRecords: SemanticEnvironmentRecord[] = [];
   const proseRecords: ImportedDocsRecord[] = [];
   const modelTypeSources: ModelTypeSource[] = [];
+  const resolvedPackageRoots = new Map<string, Set<string>>();
   const inputPaths = new Set<string>();
   const visited = new Set<string>();
   const pending: { containingFile: string; specifier: string }[] =
@@ -2694,6 +2752,15 @@ export function collectTypeEnvironment(
 
   function addResolved(path: string, external = false): void {
     const absolute = external ? resolve(path) : assertWithinRoot(root, path);
+    if (external) {
+      const installedPackage = installedPackageLocation(absolute);
+      if (installedPackage) {
+        const roots =
+          resolvedPackageRoots.get(installedPackage.name) ?? new Set<string>();
+        roots.add(installedPackage.root);
+        resolvedPackageRoots.set(installedPackage.name, roots);
+      }
+    }
     if (visited.has(absolute)) return;
     visited.add(absolute);
     if (!existsSync(absolute)) {
@@ -2810,20 +2877,49 @@ export function collectTypeEnvironment(
   }
   drainPendingModules();
 
-  const resolvedPackages = new Set(
-    records
-      .map((record) => record.id)
-      .filter((id) => id.startsWith("package:"))
-      .map(packageNameFromRecordId),
+  const environment = environmentFiles(root, module.route.packageOwner).map(
+    (path) => {
+      const source = readFileSync(path, "utf8");
+      const syntax = path.endsWith(".json")
+        ? semanticJson(source)
+        : { sha256: sha256Bytes(source) };
+      return { path, syntax };
+    },
   );
+  const manifests = environment.filter(
+    ({ path }) => basename(path) === "package.json",
+  );
+  const manifestPackages = new Map<string, Set<string>>();
+  for (const [name, packageRoots] of resolvedPackageRoots) {
+    for (const packageRoot of packageRoots) {
+      for (const manifest of manifests) {
+        if (!declaredManifestPackages(manifest.syntax).has(name)) continue;
+        const probe = join(dirname(manifest.path), "__jaunt_manifest__.ts");
+        const resolution = compiler.resolveModuleName(
+          name,
+          probe,
+          compilerOptions,
+          compiler.sys,
+          undefined,
+          undefined,
+          resolutionMode(compiler, probe, compilerOptions),
+        ).resolvedModule;
+        const resolvedLocation = resolution
+          ? installedPackageLocation(resolution.resolvedFileName)
+          : undefined;
+        if (!resolvedLocation || resolvedLocation.root !== packageRoot)
+          continue;
+        const names = manifestPackages.get(manifest.path) ?? new Set<string>();
+        names.add(name);
+        manifestPackages.set(manifest.path, names);
+        break;
+      }
+    }
+  }
 
-  for (const path of environmentFiles(root, module.route.packageOwner)) {
-    const source = readFileSync(path, "utf8");
+  for (const { path, syntax } of environment) {
     inputPaths.add(path);
     const id = `environment:${toPosix(relative(root, path))}`;
-    const syntax = path.endsWith(".json")
-      ? semanticJson(source)
-      : { sha256: sha256Bytes(source) };
     records.push({
       id,
       syntax,
@@ -2836,7 +2932,10 @@ export function collectTypeEnvironment(
     compatibleEnvironmentSyntax.set(
       id,
       basename(path) === "package.json"
-        ? normalizePackageManifest(syntax, resolvedPackages)
+        ? normalizePackageManifest(
+            syntax,
+            manifestPackages.get(path) ?? new Set(),
+          )
         : normalizeToolingMetadata(syntax),
     );
   }
