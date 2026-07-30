@@ -51,16 +51,19 @@ export interface SemanticEnvironmentRecord {
 
 function compatibilityGroupId(id: string): string {
   if (id.startsWith("package:")) {
-    const path = id.slice("package:".length);
-    const parts = path.split("/");
-    const packageName = path.startsWith("@")
-      ? parts.slice(0, 2).join("/")
-      : (parts[0] ?? path);
-    return `package:${packageName}`;
+    return `package:${packageNameFromRecordId(id)}`;
   }
   if (id.startsWith("unresolved-module:")) return "unresolved-modules";
   if (id.startsWith("unresolved-type:")) return "unresolved-types";
   return id;
+}
+
+function packageNameFromRecordId(id: string): string {
+  const path = id.slice("package:".length);
+  const parts = path.split("/");
+  return path.startsWith("@")
+    ? parts.slice(0, 2).join("/")
+    : (parts[0] ?? path);
 }
 
 export function groupSemanticEnvironmentRecords(
@@ -161,6 +164,55 @@ function normalizeToolingMetadata(
     );
   }
   return value;
+}
+
+const MANIFEST_DEPENDENCY_MAPS = new Set([
+  "dependencies",
+  "devDependencies",
+  "optionalDependencies",
+  "peerDependencies",
+]);
+
+const MANIFEST_BUNDLED_DEPENDENCIES = new Set([
+  "bundleDependencies",
+  "bundledDependencies",
+]);
+
+function normalizePackageManifest(
+  syntax: unknown,
+  resolvedPackages: ReadonlySet<string>,
+): unknown {
+  const normalized = normalizeToolingMetadata(syntax);
+  if (
+    normalized === null ||
+    typeof normalized !== "object" ||
+    Array.isArray(normalized)
+  ) {
+    return normalized;
+  }
+  return Object.fromEntries(
+    Object.entries(normalized).flatMap(([key, value]) => {
+      if (
+        MANIFEST_DEPENDENCY_MAPS.has(key) &&
+        value !== null &&
+        typeof value === "object" &&
+        !Array.isArray(value)
+      ) {
+        const relevant = Object.fromEntries(
+          Object.entries(value).filter(([name]) => resolvedPackages.has(name)),
+        );
+        return Object.keys(relevant).length > 0 ? [[key, relevant]] : [];
+      }
+      if (MANIFEST_BUNDLED_DEPENDENCIES.has(key) && Array.isArray(value)) {
+        const relevant = value.filter(
+          (name): name is string =>
+            typeof name === "string" && resolvedPackages.has(name),
+        );
+        return relevant.length > 0 ? [[key, relevant]] : [];
+      }
+      return [[key, value]];
+    }),
+  );
 }
 
 function toolingProvenanceRecords(
@@ -2758,6 +2810,13 @@ export function collectTypeEnvironment(
   }
   drainPendingModules();
 
+  const resolvedPackages = new Set(
+    records
+      .map((record) => record.id)
+      .filter((id) => id.startsWith("package:"))
+      .map(packageNameFromRecordId),
+  );
+
   for (const path of environmentFiles(root, module.route.packageOwner)) {
     const source = readFileSync(path, "utf8");
     inputPaths.add(path);
@@ -2774,7 +2833,12 @@ export function collectTypeEnvironment(
       compatibilityIgnoredIds.add(id);
       continue;
     }
-    compatibleEnvironmentSyntax.set(id, normalizeToolingMetadata(syntax));
+    compatibleEnvironmentSyntax.set(
+      id,
+      basename(path) === "package.json"
+        ? normalizePackageManifest(syntax, resolvedPackages)
+        : normalizeToolingMetadata(syntax),
+    );
   }
 
   records.sort((left, right) => {

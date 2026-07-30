@@ -1453,7 +1453,7 @@ export function normalize(value: string): string {
   expect(await freshnessDigests(workspace)).toEqual(documentationEdit);
 });
 
-test("resolved package declarations and lock state participate in structural freshness", async () => {
+test("resolved package declarations participate in structural freshness while lock state is provenance", async () => {
   const workspace = createFixtureWorkspace();
   roots.push(workspace.root);
   write(
@@ -1536,7 +1536,7 @@ export function slugify(title: string, options: SlugOptions): string {
     )}\n`,
   );
   const lockEdit = await freshnessDigests(workspace);
-  expect(lockEdit.structural).not.toBe(declarationEdit.structural);
+  expect(lockEdit.structural).toBe(declarationEdit.structural);
   expect(lockEdit.environment).toBe(declarationEdit.environment);
 });
 
@@ -1569,8 +1569,49 @@ test("compatibility identity normalizes only Jaunt tool package metadata", async
   write(workspace.root, "package-lock.json", lock("0.1.0-alpha.2"));
   const after = await freshnessDigests(workspace);
 
-  expect(after.structural).not.toBe(before.structural);
+  expect(after.structural).toBe(before.structural);
   expect(after.environment).toBe(before.environment);
+});
+
+test("unresolved manifest dependencies do not invalidate module freshness", async () => {
+  const workspace = createFixtureWorkspace();
+  roots.push(workspace.root);
+  const manifest = (unrelatedVersion?: string) =>
+    `${JSON.stringify({
+      name: "fixture",
+      private: true,
+      type: "module",
+      dependencies: {
+        "@fixture/contracts": "1.0.0",
+        ...(unrelatedVersion ? { unrelated: unrelatedVersion } : {}),
+      },
+    })}\n`;
+  write(workspace.root, "package.json", manifest("1.0.0"));
+  write(
+    workspace.root,
+    "node_modules/@fixture/contracts/package.json",
+    `${JSON.stringify({ name: "@fixture/contracts", version: "1.0.0", types: "./index.d.ts" })}\n`,
+  );
+  write(
+    workspace.root,
+    "node_modules/@fixture/contracts/index.d.ts",
+    "export interface SlugOptions { separator: string; }\n",
+  );
+  write(
+    workspace.root,
+    "src/slug/index.jaunt.ts",
+    `import * as jaunt from "@usejaunt/ts/spec";
+import type { SlugOptions } from "@fixture/contracts";
+jaunt.magicModule();
+export function slugify(title: string, options: SlugOptions): string {
+  return jaunt.magic();
+}
+`,
+  );
+  const before = await freshnessDigests(workspace);
+
+  write(workspace.root, "package.json", manifest());
+  expect(await freshnessDigests(workspace)).toEqual(before);
 });
 
 test("packageManager is tooling provenance rather than semantic compatibility", async () => {
@@ -1592,7 +1633,7 @@ test("packageManager is tooling provenance rather than semantic compatibility", 
 
   write(workspace.root, "package.json", manifest("pnpm@11.5.0"));
   const added = await freshnessModule(workspace);
-  expect(added.structuralDigest).not.toBe(before.structuralDigest);
+  expect(added.structuralDigest).toBe(before.structuralDigest);
   expect(added.semanticEnvironmentDigest).toBe(
     before.semanticEnvironmentDigest,
   );
@@ -1606,7 +1647,7 @@ test("packageManager is tooling provenance rather than semantic compatibility", 
 
   write(workspace.root, "package.json", manifest("npm@11.5.1"));
   const changed = await freshnessModule(workspace);
-  expect(changed.structuralDigest).not.toBe(added.structuralDigest);
+  expect(changed.structuralDigest).toBe(added.structuralDigest);
   expect(changed.semanticEnvironmentDigest).toBe(
     added.semanticEnvironmentDigest,
   );
@@ -1713,12 +1754,12 @@ packages:
     write(workspace.root, "package.json", manifest("0.1.0-alpha.2"));
     write(workspace.root, path, lock("0.1.0-alpha.2", "1.0.0"));
     const toolUpgrade = await freshnessDigests(workspace);
-    expect(toolUpgrade.structural).not.toBe(before.structural);
+    expect(toolUpgrade.structural).toBe(before.structural);
     expect(toolUpgrade.environment).toBe(before.environment);
 
     write(workspace.root, path, lock("0.1.0-alpha.2", "1.1.0"));
     const dependencyUpgrade = await freshnessDigests(workspace);
-    expect(dependencyUpgrade.structural).not.toBe(toolUpgrade.structural);
+    expect(dependencyUpgrade.structural).toBe(toolUpgrade.structural);
     expect(dependencyUpgrade.environment).toBe(toolUpgrade.environment);
   },
 );
