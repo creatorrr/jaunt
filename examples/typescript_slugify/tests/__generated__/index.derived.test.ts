@@ -2,33 +2,31 @@
 // jaunt:tier=derived
 // jaunt:source=tests/index.jaunt-test.ts
 // jaunt:test_spec_digest=sha256:5bbbbbde8f55a8a7b2f3d0e59080f7306f81191cda70f24469227fb6014b44c9
-// jaunt:target_api_digest=sha256:dfbc3fb7ce87d84eac3129a976e634a1d0c925bd551a9102032628b9a23df013
+// jaunt:target_api_digest=sha256:fbcbc4d22cae2b3450e3af658bed40addf8d49a96a2016bb0b8ab3bdbbdd41aa
 // jaunt:fixture_fingerprint=sha256:74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b
 // jaunt:vitest_fingerprint=sha256:4962cb1ba597e743b68e1e47c54890379c7e8a12cf4e208aa7aa6108cdbfb423
-// jaunt:fast_check_fingerprint=sha256:fdf6617d9d3f4359cc6c80ae721209fdd9056c36296e9d7af50b17effd1cd819
-// jaunt:runner_fingerprint=sha256:50d27e7718852bf96ddfee00be5ccf80c718da6d98af5326aabc1a952dfaf8db
+// jaunt:fast_check_fingerprint=sha256:83e236e47ebc48763b1b0308bc0beb28122a39d4d2a15d15dce3949110ae79fa
+// jaunt:runner_fingerprint=sha256:32a716b44a009f4568cef091e5b73d62290ddca05aa9e57845b96a926c2507d0
 // jaunt:prompt_fingerprint=sha256:2cbbf4c5fa043c5528d29d226004a63e9024add1bf6c52df4442825a1faa0953
 // jaunt:policy_fingerprint=sha256:babe1406e8e4cc1024536374f7e50070a88000c5e80db5f17d2914c1e7752693
-// jaunt:skills_fingerprint=462d7ee5b605e739480d217bc7874e1490ce7a1a8d700cb2a516c776f04fbcaf
-// jaunt:battery_fingerprint=sha256:9e7dfe58589a186cdd2022806d5efb648dcd06bececfab7a77c13c4dc68a34f9
-// jaunt:body_digest=sha256:15908a2922828697edebefe49a25c807ea53adb70f2e35f6f42d02d3f234e42c
+// jaunt:battery_fingerprint=sha256:6f05636f92f284296490b10e1e4cc03570ccf27165a77939195499927890b929
+// jaunt:body_digest=sha256:bf5343caac0c74a367f1ee05071ae64c6253620a6d2c78178b911eaa7b9ed9af
 
 import { expect, test } from "vitest";
 
 import { slugify } from "../../src/index.js";
 
 const cases: ReadonlyArray<readonly [string, string, string]> = [
-  ["d-001", "Alpha BETA gamma", "alpha-beta-gamma"],
-  ["d-002", "one___two...three", "one-two-three"],
-  ["d-003", "---Edge Boundaries---", "edge-boundaries"],
-  ["d-004", "version 2 release 10", "version-2-release-10"],
-  ["d-005", "A\té\nB—C", "a-b-c"],
-  ["d-006", " \t—_!?\n ", ""],
-  ["d-007", "ABC123xyz", "abc123xyz"],
+  ["d-001", "JAUNT", "jaunt"],
+  ["d-002", "Version 2 Build 17", "version-2-build-17"],
+  ["d-003", "alpha___... beta", "alpha-beta"],
+  ["d-004", "---Alpha---", "alpha"],
+  ["d-005", "12345", "12345"],
+  ["d-006", " \t!@#$%^&*()\n", ""],
+  ["d-007", "你好é", ""],
+  ["d-008", "a/B\\C:D", "a-b-c-d"],
 ];
 
-for (const [caseId, input, expected] of cases) {
-  test(caseId, () => {
-    expect(slugify(input)).toBe(expected);
-  });
-}
+test.each(cases)("%s", (_caseId, title, expected) => {
+  expect(slugify(title)).toBe(expected);
+});
