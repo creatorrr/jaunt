@@ -6810,6 +6810,115 @@ async def test_typecheck_batches_keep_config_snapshot_out_of_overlay_roots(
 
 
 @pytest.mark.asyncio
+async def test_typecheck_batches_reuse_command_level_runtime_pins(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    battery = "tests/__generated__/math.example.test.ts"
+    workspace = {
+        "projects": [
+            {
+                "id": "tsconfig.test.json",
+                "configPath": "tsconfig.test.json",
+                "role": "test",
+                "rootFiles": [battery],
+            }
+        ]
+    }
+    pin_calls: list[str] = []
+
+    async def runner(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "mode": "typecheck",
+            "diagnostics": [],
+            "tests": [],
+            "captured": {"stdout": "", "stderr": ""},
+        }
+
+    monkeypatch.setattr(ts_tester, "_run_test_runner", runner)
+    monkeypatch.setattr(
+        ts_tester,
+        "_validate_test_owner_dependencies",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        ts_tester,
+        "_pin_test_dependency_runtimes",
+        lambda *_args, **_kwargs: pin_calls.append("test"),
+    )
+    monkeypatch.setattr(
+        ts_tester,
+        "_pin_vitest_config_dependency_runtimes",
+        lambda *_args, **_kwargs: pin_calls.append("config"),
+    )
+
+    result = await ts_tester._run_test_batches(
+        object(),
+        tmp_path,
+        config,
+        workspace,
+        files=(battery,),
+        overlays={battery: "export {};\n"},
+        typecheck_only=True,
+        config_snapshot=(
+            {"vitest.config.ts": "sha256:config"},
+            {"vitest.config.ts": "export default {};\n"},
+        ),
+        runtime_dependencies_pinned=True,
+    )
+
+    assert result["ok"] is True
+    assert pin_calls == []
+
+
+def test_permission_symlink_roots_scan_once_per_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "workspace"
+    external_modules = tmp_path / "store/node_modules"
+    package = external_modules / "vitest"
+    package.mkdir(parents=True)
+    (root / "node_modules").mkdir(parents=True)
+    (root / "node_modules/vitest").symlink_to(package, target_is_directory=True)
+    second_root = tmp_path / "second-view"
+    (second_root / "node_modules").mkdir(parents=True)
+    (second_root / "node_modules/vitest").symlink_to(package, target_is_directory=True)
+    source_root = tmp_path / "source-workspace"
+    source_root.mkdir()
+    runner_root = tmp_path / "isolated"
+    runner_root.mkdir()
+    client = SimpleNamespace()
+    original_rglob = Path.rglob
+    scans = 0
+
+    def counted_rglob(path: Path, pattern: str):
+        nonlocal scans
+        scans += 1
+        return original_rglob(path, pattern)
+
+    monkeypatch.setattr(Path, "rglob", counted_rglob)
+
+    first = ts_tester._permission_symlink_read_roots(
+        client,
+        root,
+        runner_root,
+        cache_root=source_root,
+    )
+    second = ts_tester._permission_symlink_read_roots(
+        client,
+        second_root,
+        runner_root,
+        cache_root=source_root,
+    )
+
+    assert first == second == {external_modules}
+    assert scans == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("redact_derived", [True, False])
 async def test_runner_startup_failure_survives_child_protocol(
     tmp_path: Path,
