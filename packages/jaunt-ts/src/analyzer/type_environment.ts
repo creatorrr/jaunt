@@ -66,6 +66,22 @@ function packageNameFromRecordId(id: string): string {
     : (parts[0] ?? path);
 }
 
+function packageNameFromSpecifier(specifier: string): string | undefined {
+  if (
+    specifier.startsWith(".") ||
+    specifier.startsWith("/") ||
+    specifier.startsWith("#")
+  ) {
+    return undefined;
+  }
+  const parts = specifier.split("/");
+  return specifier.startsWith("@")
+    ? parts.length >= 2
+      ? parts.slice(0, 2).join("/")
+      : undefined
+    : parts[0];
+}
+
 export function groupSemanticEnvironmentRecords(
   records: readonly { readonly id: string; readonly digest: string }[],
 ): readonly SemanticEnvironmentRecord[] {
@@ -2506,16 +2522,23 @@ export function collectTypeEnvironment(
   const toolingRecords: SemanticEnvironmentRecord[] = [];
   const proseRecords: ImportedDocsRecord[] = [];
   const modelTypeSources: ModelTypeSource[] = [];
-  const resolvedPackageRoots = new Map<string, Set<string>>();
   const inputPaths = new Set<string>();
   const visited = new Set<string>();
+  const directModuleSpecifiers = moduleSpecifiers(
+    compiler,
+    module.sourceFile,
+    compilerOptions,
+  );
+  const manifestPackageNames = new Set(
+    directModuleSpecifiers
+      .map(packageNameFromSpecifier)
+      .filter((name): name is string => name !== undefined),
+  );
   const pending: { containingFile: string; specifier: string }[] =
-    moduleSpecifiers(compiler, module.sourceFile, compilerOptions).map(
-      (specifier) => ({
-        containingFile: module.sourceFile.fileName,
-        specifier,
-      }),
-    );
+    directModuleSpecifiers.map((specifier) => ({
+      containingFile: module.sourceFile.fileName,
+      specifier,
+    }));
 
   const requestedModelTypes = new Map<string, Map<string, ModelTypePriority>>();
   const processedModelTypes = new Map<string, Map<string, ModelTypePriority>>();
@@ -2781,15 +2804,6 @@ export function collectTypeEnvironment(
 
   function addResolved(path: string, external = false): void {
     const absolute = external ? resolve(path) : assertWithinRoot(root, path);
-    if (external) {
-      const installedPackage = installedPackageLocation(absolute);
-      if (installedPackage) {
-        const roots =
-          resolvedPackageRoots.get(installedPackage.name) ?? new Set<string>();
-        roots.add(installedPackage.root);
-        resolvedPackageRoots.set(installedPackage.name, roots);
-      }
-    }
     if (visited.has(absolute)) return;
     visited.add(absolute);
     if (!existsSync(absolute)) {
@@ -2892,6 +2906,9 @@ export function collectTypeEnvironment(
     .getAutomaticTypeDirectiveNames(compilerOptions, compiler.sys)
     .sort();
   for (const typeName of automaticTypes) {
+    manifestPackageNames.add(
+      typeName.startsWith("@") ? typeName : `@types/${typeName}`,
+    );
     const resolution = compiler.resolveTypeReferenceDirective(
       typeName,
       module.sourceFile.fileName,
@@ -2923,30 +2940,17 @@ export function collectTypeEnvironment(
     ({ path }) => basename(path) === "package.json",
   );
   const manifestPackages = new Map<string, Set<string>>();
-  for (const [name, packageRoots] of resolvedPackageRoots) {
-    for (const packageRoot of packageRoots) {
-      for (const manifest of manifests) {
-        if (!declaredManifestPackages(manifest.syntax).has(name)) continue;
-        const probe = join(dirname(manifest.path), "__jaunt_manifest__.ts");
-        const resolution = compiler.resolveModuleName(
-          name,
-          probe,
-          compilerOptions,
-          compiler.sys,
-          undefined,
-          undefined,
-          resolutionMode(compiler, probe, compilerOptions),
-        ).resolvedModule;
-        const resolvedLocation = resolution
-          ? installedPackageLocation(resolution.resolvedFileName)
-          : undefined;
-        if (!resolvedLocation || resolvedLocation.root !== packageRoot)
-          continue;
-        const names = manifestPackages.get(manifest.path) ?? new Set<string>();
-        names.add(name);
-        manifestPackages.set(manifest.path, names);
-        break;
-      }
+  for (const name of manifestPackageNames) {
+    // environmentFiles is nearest-owner first. Attribute a package to the
+    // nearest manifest that declares it instead of comparing physical package
+    // roots: npm hoisting and pnpm's content-addressed store may expose the
+    // same declaration closure through different filesystem topologies.
+    for (const manifest of manifests) {
+      if (!declaredManifestPackages(manifest.syntax).has(name)) continue;
+      const names = manifestPackages.get(manifest.path) ?? new Set<string>();
+      names.add(name);
+      manifestPackages.set(manifest.path, names);
+      break;
     }
   }
 

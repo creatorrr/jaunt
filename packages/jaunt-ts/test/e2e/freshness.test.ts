@@ -1715,6 +1715,59 @@ export function slugify(title: string, options: SlugOptions): string {
   expect(await freshnessDigests(workspace)).toEqual(before);
 });
 
+test("manifest compatibility follows direct authored package imports", async () => {
+  const workspace = createFixtureWorkspace();
+  roots.push(workspace.root);
+  const manifest = (supportVersion: string) =>
+    `${JSON.stringify({
+      name: "fixture",
+      private: true,
+      type: "module",
+      dependencies: {
+        "@fixture/contracts": "1.0.0",
+        "@fixture/support": supportVersion,
+      },
+    })}\n`;
+  write(workspace.root, "package.json", manifest("1.0.0"));
+  write(
+    workspace.root,
+    "node_modules/@fixture/contracts/package.json",
+    `${JSON.stringify({ name: "@fixture/contracts", version: "1.0.0", types: "./index.d.ts" })}\n`,
+  );
+  write(
+    workspace.root,
+    "node_modules/@fixture/contracts/index.d.ts",
+    `import type { Support } from "@fixture/support";
+export interface SlugOptions { support: Support; }
+`,
+  );
+  write(
+    workspace.root,
+    "node_modules/@fixture/support/package.json",
+    `${JSON.stringify({ name: "@fixture/support", version: "1.0.0", types: "./index.d.ts" })}\n`,
+  );
+  write(
+    workspace.root,
+    "node_modules/@fixture/support/index.d.ts",
+    "export interface Support { separator: string; }\n",
+  );
+  write(
+    workspace.root,
+    "src/slug/index.jaunt.ts",
+    `import * as jaunt from "@usejaunt/ts/spec";
+import type { SlugOptions } from "@fixture/contracts";
+jaunt.magicModule();
+export function slugify(title: string, options: SlugOptions): string {
+  return jaunt.magic();
+}
+`,
+  );
+  const before = await freshnessDigests(workspace);
+
+  write(workspace.root, "package.json", manifest("2.0.0"));
+  expect(await freshnessDigests(workspace)).toEqual(before);
+});
+
 test("only the manifest owning a resolved package installation affects freshness", async () => {
   const workspace = createFixtureWorkspace();
   roots.push(workspace.root);
