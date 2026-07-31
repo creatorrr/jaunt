@@ -65,6 +65,36 @@ def test_manual_meta_scopes_skill_and_user_overrides_managed(tmp_path: Path) -> 
     assert selection.entries[0].source == "user"
 
 
+def test_manual_meta_uses_import_roots_for_differently_named_library(tmp_path: Path) -> None:
+    _write(tmp_path / ".agents/skills/company-utils/SKILL.md", "# company utilities\n")
+    _write(
+        tmp_path / ".agents/skills/company-utils/META.json",
+        json.dumps(
+            {
+                "libs": [
+                    {
+                        "type": "path",
+                        "name": "company-utils",
+                        "path": "libs/company-utils",
+                        "import_roots": ["acme_utils"],
+                    }
+                ]
+            }
+        ),
+    )
+
+    selection = select_skills(
+        project_root=tmp_path,
+        builtin_names=(),
+        texts=("import acme_utils\n",),
+        language="py",
+        kind="build",
+    )
+
+    assert selection.names == ("company-utils",)
+    assert selection.entries[0].reason == "import:acme-utils"
+
+
 def test_all_always_exclude_and_unknown_validation(tmp_path: Path) -> None:
     _write(tmp_path / ".agents/skills/a/SKILL.md", "a\n")
     _write(tmp_path / ".agents/skills/b/SKILL.md", "b\n")

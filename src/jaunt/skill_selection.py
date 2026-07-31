@@ -78,11 +78,17 @@ def _manual_triggers(skill_dir: Path) -> frozenset[str]:
     libs = value.get("libs") if isinstance(value, dict) else None
     if not isinstance(libs, list):
         return frozenset()
-    names = {
-        pep503_normalize(str(item.get("name", "")))
-        for item in libs
-        if isinstance(item, dict) and item.get("name")
-    }
+    names: set[str] = set()
+    for item in libs:
+        if not isinstance(item, dict):
+            continue
+        if item.get("name"):
+            names.add(pep503_normalize(str(item["name"])))
+        import_roots = item.get("import_roots")
+        if isinstance(import_roots, list):
+            names.update(
+                pep503_normalize(root) for root in import_roots if isinstance(root, str) and root
+            )
     return frozenset(name for name in names if name)
 
 
