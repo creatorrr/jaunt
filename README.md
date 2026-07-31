@@ -140,6 +140,8 @@ before approving paid regeneration:
 
 ```bash
 uvx jaunt migrate --language ts --json
+uvx jaunt migrate --language ts --target ts:src/example --json
+uvx jaunt migrate --language ts --target ts:src/example --apply
 uvx jaunt migrate --language ts --apply
 uvx jaunt test --language ts --no-build
 uvx jaunt check --language ts
@@ -149,7 +151,8 @@ Apply only when the plan contains `free-recompose` actions and an empty
 `requires_rebuild` list. Jaunt recompiles the existing implementations against
 the current declaration environment and carries the validated API transition
 into the battery check; it does not call a model. Contract changes and failed
-validation remain rebuilds.
+validation remain rebuilds. Repeat `--target` to preview or apply a bounded
+rollout; no unselected module artifacts are written.
 
 The same test/check sequence also handles a battery whose target API and aggregate
 battery stamps changed. It remains eligible when the embedded prompt, protected

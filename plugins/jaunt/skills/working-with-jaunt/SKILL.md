@@ -75,7 +75,9 @@ the build afterward.
   `check --language ts`. This explicit route validates the saved implementation
   with the current compiler, policy, API, and consumer closure; it makes no
   model calls. Never describe `model-rebuild` or `manual-intervention` as safe
-  to restamp.
+  to restamp. For an incremental rollout, pass repeatable `--target
+  ts:<module-id>` flags to both preview and apply; unselected module artifacts
+  are not written.
 - When battery drift includes `target_api_digest` and `battery_fingerprint`,
   run `test --language ts --no-build` followed by `check --language ts`.
   Co-drift in the embedded prompt or runner/Vitest fingerprint still takes the

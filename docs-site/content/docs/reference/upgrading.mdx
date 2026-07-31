@@ -33,6 +33,12 @@ dependency context, keeps unscoped manual project skills active, and partitions 
 generation cache on the selected set. Use `[skills] activation = "all"` for the old
 all-skills behavior, or configure `always` and `exclude` by skill name.
 
+Targeted TypeScript builds now recompose an existing implementation without a model
+call when current compiler and consumer validation prove that structural staleness
+came only from compatible environment provenance. For an explicit preview/apply
+workflow, `jaunt migrate --language ts` also accepts repeatable `--target
+ts:<module-id>` flags and limits its write set to those modules.
+
 This is a Python-only patch. Keep `@usejaunt/ts` at 0.1.3; no npm upgrade is needed.
 
 ## 1.7.13 / `@usejaunt/ts` 0.1.3
@@ -220,6 +226,8 @@ the recovery first:
 
 ```bash
 jaunt migrate --language ts --json
+jaunt migrate --language ts --target ts:src/example --json
+jaunt migrate --language ts --target ts:src/example --apply
 jaunt migrate --language ts --apply
 jaunt test --language ts --no-build
 jaunt check --language ts
@@ -231,6 +239,8 @@ against the current compiler, static policy, public API, and consumer closure,
 then carries the old-to-new API proof into the separate battery command. It
 makes no model calls. Contract changes, changed symbol/options/dependency
 payloads, and compiler-overlay failures remain rebuilds.
+Use repeatable `--target` flags when you want to validate and land the recovery
+incrementally without writing unrelated module artifacts.
 
 New sidecars store package- and workspace-scoped semantic-environment digests.
 Whole lockfiles still trigger ordinary structural analysis, but unrelated

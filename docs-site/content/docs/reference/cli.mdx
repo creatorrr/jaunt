@@ -627,11 +627,16 @@ apply, run `jaunt test --language ts --no-build` and `jaunt check --language ts`
 Migration records the validated API transition so compatible batteries can be
 reheadered without a model call. A failed overlay writes nothing.
 
+Use repeatable `--target ts:<module-id>` flags to preview or apply only selected
+modules. Targeted plans may analyze dependency context, but their action and
+write sets contain no unselected module artifacts.
+
 | Flag | Effect |
 |------|--------|
 | `--apply` | Write the planned changes. Refuses on a dirty git tree unless `--force`. |
 | `--force` | Apply despite uncommitted changes. |
 | `--language {py,ts}` | Select one target. Plain migrate selects TypeScript only when `[target.ts]` is the sole configured target. |
+| `--target ts:<module-id>` | Restrict a TypeScript plan/apply to selected modules. Repeatable. |
 | `--allow-newly-governed` | Also rewrite legacy bodies that would newly govern a symbol. |
 | `--json` | Emit `{applied, actions: [...]}`. TypeScript plans also include `plan_digest`, `diagnostics`, `blocked`, and `requires_rebuild`. |
 

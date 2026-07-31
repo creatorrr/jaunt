@@ -3884,6 +3884,50 @@ async def test_toolchain_digest_drift_recomposes_without_model(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_targeted_environment_drift_recomposes_without_model(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    worker = FakeWorker(tmp_path)
+    await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    expected = json.loads(worker.sidecar)
+    expected["semanticEnvironmentDigest"] = "sha256:semantic-environment-v2"
+    worker.module["semanticEnvironmentDigest"] = expected["semanticEnvironmentDigest"]
+    worker.module["sidecar"] = json.dumps(expected, sort_keys=True) + "\n"
+
+    status = await run_status(
+        tmp_path,
+        config,
+        target_ids=("ts:src/math",),
+        worker_factory=lambda *_: worker,
+    )
+    report = await run_build(
+        tmp_path,
+        config,
+        target_ids=("ts:src/math",),
+        generator=ExplodingGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert status.stale == {"ts:src/math": "structural"}
+    assert report.generated == frozenset()
+    assert report.skipped == frozenset()
+    assert report.refrozen == frozenset({"ts:src/math"})
+    assert report.metadata["recomposed"] == ("ts:src/math",)
+    assert report.metadata["cost"]["api_calls"] == 0
+    after = await run_status(
+        tmp_path,
+        config,
+        target_ids=("ts:src/math",),
+        worker_factory=lambda *_: worker,
+    )
+    assert after.fresh == frozenset({"ts:src/math"})
+
+
+@pytest.mark.asyncio
 async def test_worker_session_preserves_body_error_during_runtime_change(
     tmp_path: Path,
 ) -> None:

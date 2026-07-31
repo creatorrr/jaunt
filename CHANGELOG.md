@@ -17,6 +17,14 @@ Python or TypeScript release.
 - Report the selected set and registry shadowing in JSON, and partition response
   caches only on the skills relevant to each request.
 
+### Fixes
+
+- Recompose a targeted TypeScript module without a model call when current
+  compiler and consumer validation prove that structural staleness came only
+  from compatible environment provenance.
+- Add repeatable `jaunt migrate --language ts --target ts:<module-id>` selection
+  so model-free repair plans and applies do not write unrelated module artifacts.
+
 ### Packages
 
 - Release Jaunt 1.7.14 as a Python-only patch. `@usejaunt/ts` remains at 0.1.3.

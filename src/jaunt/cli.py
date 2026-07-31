@@ -338,6 +338,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Restrict migration to one version-2 target language.",
     )
     migrate_p.add_argument(
+        "--target",
+        action="append",
+        default=[],
+        help="Restrict TypeScript artifact migration to ts:<spec-path>[#symbol] (repeatable).",
+    )
+    migrate_p.add_argument(
         "--apply",
         action="store_true",
         help="Execute the migrations (default: plan only).",
@@ -5123,7 +5129,14 @@ def _cmd_typescript_migrate_loaded(args: argparse.Namespace, root: Path, cfg: Ja
 
     json_mode = _is_json_mode(args)
     try:
-        plan = asyncio.run(plan_typescript_migration(root, cfg))
+        target_ids = _typescript_target_ids(args)
+        plan = asyncio.run(
+            plan_typescript_migration(
+                root,
+                cfg,
+                **({"target_ids": target_ids} if target_ids else {}),
+            )
+        )
         payload = plan.to_json()
         if not bool(getattr(args, "apply", False)):
             if json_mode:

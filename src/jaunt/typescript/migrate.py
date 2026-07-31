@@ -628,6 +628,7 @@ async def plan_typescript_migration(
     root: Path,
     config: JauntConfig,
     *,
+    target_ids: Sequence[str] = (),
     worker_factory: Any | None = None,
 ) -> TypeScriptMigrationPlan:
     """Plan model-free TypeScript artifact repairs through the project worker."""
@@ -652,7 +653,12 @@ async def plan_typescript_migration(
     root = root.resolve()
     if config.version != 2 or config.typescript_target is None:
         raise JauntConfigError("TypeScript migration requires config version 2 with [target.ts]")
-    legacy_actions, legacy_diagnostics, legacy_inputs = _legacy_layout_plan(root, config)
+    # Legacy preview layouts predate stable module IDs and cannot be selected by
+    # ``ts:<module-id>``. A targeted migration is exclusively for current,
+    # analyzer-owned artifacts and must not be blocked by unrelated legacy files.
+    legacy_actions, legacy_diagnostics, legacy_inputs = (
+        ((), (), {}) if target_ids else _legacy_layout_plan(root, config)
+    )
     if legacy_diagnostics:
         payload = json.dumps(
             {
@@ -678,10 +684,18 @@ async def plan_typescript_migration(
         client,
         initialized,
     ):
-        analysis = await analyze(client, initialized)
-        modules = analysis.modules
+        analysis = await analyze(client, initialized, target_ids=target_ids)
+        analyzed_modules = analysis.modules
+        requested_module_ids = (
+            {target.split("#", 1)[0] for target in target_ids}
+            if target_ids
+            else {_module_id(module) for module in analyzed_modules}
+        )
+        modules = tuple(
+            module for module in analyzed_modules if _module_id(module) in requested_module_ids
+        )
         semantic_compatible = compatible_semantic_modules(
-            root, tuple(modules), allow_environment_drift=True
+            root, tuple(analyzed_modules), allow_environment_drift=True
         )
         status = classify_modules(root, modules)
         api_records_before = capture_target_api_records(root, modules)
@@ -971,7 +985,7 @@ async def plan_typescript_migration(
         writes=tuple(writes),
         plan_digest=_sha256(payload.encode("utf-8")),
         api_records_before=api_records_before,
-        reuse_modules=tuple(modules),
+        reuse_modules=tuple(analyzed_modules),
         reused_module_ids=frozenset(recomposed_module_ids),
     )
 

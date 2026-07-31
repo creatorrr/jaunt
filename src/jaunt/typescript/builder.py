@@ -2753,6 +2753,13 @@ async def run_build_in_session(
     _topological_modules(analysis.modules)
     output_preconditions = _artifact_preconditions(root, analysis.modules)
     status = classify_modules(root, analysis.modules)
+    from jaunt.typescript.upgrade import compatible_semantic_modules
+
+    semantic_compatible = compatible_semantic_modules(
+        root,
+        tuple(analysis.modules),
+        allow_environment_drift=True,
+    )
     gate_enabled = (
         config.semantic_gate.enabled if semantic_gate_enabled is None else semantic_gate_enabled
     )
@@ -2762,6 +2769,13 @@ async def run_build_in_session(
         if not force and reason == "fingerprint":
             refrozen.add(module_id)
         elif not force and reason == "toolchain":
+            refrozen.add(module_id)
+            recomposed.add(module_id)
+        elif not force and reason == "structural" and module_id in semantic_compatible:
+            # Worker/package upgrades can change structural digests while the
+            # complete model-facing contract remains byte-for-byte identical.
+            # Recompose the already-built implementation through the current
+            # compiler and consumer overlay instead of paying for generation.
             refrozen.add(module_id)
             recomposed.add(module_id)
         elif not force and reason == "prose" and gate_enabled:
