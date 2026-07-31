@@ -212,7 +212,15 @@ def test_workflows_gate_release_integrity_and_typescript_fixture_freshness() -> 
     assert release.count("scripts/verify_pypi_candidates.py") >= 3
     assert "git fetch --force --tags origin" in release
     assert "jaunt check --language ts --root examples/typescript-jwt" in release
-    assert "jaunt check --language ts --root examples/typescript-jwt" in ci
+    assert "typescript-worker:" in ci
+    assert "typescript-adapter:" in ci
+    assert "typescript-examples:" in ci
+    assert ci.count("uv run pytest -q tests/test_typescript_real_worker.py") == 1
+    assert ci.count("npm run lint && npm run format:check && npm run typecheck && npm test") == 1
+    assert "path: examples/typescript-jwt" in ci
+    assert "path: examples/typescript_slugify" in ci
+    assert "path: examples/typescript_project_references" in ci
+    assert "uv run --project ../.. jaunt check --language ts" in ci
     candidate_refreeze = (
         '"$jaunt_bin" test --language ts --no-build --no-run --root "$project" --json'
     )
