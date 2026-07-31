@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import runpy
 import subprocess
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 ROOT = Path(__file__).parents[1]
 VERIFY_TAGS = ROOT / "scripts" / "verify_release_tags.py"
@@ -246,6 +249,58 @@ def test_typescript_upgrade_verifier_requires_runtime_proof_and_bounded_repair()
     assert '"pnpm", "--dir", str(project), "test"' in verifier
     assert "codex.write_text(" in verifier
     assert 'migrate_payload.get("requires_rebuild") != []' in verifier
+
+
+def test_typescript_upgrade_verifier_requires_exact_runtime_refreeze() -> None:
+    namespace = runpy.run_path(str(VERIFY_TYPESCRIPT_UPGRADE))
+    validate = namespace["_validate_candidate_battery_refreeze"]
+    verification_error = namespace["VerificationError"]
+    batteries = {
+        "tests/__generated__/workspace.derived.test.ts",
+        "tests/__generated__/workspace.example.test.ts",
+    }
+
+    validate(
+        {
+            "ok": True,
+            "generated": [],
+            "skipped": [],
+            "failed": {},
+            "refrozen": sorted(batteries),
+        }
+    )
+    with pytest.raises(verification_error, match="not model-free"):
+        validate(
+            {
+                "ok": True,
+                "generated": [],
+                "skipped": sorted(batteries),
+                "failed": {},
+                "refrozen": [],
+            }
+        )
+
+
+def test_typescript_upgrade_verifier_allows_only_exact_gitignore_migration(
+    tmp_path: Path,
+) -> None:
+    namespace = runpy.run_path(str(VERIFY_TYPESCRIPT_UPGRADE))
+    validate = namespace["_assert_historical_files_protected"]
+    verification_error = namespace["VerificationError"]
+    block = namespace["TRACKED_SKILLS_GITIGNORE_BLOCK"]
+    fixture = tmp_path / "fixture"
+    project = tmp_path / "project"
+    fixture.mkdir()
+    project.mkdir()
+    original = ".jaunt/\n.jaunt-vitest-cache/\n"
+    (fixture / ".gitignore").write_text(original, encoding="utf-8")
+    (project / ".gitignore").write_text(original + block, encoding="utf-8")
+    manifest = {"files": {".gitignore": hashlib.sha256(original.encode()).hexdigest()}}
+
+    validate(project, fixture, manifest)
+    (project / ".gitignore").write_text(original, encoding="utf-8")
+    with pytest.raises(verification_error, match="exact managed-skills"):
+        validate(project, fixture, manifest)
 
 
 def test_workflows_gate_release_integrity_and_typescript_fixture_freshness() -> None:

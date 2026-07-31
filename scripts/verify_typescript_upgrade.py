@@ -31,6 +31,13 @@ MUTABLE_HISTORICAL_PREFIXES = (
     "tests/__generated__/",
 )
 IGNORED_RUNTIME_PARTS = {".jaunt", ".jaunt-vitest-cache", "dist", "node_modules"}
+TRACKED_SKILLS_GITIGNORE_BLOCK = """\
+# Jaunt local state; managed skills are tracked.
+!/.jaunt/
+/.jaunt/*
+!/.jaunt/skills/
+!/.jaunt/skills/**
+"""
 
 
 class VerificationError(RuntimeError):
@@ -182,13 +189,24 @@ def _verify_fixture(fixture: Path) -> dict[str, Any]:
     return manifest
 
 
-def _assert_historical_files_protected(project: Path, manifest: Mapping[str, Any]) -> None:
+def _assert_historical_files_protected(
+    project: Path, fixture: Path, manifest: Mapping[str, Any]
+) -> None:
     files = manifest["files"]
     assert isinstance(files, dict)
     for relative, expected in files.items():
         if relative.startswith(MUTABLE_HISTORICAL_PREFIXES):
             continue
         path = project / relative
+        if relative == ".gitignore":
+            original = (fixture / relative).read_text(encoding="utf-8")
+            joiner = "" if not original or original.endswith("\n") else "\n"
+            expected_text = original + joiner + TRACKED_SKILLS_GITIGNORE_BLOCK
+            if not path.is_file() or path.read_text(encoding="utf-8") != expected_text:
+                raise VerificationError(
+                    "upgrade did not apply the exact managed-skills .gitignore migration"
+                )
+            continue
         if not path.is_file() or _sha256(path) != expected:
             raise VerificationError(f"upgrade modified protected historical file: {relative}")
 
@@ -222,6 +240,17 @@ def _collect_codes(value: Any) -> set[str]:
         for item in value:
             codes.update(_collect_codes(item))
     return codes
+
+
+def _validate_candidate_battery_refreeze(payload: Mapping[str, Any]) -> None:
+    if (
+        payload.get("ok") is not True
+        or payload.get("generated") != []
+        or payload.get("skipped") != []
+        or payload.get("failed") != {}
+        or set(payload.get("refrozen", [])) != EXPECTED_BATTERIES
+    ):
+        raise VerificationError(f"candidate battery refreeze was not model-free: {payload}")
 
 
 def _installed_version(python: Path) -> str:
@@ -475,18 +504,7 @@ def verify(args: argparse.Namespace, report: dict[str, Any]) -> None:
             timeout=_remaining(deadline, phase="battery_refreeze"),
         )
         refreeze_payload = _load_json(refreeze.stdout, phase="battery_refreeze")
-        expected_refrozen = EXPECTED_BATTERIES if battery_drift else set()
-        expected_skipped = set() if battery_drift else EXPECTED_BATTERIES
-        if (
-            refreeze_payload.get("ok") is not True
-            or refreeze_payload.get("generated") != []
-            or set(refreeze_payload.get("skipped", [])) != expected_skipped
-            or refreeze_payload.get("failed") != {}
-            or set(refreeze_payload.get("refrozen", [])) != expected_refrozen
-        ):
-            raise VerificationError(
-                f"candidate battery refreeze was not model-free: {refreeze_payload}"
-            )
+        _validate_candidate_battery_refreeze(refreeze_payload)
 
         final_check = _record_phase(
             report,
@@ -529,7 +547,7 @@ def verify(args: argparse.Namespace, report: dict[str, Any]) -> None:
         )
         if marker.exists():
             raise VerificationError("model-free upgrade invoked codex")
-        _assert_historical_files_protected(project, manifest)
+        _assert_historical_files_protected(project, fixture, manifest)
 
 
 def _parser() -> argparse.ArgumentParser:
