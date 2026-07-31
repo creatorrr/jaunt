@@ -2,6 +2,278 @@
 
 Running notes from real adopters. Newest section first.
 
+## 2026-07-31 (follow-up 7): targeted TypeScript regeneration has a silent no-op path, while the model-free repair path cannot be scoped
+
+This is a follow-up to the 1.7.13 / `@usejaunt/ts` 0.1.3 consumer upgrade
+described above. We intentionally tried to repair exactly one of the 20
+structurally stale dashboard modules rather than trigger a fleet-wide rewrite:
+
+```text
+ts:apps/dashboard/src/pure/copilot/select-starter-topics/index
+```
+
+The module's spec and consumer test already existed. Before repair, targeted
+`jaunt status --language ts --target <module> --json` reported only this module
+as `stale (structural)`, with no invalid artifacts or orphans. The only
+semantic-environment change reported was
+`environment:apps/dashboard/package.json`—the `@usejaunt/ts` 0.1.2 -> 0.1.3
+upgrade.
+
+### 1. A normal targeted build reports success but silently skips a stale module
+
+With the documented module ID, the ordinary targeted command completed with
+exit 0 and this material result:
+
+```bash
+jaunt build --language ts \
+  --target ts:apps/dashboard/src/pure/copilot/select-starter-topics/index \
+  --no-progress --json
+```
+
+```json
+{
+  "ok": true,
+  "generated": [],
+  "skipped": ["ts:apps/dashboard/src/pure/copilot/select-starter-topics/index"],
+  "refrozen": [],
+  "recomposed": [],
+  "failed": {},
+  "cost": {"api_calls": 0}
+}
+```
+
+Immediately afterward, the same targeted `status` still reported the module
+as `stale (structural)`. This is a dangerous success result: automation and
+an adopter can reasonably interpret `ok: true` as a repaired target, but it
+has performed no repair and has not explained why it selected nothing. The
+target is valid—`jaunt specs --language ts --json` lists that exact `moduleId`.
+
+An attempted selector using the spec path instead (`.../index.jaunt.ts`) fails
+explicitly as unknown, so there is no documented alternate selector that
+avoids the no-op. The command should either repair/refreeze the explicitly
+selected stale module or exit nonzero with a diagnostic such as
+`JAUNT_TS_TARGET_STALE_NOT_ACTIONED`, including the stale reason and the
+recommended command.
+
+### 2. `migrate` proves the safe repair, but cannot apply it to the requested module
+
+The read-only command below analyzed all 20 stale dashboard modules:
+
+```bash
+jaunt migrate --language ts --json
+```
+
+It reported the selected module, and every other pending dashboard module, as
+`free-recompose`, with `blocked: false` and `requires_rebuild: []`. Its
+description says the existing implementation passed the current worker,
+compiler, policy, API, and consumer validation and can be recomposed without a
+model call. This is exactly the repair classification we need.
+
+But `migrate` exposes only `--language` and `--apply`; it has no `--target`.
+Using `jaunt migrate --language ts --apply` would mutate all 20 modules,
+despite the operator intentionally asking to trial one module first. That
+makes the safe path unusable for incremental rollout, bisecting, or review of
+a large consumer fleet. Please add repeatable `--target
+ts:<module-id>` support to both the preview and apply paths, and make the JSON
+plan say which writes belong to each target.
+
+### Control: a forced one-module build works, but spends the expensive path unnecessarily
+
+The only supported CLI command that actually repaired one module was:
+
+```bash
+jaunt build --language ts --force \
+  --target ts:apps/dashboard/src/pure/copilot/select-starter-topics/index \
+  --no-progress --json
+```
+
+It rewrote exactly the module's three owned generated artifacts:
+
+- `__generated__/index.ts`
+- `__generated__/index.api.ts`
+- `__generated__/index.jaunt.json`
+
+The sidecar now records `jaunt` 1.7.13, worker 0.1.3, and the current
+semantic-environment digest. The focused consumer test passed (9/9), and the
+subsequent targeted status reports the module `fresh`. This confirms the
+consumer and target selector can complete a one-module repair; the missing
+piece is allowing the already-proven model-free migration to do it.
+
+The forced build also changed the generated implementation's internal shape
+(48 insertions / 45 deletions) despite no spec change. The focused tests pass,
+but this is why forcing a model generation merely to restamp version
+provenance is not an acceptable fleet repair policy: it creates review noise
+and behavior risk when Jaunt has already established that the old
+implementation is valid.
+
+### Requested acceptance cases
+
+1. For a stale explicit target, `jaunt build --target <module>` must not return
+   `ok: true` with the module skipped and still stale. It should recompose it,
+   or fail with an actionable reason.
+2. `jaunt migrate --target <module> --apply` must atomically write only that
+   module's owned artifacts after the same validation that currently supports
+   `free-recompose`.
+3. Add an end-to-end fixture that upgrades only Jaunt Python/npm versions,
+   starts with a stamped generated TypeScript module, and asserts that a
+   targeted model-free repair leaves the module fresh without a forced model
+   build or unrelated artifact writes.
+
+## 2026-07-30 (follow-up 6): unreleased 1.7.13 correctly demotes ambient fingerprints, but `target_api_digest` and structural drift still keep CI red
+
+The 1.7.12 closure fix got us past the jsdom blocker from follow-up 5, but
+our repository is now failing at the next freshness layer. This is broad
+enough to block the normal PR lane: at the time of this check, 23 open
+`julep-ai/mem-mcp` PRs had a failed **Jaunt Check**, and the last completed
+`main` run had failed the same job. Two fresh examples:
+
+- PR #2908, job
+  <https://github.com/julep-ai/mem-mcp/actions/runs/30540507881/job/90864120469>
+- PR #2903, job
+  <https://github.com/julep-ai/mem-mcp/actions/runs/30537114304/job/90853114792>
+
+The CI setup is the ordinary released consumer path: Python 3.13, Node 20,
+pnpm 10, `uv sync --all-packages --all-extras --group dev`, frozen dashboard
+dependencies, then `uv run jaunt check`. The lockfiles resolve:
+
+- `jaunt==1.7.12`
+- `@usejaunt/ts==0.1.2`
+- TypeScript 5.9.3
+- Vitest 4.0.17
+
+Both example jobs complete the worker scan successfully and then exit 4 with
+the same 50 TypeScript freshness failures:
+
+- 30 `JAUNT_TS_TEST_BATTERY_STALE` diagnostics: example + derived batteries
+  for 15 test specs. Released 1.7.12 reports
+  `battery_fingerprint`, `skills_fingerprint`, and `target_api_digest` in the
+  human-readable stale reason.
+- 20 `JAUNT_MAGIC_STALE` diagnostics: every governed dashboard TypeScript
+  module is `stale (structural)`.
+
+This is not only old PR branches missing a restamp. The last completed
+`main` workflow at the time of inspection also failed Jaunt Check:
+<https://github.com/julep-ai/mem-mcp/actions/runs/30550171539/job/90896470269>.
+The two sample PRs are also unrelated in product scope—one is a Stage Review
+revert and one is a memory-api RECORD retry fix—yet they fail on the same
+dashboard-wide set.
+
+### A/B against unreleased 1.7.13 / PR #102
+
+We then tested the post-1.7.12 upstream commit directly:
+
+- Jaunt commit:
+  `fd182019caa81f5d47d3e51d61db58f3fd2cf017`
+  (<https://github.com/creatorrr/jaunt/commit/fd182019caa81f5d47d3e51d61db58f3fd2cf017>)
+- Commit title: `fix(ts): stop installed skills and toolchain identity from
+  gating TypeScript battery freshness (#102)`
+- Exact consumer revision: PR #2908 head
+  `2ef13c42f30035e9ff4ec1e7466bf30891868060`
+- Clean isolated clone; dashboard installed from its frozen pnpm lock;
+  project Python environment synced from `uv.lock` with Python 3.13.
+
+The commands, from the consumer repository root, were:
+
+```bash
+UV_PYTHON=3.13 uv sync --all-packages --all-extras --group dev
+
+UV_PYTHON=3.13 uv run \
+  --with 'git+https://github.com/creatorrr/jaunt.git@fd182019caa81f5d47d3e51d61db58f3fd2cf017' \
+  jaunt --version
+
+UV_PYTHON=3.13 uv run \
+  --with 'git+https://github.com/creatorrr/jaunt.git@fd182019caa81f5d47d3e51d61db58f3fd2cf017' \
+  jaunt check --json
+```
+
+The source install identifies itself as `jaunt 1.7.13`. The check still exits
+4 with the same 30 stale batteries and 20 structurally stale modules.
+
+PR #102's intended narrowing is visible and appears to work. For each stale
+battery, 1.7.13 now reports data shaped like:
+
+```json
+{
+  "mismatches": [
+    "battery_fingerprint",
+    "fast_check_fingerprint",
+    "target_api_digest"
+  ],
+  "gating": ["target_api_digest"],
+  "advisories": ["battery_fingerprint", "fast_check_fingerprint"]
+}
+```
+
+`skills_fingerprint` no longer gates or appears in that mismatch set, and the
+battery / FastCheck fingerprints are advisory. That is a real improvement.
+It does not unblock this consumer, however, because `target_api_digest` still
+gates all 30 batteries. The 20 module failures are unchanged and still expose
+only `state: "stale", reason: "structural"`.
+
+One environment difference is worth making explicit: the local 1.7.13 A/B
+used Node 24.14 and pnpm 11.5 to materialize the same frozen package graph,
+while GitHub CI uses Node 20 and pnpm 10. That should no longer explain the
+failure under PR #102—the environment-sensitive fingerprints are advisory in
+the 1.7.13 JSON, while the remaining gates are specifically
+`target_api_digest` and structural module freshness. If Node or pnpm identity
+still feeds either remaining value indirectly, that would be the next bug.
+
+### What we cannot determine from the diagnostics
+
+The remaining output says *which category* differs but not *what input*
+changed. In particular:
+
+1. There is no stamped-versus-current `target_api_digest` pair or component
+   diff, so we cannot tell which declaration, governed export, dependency API,
+   or ambient project input invalidated every battery.
+2. `JAUNT_MAGIC_STALE` with `reason: "structural"` gives no lower-level
+   structural mismatch. We cannot distinguish a real spec/exported-API change
+   from a Jaunt digest-schema change or an overly broad declaration closure.
+3. The breadth is suspicious: unrelated backend/docs/revert branches, plus
+   `main`, all invalidate the same dashboard fleet. It looks more like one
+   shared freshness input than 20 independent governed contracts changing.
+
+This leaves the adopter with a risky choice: run the prescribed build/test
+commands across all 20 modules and 30 batteries without knowing whether the
+repair is model-free, or keep CI red. Given the earlier episodes where a patch
+upgrade triggered paid regeneration and a real behavior regression, we do not
+want to start a fleet-wide rebuild merely to discover which digest component
+changed.
+
+### Requests for the maintainer pass
+
+1. **Reproduce against the exact consumer SHA above with 1.7.13.** The useful
+   acceptance condition is `jaunt check --json` exit 0 from the clean frozen
+   install, not only Jaunt's self-hosted fixtures.
+2. **Explain `target_api_digest` drift structurally.** JSON should expose at
+   least stamped/current digests and the declarations or dependency API nodes
+   added, removed, or changed. A digest with no causal diff is not actionable
+   at this scale.
+3. **Give `JAUNT_MAGIC_STALE` the same causal detail.** If `structural` means a
+   spec AST change, generated facade change, contract-IR schema change, or
+   dependency API change, name that component and ideally its path/symbol.
+4. **Audit the digest boundary.** A battery should follow the governed target's
+   public contract and declared/inferred dependencies, not unrelated ambient
+   dashboard declarations or patch-level tool internals. Please verify that
+   `target_api_digest` is not effectively hashing a workspace-wide declaration
+   environment.
+5. **Provide a deterministic repair path when behavior is already valid.** If
+   this drift is an intentional schema transition, `migrate` should be able to
+   preview the exact changes and recompose/refreeze model-free after compiler,
+   conformance, and committed-battery verification. It should identify any
+   module that truly requires a paid rebuild before writing anything.
+6. **Add this consumer shape to release verification.** The important fixture
+   is a pnpm frontend with many governed modules, committed example/derived
+   batteries, and ordinary non-governed app declarations—not only a small
+   node-environment project.
+
+Bottom line: 1.7.13 fixes the false-positive skills/toolchain portion of the
+battery result, but it still fails the same real consumer and therefore does
+not yet unblock our PR CI. The remaining work is now narrower and better
+identified: explain and correct the dashboard-wide `target_api_digest` and
+module `structural` drift, or provide a provably model-free migration if that
+drift is intentional.
+
 ## 2026-07-24 (follow-up 5): root cause of the released pin failure — the closure scan lints jsdom and fails closed, so every vitest+jsdom project is blocked
 
 We traced follow-up 4 to its exact origin with the released `jaunt==1.7.11`

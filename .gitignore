@@ -68,3 +68,6 @@ node_modules/
 !examples/typescript_project_references/packages/app/src/slug/__generated__/**
 !examples/typescript_project_references/tests/__generated__/
 !examples/typescript_project_references/tests/__generated__/**
+
+# Riptide artifacts (cloud-synced)
+.humanlayer/tasks/
