@@ -4971,6 +4971,241 @@ def test_runtime_verification_hashes_duplicate_package_pins_once_per_pass(
     assert identity_calls == 1
 
 
+def test_package_resolution_closure_reuses_walk_for_same_physical_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installation = _installation(tmp_path, "console.log('worker');\n")
+
+    def install(package: str, dependencies: Mapping[str, str] | None = None) -> Path:
+        package_root = tmp_path / "node_modules" / package
+        runtime = package_root / "dist/index.js"
+        runtime.parent.mkdir(parents=True)
+        runtime.write_text("export {};\n", encoding="utf-8")
+        (package_root / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": package,
+                    "version": "1.0.0",
+                    "main": "./dist/index.js",
+                    "dependencies": dependencies or {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return package_root
+
+    install("vitest")
+    original_closure = typescript_worker._runtime_package_resolution_closure
+    closure_calls = 0
+
+    def counted_closure(
+        package_root: Path,
+        *,
+        root_label: str,
+    ) -> tuple[typescript_worker._RuntimePackageResolutionEdge, ...]:
+        nonlocal closure_calls
+        closure_calls += 1
+        return original_closure(package_root, root_label=root_label)
+
+    monkeypatch.setattr(
+        typescript_worker,
+        "_runtime_package_resolution_closure",
+        counted_closure,
+    )
+    client = WorkerClient(root=tmp_path, installation=installation)
+
+    for label in ("runner Vitest closure", "workspace Vitest closure"):
+        client.pin_package_resolution_closure(
+            label,
+            tmp_path,
+            "vitest",
+            boundary=tmp_path,
+            expected_name="vitest",
+        )
+
+    assert closure_calls == 1
+
+
+def test_package_resolution_closure_hashes_diamond_dependency_once_per_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installation = _installation(tmp_path, "console.log('worker');\n")
+
+    def install(package: str, dependencies: Mapping[str, str] | None = None) -> Path:
+        package_root = tmp_path / "node_modules" / package
+        runtime = package_root / "dist/index.js"
+        runtime.parent.mkdir(parents=True)
+        dependency_names = tuple((dependencies or {}).keys())
+        runtime.write_text(
+            "".join(f'import "{dependency}";\n' for dependency in dependency_names)
+            + "export {};\n",
+            encoding="utf-8",
+        )
+        (package_root / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": package,
+                    "version": "1.0.0",
+                    "main": "./dist/index.js",
+                    "dependencies": dependencies or {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return package_root
+
+    install("vitest", {"pkg-a": "1.0.0", "pkg-b": "1.0.0"})
+    install("pkg-a", {"pkg-c": "1.0.0"})
+    install("pkg-b", {"pkg-c": "1.0.0"})
+    install("pkg-c")
+    original_identity = typescript_worker.runtime_package_session_identity
+    identity_calls = 0
+
+    def counted_identity(package_root: Path, *, expected_name: str | None = None) -> str:
+        nonlocal identity_calls
+        identity_calls += 1
+        return original_identity(package_root, expected_name=expected_name)
+
+    monkeypatch.setattr(
+        typescript_worker,
+        "runtime_package_session_identity",
+        counted_identity,
+    )
+    client = WorkerClient(root=tmp_path, installation=installation)
+
+    client.pin_package_resolution_closure(
+        "Vitest closure",
+        tmp_path,
+        "vitest",
+        boundary=tmp_path,
+        expected_name="vitest",
+    )
+
+    assert identity_calls == 4
+
+
+def test_reset_full_runtime_identity_clears_package_pin_caches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installation = _installation(tmp_path, "console.log('worker');\n")
+
+    def install(package: str, dependencies: Mapping[str, str] | None = None) -> Path:
+        package_root = tmp_path / "node_modules" / package
+        runtime = package_root / "dist/index.js"
+        runtime.parent.mkdir(parents=True)
+        runtime.write_text("export {};\n", encoding="utf-8")
+        (package_root / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": package,
+                    "version": "1.0.0",
+                    "main": "./dist/index.js",
+                    "dependencies": dependencies or {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return package_root
+
+    install("vitest")
+    original_closure = typescript_worker._runtime_package_resolution_closure
+    original_identity = typescript_worker.runtime_package_session_identity
+    closure_calls = 0
+    identity_calls = 0
+
+    def counted_closure(
+        package_root: Path,
+        *,
+        root_label: str,
+    ) -> tuple[typescript_worker._RuntimePackageResolutionEdge, ...]:
+        nonlocal closure_calls
+        closure_calls += 1
+        return original_closure(package_root, root_label=root_label)
+
+    def counted_identity(package_root: Path, *, expected_name: str | None = None) -> str:
+        nonlocal identity_calls
+        identity_calls += 1
+        return original_identity(package_root, expected_name=expected_name)
+
+    monkeypatch.setattr(
+        typescript_worker,
+        "_runtime_package_resolution_closure",
+        counted_closure,
+    )
+    monkeypatch.setattr(
+        typescript_worker,
+        "runtime_package_session_identity",
+        counted_identity,
+    )
+    client = WorkerClient(root=tmp_path, installation=installation)
+    client.pin_package_resolution_closure(
+        "runner Vitest closure",
+        tmp_path,
+        "vitest",
+        boundary=tmp_path,
+        expected_name="vitest",
+    )
+
+    assert (closure_calls, identity_calls) == (1, 1)
+
+    client.reset_full_runtime_identity()
+    client.pin_package_resolution_closure(
+        "workspace Vitest closure",
+        tmp_path,
+        "vitest",
+        boundary=tmp_path,
+        expected_name="vitest",
+    )
+
+    assert (closure_calls, identity_calls) == (2, 2)
+
+
+def test_package_resolution_closure_cached_pin_still_verifies_runtime_bytes(
+    tmp_path: Path,
+) -> None:
+    installation = _installation(tmp_path, "console.log('worker');\n")
+
+    def install(package: str, dependencies: Mapping[str, str] | None = None) -> Path:
+        package_root = tmp_path / "node_modules" / package
+        runtime = package_root / "dist/index.js"
+        runtime.parent.mkdir(parents=True)
+        runtime.write_text("export const value = 1;\n", encoding="utf-8")
+        (package_root / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": package,
+                    "version": "1.0.0",
+                    "main": "./dist/index.js",
+                    "dependencies": dependencies or {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return package_root
+
+    package = install("vitest")
+    client = WorkerClient(root=tmp_path, installation=installation)
+    for label in ("runner Vitest closure", "workspace Vitest closure"):
+        client.pin_package_resolution_closure(
+            label,
+            tmp_path,
+            "vitest",
+            boundary=tmp_path,
+            expected_name="vitest",
+        )
+
+    (package / "dist/index.js").write_text("export const value = 2;\n", encoding="utf-8")
+
+    with pytest.raises(
+        WorkerToolchainChangedError,
+        match="JAUNT_TS_TOOLCHAIN_CHANGED_DURING_BUILD",
+    ):
+        client.verify_runtime_identity()
+
+
 def test_package_resolution_closure_rejects_dependency_symlink_aba(tmp_path: Path) -> None:
     installation = _installation(tmp_path, "console.log('worker');\n")
     vitest = tmp_path / "node_modules/vitest"
