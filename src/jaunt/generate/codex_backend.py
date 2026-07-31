@@ -604,6 +604,7 @@ class CodexBackend(GeneratorBackend):
                     builtin_names=tuple(getattr(ctx, "builtin_skill_names", ()) or ()),
                     texts=(
                         *tuple(ctx.spec_sources.values()),
+                        getattr(ctx, "blueprint_source", "") or "",
                         *tuple(ctx.dependency_apis.values()),
                         *tuple((getattr(ctx, "dependency_generated_modules", {}) or {}).values()),
                         getattr(ctx, "seed_target_content", "") or "",

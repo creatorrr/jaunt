@@ -431,6 +431,27 @@ def test_generic_cache_key_is_language_and_target_namespaced() -> None:
     assert ts_key != py_key
 
 
+def test_generic_cache_key_ignores_unselected_builtin_skill() -> None:
+    def validate(_source: str) -> list[str]:
+        return []
+
+    request = GenerationRequest(
+        language="py",
+        kind="build",
+        target_path="out/module.py",
+        context_files={"spec.py": "import pydantic\n"},
+        prompt="prompt",
+        cache_payload={},
+        validator=validate,
+        builtin_skill_names=("pydantic",),
+    )
+    with_irrelevant = replace(request, builtin_skill_names=("pydantic", "pytest"))
+
+    assert generation_request_cache_key(
+        request, model="m", provider="p"
+    ) == generation_request_cache_key(with_irrelevant, model="m", provider="p")
+
+
 def test_codex_generic_request_writes_only_safe_workspace_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

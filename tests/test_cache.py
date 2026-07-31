@@ -20,6 +20,8 @@ def _make_ctx(**overrides: object) -> ModuleSpecContext:
         dependency_apis=overrides.get("dependency_apis", {}),  # type: ignore[arg-type]
         dependency_generated_modules=overrides.get("dependency_generated_modules", {}),  # type: ignore[arg-type]
         decorator_apis=overrides.get("decorator_apis", {}),  # type: ignore[arg-type]
+        project_root=overrides.get("project_root"),  # type: ignore[arg-type]
+        builtin_skill_names=overrides.get("builtin_skill_names", ()),  # type: ignore[arg-type]
         module_contract_block=overrides.get("module_contract_block", ""),  # type: ignore[arg-type]
         blueprint_source=overrides.get("blueprint_source", ""),  # type: ignore[arg-type]
         build_instructions_block=overrides.get("build_instructions_block", ""),  # type: ignore[arg-type]
@@ -212,6 +214,20 @@ def test_cache_key_differs_by_blueprint_source() -> None:
     ctx2 = _make_ctx(blueprint_source="def foo() -> str:\n    ...\n")
     assert cache_key_from_context(ctx1, model="m", provider="p") != cache_key_from_context(
         ctx2, model="m", provider="p"
+    )
+
+
+def test_cache_key_ignores_unselected_builtin_skill() -> None:
+    base = _make_ctx(
+        blueprint_source="from pydantic import BaseModel\n",
+        builtin_skill_names=("pydantic",),
+    )
+    with_irrelevant = _make_ctx(
+        blueprint_source="from pydantic import BaseModel\n",
+        builtin_skill_names=("pydantic", "pytest"),
+    )
+    assert cache_key_from_context(base, model="m", provider="p") == cache_key_from_context(
+        with_irrelevant, model="m", provider="p"
     )
 
 

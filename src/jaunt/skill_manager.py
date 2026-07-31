@@ -434,15 +434,18 @@ def ensure_managed_skills_gitignore(project_root: Path) -> bool:
     joiner = "" if not original or original.endswith("\n") else "\n"
     content = original + joiner + _TRACKED_SKILLS_GITIGNORE_BLOCK
     _atomic_write_text(path, content)
-    inside_git = (
-        subprocess.run(
-            ["git", "-C", str(project_root), "rev-parse", "--is-inside-work-tree"],
-            capture_output=True,
-            text=True,
-            check=False,
-        ).returncode
-        == 0
-    )
+    try:
+        inside_git = (
+            subprocess.run(
+                ["git", "-C", str(project_root), "rev-parse", "--is-inside-work-tree"],
+                capture_output=True,
+                text=True,
+                check=False,
+            ).returncode
+            == 0
+        )
+    except FileNotFoundError:
+        inside_git = False
     if inside_git:
         runtime_ignored = (
             subprocess.run(
@@ -473,8 +476,6 @@ def apply_managed_skill_migration(project_root: Path, plan: SkillMigrationPlan) 
 
     if plan.conflicts:
         raise ValueError("cannot apply a managed skill migration with conflicts")
-    if not plan.actions:
-        return
     ensure_managed_skills_gitignore(project_root)
     for action in plan.actions:
         action.destination.parent.mkdir(parents=True, exist_ok=True)

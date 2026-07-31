@@ -104,6 +104,7 @@ def cache_key_from_context(
         builtin_names=ctx.builtin_skill_names,
         texts=(
             *tuple(ctx.spec_sources.values()),
+            ctx.blueprint_source or "",
             *tuple(ctx.dependency_apis.values()),
             *tuple(ctx.dependency_generated_modules.values()),
             ctx.seed_target_content or "",
@@ -120,8 +121,6 @@ def cache_key_from_context(
         selected_names=selection.names,
     )
     h.update(selected_digest.encode())
-    h.update(b"\x00")
-    h.update(json.dumps(sorted(ctx.builtin_skill_names)).encode())
     h.update(b"\x00")
     h.update((ctx.module_contract_block or "").encode())
     h.update(b"\x00")

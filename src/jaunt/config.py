@@ -797,10 +797,15 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     ``config_path`` points at a file that does not exist, ``JauntConfigError`` is
     raised (wrapping the underlying ``FileNotFoundError``). Unknown sections or
     keys, an invalid TOML body, or a missing/unsupported ``version`` likewise
-    raise ``JauntConfigError``.
+    raise ``JauntConfigError``. ``skills.activation`` accepts only ``relevant``
+    or ``all``; ``skills.always`` and ``skills.exclude`` must be lists of strings
+    and must not overlap. Invalid skill activation or selection configuration
+    raises ``JauntConfigError``.
 
     Raises:
     - load_config(config_path=Path("/nonexistent/jaunt.toml")) raises JauntConfigError
+    - a config with skills.activation = "sometimes" raises JauntConfigError
+    - a config with the same skill in skills.always and skills.exclude raises JauntConfigError
     """
 
     if config_path is None:

@@ -19,6 +19,13 @@ def _managed(dist: str, version: str = "1") -> str:
     return f"---\nname: {dist}\nx-jaunt-dist: {dist}\nx-jaunt-version: {version}\n---\nbody\n"
 
 
+def _managed_npm(package: str, version: str = "1") -> str:
+    return (
+        f"---\nname: {package}\nx-jaunt-npm-package: {package}\n"
+        f"x-jaunt-npm-version: {version}\n---\nbody\n"
+    )
+
+
 def test_relevant_selection_uses_imports_baselines_and_unscoped_manual(tmp_path: Path) -> None:
     _write(tmp_path / ".jaunt/skills/pydantic/SKILL.md", _managed("pydantic"))
     _write(tmp_path / ".jaunt/skills/httpx/SKILL.md", _managed("httpx"))
@@ -104,3 +111,21 @@ def test_unselected_skill_bytes_do_not_change_selected_fingerprint(tmp_path: Pat
         selected_names=selection.names,
     )
     assert before == after
+
+
+def test_typescript_side_effect_import_selects_managed_skill(tmp_path: Path) -> None:
+    _write(
+        tmp_path / ".jaunt/skills/reflect-metadata/SKILL.md",
+        _managed_npm("reflect-metadata"),
+    )
+
+    selection = select_skills(
+        project_root=tmp_path,
+        builtin_names=(),
+        texts=('import "./setup";\nimport "reflect-metadata";\n',),
+        language="ts",
+        kind="build",
+    )
+
+    assert selection.names == ("reflect-metadata",)
+    assert selection.entries[0].reason == "import:reflect-metadata"

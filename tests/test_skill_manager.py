@@ -9,6 +9,7 @@ from jaunt.skill_manager import (
     SkillMeta,
     add_skill,
     discover_all_skills,
+    ensure_managed_skills_gitignore,
     import_skills,
     read_skill_meta,
     remove_auto_skills,
@@ -27,6 +28,16 @@ def _write(path: Path, text: str) -> None:
 
 def _header(dist: str, version: str) -> str:
     return _format_generated_skill_file(dist=dist, version=version, body_md="")
+
+
+def test_gitignore_setup_tolerates_missing_git(tmp_path: Path, monkeypatch) -> None:
+    def missing_git(*_args, **_kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr("jaunt.skill_manager.subprocess.run", missing_git)
+
+    assert ensure_managed_skills_gitignore(tmp_path) is True
+    assert "!/.jaunt/skills/**" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
 
 
 # --- discover_all_skills ---

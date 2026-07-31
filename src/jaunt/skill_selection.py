@@ -168,7 +168,7 @@ def _python_imports(texts: tuple[str, ...]) -> set[str]:
 
 
 _TS_IMPORT_RE = re.compile(
-    r"(?:from\s*|import\s*\(|require\s*\()\s*['\"]([^'\"]+)['\"]",
+    r"(?:from\s*|import\s+(?![\w{$*])|import\s*\(|require\s*\()\s*['\"]([^'\"]+)['\"]",
     re.MULTILINE,
 )
 

@@ -193,6 +193,37 @@ def test_generate_module_seeds_skills(monkeypatch) -> None:
     asyncio.run(run())
 
 
+def test_generate_module_selects_skill_from_blueprint_import(monkeypatch) -> None:
+    async def run() -> None:
+        backend = _backend()
+        seen: dict[str, object] = {}
+
+        def on_run(args: list[str]) -> None:
+            root = _cwd_from_args(args)
+            seen["skills"] = sorted(p.name for p in (root / ".agents/skills").glob("*"))
+            (root / "pkg/__generated__/thing.py").write_text(
+                "def alpha():\n    pass\n\ndef beta():\n    pass\n",
+                encoding="utf-8",
+            )
+
+        _install_fake_exec(
+            monkeypatch,
+            on_run=on_run,
+            stdout=_usage_jsonl("done", input_tokens=1, output_tokens=1),
+        )
+
+        await backend.generate_module(
+            _ctx(
+                blueprint_source="from pydantic import BaseModel\n",
+                builtin_skill_names=("pydantic",),
+            )
+        )
+
+        assert seen["skills"] == ["pydantic"]
+
+    asyncio.run(run())
+
+
 def test_generate_module_command_line_flags(monkeypatch) -> None:
     async def run() -> None:
         backend = _backend()

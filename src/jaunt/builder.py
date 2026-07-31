@@ -3129,6 +3129,7 @@ async def run_build(
             builtin_names=selection_ctx.builtin_skill_names,
             texts=(
                 *tuple(selection_ctx.spec_sources.values()),
+                selection_ctx.blueprint_source or "",
                 *tuple(selection_ctx.dependency_apis.values()),
                 *tuple(selection_ctx.dependency_generated_modules.values()),
                 selection_ctx.seed_target_content or "",

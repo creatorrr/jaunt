@@ -352,6 +352,20 @@ def test_cmd_skill_migrate_reports_different_destination_conflict(tmp_path: Path
     assert out["conflicts"]
 
 
+def test_cmd_skill_migrate_apply_updates_gitignore_without_classic_skills(
+    tmp_path: Path, capsys
+) -> None:
+    _write(tmp_path / ".gitignore", ".jaunt/\n")
+
+    rc = main(["skill", "migrate", "--root", str(tmp_path), "--apply", "--force", "--json"])
+
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["applied"] is True
+    assert out["actions"] == []
+    assert "!/.jaunt/skills/**" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
+
+
 def test_cmd_skill_add_json(tmp_path: Path, capsys) -> None:
     rc = main(["skill", "add", "new-skill", "--root", str(tmp_path), "--json"])
     assert rc == 0

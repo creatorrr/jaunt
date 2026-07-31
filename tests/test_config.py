@@ -315,6 +315,15 @@ def test_skills_always_and_exclude_must_not_overlap(tmp_path: Path) -> None:
         load_config(root=tmp_path)
 
 
+def test_skills_activation_rejects_unknown_value(tmp_path: Path) -> None:
+    (tmp_path / "jaunt.toml").write_text(
+        'version = 1\n[skills]\nactivation = "sometimes"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(JauntConfigError, match="skills.activation"):
+        load_config(root=tmp_path)
+
+
 def test_skills_builtin_defaults(tmp_path: Path) -> None:
     from jaunt.skills_builtin import DEFAULT_BUILTIN_SKILLS
 
