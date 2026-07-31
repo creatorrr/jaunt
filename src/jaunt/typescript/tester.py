@@ -400,6 +400,7 @@ def _pin_test_dependency_runtimes(
 ) -> None:
     """Pin each Vitest resolution topology through the artifact commit."""
 
+    # TODO(perf): See worker._runtime_package_static_dependencies for persistent graph nodes.
     pin_closure = getattr(client, "pin_package_resolution_closure", None)
     pin_resolution = getattr(client, "pin_package_resolution_identity", None)
     pin_runtime = getattr(client, "pin_package_runtime_identity", None)
