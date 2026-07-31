@@ -1,0 +1,27 @@
+# yaml-language-server: $schema=https://dandylyons.github.io/treedocs/schemas/0.2.0/treedocs.schema.json
+project:
+  last_updated: '2026-07-13'
+  name: typescript_project_references
+  version: '2'
+schema_version: 0.2.0
+signature: sha256:ff79a0556af1b274da3d6303777a51621a2f6e6df44d95f99c194264857216b6
+tree:
+  packages:
+    _doc: packages package
+    app:
+      _doc: app package
+      src:
+        _doc: 'package: demo'
+        demo.ts: TypeScript module
+        slug:
+          _doc: 'package: index, index.jaunt'
+          index.jaunt.ts: 'specs: slugify'
+          index.ts: TypeScript module
+    core:
+      _doc: core package
+      src:
+        _doc: src package
+        normalize:
+          _doc: 'package: index, index.jaunt'
+          index.jaunt.ts: 'specs: normalizeSpacing'
+          index.ts: TypeScript module

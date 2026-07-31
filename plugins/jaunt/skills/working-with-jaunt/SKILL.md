@@ -52,7 +52,7 @@ API mirror, sidecar, a newly created canonical facade, and Jaunt metadata.
 
 | Reason | What the next build does |
 |---|---|
-| `structural` | Calls the implementation model and rebuilds the module. |
+| `structural` | Rebuilds with the model, except compatible environment-only drift that passes current overlay validation is recomposed for free. |
 | `prose` | Calls the semantic gate, then refreezes unchanged code or rebuilds. |
 | `fingerprint` / `re-stamp` | Re-stamps validated output without a model call. |
 | `stub` | Re-emits the `.pyi` deterministically when implementation inputs are unchanged. |
@@ -75,13 +75,22 @@ the build afterward.
   `check --language ts`. This explicit route validates the saved implementation
   with the current compiler, policy, API, and consumer closure; it makes no
   model calls. Never describe `model-rebuild` or `manual-intervention` as safe
-  to restamp.
+  to restamp. For an incremental rollout, pass repeatable `--target
+  ts:<module-id>` flags to both preview and apply; unselected module artifacts
+  are not written.
 - When battery drift includes `target_api_digest` and `battery_fingerprint`,
   run `test --language ts --no-build` followed by `check --language ts`.
   Co-drift in the embedded prompt or runner/Vitest fingerprint still takes the
   same model-free path. The test command safety-typechecks and runs the committed
   body before reheadering it. Do not add `--no-run`; that removes the runtime
   proof and forces generation.
+- For a bounded battery rollout, use the diagnostic's `repair_command` and exact
+  `repair_targets`; a multi-target intent needs every listed target. Successful
+  target-scoped invocations atomically commit the selected batteries and report
+  exact paths under `refrozen` or `generated`. Reruns skip completed batteries,
+  and an interrupted invocation does not partially commit its active transaction.
+  Resume with the remaining target commands, then run the unscoped
+  `check --language ts` final gate.
 - A final compiler/conformance rejection is already retried inside the module's
   remaining attempt budget with the rejected source and exact diagnostics.
   Read `candidate_outcomes` in build JSON before proposing another paid run.
@@ -110,6 +119,14 @@ the build afterward.
   this plugin's hooks and unrelated MCP tools are not nested inside generation.
   Older Codex CLIs fall back to legacy behavior; recommend an upgrade when that
   distinction matters.
+- TypeScript commands persist tokenizer results for the npm closure scan in
+  `.jaunt/cache/ts-specifiers.json` (gitignored). On fresh CI runners restore it
+  with the CI cache action keyed on the lockfile hash, with a loose
+  `restore-keys` fallback: entries are content-addressed (SHA-256 of file
+  bytes), so a stale cache is incomplete but never wrong, and version-header
+  rotation discards incompatible entries after a Jaunt or `@usejaunt/ts`
+  upgrade. Warm closure scans drop from ~49s to ~4s on a dashboard-sized
+  project.
 
 ## Authoring specs
 

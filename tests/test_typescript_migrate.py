@@ -450,6 +450,72 @@ async def test_typescript_migrate_recomposes_environment_drift_and_preserves_bat
 
 
 @pytest.mark.asyncio
+async def test_typescript_migrate_targets_one_environment_recomposition(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    worker = _MigrationWorker(tmp_path)
+    _write_built_artifacts(tmp_path, worker)
+    worker.sidecar_value.update(
+        {
+            "semanticEnvironmentDigest": "sha256:semantic-environment-v2",
+            "semanticEnvironmentRecords": [
+                {
+                    "id": "environment:package.json",
+                    "digest": "sha256:package-json-v2",
+                }
+            ],
+        }
+    )
+    worker.module.update(worker.sidecar_value)
+    worker.refresh_expected_sidecar()
+    unrelated = {
+        **worker.module,
+        "moduleId": "ts:src/unrelated",
+        "specPath": "src/unrelated.jaunt.ts",
+        "facadePath": "src/unrelated.ts",
+        "apiMirrorPath": "src/__generated__/unrelated.api.ts",
+        "implementationPath": "src/__generated__/unrelated.ts",
+        "sidecarPath": "src/__generated__/unrelated.jaunt.json",
+    }
+    original_request = worker.request
+
+    async def request(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        result = await original_request(method, params)
+        if method == "analyzeWorkspace":
+            result["routes"] = [
+                *result["routes"],
+                {"moduleId": "ts:src/unrelated", "packageOwner": "."},
+            ]
+            result["specs"] = [*result["specs"], {"moduleId": "ts:src/unrelated"}]
+        elif method == "analyzeContracts":
+            result["modules"] = [*result["modules"], unrelated]
+        return result
+
+    worker.request = request  # type: ignore[method-assign]
+
+    plan = await plan_typescript_migration(
+        tmp_path,
+        config,
+        target_ids=("ts:src/math",),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert {action.module_id for action in plan.actions} == {"ts:src/math"}
+    assert {getattr(write, "module_id", None) for write in plan.writes} == {"ts:src/math"}
+
+    applied = apply_typescript_migration(plan)
+    assert applied
+    assert all(path.startswith("src/") for path in applied)
+    assert (
+        json.loads((tmp_path / "src/__generated__/math.jaunt.json").read_text(encoding="utf-8"))[
+            "semanticEnvironmentDigest"
+        ]
+        == "sha256:semantic-environment-v2"
+    )
+
+
+@pytest.mark.asyncio
 async def test_typescript_migrate_reports_package_manager_as_tooling_provenance(
     tmp_path: Path,
 ) -> None:
@@ -707,6 +773,119 @@ def test_typescript_only_plain_migrate_routes_to_ts_and_emits_json(
     assert payload["language"] == "ts"
     assert payload["applied"] is False
     assert payload["actions"][0]["classification"] == "deterministic-rewrite"
+
+
+def test_typescript_migrate_forwards_target_to_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _config(tmp_path)
+    captured: dict[str, tuple[str, ...]] = {}
+    plan = TypeScriptMigrationPlan(
+        root=tmp_path,
+        actions=(),
+        diagnostics=(),
+        expected_inputs={},
+        writes=(),
+        plan_digest="sha256:plan",
+    )
+
+    async def fake_plan(
+        _root: Path,
+        _config: JauntConfig,
+        *,
+        target_ids: tuple[str, ...],
+    ) -> TypeScriptMigrationPlan:
+        captured["target_ids"] = target_ids
+        return plan
+
+    monkeypatch.setattr("jaunt.typescript.migrate.plan_typescript_migration", fake_plan)
+
+    assert (
+        main(
+            [
+                "migrate",
+                "--language",
+                "ts",
+                "--root",
+                str(tmp_path),
+                "--target",
+                "ts:src/math",
+                "--apply",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+    assert captured["target_ids"] == ("ts:src/math",)
+    assert not (tmp_path / ".gitignore").exists()
+
+
+@pytest.mark.parametrize("migration_flag", ["--config-v2", "--merge-projects"])
+def test_typescript_migrate_target_rejects_non_artifact_migrations(
+    migration_flag: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert (
+        main(
+            [
+                "migrate",
+                migration_flag,
+                "--target",
+                "ts:src/math",
+                "--apply",
+                "--json",
+            ]
+        )
+        == 2
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"] == "--target applies only to TypeScript artifact migration"
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_typescript_migrate_target_rejects_python_dispatch(
+    tmp_path: Path, mixed: bool, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    if mixed:
+        (tmp_path / "tsconfig.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "jaunt.toml").write_text(
+        (
+            "version = 2\n"
+            "[target.py]\n"
+            'source_roots = ["src"]\n'
+            'test_roots = ["tests"]\n'
+            + (
+                "[target.ts]\n"
+                'source_roots = ["src"]\n'
+                'test_roots = ["tests"]\n'
+                'projects = ["tsconfig.json"]\n'
+                if mixed
+                else ""
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                "migrate",
+                "--root",
+                str(tmp_path),
+                "--target",
+                "ts:src/math",
+                "--apply",
+                "--json",
+            ]
+        )
+        == 2
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert "use `--language ts`" in payload["error"]
 
 
 def test_typescript_migrate_apply_obeys_dirty_guard_and_force(

@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import runpy
 import subprocess
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 ROOT = Path(__file__).parents[1]
 VERIFY_TAGS = ROOT / "scripts" / "verify_release_tags.py"
 VERIFY_PYPI = ROOT / "scripts" / "verify_pypi_candidates.py"
 VERIFY_GITHUB_ASSETS = ROOT / "scripts" / "verify_github_release_assets.py"
+VERIFY_TYPESCRIPT_UPGRADE = ROOT / "scripts" / "verify_typescript_upgrade.py"
+TYPESCRIPT_UPGRADE_FIXTURE = ROOT / "tests" / "fixtures" / "typescript_upgrade_1_7_12_pnpm"
 
 
 def _git(root: Path, *args: str) -> str:
@@ -203,6 +208,101 @@ def test_github_release_assets_reject_unsafe_or_cross_component_manifests(
     assert "invalid SHA256SUMS line" in invalid.stderr
 
 
+def test_typescript_upgrade_fixture_matches_its_published_provenance() -> None:
+    manifest = json.loads(
+        (TYPESCRIPT_UPGRADE_FIXTURE / "fixture-manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert manifest["schema_version"] == 1
+    assert manifest["source"] == {
+        "git_ref": "v1.7.12",
+        "path": "examples/typescript_project_references",
+    }
+    assert manifest["versions"] == {"jaunt": "1.7.12", "typescript_worker": "0.1.2"}
+    fixture_files = {
+        path.relative_to(TYPESCRIPT_UPGRADE_FIXTURE).as_posix()
+        for path in TYPESCRIPT_UPGRADE_FIXTURE.rglob("*")
+        if path.is_file() and path.name != "fixture-manifest.json"
+    }
+    assert fixture_files == set(manifest["files"])
+    for relative, expected in manifest["files"].items():
+        actual = hashlib.sha256((TYPESCRIPT_UPGRADE_FIXTURE / relative).read_bytes()).hexdigest()
+        assert actual == expected
+
+
+def test_typescript_upgrade_verifier_requires_runtime_proof_and_bounded_repair() -> None:
+    verifier = VERIFY_TYPESCRIPT_UPGRADE.read_text(encoding="utf-8")
+
+    assert '"--budget-seconds", type=float, default=300.0' in verifier
+    runtime_refreeze = "\n".join(
+        (
+            '            "test",',
+            '                "--language",',
+            '                "ts",',
+            '                "--no-build",',
+        )
+    ).lstrip()
+    assert runtime_refreeze in verifier
+    assert '"--no-run"' not in verifier
+    assert '"check", "--language", "ts", "--root"' in verifier
+    assert '"pnpm", "--dir", str(project), "run", "typecheck"' in verifier
+    assert '"pnpm", "--dir", str(project), "test"' in verifier
+    assert "codex.write_text(" in verifier
+    assert 'migrate_payload.get("requires_rebuild") != []' in verifier
+
+
+def test_typescript_upgrade_verifier_requires_exact_runtime_refreeze() -> None:
+    namespace = runpy.run_path(str(VERIFY_TYPESCRIPT_UPGRADE))
+    validate = namespace["_validate_candidate_battery_refreeze"]
+    verification_error = namespace["VerificationError"]
+    batteries = {
+        "tests/__generated__/workspace.derived.test.ts",
+        "tests/__generated__/workspace.example.test.ts",
+    }
+
+    validate(
+        {
+            "ok": True,
+            "generated": [],
+            "skipped": [],
+            "failed": {},
+            "refrozen": sorted(batteries),
+        }
+    )
+    with pytest.raises(verification_error, match="not model-free"):
+        validate(
+            {
+                "ok": True,
+                "generated": [],
+                "skipped": sorted(batteries),
+                "failed": {},
+                "refrozen": [],
+            }
+        )
+
+
+def test_typescript_upgrade_verifier_allows_only_exact_gitignore_migration(
+    tmp_path: Path,
+) -> None:
+    namespace = runpy.run_path(str(VERIFY_TYPESCRIPT_UPGRADE))
+    validate = namespace["_assert_historical_files_protected"]
+    verification_error = namespace["VerificationError"]
+    block = namespace["TRACKED_SKILLS_GITIGNORE_BLOCK"]
+    fixture = tmp_path / "fixture"
+    project = tmp_path / "project"
+    fixture.mkdir()
+    project.mkdir()
+    original = ".jaunt/\n.jaunt-vitest-cache/\n"
+    (fixture / ".gitignore").write_text(original, encoding="utf-8")
+    (project / ".gitignore").write_text(original + block, encoding="utf-8")
+    manifest = {"files": {".gitignore": hashlib.sha256(original.encode()).hexdigest()}}
+
+    validate(project, fixture, manifest)
+    (project / ".gitignore").write_text(original, encoding="utf-8")
+    with pytest.raises(verification_error, match="exact managed-skills"):
+        validate(project, fixture, manifest)
+
+
 def test_workflows_gate_release_integrity_and_typescript_fixture_freshness() -> None:
     root = Path(__file__).parents[1]
     release = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
@@ -212,7 +312,15 @@ def test_workflows_gate_release_integrity_and_typescript_fixture_freshness() -> 
     assert release.count("scripts/verify_pypi_candidates.py") >= 3
     assert "git fetch --force --tags origin" in release
     assert "jaunt check --language ts --root examples/typescript-jwt" in release
-    assert "jaunt check --language ts --root examples/typescript-jwt" in ci
+    assert "typescript-worker:" in ci
+    assert "typescript-adapter:" in ci
+    assert "typescript-examples:" in ci
+    assert ci.count("uv run pytest -q tests/test_typescript_real_worker.py") == 1
+    assert ci.count("npm run lint && npm run format:check && npm run typecheck && npm test") == 1
+    assert "path: examples/typescript-jwt" in ci
+    assert "path: examples/typescript_slugify" in ci
+    assert "path: examples/typescript_project_references" in ci
+    assert "uv run --project ../.. jaunt check --language ts" in ci
     candidate_refreeze = (
         '"$jaunt_bin" test --language ts --no-build --no-run --root "$project" --json'
     )
@@ -262,10 +370,25 @@ def test_workflows_gate_release_integrity_and_typescript_fixture_freshness() -> 
     assert "(inputs.component == 'both' && needs.publish_npm.result == 'success')" in release
     assert release.count("needs.candidates.result == 'success'") == 2
     assert "always()" not in release
-    assert release.count("!cancelled()") == 2
+    assert release.count("!cancelled()") == 3
     assert release.count("id-token: write") == 2
-    assert release.count("node-version: 24") == 7
+    assert release.count("node-version: 24") == 8
     assert release.count("npm install --global npm@11.18.0") == 7
+    assert "  validate_typescript_upgrade:" in release
+    assert "name: Verify installed-version TypeScript upgrade" in release
+    assert 'python-version: "3.12"' in release
+    assert "npm install --global pnpm@11.5.0" in release
+    assert "scripts/verify_typescript_upgrade.py" in release
+    assert "--budget-seconds 300" in release
+    assert "name: jaunt-typescript-upgrade-report" in release
+    publish_npm = release[release.index("  publish_npm:") : release.index("  publish_python:")]
+    publish_python = release[
+        release.index("  publish_python:") : release.index("  finalize_release:")
+    ]
+    assert "- validate_typescript_upgrade" in publish_npm
+    assert "needs.validate_typescript_upgrade.result == 'success'" in publish_npm
+    assert "- validate_typescript_upgrade" in publish_python
+    assert "needs.validate_typescript_upgrade.result == 'success'" in publish_python
     for validation_job in (
         "validate_python",
         "validate_typescript",

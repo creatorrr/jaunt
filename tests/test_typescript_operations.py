@@ -133,6 +133,8 @@ from jaunt.typescript.tester import (
     _strip_test_header,
     _terminate_runner_process,
     _test_header_metadata,
+    _test_battery_repair_command,
+    _test_battery_repair_targets,
     _test_dependency_runtime_identity,
     _TEST_PROVENANCE_FIELDS,
     _test_provenance,
@@ -3884,6 +3886,50 @@ async def test_toolchain_digest_drift_recomposes_without_model(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_targeted_environment_drift_recomposes_without_model(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    worker = FakeWorker(tmp_path)
+    await run_build(
+        tmp_path,
+        config,
+        generator=FakeGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+    expected = json.loads(worker.sidecar)
+    expected["semanticEnvironmentDigest"] = "sha256:semantic-environment-v2"
+    worker.module["semanticEnvironmentDigest"] = expected["semanticEnvironmentDigest"]
+    worker.module["sidecar"] = json.dumps(expected, sort_keys=True) + "\n"
+
+    status = await run_status(
+        tmp_path,
+        config,
+        target_ids=("ts:src/math",),
+        worker_factory=lambda *_: worker,
+    )
+    report = await run_build(
+        tmp_path,
+        config,
+        target_ids=("ts:src/math",),
+        generator=ExplodingGenerator(),
+        worker_factory=lambda *_: worker,
+    )
+
+    assert status.stale == {"ts:src/math": "structural"}
+    assert report.generated == frozenset()
+    assert report.skipped == frozenset()
+    assert report.refrozen == frozenset({"ts:src/math"})
+    assert report.metadata["recomposed"] == ("ts:src/math",)
+    assert report.metadata["cost"]["api_calls"] == 0
+    after = await run_status(
+        tmp_path,
+        config,
+        target_ids=("ts:src/math",),
+        worker_factory=lambda *_: worker,
+    )
+    assert after.fresh == frozenset({"ts:src/math"})
+
+
+@pytest.mark.asyncio
 async def test_worker_session_preserves_body_error_during_runtime_change(
     tmp_path: Path,
 ) -> None:
@@ -7366,6 +7412,7 @@ def test_auto_class_tests_create_stable_virtual_intents_without_duplicates(
             'test_projects = ["tsconfig.test.json"]\nauto_class_tests = true\n',
         )
     )
+
     config = load_config(root=tmp_path)
     modules = {
         "ts:src/store": {
@@ -7388,6 +7435,11 @@ def test_auto_class_tests_create_stable_virtual_intents_without_duplicates(
             ),
         },
     )
+    implicit_targets = _test_battery_repair_targets(records[0], tuple(modules.values()))
+    assert implicit_targets == ("ts:src/store#Store",)
+    assert _test_battery_repair_command(implicit_targets) == (
+        "jaunt test --language ts --no-build --target 'ts:src/store#Store'"
+    )
     assert (
         _implicit_class_test_specs(
             tmp_path,
@@ -7396,6 +7448,41 @@ def test_auto_class_tests_create_stable_virtual_intents_without_duplicates(
             explicit_specs=({"targets": ["ts:src/store#Store"]},),
         )
         == ()
+    )
+
+
+def test_battery_repair_command_preserves_declared_multi_targets() -> None:
+    modules = (
+        {"moduleId": "ts:src/math"},
+        {"moduleId": "ts:src/triple"},
+    )
+    targets = _test_battery_repair_targets(
+        {
+            "targets": [
+                "ts:src/math#double",
+                "ts:src/triple#triple",
+                "ts:src/math#double",
+            ]
+        },
+        modules,
+    )
+
+    assert targets == ("ts:src/math#double", "ts:src/triple#triple")
+    assert _test_battery_repair_command(targets) == (
+        "jaunt test --language ts --no-build "
+        "--target 'ts:src/math#double' --target 'ts:src/triple#triple'"
+    )
+
+
+def test_battery_repair_targets_fall_back_to_selected_modules() -> None:
+    targets = _test_battery_repair_targets(
+        {"targets": []},
+        ({"moduleId": "ts:src/zeta"}, {"moduleId": "ts:src/alpha"}),
+    )
+
+    assert targets == ("ts:src/alpha", "ts:src/zeta")
+    assert _test_battery_repair_command(targets) == (
+        "jaunt test --language ts --no-build --target ts:src/alpha --target ts:src/zeta"
     )
 
 
@@ -14832,6 +14919,11 @@ async def test_api_only_reheader_failure_regenerates_the_battery(
     }
     assert "jaunt test --language ts --no-build" in api_drift.message
     assert "without `--no-run`" in api_drift.message
+    assert api_drift.data["repair_targets"] == ("ts:src/math#double",)
+    assert api_drift.data["repair_command"] == (
+        "jaunt test --language ts --no-build --target 'ts:src/math#double'"
+    )
+    assert "rerun `jaunt check --language ts`" in api_drift.message
     runtime_calls = 0
 
     async def reject_verification(*_args: Any, **kwargs: Any) -> dict[str, Any]:

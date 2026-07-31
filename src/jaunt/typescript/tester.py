@@ -14,6 +14,7 @@ import math
 import os
 import posixpath
 import re
+import shlex
 import shutil
 import signal
 import stat
@@ -105,6 +106,7 @@ from jaunt.typescript.worker import (
     _runtime_package_identity_files,
     _runtime_package_owner,
     _runtime_package_resolution_closure,
+    _runtime_specifier_cache,
     _unsafe_runtime_package_import_fragment,
     compiler_runtime_identity,
     resolve_node_package,
@@ -400,6 +402,8 @@ def _pin_test_dependency_runtimes(
 ) -> None:
     """Pin each Vitest resolution topology through the artifact commit."""
 
+    # TODO(perf): Tokenizer results are persistently cached per file. Skipping package
+    # enumeration and reads still needs worker's stat-epoch graph-node design.
     pin_closure = getattr(client, "pin_package_resolution_closure", None)
     pin_resolution = getattr(client, "pin_package_resolution_identity", None)
     pin_runtime = getattr(client, "pin_package_runtime_identity", None)
@@ -2101,6 +2105,7 @@ def _config_package_runtime_identities(
     """Fingerprint directly imported config packages for cross-command freshness."""
 
     identities: dict[str, str] = {}
+    specifier_cache = _runtime_specifier_cache(root)
     for relative, source in sorted(config_overlays.items()):
         for specifier, package, resolution_start in _config_package_dependencies(
             root, relative, source
@@ -2129,6 +2134,7 @@ def _config_package_runtime_identities(
                 closure = _runtime_package_resolution_closure(
                     resolved,
                     root_label=package,
+                    specifier_cache=specifier_cache,
                 )
             except TypeScriptWorkerError as exc:
                 raise JauntConfigError(
@@ -2142,6 +2148,7 @@ def _config_package_runtime_identities(
                     if edge.resolved_root is None
                     else runtime_package_identity(edge.resolved_root)
                 )
+    specifier_cache.save()
     return identities
 
 
@@ -3188,13 +3195,30 @@ def _test_provenance(
                 "compared on read."
             )
         raise RuntimeError("invalid TypeScript battery provenance fields: " + " ".join(failures))
+    effective_builtin_skills = (
+        tuple(builtin_skill_names)
+        if builtin_skill_names is not None
+        else (tuple(config.skills.builtin_skills) if config.skills.builtin else ())
+    )
+    selected_names = None
+    if prepared_request is not None:
+        from jaunt.skill_selection import select_skills
+
+        selected_names = select_skills(
+            project_root=root,
+            builtin_names=effective_builtin_skills,
+            texts=tuple(prepared_request.context_files.values())
+            + (prepared_request.seed_target_content,),
+            language="ts",
+            kind=prepared_request.kind,
+            activation=prepared_request.skill_activation,
+            always=prepared_request.skill_always,
+            exclude=prepared_request.skill_exclude,
+        ).names
     skills = skills_fingerprint(
         project_root=root,
-        builtin_names=(
-            tuple(builtin_skill_names)
-            if builtin_skill_names is not None
-            else (tuple(config.skills.builtin_skills) if config.skills.builtin else ())
-        ),
+        builtin_names=effective_builtin_skills,
+        selected_names=selected_names,
     )
     fast_check_version = _read_package_version(roots, "fast-check")
     committed = _canonical_digest(
@@ -4803,6 +4827,9 @@ def _test_request(
             if builtin_skill_names is not None
             else (tuple(config.skills.builtin_skills) if config.skills.builtin else ())
         ),
+        skill_activation=config.skills.activation,
+        skill_always=tuple(config.skills.always),
+        skill_exclude=tuple(config.skills.exclude),
     )
 
 
@@ -4930,6 +4957,32 @@ def _selected_generated_test_files(
     return tuple(sorted(path for path in selected if path and _safe_path(root, path).is_file()))
 
 
+def _test_battery_repair_targets(
+    test_spec: Mapping[str, Any],
+    selected_modules: Sequence[Mapping[str, Any]],
+) -> tuple[str, ...]:
+    """Return the exact repeatable ``--target`` values for one test intent."""
+
+    raw_targets = test_spec.get("targets", [])
+    declared = (
+        tuple(
+            dict.fromkeys(
+                item for item in raw_targets if isinstance(item, str) and item.startswith("ts:")
+            )
+        )
+        if isinstance(raw_targets, list)
+        else ()
+    )
+    if declared:
+        return declared
+    return tuple(sorted({_module_id(module) for module in selected_modules}))
+
+
+def _test_battery_repair_command(targets: Sequence[str]) -> str:
+    command = "jaunt test --language ts --no-build"
+    return command + "".join(f" --target {shlex.quote(target)}" for target in targets)
+
+
 def _test_battery_diagnostics(
     root: Path,
     config: JauntConfig,
@@ -4961,6 +5014,8 @@ def _test_battery_diagnostics(
         selected = _selected_test_modules(test_spec, modules)
         if requested and not any(_module_id(module) in requested for module in selected):
             continue
+        repair_targets = _test_battery_repair_targets(test_spec, selected)
+        repair_command = _test_battery_repair_command(repair_targets)
         source_path = str(test_spec.get("path", ""))
         for tier in ("example", "derived"):
             relative = _test_output(source_path, _target(config).generated_dir, tier)
@@ -5095,13 +5150,14 @@ def _test_battery_diagnostics(
                 # ``_is_verifiable_api_transition`` requires the ``battery_fingerprint``
                 # aggregate, which is deliberately not a contract field and so never appears
                 # in ``gating``. It must inspect the raw mismatch set or it never matches.
+                verifiable_api_transition = _is_verifiable_api_transition(
+                    mismatch_fields,
+                    additional_allowed=migration_safe_fields,
+                )
                 remedy = (
-                    "run `jaunt test --language ts --no-build` without `--no-run`, then "
-                    "rerun `jaunt check`."
-                    if _is_verifiable_api_transition(
-                        mismatch_fields,
-                        additional_allowed=migration_safe_fields,
-                    )
+                    f"run `{repair_command}` without `--no-run`, then "
+                    "rerun `jaunt check --language ts`."
+                    if verifiable_api_transition
                     else "run `jaunt test --language ts`."
                 )
                 diagnostics.append(
@@ -5125,6 +5181,14 @@ def _test_battery_diagnostics(
                             "mismatches": tuple(sorted(mismatch_fields)),
                             "gating": tuple(sorted(gating)),
                             **({"advisories": advisories} if advisories else {}),
+                            **(
+                                {
+                                    "repair_targets": repair_targets,
+                                    "repair_command": repair_command,
+                                }
+                                if verifiable_api_transition
+                                else {}
+                            ),
                             **(
                                 {
                                     "candidate": distinct["candidate"],

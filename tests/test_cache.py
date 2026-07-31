@@ -20,6 +20,8 @@ def _make_ctx(**overrides: object) -> ModuleSpecContext:
         dependency_apis=overrides.get("dependency_apis", {}),  # type: ignore[arg-type]
         dependency_generated_modules=overrides.get("dependency_generated_modules", {}),  # type: ignore[arg-type]
         decorator_apis=overrides.get("decorator_apis", {}),  # type: ignore[arg-type]
+        project_root=overrides.get("project_root"),  # type: ignore[arg-type]
+        builtin_skill_names=overrides.get("builtin_skill_names", ()),  # type: ignore[arg-type]
         module_contract_block=overrides.get("module_contract_block", ""),  # type: ignore[arg-type]
         blueprint_source=overrides.get("blueprint_source", ""),  # type: ignore[arg-type]
         build_instructions_block=overrides.get("build_instructions_block", ""),  # type: ignore[arg-type]
@@ -31,6 +33,7 @@ def _make_ctx(**overrides: object) -> ModuleSpecContext:
         whole_class=overrides.get("whole_class", False),  # type: ignore[arg-type]
         repo_map_block=overrides.get("repo_map_block", ""),  # type: ignore[arg-type]
         relevant_context_block=overrides.get("relevant_context_block", ""),  # type: ignore[arg-type]
+        relevant_context_files=overrides.get("relevant_context_files", ()),  # type: ignore[arg-type]
         project_overview_block=overrides.get("project_overview_block", ""),  # type: ignore[arg-type]
     )
 
@@ -186,7 +189,7 @@ def test_cache_key_differs_by_module_context_digest() -> None:
     assert k1 != k2
 
 
-def test_cache_key_changes_with_skills_digest() -> None:
+def test_cache_key_ignores_legacy_global_skills_digest() -> None:
     from jaunt.cache import cache_key_from_context
     from jaunt.generate.base import ModuleSpecContext
 
@@ -204,7 +207,7 @@ def test_cache_key_changes_with_skills_digest() -> None:
     c2 = ModuleSpecContext(**base, skills_digest="bbb")
     k1 = cache_key_from_context(c1, model="m", provider="codex", generation_fingerprint="fp")
     k2 = cache_key_from_context(c2, model="m", provider="codex", generation_fingerprint="fp")
-    assert k1 != k2
+    assert k1 == k2
 
 
 def test_cache_key_differs_by_blueprint_source() -> None:
@@ -212,6 +215,20 @@ def test_cache_key_differs_by_blueprint_source() -> None:
     ctx2 = _make_ctx(blueprint_source="def foo() -> str:\n    ...\n")
     assert cache_key_from_context(ctx1, model="m", provider="p") != cache_key_from_context(
         ctx2, model="m", provider="p"
+    )
+
+
+def test_cache_key_ignores_unselected_builtin_skill() -> None:
+    base = _make_ctx(
+        blueprint_source="from pydantic import BaseModel\n",
+        builtin_skill_names=("pydantic",),
+    )
+    with_irrelevant = _make_ctx(
+        blueprint_source="from pydantic import BaseModel\n",
+        builtin_skill_names=("pydantic", "pytest"),
+    )
+    assert cache_key_from_context(base, model="m", provider="p") == cache_key_from_context(
+        with_irrelevant, model="m", provider="p"
     )
 
 
@@ -288,6 +305,29 @@ def test_relevant_block_changes_cache_key() -> None:
         provider="p",
     )
     assert k1 != k2
+
+
+def test_relevant_context_file_contents_change_cache_key() -> None:
+    first = _make_ctx(relevant_context_files=(("relevant_0.py", "import pydantic\n"),))
+    second = _make_ctx(relevant_context_files=(("relevant_0.py", "import httpx\n"),))
+
+    assert cache_key_from_context(first, model="m", provider="p") != cache_key_from_context(
+        second, model="m", provider="p"
+    )
+
+
+def test_relevant_context_file_order_does_not_change_cache_key() -> None:
+    first = _make_ctx(
+        relevant_context_files=(
+            ("relevant_0.py", "import pydantic\n"),
+            ("relevant_1.py", "x = 1\n"),
+        )
+    )
+    second = _make_ctx(relevant_context_files=tuple(reversed(first.relevant_context_files)))
+
+    assert cache_key_from_context(first, model="m", provider="p") == cache_key_from_context(
+        second, model="m", provider="p"
+    )
 
 
 def test_project_overview_block_changes_cache_key() -> None:

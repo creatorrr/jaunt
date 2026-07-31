@@ -21,8 +21,8 @@ contracts and Jaunt writes implementations under `__generated__/` using the Open
 Codex CLI (`codex exec`). Python and TypeScript are supported targets; TypeScript uses
 version-2 configuration and a project-local analyzer package.
 
-> **Windows:** support is currently best-effort and flaky. Some build and artifact
-> publication paths may fail on Windows; use Linux or macOS for reliable workflows.
+> **Windows:** native Windows support is not a project goal. Use Linux, macOS, or
+> WSL for Jaunt workflows.
 
 Call `jaunt.magic_module(__name__)` once at the top of a file and every top-level
 stub below it becomes a spec, with no per-symbol decorators:
@@ -140,6 +140,8 @@ before approving paid regeneration:
 
 ```bash
 uvx jaunt migrate --language ts --json
+uvx jaunt migrate --language ts --target ts:src/example --json
+uvx jaunt migrate --language ts --target ts:src/example --apply
 uvx jaunt migrate --language ts --apply
 uvx jaunt test --language ts --no-build
 uvx jaunt check --language ts
@@ -149,7 +151,8 @@ Apply only when the plan contains `free-recompose` actions and an empty
 `requires_rebuild` list. Jaunt recompiles the existing implementations against
 the current declaration environment and carries the validated API transition
 into the battery check; it does not call a model. Contract changes and failed
-validation remain rebuilds.
+validation remain rebuilds. Repeat `--target` to preview or apply a bounded
+rollout; no unselected module artifacts are written.
 
 The same test/check sequence also handles a battery whose target API and aggregate
 battery stamps changed. It remains eligible when the embedded prompt, protected
@@ -157,6 +160,19 @@ runner, or Vitest fingerprint changed at the same time. The test command applies
 current safety scan, typechecks, and runs the committed body against the current
 target, then reheaders it when green without calling a model. Do not add `--no-run`:
 runtime verification is the proof that makes the free reheader safe.
+
+Large battery repairs can be resumed as bounded target transactions. Copy the
+`repair_command` from the stale-battery diagnostic, or repeat `--target` yourself:
+
+```bash
+uvx jaunt test --language ts --no-build --target 'ts:src/tokens#issueToken' --json
+```
+
+For a test intent that names several targets, include every target shown in
+`repair_targets`. A successful invocation reports the exact committed paths in
+`refrozen` or `generated`; a rerun skips those fresh batteries. An interruption does
+not partially commit the active transaction. Repair the remaining targets in later
+invocations, then always run the unscoped `uvx jaunt check --language ts` final gate.
 
 Generated programs use ordinary imports and keep running without Jaunt installed. See
 the [TypeScript guide](https://jaunt.ing/docs/guides/typescript) for the facade layout,

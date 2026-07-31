@@ -39,7 +39,6 @@ from jaunt.generate.codex_backend import CodexBackend
 from jaunt.generate.codex_backend import run_codex_exec
 from jaunt.generate.request_cache import generate_request_cached, store_generation_result
 from jaunt.journal import JournalEvent, append_events
-from jaunt.skill_seed import skills_fingerprint
 from jaunt.targets.base import TargetBuildReport, TargetDiagnostic
 from jaunt.typescript.config import TypeScriptTargetConfig
 from jaunt.typescript.protocol import (
@@ -2070,11 +2069,6 @@ def _generation_fingerprint(
         if build_instructions is not None
         else tuple(config.build.instructions)
     )
-    effective_builtin_skills = (
-        tuple(builtin_skill_names)
-        if builtin_skill_names is not None
-        else (tuple(config.skills.builtin_skills) if config.skills.builtin else ())
-    )
     payload = {
         "format": "jaunt-ts-generation/1-draft.1",
         "model": config.codex.model,
@@ -2093,11 +2087,8 @@ def _generation_fingerprint(
             if project_overview_enabled is None
             else project_overview_enabled
         ),
-        "builtin_skills": effective_builtin_skills,
-        "skills_fingerprint": skills_fingerprint(
-            project_root=root,
-            builtin_names=effective_builtin_skills,
-        ),
+        # Skill guidance partitions each module's response cache from its
+        # GenerationRequest; it is not a workspace-wide structural input.
     }
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
@@ -2507,6 +2498,9 @@ def _build_request(
             if builtin_skill_names is not None
             else (tuple(config.skills.builtin_skills) if config.skills.builtin else ())
         ),
+        skill_activation=config.skills.activation,
+        skill_always=tuple(config.skills.always),
+        skill_exclude=tuple(config.skills.exclude),
     )
 
 
@@ -2759,6 +2753,13 @@ async def run_build_in_session(
     _topological_modules(analysis.modules)
     output_preconditions = _artifact_preconditions(root, analysis.modules)
     status = classify_modules(root, analysis.modules)
+    from jaunt.typescript.upgrade import compatible_semantic_modules
+
+    semantic_compatible = compatible_semantic_modules(
+        root,
+        tuple(analysis.modules),
+        allow_environment_drift=True,
+    )
     gate_enabled = (
         config.semantic_gate.enabled if semantic_gate_enabled is None else semantic_gate_enabled
     )
@@ -2768,6 +2769,13 @@ async def run_build_in_session(
         if not force and reason == "fingerprint":
             refrozen.add(module_id)
         elif not force and reason == "toolchain":
+            refrozen.add(module_id)
+            recomposed.add(module_id)
+        elif not force and reason == "structural" and module_id in semantic_compatible:
+            # Worker/package upgrades can change structural digests while the
+            # complete model-facing contract remains byte-for-byte identical.
+            # Recompose the already-built implementation through the current
+            # compiler and consumer overlay instead of paying for generation.
             refrozen.add(module_id)
             recomposed.add(module_id)
         elif not force and reason == "prose" and gate_enabled:

@@ -96,9 +96,16 @@ def cache_key_from_context(
         ).encode()
     )
     h.update(b"\x00")
-    h.update((ctx.skills_digest or "").encode())
-    h.update(b"\x00")
-    h.update(json.dumps(sorted(ctx.builtin_skill_names)).encode())
+    from jaunt.skill_seed import skills_fingerprint
+    from jaunt.skill_selection import select_module_context_skills
+
+    selection = select_module_context_skills(ctx)
+    selected_digest = skills_fingerprint(
+        project_root=ctx.project_root,
+        builtin_names=ctx.builtin_skill_names,
+        selected_names=selection.names,
+    )
+    h.update(selected_digest.encode())
     h.update(b"\x00")
     h.update((ctx.module_contract_block or "").encode())
     h.update(b"\x00")
@@ -121,6 +128,8 @@ def cache_key_from_context(
     h.update((ctx.repo_map_block or "").encode())
     h.update(b"\x00")
     h.update((ctx.relevant_context_block or "").encode())
+    h.update(b"\x00")
+    h.update(json.dumps(dict(sorted(ctx.relevant_context_files)), sort_keys=True).encode())
     h.update(b"\x00")
     h.update((ctx.project_overview_block or "").encode())
     h.update(b"\x00")

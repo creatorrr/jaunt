@@ -2,3 +2,8 @@
 packages/*/dist/
 *.tsbuildinfo
 .jaunt-vitest-cache/
+# Jaunt local state; managed skills are tracked.
+!/.jaunt/
+/.jaunt/*
+!/.jaunt/skills/
+!/.jaunt/skills/**

@@ -65,6 +65,12 @@ run `jaunt test --language ts --no-build` and then `jaunt check --language ts`.
 A green committed body is verified and reheadered; `--no-run` deliberately disables
 that proof.
 
+For a bounded or resumable rollout, use the stale diagnostic's `repair_command`.
+It repeats `--target` for every member of a multi-target intent. Green invocations
+atomically commit and report exact `refrozen` or `generated` paths, while reruns skip
+already-fresh batteries. After all target-scoped invocations, run an unscoped
+`jaunt check --language ts`.
+
 For TypeScript builds, the workflow reads `candidate_outcomes` before suggesting
 another run. Jaunt already spends the remaining attempt budget on final
 conformance repair; a failed module should not be rerun blindly. Worker heap

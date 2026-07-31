@@ -97,10 +97,45 @@ class SkillInfo:
     source: Literal["auto", "user"]
     dist: str | None
     version: str | None
+    registry: Literal["user", "managed", "classic"] = "user"
+    managed_kind: Literal["pypi", "npm"] | None = None
 
 
 def skills_dir(project_root: Path) -> Path:
     return project_root / ".agents" / "skills"
+
+
+def managed_skills_dir(project_root: Path) -> Path:
+    """Return the tracked project-local registry for Jaunt-managed skills."""
+
+    return project_root / ".jaunt" / "skills"
+
+
+def parse_managed_skill_meta(
+    text: str,
+) -> tuple[Literal["pypi", "npm"], str, str] | None:
+    """Return managed skill provenance from Agent-Skills frontmatter."""
+
+    if not text.startswith("---\n"):
+        return None
+    end = text.find("\n---", 4)
+    if end < 0:
+        return None
+    metadata: dict[str, str] = {}
+    for line in text[4:end].splitlines():
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        metadata[key.strip()] = value.strip().strip("\"'")
+    dist = metadata.get("x-jaunt-dist")
+    dist_version = metadata.get("x-jaunt-version")
+    if dist and dist_version:
+        return "pypi", dist, dist_version
+    package = metadata.get("x-jaunt-npm-package")
+    package_version = metadata.get("x-jaunt-npm-version")
+    if package and package_version:
+        return "npm", package, package_version
+    return None
 
 
 def validate_skill_name(name: str) -> str:
@@ -117,31 +152,42 @@ def validate_skill_name(name: str) -> str:
 
 
 def discover_all_skills(project_root: Path) -> list[SkillInfo]:
-    """Glob */SKILL.md under .agents/skills/, classify auto vs user."""
-    from jaunt.skills_auto import parse_generated_skill_meta
-
-    sd = skills_dir(project_root)
-    if not sd.is_dir():
-        return []
-
+    """Discover user, managed, and not-yet-migrated managed skills."""
     results: list[SkillInfo] = []
-    for skill_md in sorted(sd.glob("*/SKILL.md")):
-        dir_name = skill_md.parent.name
-        try:
-            txt = skill_md.read_text(encoding="utf-8")
-        except Exception:  # noqa: BLE001
+    roots = ((managed_skills_dir(project_root), "managed"), (skills_dir(project_root), "user"))
+    for root, registry in roots:
+        if not root.is_dir():
             continue
-
-        header = parse_generated_skill_meta(txt)
-        if header is not None:
-            dist, version = header
-            results.append(
-                SkillInfo(name=dir_name, path=skill_md, source="auto", dist=dist, version=version)
-            )
-        else:
-            results.append(
-                SkillInfo(name=dir_name, path=skill_md, source="user", dist=None, version=None)
-            )
+        for skill_md in sorted(root.glob("*/SKILL.md")):
+            try:
+                text = skill_md.read_text(encoding="utf-8")
+            except Exception:  # noqa: BLE001
+                continue
+            metadata = parse_managed_skill_meta(text)
+            if metadata is not None:
+                kind, package, version = metadata
+                results.append(
+                    SkillInfo(
+                        name=skill_md.parent.name,
+                        path=skill_md,
+                        source="auto",
+                        dist=package,
+                        version=version,
+                        registry="managed" if registry == "managed" else "classic",
+                        managed_kind=kind,
+                    )
+                )
+            elif registry == "user":
+                results.append(
+                    SkillInfo(
+                        name=skill_md.parent.name,
+                        path=skill_md,
+                        source="user",
+                        dist=None,
+                        version=None,
+                        registry="user",
+                    )
+                )
 
     results.sort(key=lambda s: s.name.lower())
     return results
@@ -230,7 +276,13 @@ def add_skill(
                 except ValueError:
                     pass  # outside project root — store absolute as fallback
             lib_dicts.append(
-                {"type": ref.type, "name": ref.name, "path": stored_path, "version": ref.version}
+                {
+                    "type": ref.type,
+                    "name": ref.name,
+                    "path": stored_path,
+                    "version": ref.version,
+                    "import_roots": list(ref.import_roots),
+                }
             )
         write_skill_meta(project_root, name, SkillMeta(libs=lib_dicts, description=description))
     else:
@@ -247,11 +299,21 @@ def add_skill(
 
 
 def remove_skill(project_root: Path, name: str) -> Path:
-    """Remove a skill directory. Raises FileNotFoundError if missing."""
+    """Remove a user-owned skill directory. Managed skills use refresh/migrate."""
     name = validate_skill_name(name)
     skill_path = skills_dir(project_root) / name
     if not skill_path.exists():
         raise FileNotFoundError(f"Skill not found: {skill_path}")
+    skill_md = skill_path / "SKILL.md"
+    if skill_md.is_file():
+        try:
+            managed = parse_managed_skill_meta(skill_md.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError):
+            managed = None
+        if managed is not None:
+            raise ValueError(
+                f"Skill '{name}' is Jaunt-managed; run `jaunt skill migrate` or refresh skills"
+            )
     shutil.rmtree(skill_path)
     return skill_path
 
@@ -259,20 +321,186 @@ def remove_skill(project_root: Path, name: str) -> Path:
 def show_skill(project_root: Path, name: str) -> str:
     """Read and return SKILL.md content."""
     name = validate_skill_name(name)
-    path = skills_dir(project_root) / name / "SKILL.md"
-    if not path.exists():
-        raise FileNotFoundError(f"Skill not found: {path}")
-    return path.read_text(encoding="utf-8")
+    user_path = skills_dir(project_root) / name / "SKILL.md"
+    if user_path.exists():
+        user_text = user_path.read_text(encoding="utf-8")
+        if parse_managed_skill_meta(user_text) is None:
+            return user_text
+    managed_path = managed_skills_dir(project_root) / name / "SKILL.md"
+    if managed_path.exists():
+        return managed_path.read_text(encoding="utf-8")
+    if user_path.exists():
+        return user_text
+    raise FileNotFoundError(f"Skill not found: {user_path}")
 
 
-def remove_auto_skills(project_root: Path) -> list[str]:
-    """Remove all auto-generated skill dirs. Returns list of removed names."""
+def remove_auto_skills(project_root: Path, *, include_classic: bool = True) -> list[str]:
+    """Remove managed-registry skills, optionally including classic entries."""
     removed: list[str] = []
     for info in discover_all_skills(project_root):
-        if info.source == "auto":
+        if info.source == "auto" and (include_classic or info.registry == "managed"):
             shutil.rmtree(info.path.parent)
             removed.append(info.name)
     return removed
+
+
+@dataclass(frozen=True, slots=True)
+class SkillMigrationAction:
+    name: str
+    kind: Literal["pypi", "npm"]
+    source: Path
+    destination: Path
+    action: Literal["move", "deduplicate"]
+
+
+@dataclass(frozen=True, slots=True)
+class SkillMigrationPlan:
+    actions: tuple[SkillMigrationAction, ...] = ()
+    conflicts: tuple[str, ...] = ()
+
+
+def _directory_digest(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    for item in sorted(path.rglob("*")):
+        if item.is_symlink():
+            raise ValueError(f"symlinked managed skill content is unsafe: {item}")
+        if not item.is_file():
+            continue
+        digest.update(item.relative_to(path).as_posix().encode())
+        digest.update(b"\0")
+        digest.update(item.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def plan_managed_skill_migration(project_root: Path) -> SkillMigrationPlan:
+    """Plan classic ``.agents/skills`` managed entries into ``.jaunt/skills``."""
+
+    actions: list[SkillMigrationAction] = []
+    conflicts: list[str] = []
+    source_root = skills_dir(project_root)
+    if not source_root.is_dir():
+        return SkillMigrationPlan()
+    for skill_md in sorted(source_root.glob("*/SKILL.md")):
+        source = skill_md.parent
+        if source.is_symlink():
+            conflicts.append(f"{source}: symlinked skill directories are not migrated")
+            continue
+        try:
+            metadata = parse_managed_skill_meta(skill_md.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError) as exc:
+            conflicts.append(f"{skill_md}: unreadable managed skill: {exc}")
+            continue
+        if metadata is None:
+            continue
+        kind, _package, _version = metadata
+        try:
+            source_digest = _directory_digest(source)
+        except (OSError, ValueError) as exc:
+            conflicts.append(f"{source.name}: unsafe managed skill: {exc}")
+            continue
+        destination = managed_skills_dir(project_root) / source.name
+        if not destination.exists():
+            actions.append(SkillMigrationAction(source.name, kind, source, destination, "move"))
+            continue
+        try:
+            identical = source_digest == _directory_digest(destination)
+        except (OSError, ValueError) as exc:
+            conflicts.append(f"{source.name}: cannot compare destination: {exc}")
+            continue
+        if identical:
+            actions.append(
+                SkillMigrationAction(source.name, kind, source, destination, "deduplicate")
+            )
+        else:
+            conflicts.append(
+                f"{source.name}: destination already exists with different contents: {destination}"
+            )
+    return SkillMigrationPlan(tuple(actions), tuple(conflicts))
+
+
+_TRACKED_SKILLS_GITIGNORE_BLOCK = """\
+# Jaunt local state; managed skills are tracked.
+!/.jaunt/
+/.jaunt/*
+!/.jaunt/skills/
+!/.jaunt/skills/**
+"""
+
+
+def managed_skills_gitignore_needed(project_root: Path) -> bool:
+    """Return whether applying a migration would append the tracked-skills block."""
+
+    path = project_root / ".gitignore"
+    original = path.read_text(encoding="utf-8") if path.exists() else ""
+    return _TRACKED_SKILLS_GITIGNORE_BLOCK.strip() not in original
+
+
+def ensure_managed_skills_gitignore(project_root: Path) -> bool:
+    """Append the canonical tracked-skills exception block when it is absent."""
+
+    path = project_root / ".gitignore"
+    original = path.read_text(encoding="utf-8") if path.exists() else ""
+    if _TRACKED_SKILLS_GITIGNORE_BLOCK.strip() in original:
+        return False
+    joiner = "" if not original or original.endswith("\n") else "\n"
+    content = original + joiner + _TRACKED_SKILLS_GITIGNORE_BLOCK
+    _atomic_write_text(path, content)
+    try:
+        inside_git = (
+            subprocess.run(
+                ["git", "-C", str(project_root), "rev-parse", "--is-inside-work-tree"],
+                capture_output=True,
+                text=True,
+                check=False,
+            ).returncode
+            == 0
+        )
+    except FileNotFoundError:
+        inside_git = False
+    if inside_git:
+        runtime_ignored = (
+            subprocess.run(
+                ["git", "-C", str(project_root), "check-ignore", "-q", ".jaunt/.runtime-probe"],
+                capture_output=True,
+                check=False,
+            ).returncode
+            == 0
+        )
+        skills_ignored = (
+            subprocess.run(
+                ["git", "-C", str(project_root), "check-ignore", "-q", ".jaunt/skills/.probe"],
+                capture_output=True,
+                check=False,
+            ).returncode
+            == 0
+        )
+        if not runtime_ignored or skills_ignored:
+            _atomic_write_text(path, original)
+            raise ValueError(
+                "could not configure .gitignore to track .jaunt/skills while ignoring runtime state"
+            )
+    return True
+
+
+def apply_managed_skill_migration(project_root: Path, plan: SkillMigrationPlan) -> bool:
+    """Apply a validated, conflict-free managed skill migration.
+
+    Returns whether the tracked-skills ``.gitignore`` block was appended.
+    """
+
+    if plan.conflicts:
+        raise ValueError("cannot apply a managed skill migration with conflicts")
+    gitignore_updated = ensure_managed_skills_gitignore(project_root)
+    for action in plan.actions:
+        action.destination.parent.mkdir(parents=True, exist_ok=True)
+        if action.action == "move":
+            shutil.move(str(action.source), str(action.destination))
+        else:
+            shutil.rmtree(action.source)
+    return gitignore_updated
 
 
 def _git_toplevel(start: Path) -> Path | None:

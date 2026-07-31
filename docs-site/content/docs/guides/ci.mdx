@@ -180,6 +180,32 @@ property cases use `@prop`. For a mixed workspace, omit `--language ts` to gate 
 targets in one command, or split `--language py` and `--language ts` into separate
 jobs for clearer annotations.
 
+### Restore the tokenizer cache
+
+TypeScript commands scan the Vitest/npm resolution closure by tokenizing every
+shipped JavaScript file of every closure package. Jaunt persists those tokenizer
+results in `.jaunt/cache/ts-specifiers.json` — on a real pnpm dashboard closure
+this takes a cold ~49s walk to ~4s warm. The file is gitignored, so a fresh CI
+runner always starts cold unless you restore it:
+
+```yaml
+      - uses: actions/cache@v4
+        with:
+          path: .jaunt/cache/ts-specifiers.json
+          key: ts-specifiers-${{ runner.os }}-${{ hashFiles('**/package-lock.json', '**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ts-specifiers-${{ runner.os }}-
+```
+
+The cache is content-addressed — every entry is keyed by the SHA-256 of the
+file bytes it was computed from — so a restored cache can be incomplete but
+never wrong. That makes the loose `restore-keys` fallback safe: an old cache
+from any branch is mostly hits, a dependency bump re-tokenizes only the
+packages that actually changed, and a Jaunt or `@usejaunt/ts` upgrade rotates
+the cache's version header so incompatible entries are discarded automatically.
+No seeding step is needed; the first command that scans a closure writes the
+file, and the post-job cache save picks it up.
+
 ## Guarding agents locally: `jaunt guard`
 
 CI catches drift after the fact. In an agent-driven repo you also want to stop

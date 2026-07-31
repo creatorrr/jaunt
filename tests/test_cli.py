@@ -64,6 +64,12 @@ def test_parse_build_flags() -> None:
     assert ns.quota_wait == 2.5
 
 
+def test_parse_migrate_target() -> None:
+    ns = jaunt.cli.parse_args(["migrate", "--language", "ts", "--target", "ts:src/math", "--apply"])
+    assert ns.target == ["ts:src/math"]
+    assert ns.apply is True
+
+
 def test_parse_test_defaults() -> None:
     ns = jaunt.cli.parse_args(["test"])
     assert ns.command == "test"

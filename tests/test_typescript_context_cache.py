@@ -358,8 +358,8 @@ def test_npm_skill_reconciliation_removes_only_stale_managed_skills(tmp_path: Pa
     second = ensure_npm_skills(project_root=tmp_path, package_owners=(owner,))
 
     assert second.removed == ("npm-remove",)
-    assert not (tmp_path / ".agents/skills/npm-remove").exists()
-    assert (tmp_path / ".agents/skills/npm-keep/SKILL.md").is_file()
+    assert not (tmp_path / ".jaunt/skills/npm-remove").exists()
+    assert (tmp_path / ".jaunt/skills/npm-keep/SKILL.md").is_file()
     assert user_skill.is_file()
     assert pypi_skill.is_file()
 
@@ -380,14 +380,14 @@ def test_npm_skill_reconciliation_handles_collision_transitions(tmp_path: Path) 
     assert collided.removed == ("npm-foo-bar",)
     assert len(collided_names) == 2
     assert all(name.startswith("npm-foo-bar-") for name in collided_names)
-    assert not (tmp_path / ".agents/skills/npm-foo-bar/SKILL.md").exists()
+    assert not (tmp_path / ".jaunt/skills/npm-foo-bar/SKILL.md").exists()
 
     (owner / "package.json").write_text('{"dependencies":{"foo-bar":"1.0.0"}}\n')
     uncollided = ensure_npm_skills(project_root=tmp_path, package_owners=(owner,))
     assert set(uncollided.removed) == collided_names
     assert uncollided.generated == ("npm-foo-bar",)
-    assert (tmp_path / ".agents/skills/npm-foo-bar/SKILL.md").is_file()
-    assert all(not (tmp_path / ".agents/skills" / name).exists() for name in collided_names)
+    assert (tmp_path / ".jaunt/skills/npm-foo-bar/SKILL.md").is_file()
+    assert all(not (tmp_path / ".jaunt/skills" / name).exists() for name in collided_names)
 
 
 def test_npm_skill_reconciliation_warns_when_stale_skill_cannot_be_removed(
@@ -405,7 +405,7 @@ def test_npm_skill_reconciliation_warns_when_stale_skill_cannot_be_removed(
     user_skill = tmp_path / ".agents/skills/user/SKILL.md"
     user_skill.parent.mkdir(parents=True)
     user_skill.write_text("---\nname: user\n---\nuser owned\n")
-    stale_skill = tmp_path / ".agents/skills/npm-remove/SKILL.md"
+    stale_skill = tmp_path / ".jaunt/skills/npm-remove/SKILL.md"
     stale_bytes = stale_skill.read_bytes()
     original_unlink = Path.unlink
 
@@ -438,7 +438,7 @@ def test_npm_skill_reconciliation_warns_per_failed_write_and_keeps_other_files(
     _install_npm_fixture(owner, "beta")
     initial = ensure_npm_skills(project_root=tmp_path, package_owners=(owner,))
     assert initial.generated == ("npm-beta",)
-    beta_skill = tmp_path / ".agents/skills/npm-beta/SKILL.md"
+    beta_skill = tmp_path / ".jaunt/skills/npm-beta/SKILL.md"
     beta_bytes = beta_skill.read_bytes()
 
     _install_npm_fixture(owner, "alpha")
@@ -463,7 +463,7 @@ def test_npm_skill_reconciliation_warns_per_failed_write_and_keeps_other_files(
     warning = "optional npm skill 'npm-beta' not written: filesystem error"
     assert result.generated == ("npm-alpha",)
     assert result.warnings == (warning,)
-    assert (tmp_path / ".agents/skills/npm-alpha/SKILL.md").is_file()
+    assert (tmp_path / ".jaunt/skills/npm-alpha/SKILL.md").is_file()
     assert beta_skill.read_bytes() == beta_bytes
     assert user_skill.read_text() == "---\nname: user\n---\nuser owned\n"
 

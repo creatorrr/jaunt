@@ -29,7 +29,7 @@ diagnostic.
 
 The worker and protected test runner require Node `>=20 <25`. This is the tool-host
 range, not a restriction on the runtime used to deploy generated JavaScript. CI
-tests both boundary majors, Node 20 and Node 24.
+runs on the latest supported host major, Node 24.
 
 Pin a supported compiler when installing; an unversioned `typescript` install may
 select TypeScript 7:
@@ -94,6 +94,14 @@ API plus aggregate battery stamp changed, including co-drift in the embedded pro
 protected runner, or Vitest fingerprint. The current safety scan and a green compiler
 and Vitest run reheader the unchanged body without a model call; `--no-run`
 deliberately disables that proof.
+
+Stale-battery diagnostics expose `repair_targets` and a copyable `repair_command`.
+Use that target-scoped command to repair a large workspace over several invocations;
+multi-target intents require every listed target. Each successful invocation commits
+only after its selected batteries pass validation and reports their exact paths in
+`refrozen` or `generated`. Completed batteries are skipped on rerun, and interruption
+cannot leave a partially committed active transaction. Finish with the unscoped
+`jaunt check --language ts`, even when every bounded repair command was green.
 
 TypeScript battery generation receives the configured build instructions and a
 declaration-only view of workspace-local types imported by the selected target. The

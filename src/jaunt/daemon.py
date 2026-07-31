@@ -467,15 +467,16 @@ def probe_lock(root: Path) -> tuple[bool, int | None]:
 
 
 def jaunt_dir_ignored(root: Path) -> bool:
-    """True if ``.jaunt/`` is gitignored.
+    """True if Jaunt runtime state is ignored while managed skills may be tracked.
 
-    Creates the directory first: dir-only ignore rules (``.jaunt/``) do not match a
-    path that does not exist on disk, so a freshly initialized project would fail the
-    check before its first daemon run. The daemon needs the directory anyway.
+    A sentinel outside ``.jaunt/skills`` checks the actual safety boundary. This
+    accepts both the legacy whole-directory rule and the tracked-skills exception.
     """
-    (root / ".jaunt").mkdir(parents=True, exist_ok=True)
+    jaunt_dir = root / ".jaunt"
+    jaunt_dir.mkdir(parents=True, exist_ok=True)
+    sentinel = jaunt_dir / ".runtime-state-probe"
     proc = subprocess.run(
-        ["git", "-C", str(root), "check-ignore", "-q", ".jaunt"],
+        ["git", "-C", str(root), "check-ignore", "-q", str(sentinel.relative_to(root))],
         capture_output=True,
         check=False,
     )

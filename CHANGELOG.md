@@ -4,6 +4,31 @@ All notable changes to Jaunt and `@usejaunt/ts`. Generated from conventional
 commits by [git-cliff](https://git-cliff.org), with one section per published
 Python or TypeScript release.
 
+## [1.7.14] - 2026-07-31
+
+### Features
+
+- Keep user-authored skills in `.agents/skills` and Jaunt-managed PyPI/npm skills in
+  the tracked `.jaunt/skills` registry. `jaunt skill migrate` previews and safely
+  applies the move from the classic shared location.
+- Select skills per generation request from imports and dependency context. Projects
+  can switch to the complete set or force/include named skills with `[skills]`
+  `activation`, `always`, and `exclude`.
+- Report the selected set and registry shadowing in JSON, and partition response
+  caches only on the skills relevant to each request.
+
+### Fixes
+
+- Recompose a targeted TypeScript module without a model call when current
+  compiler and consumer validation prove that structural staleness came only
+  from compatible environment provenance.
+- Add repeatable `jaunt migrate --language ts --target ts:<module-id>` selection
+  so model-free repair plans and applies do not write unrelated module artifacts.
+
+### Packages
+
+- Release Jaunt 1.7.14 as a Python-only patch. `@usejaunt/ts` remains at 0.1.3.
+
 ## [1.7.13 / @usejaunt/ts 0.1.3] - 2026-07-30
 
 ### Fixes

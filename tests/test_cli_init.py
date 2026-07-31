@@ -150,7 +150,9 @@ def test_init_scaffolds_journal_and_attributes(tmp_path: Path, monkeypatch) -> N
     assert rc == 0
     assert (tmp_path / "JAUNT_LOG").exists()
     assert "JAUNT_LOG merge=union" in (tmp_path / ".gitattributes").read_text(encoding="utf-8")
-    assert ".jaunt/" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert "/.jaunt/*" in gitignore
+    assert "!/.jaunt/skills/**" in gitignore
     assert ".jaunt-vitest-cache/" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
 
 
@@ -168,7 +170,8 @@ def test_init_journal_scaffolding_is_idempotent(tmp_path: Path, monkeypatch) -> 
     gitattributes_lines = (tmp_path / ".gitattributes").read_text(encoding="utf-8").splitlines()
     gitignore_lines = (tmp_path / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert gitattributes_lines.count("JAUNT_LOG merge=union") == 1
-    assert gitignore_lines.count(".jaunt/") == 1
+    assert gitignore_lines.count("/.jaunt/*") == 1
+    assert gitignore_lines.count("!/.jaunt/skills/**") == 1
     assert gitignore_lines.count(".jaunt-vitest-cache/") == 1
 
 

@@ -1,0 +1,43 @@
+{
+  "files": {
+    ".gitattributes": "8442e11c8157f08f08d18edb717c315d0d1892f6bb0e39b46e8536706e04063f",
+    ".gitignore": "61c2af878911ad3f7d4a46858dfab77d4f3178ba45890bf8259414c085146a77",
+    "README.md": "6391efdc16cb5b3a942b24580885119b2fcd7650b9de7688b858a336b37867af",
+    "jaunt.toml": "c299c4c540f1c8a5d0424cd746b802f57fa5d8932cf2b15eed59414e7c133228",
+    "package-lock.json": "931780501e033d6c6d6054860abf401027aa2a5748ca0f4b91c671af6bf60fb9",
+    "package.json": "1e303c64218b5c9026a0d9e93973fe16007056253abaedab35a9bd9fec0c6b8f",
+    "packages/app/package.json": "1c6d6726fd1b48110c55a3537d9bf8f9ac6b7cb314ce2d54ec99e3701a64f06a",
+    "packages/app/src/demo.ts": "3cf0827ad947bfd847b208bbe04376fae3e3846c9444c73c8e0961450ad3718f",
+    "packages/app/src/slug/__generated__/index.api.ts": "4b177094a36c49d4204eeb912f4d0cf19046b116427bbff0f62e6bc25b532b74",
+    "packages/app/src/slug/__generated__/index.jaunt.json": "9647c605fb071f57ddf02ee583ff8b864d050864c9a0b568ed5dae4ad9bcaa52",
+    "packages/app/src/slug/__generated__/index.ts": "c4d89ed568abd7b5007b3c60884390826ee1f9fc7fb0738d685b5149095aab51",
+    "packages/app/src/slug/index.jaunt.ts": "aa3cdfbe8809715b23d34b6fc07c550d4caaa069ca54b583e2418ef2566033f6",
+    "packages/app/src/slug/index.ts": "1db00b0df482881a7fe6f67c5d84bf3d48659187a8e4ed17909cf395260f6874",
+    "packages/app/tsconfig.json": "b2abfbd530dc8ff088ad43c237e90c3e4efe8d07c0a57a946215a8285bfa0fa5",
+    "packages/core/package.json": "d4e28a842882daddaffc63a4e0d1b4976577d6e381dad1f88b18c8622fd019be",
+    "packages/core/src/normalize/__generated__/index.api.ts": "30789840aeb4eeeddc5df2e060d19484fe9ab8deaa772aca45bc2c05ae1c33ac",
+    "packages/core/src/normalize/__generated__/index.jaunt.json": "bb9a146d30ba7c5b1237270d1f102c0d04a06dfbc3d784db182449304e43b503",
+    "packages/core/src/normalize/__generated__/index.ts": "589cf1fb8dc0f369f68213b4441518a573b2434d1f2ef7126d190dbd9f527fdf",
+    "packages/core/src/normalize/index.jaunt.ts": "100b31477e20ce8fb0846bc6cbad50b1b2ec333d1c8b44c0e185c78dab910d89",
+    "packages/core/src/normalize/index.ts": "1db00b0df482881a7fe6f67c5d84bf3d48659187a8e4ed17909cf395260f6874",
+    "packages/core/tsconfig.json": "7272246602121784585320286f19e4b718e54c436ececdd044e141dd1d736c85",
+    "pnpm-lock.yaml": "8c616bdf7930b6161f3eac4d820987decc8dc3008d4f1c7dcc7e81bd26def81b",
+    "pnpm-workspace.yaml": "2d199c52a14764d12fd960189fa39c33a7debda911fd8adb8da60f99b52ffeb0",
+    "tests/__generated__/workspace.derived.test.ts": "caec597fee929a2a2d6ec45050d93fbcbb5443ceeb9b38c0f20b62a170af7dd4",
+    "tests/__generated__/workspace.example.test.ts": "a31f6d03e557501e1858b5822f14b108065846e807e93a9a03bb36889f79b5af",
+    "tests/public-api.types.ts": "434b3159045818d70dff615eba9f1a40888ce209fb69a10fcb3e1a7e1e36b2aa",
+    "tests/workspace.jaunt-test.ts": "4c84020ea5cd8f8d617896df8d058b5000f750b5335c6993ff74776687cb63ad",
+    "treedocs.yaml": "e37cf4a77f5307963a9251c453b1ece24bf0533d63b7e962b875b33a975cb0b5",
+    "tsconfig.json": "34c12ccae95cfbb5268813f459112171914fdd86010a5ddfe94ba066975674dc",
+    "tsconfig.test.json": "db367653de3ee9bf8aa563ddb8e01177e7d3393be05371bf9eab4ef823a92bde"
+  },
+  "schema_version": 1,
+  "source": {
+    "git_ref": "v1.7.12",
+    "path": "examples/typescript_project_references"
+  },
+  "versions": {
+    "jaunt": "1.7.12",
+    "typescript_worker": "0.1.2"
+  }
+}

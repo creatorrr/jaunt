@@ -407,12 +407,62 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  validate_typescript_upgrade:
+    name: Verify installed-version TypeScript upgrade
+    needs: candidates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Pin pnpm used by the historical fixture
+        run: |
+          npm install --global pnpm@11.5.0
+          test "$(pnpm --version)" = "11.5.0"
+      - uses: actions/download-artifact@v8
+        with:
+          name: jaunt-release-candidates
+          path: release
+      - name: Exercise model-free 1.7.12 to candidate repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheel="$(find release/python -maxdepth 1 -name '*.whl' -print -quit)"
+          tarball="$(find release/npm -maxdepth 1 -name '*.tgz' -print -quit)"
+          test -n "$wheel"
+          test -n "$tarball"
+          python scripts/verify_typescript_upgrade.py \
+            --fixture tests/fixtures/typescript_upgrade_1_7_12_pnpm \
+            --wheel "$wheel" \
+            --npm-tarball "$tarball" \
+            --budget-seconds 300 \
+            --report release/typescript-upgrade-report.json
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: jaunt-typescript-upgrade-report
+          path: release/typescript-upgrade-report.json
+          if-no-files-found: error
+          retention-days: 30
+
   publish_npm:
     name: Publish npm candidate with trusted publishing
     if: >-
-      ${{ inputs.publish && github.ref == 'refs/heads/main' &&
+      ${{ needs.validate_typescript_upgrade.result == 'success' &&
+          inputs.publish && github.ref == 'refs/heads/main' &&
           (inputs.component == 'both' || inputs.component == 'typescript') }}
-    needs: candidates
+    needs:
+      - candidates
+      - validate_typescript_upgrade
     runs-on: ubuntu-latest
     environment: npm
     permissions:
@@ -479,10 +529,12 @@ jobs:
     if: >-
       ${{ !cancelled() && inputs.publish && github.ref == 'refs/heads/main' &&
           needs.candidates.result == 'success' &&
+          needs.validate_typescript_upgrade.result == 'success' &&
           ((inputs.component == 'python' && needs.publish_npm.result == 'skipped') ||
            (inputs.component == 'both' && needs.publish_npm.result == 'success')) }}
     needs:
       - candidates
+      - validate_typescript_upgrade
       - publish_npm
     runs-on: ubuntu-latest
     environment: pypi

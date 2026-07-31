@@ -29,6 +29,7 @@ from jaunt.typescript.protocol import (
     ProtocolResponse,
     ProtocolValidationError,
 )
+from jaunt.typescript.specifier_cache import SpecifierCache, specifier_cache_key
 
 _DEFAULT_TIMEOUT = 30.0
 _DEFAULT_STARTUP_TIMEOUT = 10.0
@@ -6325,6 +6326,16 @@ def _shadowed_native_loader_indices(
     return frozenset(shadowed)
 
 
+_RUNTIME_TOKENIZER_CACHE_VERSION = 1
+
+
+def _runtime_specifier_cache(root: Path) -> SpecifierCache:
+    """Return the project cache using the current tokenizer and worker protocol versions."""
+
+    version = f"{_RUNTIME_TOKENIZER_CACHE_VERSION}:{PROTOCOL_VERSION}"
+    return SpecifierCache(root / ".jaunt" / "cache" / "ts-specifiers.json", version=version)
+
+
 def _runtime_module_specifiers(
     source: str,
     *,
@@ -6750,9 +6761,14 @@ def _runtime_package_import_targets(
 
 def _runtime_package_static_dependencies(
     package_root: Path,
+    *,
+    specifier_cache: SpecifierCache | None = None,
 ) -> tuple[tuple[Path, str], ...]:
     """Return statically executable bare package loads from shipped sources."""
 
+    # TODO(perf): Raw tokenizer results now use a persistent per-file content cache. Skipping
+    # package enumeration and source reads entirely would still require the per-package
+    # stat-epoch graph-node design (including manifest, content, and symlink identity).
     physical_root = package_root.resolve(strict=True)
     dependencies: set[tuple[Path, str]] = set()
     for path in _runtime_package_identity_files(physical_root):
@@ -6764,17 +6780,30 @@ def _runtime_package_static_dependencies(
         is_node_script = not path.suffix and content.startswith(b"#!") and b"node" in content[:256]
         if not is_javascript and not is_node_script:
             continue
-        try:
-            source = content.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise TypeScriptWorkerError(
-                f"Could not decode runtime package source at {path}: {exc}"
-            ) from exc
-        specifiers = _runtime_module_specifiers(
-            source,
-            source_path=path,
-            tolerate_unsupported_loader_flows=True,
-        )
+        cache_key: str | None = None
+        specifiers: tuple[str, ...] | None = None
+        if specifier_cache is not None:
+            cache_key = specifier_cache_key(
+                content,
+                suffix=path.suffix.casefold(),
+                tolerate_unsupported_loader_flows=True,
+            )
+            specifiers = specifier_cache.get(cache_key)
+        if specifiers is None:
+            try:
+                source = content.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise TypeScriptWorkerError(
+                    f"Could not decode runtime package source at {path}: {exc}"
+                ) from exc
+            specifiers = _runtime_module_specifiers(
+                source,
+                source_path=path,
+                tolerate_unsupported_loader_flows=True,
+            )
+            if specifier_cache is not None:
+                assert cache_key is not None
+                specifier_cache.put(cache_key, specifiers)
         for specifier in specifiers:
             if specifier.startswith("#"):
                 scope = _runtime_package_scope(physical_root, path)
@@ -6864,6 +6893,8 @@ def _runtime_package_dependencies(package_root: Path) -> tuple[tuple[str, bool],
 
 def _runtime_package_dependency_edges(
     package_root: Path,
+    *,
+    specifier_cache: SpecifierCache | None = None,
 ) -> tuple[_RuntimePackageDependencyEdge, ...]:
     """Merge manifest declarations with discoverable runtime package loads.
 
@@ -6875,7 +6906,10 @@ def _runtime_package_dependency_edges(
 
     physical_root = package_root.resolve(strict=True)
     declared = dict(_runtime_package_dependencies(physical_root))
-    static_dependencies = _runtime_package_static_dependencies(physical_root)
+    static_dependencies = _runtime_package_static_dependencies(
+        physical_root,
+        specifier_cache=specifier_cache,
+    )
     static_names = {package for _importer, package in static_dependencies}
     raw_edges = [
         # A package may ship tests/examples that are not part of its executed
@@ -6950,6 +6984,7 @@ def _runtime_package_resolution_closure(
     package_root: Path,
     *,
     root_label: str,
+    specifier_cache: SpecifierCache | None = None,
 ) -> tuple[_RuntimePackageResolutionEdge, ...]:
     """Resolve the exact recursive runtime graph shared by fingerprints and seals."""
 
@@ -6967,7 +7002,10 @@ def _runtime_package_resolution_closure(
         if physical_root in expanded:
             continue
         expanded.add(physical_root)
-        for edge in _runtime_package_dependency_edges(physical_root):
+        for edge in _runtime_package_dependency_edges(
+            physical_root,
+            specifier_cache=specifier_cache,
+        ):
             dependency_label = f"{label}>{edge.key}"
             resolved = resolve_node_package(
                 edge.importer,
@@ -7576,6 +7614,11 @@ class WorkerClient:
         self._full_runtime_session_identity: str | None = None
         self._package_runtime_session_identities: dict[str, tuple[Path, str | None, str]] = {}
         self._package_resolution_pins: dict[str, _PackageResolutionPin] = {}
+        # Re-pins reuse client-scoped work. A mid-session mutation is caught at verify/seal
+        # rather than re-pin time, matching the guarantee of the per-pass verify cache.
+        self._pin_session_identity_cache: dict[tuple[Path, str | None], str] = {}
+        self._resolution_closure_cache: dict[Path, tuple[_RuntimePackageResolutionEdge, ...]] = {}
+        self._specifier_cache = _runtime_specifier_cache(self.root)
         self._absent_package_resolution_pins: dict[str, _AbsentPackageResolutionPin] = {}
         self._runtime_identity_sealed = False
         self._stderr = bytearray()
@@ -7803,6 +7846,21 @@ class WorkerClient:
                 )
         return current
 
+    def _cached_package_session_identity(
+        self,
+        package_root: Path,
+        expected_name: str | None,
+    ) -> str:
+        key = (package_root, expected_name)
+        current = self._pin_session_identity_cache.get(key)
+        if current is None:
+            current = runtime_package_session_identity(
+                package_root,
+                expected_name=expected_name,
+            )
+            self._pin_session_identity_cache[key] = current
+        return current
+
     def pin_package_resolution_identity(
         self,
         label: str,
@@ -7827,9 +7885,9 @@ class WorkerClient:
             if before is None:
                 raise TypeScriptWorkerError(f"Package {package!r} is not resolvable from {start}")
             resolved_root = Path(os.path.abspath(before))
-            current = runtime_package_session_identity(
+            current = self._cached_package_session_identity(
                 resolved_root,
-                expected_name=expected_name,
+                expected_name,
             )
             after = resolve_node_package(
                 lexical_start,
@@ -7877,9 +7935,9 @@ class WorkerClient:
 
         lexical_root = Path(os.path.abspath(package_root))
         try:
-            current = runtime_package_session_identity(
+            current = self._cached_package_session_identity(
                 lexical_root,
-                expected_name=expected_name,
+                expected_name,
             )
         except TypeScriptWorkerError as exc:
             raise WorkerToolchainChangedError(
@@ -7967,11 +8025,17 @@ class WorkerClient:
         )
         root_pin = self._package_resolution_pins[label]
         try:
-            closure = _runtime_package_resolution_closure(
-                root_pin.resolved_root,
-                root_label=package,
-            )
-        except TypeScriptWorkerError as exc:
+            physical_root = root_pin.resolved_root.resolve(strict=True)
+            closure = self._resolution_closure_cache.get(physical_root)
+            if closure is None:
+                closure = _runtime_package_resolution_closure(
+                    physical_root,
+                    root_label=package,
+                    specifier_cache=self._specifier_cache,
+                )
+                self._specifier_cache.save()
+                self._resolution_closure_cache[physical_root] = closure
+        except (OSError, TypeScriptWorkerError) as exc:
             raise WorkerToolchainChangedError(
                 f"The {label} dependency closure could not be pinned for this command: {exc}"
             ) from exc
@@ -8028,6 +8092,9 @@ class WorkerClient:
         self._full_runtime_session_identity = None
         self._package_runtime_session_identities.clear()
         self._package_resolution_pins.clear()
+        self._pin_session_identity_cache.clear()
+        self._resolution_closure_cache.clear()
+        # The content-addressed specifier cache deliberately survives command resets.
         self._absent_package_resolution_pins.clear()
 
     def seal_runtime_identity(self) -> str:

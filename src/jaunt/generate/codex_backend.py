@@ -29,6 +29,7 @@ from jaunt.errors import (
 from jaunt.generate.base import GenerationRequest, GeneratorBackend, ModuleSpecContext, TokenUsage
 from jaunt.generate.shared import load_prompt
 from jaunt.skill_seed import seed_skills_into_workspace
+from jaunt.skill_selection import select_module_context_skills, select_skills
 
 
 ADVISORIES_INSTRUCTION = (
@@ -495,6 +496,16 @@ class CodexBackend(GeneratorBackend):
                 root,
                 project_root=request.project_root,
                 builtin_names=list(request.builtin_skill_names),
+                selected_names=select_skills(
+                    project_root=request.project_root,
+                    builtin_names=request.builtin_skill_names,
+                    texts=tuple(request.context_files.values()) + (request.seed_target_content,),
+                    language=request.language,
+                    kind=request.kind,
+                    activation=request.skill_activation,
+                    always=request.skill_always,
+                    exclude=request.skill_exclude,
+                ).names,
             )
             prompt_blocks = [
                 request.prompt.strip(),
@@ -588,6 +599,7 @@ class CodexBackend(GeneratorBackend):
                 root,
                 project_root=getattr(ctx, "project_root", None),
                 builtin_names=list(getattr(ctx, "builtin_skill_names", ()) or ()),
+                selected_names=select_module_context_skills(ctx).names,
             )
 
             prompt = self._build_prompt(ctx, target.relative_to(root), extra_error_context)

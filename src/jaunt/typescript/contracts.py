@@ -556,6 +556,9 @@ snapshots, custom reporters, setup hooks, console output, or TypeScript suppress
             if builtin_skill_names is not None
             else (tuple(config.skills.builtin_skills) if config.skills.builtin else ())
         ),
+        skill_activation=config.skills.activation,
+        skill_always=tuple(config.skills.always),
+        skill_exclude=tuple(config.skills.exclude),
     )
 
 
@@ -1478,6 +1481,18 @@ def _contract_generation_fingerprint(
 ) -> str:
     """Fingerprint every runtime and seeded-skill input to contract generation."""
 
+    from jaunt.skill_selection import select_skills
+
+    selection = select_skills(
+        project_root=root,
+        builtin_names=request.builtin_skill_names,
+        texts=tuple(request.context_files.values()) + (request.seed_target_content,),
+        language="ts",
+        kind=request.kind,
+        activation=request.skill_activation,
+        always=request.skill_always,
+        exclude=request.skill_exclude,
+    )
     return _sha256(
         json.dumps(
             {
@@ -1495,6 +1510,7 @@ def _contract_generation_fingerprint(
                 "skillsFingerprint": skills_fingerprint(
                     project_root=root,
                     builtin_names=request.builtin_skill_names,
+                    selected_names=selection.names,
                 ),
             },
             sort_keys=True,

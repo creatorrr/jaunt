@@ -552,7 +552,8 @@ Both accept `--root`, `--config`, and `--json`.
 
 ### `jaunt skill`
 
-Manage project-local skills under `.agents/skills/`.
+Manage user skills under `.agents/skills/` and Jaunt-managed skills under
+`.jaunt/skills/`.
 
 ```bash
 jaunt skill list
@@ -561,13 +562,17 @@ jaunt skill add rich --description "Rich usage notes" --lib rich
 jaunt skill remove rich -f
 jaunt skill import --from /path/to/skills-dir
 jaunt skill refresh
+jaunt skill migrate       # preview classic managed-skill migration
+jaunt skill migrate --apply
 jaunt skill build rich
 ```
 
 Two subcommands generate content through the Codex engine: `skill build <name>`
 expands a user-managed checked-in skill (it must already exist with `--lib`
 metadata, usually from `skill add <name> --lib <package>`), and `skill refresh`
-regenerates Jaunt-managed auto skills. Both drive `codex exec` under the hood.
+regenerates Jaunt-managed auto skills. `skill migrate` is deterministic and moves
+only provenance-marked managed skills; it never calls a model or touches manual
+skills.
 
 ### `jaunt migrate`
 
@@ -622,11 +627,16 @@ apply, run `jaunt test --language ts --no-build` and `jaunt check --language ts`
 Migration records the validated API transition so compatible batteries can be
 reheadered without a model call. A failed overlay writes nothing.
 
+Use repeatable `--target ts:<module-id>` flags to preview or apply only selected
+modules. Targeted plans may analyze dependency context, but their action and
+write sets contain no unselected module artifacts.
+
 | Flag | Effect |
 |------|--------|
 | `--apply` | Write the planned changes. Refuses on a dirty git tree unless `--force`. |
 | `--force` | Apply despite uncommitted changes. |
 | `--language {py,ts}` | Select one target. Plain migrate selects TypeScript only when `[target.ts]` is the sole configured target. |
+| `--target ts:<module-id>` | Restrict a TypeScript plan/apply to selected modules. Repeatable. |
 | `--allow-newly-governed` | Also rewrite legacy bodies that would newly govern a symbol. |
 | `--json` | Emit `{applied, actions: [...]}`. TypeScript plans also include `plan_digest`, `diagnostics`, `blocked`, and `requires_rebuild`. |
 

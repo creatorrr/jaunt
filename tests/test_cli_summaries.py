@@ -237,6 +237,13 @@ def test_cli_test_json_does_not_print_generation_summary(
         "exit_code": 0,
         "generation_failed": {},
         "refrozen": [],
+        "skill_selection": {
+            "tests.specs_mod": [
+                {"name": "pytest", "reason": "python:test", "source": "builtin"},
+                {"name": "ruff", "reason": "python:baseline", "source": "builtin"},
+                {"name": "ty", "reason": "python:baseline", "source": "builtin"},
+            ]
+        },
     }
     assert "Generated" not in out
     assert "module(s), skipped" not in out

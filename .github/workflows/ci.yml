@@ -13,6 +13,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  UV_PYTHON: "3.12"
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -54,72 +57,85 @@ jobs:
       - name: Pytest
         run: uv run pytest
 
-  typescript:
-    name: TypeScript host bounds (Node ${{ matrix.node-version }})
+  typescript-worker:
+    name: TypeScript worker
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        node-version: [20, 24]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: 24
           cache: npm
-          cache-dependency-path: |
-            packages/jaunt-ts/package-lock.json
-            examples/typescript-jwt/package-lock.json
-            examples/typescript_slugify/package-lock.json
-            examples/typescript_project_references/package-lock.json
-            examples/typescript_project_references/pnpm-lock.yaml
-      - uses: astral-sh/setup-uv@v7
-      - run: uv sync --frozen
+          cache-dependency-path: packages/jaunt-ts/package-lock.json
       - name: Install TypeScript worker dependencies
         run: npm ci
         working-directory: packages/jaunt-ts
       - name: Typecheck and test TypeScript worker
         run: npm run lint && npm run format:check && npm run typecheck && npm test
         working-directory: packages/jaunt-ts
-      - name: Exercise Python adapter against the real worker
-        run: uv run pytest -q tests/test_typescript_real_worker.py
       - name: Inspect npm tarball
         run: npm run pack:check
         working-directory: packages/jaunt-ts
-      - name: Install TypeScript architecture fixture
+
+  typescript-adapter:
+    name: TypeScript Python adapter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: packages/jaunt-ts/package-lock.json
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --frozen
+      - name: Install and build TypeScript worker
+        run: npm ci && npm run build
+        working-directory: packages/jaunt-ts
+      - name: Exercise Python adapter against the real worker
+        run: uv run pytest -q tests/test_typescript_real_worker.py
+
+  typescript-examples:
+    name: TypeScript example (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: architecture
+            path: examples/typescript-jwt
+            verify: npm run typecheck && npm test && npm run emit && npm run demo && npm run smoke:consumer
+          - label: slugify
+            path: examples/typescript_slugify
+            verify: npm run typecheck && npm test && npm run demo
+          - label: project references
+            path: examples/typescript_project_references
+            verify: npm run typecheck && npm test && npm run demo
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            packages/jaunt-ts/package-lock.json
+            ${{ matrix.path }}/package-lock.json
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --frozen
+      - name: Install and build TypeScript worker
+        run: npm ci && npm run build
+        working-directory: packages/jaunt-ts
+      - name: Install TypeScript example
         run: npm ci
-        working-directory: examples/typescript-jwt
-      - name: Check TypeScript architecture fixture freshness
-        run: uv run jaunt check --language ts --root examples/typescript-jwt
-        env:
-          JAUNT_TS_WORKER: packages/jaunt-ts/dist/worker/main.js
-      - name: Validate emitted and packed consumers
-        run: npm run typecheck && npm test && npm run emit && npm run demo && npm run smoke:consumer
-        working-directory: examples/typescript-jwt
-      - name: Install generated TypeScript example
-        run: npm ci
-        working-directory: examples/typescript_slugify
-      - name: Check and execute generated TypeScript example
-        run: |
-          uv run --project ../.. jaunt check --language ts
-          npm run typecheck
-          npm test
-          npm run demo
-        working-directory: examples/typescript_slugify
+        working-directory: ${{ matrix.path }}
+      - name: Check TypeScript example freshness
+        run: uv run --project ../.. jaunt check --language ts
+        working-directory: ${{ matrix.path }}
         env:
           JAUNT_TS_WORKER: ../../packages/jaunt-ts/dist/worker/main.js
-      - name: Install TypeScript project-reference example
-        run: npm ci
-        working-directory: examples/typescript_project_references
-      - name: Check and execute TypeScript project-reference example
-        run: |
-          uv run --project ../.. jaunt check --language ts
-          npm run typecheck
-          npm test
-          npm run demo
-        working-directory: examples/typescript_project_references
-        env:
-          JAUNT_TS_WORKER: ../../packages/jaunt-ts/dist/worker/main.js
+      - name: Execute TypeScript example
+        run: ${{ matrix.verify }}
+        working-directory: ${{ matrix.path }}
 
   typescript-watch-benchmark:
     name: TypeScript 100-edit watch resource gate
@@ -185,8 +201,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
-            node-version: 20
           - os: macos-latest
             node-version: 24
     steps:
@@ -196,15 +210,11 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
           cache-dependency-path: packages/jaunt-ts/package-lock.json
-      - uses: astral-sh/setup-uv@v7
-      - run: uv sync --frozen
       - run: npm ci
         working-directory: packages/jaunt-ts
       - name: Typecheck, test, and inspect the packed worker
         run: npm run typecheck && npm run test:platform && npm run pack:check
         working-directory: packages/jaunt-ts
-      - name: Exercise platform paths through the Python adapter
-        run: uv run pytest -q tests/test_typescript_real_worker.py
 
   typescript-pnpm:
     name: TypeScript pnpm workspace
@@ -241,7 +251,7 @@ jobs:
       matrix:
         include:
           - label: minimum
-            node-version: 20
+            node-version: 24
             vitest-version: 3.2.4
             fast-check-version: 4.0.0
           - label: maximum
@@ -275,7 +285,7 @@ jobs:
       - name: Build wheel and source distribution
         run: uv build --out-dir "${RUNNER_TEMP}/jaunt-dist" --no-create-gitignore
       - name: Inspect TypeScript resources in Python distributions
-        run: python tests/inspect_typescript_distribution.py "${RUNNER_TEMP}/jaunt-dist"
+        run: uv run --no-project python tests/inspect_typescript_distribution.py "${RUNNER_TEMP}/jaunt-dist"
 
   docs:
     runs-on: ubuntu-latest

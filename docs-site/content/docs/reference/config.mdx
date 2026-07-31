@@ -202,6 +202,9 @@ max_chars_per_skill = 8000     # retained for back-compat (unused by Codex build
 inject_user_skills = []        # retained for back-compat (unused by Codex builder)
 builtin = true                 # seed Jaunt's bundled builtin skills
 builtin_skills = ["pytest", "ruff", "ty", "uv"]  # override to trim/extend the default set
+activation = "relevant"        # relevant | all
+always = []                    # skill names exposed to every generation call
+exclude = []                   # skill names never exposed
 
 [contract]
 battery_dir = "tests/contract" # where derived contract batteries are written

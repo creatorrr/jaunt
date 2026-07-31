@@ -214,6 +214,9 @@ builtin_skills = [          # the default set (override to trim/extend)
   "asyncpg", "dbos", "descope", "fastmcp", "openai", "pydantic", "pydantic-ai",
   "pytest", "ruff", "spacy", "starlette", "ty", "uv",
 ]
+activation = "relevant"     # relevant | all
+always = []                 # skill names exposed to every generation call
+exclude = []                # skill names never exposed
 
 [context]
 repo_map = true             # maintain treedocs.yaml + inject a repo map into build prompts
@@ -303,9 +306,12 @@ module, and `jaunt build`/`jaunt check` ignore repo-map drift (`jaunt status` ma
 still note it informationally). The `[context] repo_map` on/off toggle remains a
 fingerprint input.
 
-Skills are no longer injected as prompt text; Codex discovers them natively from a
-seeded `.agents/skills/` workspace. `max_chars_per_skill` and `inject_user_skills` are
-retained for back-compat but unused by the Codex builder.
+Skills are no longer injected as prompt text. User-authored skills live in
+`.agents/skills`; Jaunt-managed PyPI/npm skills are tracked under `.jaunt/skills`.
+Jaunt selects the relevant subset and exposes it in each disposable Codex workspace
+under `.agents/skills`. `jaunt skill migrate --apply` moves managed skills from the
+classic location. `max_chars_per_skill` and `inject_user_skills` are retained for
+back-compat but unused by the Codex builder.
 
 **Change detection (two layers).** Spec freshness is computed from an AST-normalized
 contract digest, so ruff reformatting, comment edits, and whitespace/quote changes no
