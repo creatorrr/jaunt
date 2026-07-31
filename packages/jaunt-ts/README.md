@@ -95,6 +95,14 @@ protected runner, or Vitest fingerprint. The current safety scan and a green com
 and Vitest run reheader the unchanged body without a model call; `--no-run`
 deliberately disables that proof.
 
+Stale-battery diagnostics expose `repair_targets` and a copyable `repair_command`.
+Use that target-scoped command to repair a large workspace over several invocations;
+multi-target intents require every listed target. Each successful invocation commits
+only after its selected batteries pass validation and reports their exact paths in
+`refrozen` or `generated`. Completed batteries are skipped on rerun, and interruption
+cannot leave a partially committed active transaction. Finish with the unscoped
+`jaunt check --language ts`, even when every bounded repair command was green.
+
 TypeScript battery generation receives the configured build instructions and a
 declaration-only view of workspace-local types imported by the selected target. The
 worker closes requested declarations over supporting declarations, re-exports, and

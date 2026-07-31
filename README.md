@@ -161,6 +161,19 @@ current safety scan, typechecks, and runs the committed body against the current
 target, then reheaders it when green without calling a model. Do not add `--no-run`:
 runtime verification is the proof that makes the free reheader safe.
 
+Large battery repairs can be resumed as bounded target transactions. Copy the
+`repair_command` from the stale-battery diagnostic, or repeat `--target` yourself:
+
+```bash
+uvx jaunt test --language ts --no-build --target 'ts:src/tokens#issueToken' --json
+```
+
+For a test intent that names several targets, include every target shown in
+`repair_targets`. A successful invocation reports the exact committed paths in
+`refrozen` or `generated`; a rerun skips those fresh batteries. An interruption does
+not partially commit the active transaction. Repair the remaining targets in later
+invocations, then always run the unscoped `uvx jaunt check --language ts` final gate.
+
 Generated programs use ordinary imports and keep running without Jaunt installed. See
 the [TypeScript guide](https://jaunt.ing/docs/guides/typescript) for the facade layout,
 supported compiler range, and version-2 config.

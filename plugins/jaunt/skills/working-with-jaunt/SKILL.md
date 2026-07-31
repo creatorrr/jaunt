@@ -84,6 +84,13 @@ the build afterward.
   same model-free path. The test command safety-typechecks and runs the committed
   body before reheadering it. Do not add `--no-run`; that removes the runtime
   proof and forces generation.
+- For a bounded battery rollout, use the diagnostic's `repair_command` and exact
+  `repair_targets`; a multi-target intent needs every listed target. Successful
+  target-scoped invocations atomically commit the selected batteries and report
+  exact paths under `refrozen` or `generated`. Reruns skip completed batteries,
+  and an interrupted invocation does not partially commit its active transaction.
+  Resume with the remaining target commands, then run the unscoped
+  `check --language ts` final gate.
 - A final compiler/conformance rejection is already retried inside the module's
   remaining attempt budget with the rejected source and exact diagnostics.
   Read `candidate_outcomes` in build JSON before proposing another paid run.

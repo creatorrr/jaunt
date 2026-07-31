@@ -14,6 +14,7 @@ import math
 import os
 import posixpath
 import re
+import shlex
 import shutil
 import signal
 import stat
@@ -4951,6 +4952,32 @@ def _selected_generated_test_files(
     return tuple(sorted(path for path in selected if path and _safe_path(root, path).is_file()))
 
 
+def _test_battery_repair_targets(
+    test_spec: Mapping[str, Any],
+    selected_modules: Sequence[Mapping[str, Any]],
+) -> tuple[str, ...]:
+    """Return the exact repeatable ``--target`` values for one test intent."""
+
+    raw_targets = test_spec.get("targets", [])
+    declared = (
+        tuple(
+            dict.fromkeys(
+                item for item in raw_targets if isinstance(item, str) and item.startswith("ts:")
+            )
+        )
+        if isinstance(raw_targets, list)
+        else ()
+    )
+    if declared:
+        return declared
+    return tuple(sorted({_module_id(module) for module in selected_modules}))
+
+
+def _test_battery_repair_command(targets: Sequence[str]) -> str:
+    command = "jaunt test --language ts --no-build"
+    return command + "".join(f" --target {shlex.quote(target)}" for target in targets)
+
+
 def _test_battery_diagnostics(
     root: Path,
     config: JauntConfig,
@@ -4982,6 +5009,8 @@ def _test_battery_diagnostics(
         selected = _selected_test_modules(test_spec, modules)
         if requested and not any(_module_id(module) in requested for module in selected):
             continue
+        repair_targets = _test_battery_repair_targets(test_spec, selected)
+        repair_command = _test_battery_repair_command(repair_targets)
         source_path = str(test_spec.get("path", ""))
         for tier in ("example", "derived"):
             relative = _test_output(source_path, _target(config).generated_dir, tier)
@@ -5116,13 +5145,14 @@ def _test_battery_diagnostics(
                 # ``_is_verifiable_api_transition`` requires the ``battery_fingerprint``
                 # aggregate, which is deliberately not a contract field and so never appears
                 # in ``gating``. It must inspect the raw mismatch set or it never matches.
+                verifiable_api_transition = _is_verifiable_api_transition(
+                    mismatch_fields,
+                    additional_allowed=migration_safe_fields,
+                )
                 remedy = (
-                    "run `jaunt test --language ts --no-build` without `--no-run`, then "
-                    "rerun `jaunt check`."
-                    if _is_verifiable_api_transition(
-                        mismatch_fields,
-                        additional_allowed=migration_safe_fields,
-                    )
+                    f"run `{repair_command}` without `--no-run`, then "
+                    "rerun `jaunt check --language ts`."
+                    if verifiable_api_transition
                     else "run `jaunt test --language ts`."
                 )
                 diagnostics.append(
@@ -5146,6 +5176,14 @@ def _test_battery_diagnostics(
                             "mismatches": tuple(sorted(mismatch_fields)),
                             "gating": tuple(sorted(gating)),
                             **({"advisories": advisories} if advisories else {}),
+                            **(
+                                {
+                                    "repair_targets": repair_targets,
+                                    "repair_command": repair_command,
+                                }
+                                if verifiable_api_transition
+                                else {}
+                            ),
                             **(
                                 {
                                     "candidate": distinct["candidate"],
