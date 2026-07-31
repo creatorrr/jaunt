@@ -21,8 +21,8 @@ contracts and Jaunt writes implementations under `__generated__/` using the Open
 Codex CLI (`codex exec`). Python and TypeScript are supported targets; TypeScript uses
 version-2 configuration and a project-local analyzer package.
 
-> **Windows:** support is currently best-effort and flaky. Some build and artifact
-> publication paths may fail on Windows; use Linux or macOS for reliable workflows.
+> **Windows:** native Windows support is not a project goal. Use Linux, macOS, or
+> WSL for Jaunt workflows.
 
 Call `jaunt.magic_module(__name__)` once at the top of a file and every top-level
 stub below it becomes a spec, with no per-symbol decorators:

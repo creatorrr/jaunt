@@ -201,8 +201,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
-            node-version: 24
           - os: macos-latest
             node-version: 24
     steps:
