@@ -33,6 +33,7 @@ def _make_ctx(**overrides: object) -> ModuleSpecContext:
         whole_class=overrides.get("whole_class", False),  # type: ignore[arg-type]
         repo_map_block=overrides.get("repo_map_block", ""),  # type: ignore[arg-type]
         relevant_context_block=overrides.get("relevant_context_block", ""),  # type: ignore[arg-type]
+        relevant_context_files=overrides.get("relevant_context_files", ()),  # type: ignore[arg-type]
         project_overview_block=overrides.get("project_overview_block", ""),  # type: ignore[arg-type]
     )
 
@@ -304,6 +305,29 @@ def test_relevant_block_changes_cache_key() -> None:
         provider="p",
     )
     assert k1 != k2
+
+
+def test_relevant_context_file_contents_change_cache_key() -> None:
+    first = _make_ctx(relevant_context_files=(("relevant_0.py", "import pydantic\n"),))
+    second = _make_ctx(relevant_context_files=(("relevant_0.py", "import httpx\n"),))
+
+    assert cache_key_from_context(first, model="m", provider="p") != cache_key_from_context(
+        second, model="m", provider="p"
+    )
+
+
+def test_relevant_context_file_order_does_not_change_cache_key() -> None:
+    first = _make_ctx(
+        relevant_context_files=(
+            ("relevant_0.py", "import pydantic\n"),
+            ("relevant_1.py", "x = 1\n"),
+        )
+    )
+    second = _make_ctx(relevant_context_files=tuple(reversed(first.relevant_context_files)))
+
+    assert cache_key_from_context(first, model="m", provider="p") == cache_key_from_context(
+        second, model="m", provider="p"
+    )
 
 
 def test_project_overview_block_changes_cache_key() -> None:

@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from jaunt.errors import JauntConfigError
 from jaunt.external_imports import pep503_normalize
@@ -18,6 +18,9 @@ from jaunt.skill_manager import (
     skills_dir,
 )
 from jaunt.skills_builtin import iter_enabled_builtin_skill_dirs
+
+if TYPE_CHECKING:
+    from jaunt.generate.base import ModuleSpecContext
 
 Language = Literal["py", "ts"]
 
@@ -228,4 +231,36 @@ def select_skills(
     return SkillSelection(tuple(entries))
 
 
-__all__ = ["SkillSelection", "SkillSelectionEntry", "select_skills"]
+def select_module_context_skills(ctx: ModuleSpecContext) -> SkillSelection:
+    """Select skills from every source file exposed by a Python module context."""
+
+    # Context filenames identify workspace destinations. Match the backend's
+    # last-write-wins behavior for a repeated filename, then order by filename
+    # so selection is independent of tuple construction order.
+    relevant_files = dict(getattr(ctx, "relevant_context_files", ()) or ())
+    texts = (
+        *tuple(ctx.spec_sources.values()),
+        getattr(ctx, "blueprint_source", "") or "",
+        *tuple(ctx.dependency_apis.values()),
+        *tuple((getattr(ctx, "dependency_generated_modules", {}) or {}).values()),
+        getattr(ctx, "seed_target_content", "") or "",
+        *(content for _name, content in sorted(relevant_files.items())),
+    )
+    return select_skills(
+        project_root=getattr(ctx, "project_root", None),
+        builtin_names=tuple(getattr(ctx, "builtin_skill_names", ()) or ()),
+        texts=texts,
+        language="py",
+        kind=ctx.kind,
+        activation=getattr(ctx, "skill_activation", "relevant"),
+        always=tuple(getattr(ctx, "skill_always", ()) or ()),
+        exclude=tuple(getattr(ctx, "skill_exclude", ()) or ()),
+    )
+
+
+__all__ = [
+    "SkillSelection",
+    "SkillSelectionEntry",
+    "select_module_context_skills",
+    "select_skills",
+]

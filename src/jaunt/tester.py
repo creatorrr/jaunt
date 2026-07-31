@@ -1238,23 +1238,9 @@ async def run_test_generation(
             skill_always=tuple(skill_always),
             skill_exclude=tuple(skill_exclude),
         )
-        from jaunt.skill_selection import select_skills
+        from jaunt.skill_selection import select_module_context_skills
 
-        module_skill_selection[module_name] = select_skills(
-            project_root=ctx.project_root,
-            builtin_names=ctx.builtin_skill_names,
-            texts=(
-                *tuple(ctx.spec_sources.values()),
-                *tuple(ctx.dependency_apis.values()),
-                *tuple(ctx.dependency_generated_modules.values()),
-                ctx.seed_target_content or "",
-            ),
-            language="py",
-            kind=ctx.kind,
-            activation=ctx.skill_activation,
-            always=ctx.skill_always,
-            exclude=ctx.skill_exclude,
-        ).metadata()
+        module_skill_selection[module_name] = select_module_context_skills(ctx).metadata()
 
         def _validate_candidate(source: str) -> list[str]:
             return validate_test_generated_source(

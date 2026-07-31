@@ -6,8 +6,9 @@ from pathlib import Path
 import pytest
 
 from jaunt.errors import JauntConfigError
+from jaunt.generate.base import ModuleSpecContext
 from jaunt.skill_seed import skills_fingerprint
-from jaunt.skill_selection import select_skills
+from jaunt.skill_selection import select_module_context_skills, select_skills
 
 
 def _write(path: Path, text: str) -> None:
@@ -129,3 +130,24 @@ def test_typescript_side_effect_import_selects_managed_skill(tmp_path: Path) -> 
 
     assert selection.names == ("reflect-metadata",)
     assert selection.entries[0].reason == "import:reflect-metadata"
+
+
+def test_module_context_selection_includes_retrieved_file_bodies(tmp_path: Path) -> None:
+    _write(tmp_path / ".jaunt/skills/httpx/SKILL.md", _managed("httpx"))
+    ctx = ModuleSpecContext(
+        kind="build",
+        spec_module="pkg.specs",
+        generated_module="pkg.__generated__.specs",
+        expected_names=["fetch"],
+        spec_sources={},
+        decorator_prompts={},
+        dependency_apis={},
+        dependency_generated_modules={},
+        project_root=tmp_path,
+        relevant_context_files=(("relevant_0.py", "import httpx\n"),),
+    )
+
+    selection = select_module_context_skills(ctx)
+
+    assert selection.names == ("httpx",)
+    assert selection.entries[0].reason == "import:httpx"

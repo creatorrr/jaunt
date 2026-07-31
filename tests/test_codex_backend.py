@@ -721,6 +721,7 @@ def test_generate_writes_relevant_context_files(monkeypatch) -> None:
     import jaunt.generate.codex_backend as cb
 
     written: dict[str, str] = {}
+    seeded: list[str] = []
 
     async def _fake_run(*, prompt, cwd, **kw):
         ctx_dir = Path(cwd) / "_context"
@@ -734,13 +735,47 @@ def test_generate_writes_relevant_context_files(monkeypatch) -> None:
         return None
 
     monkeypatch.setattr(cb, "run_codex_exec", _fake_run)
+    monkeypatch.setattr(
+        cb,
+        "seed_skills_into_workspace",
+        lambda _root, **kwargs: seeded.extend(kwargs["selected_names"]) or [],
+    )
     backend = _backend()
     ctx = _ctx(
         relevant_context_block="Read `_context/relevant_*.py` ...",
         relevant_context_files=(("relevant_0.py", "# src/a.py\ndef f(): ...\n"),),
+        builtin_skill_names=("pydantic",),
     )
     asyncio.run(backend.generate_module(ctx))
     assert "relevant_0.py" in written and "def f()" in written["relevant_0.py"]
+    assert seeded == []
+
+
+def test_generate_selects_skill_imported_only_by_relevant_context(monkeypatch) -> None:
+    import jaunt.generate.codex_backend as cb
+
+    seeded: list[str] = []
+
+    async def _fake_run(*, cwd, **_kwargs):
+        for path in Path(cwd).rglob("*.py"):
+            if "_context" not in path.parts:
+                path.write_text("x = 1\n", encoding="utf-8")
+        return None
+
+    monkeypatch.setattr(cb, "run_codex_exec", _fake_run)
+    monkeypatch.setattr(
+        cb,
+        "seed_skills_into_workspace",
+        lambda _root, **kwargs: seeded.extend(kwargs["selected_names"]) or [],
+    )
+    ctx = _ctx(
+        relevant_context_files=(("relevant_0.py", "import pydantic\n"),),
+        builtin_skill_names=("pydantic",),
+    )
+
+    asyncio.run(_backend().generate_module(ctx))
+
+    assert seeded == ["pydantic"]
 
 
 def test_build_prompt_test_kind_has_tester_section() -> None:

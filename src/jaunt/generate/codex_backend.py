@@ -29,7 +29,7 @@ from jaunt.errors import (
 from jaunt.generate.base import GenerationRequest, GeneratorBackend, ModuleSpecContext, TokenUsage
 from jaunt.generate.shared import load_prompt
 from jaunt.skill_seed import seed_skills_into_workspace
-from jaunt.skill_selection import select_skills
+from jaunt.skill_selection import select_module_context_skills, select_skills
 
 
 ADVISORIES_INSTRUCTION = (
@@ -599,22 +599,7 @@ class CodexBackend(GeneratorBackend):
                 root,
                 project_root=getattr(ctx, "project_root", None),
                 builtin_names=list(getattr(ctx, "builtin_skill_names", ()) or ()),
-                selected_names=select_skills(
-                    project_root=getattr(ctx, "project_root", None),
-                    builtin_names=tuple(getattr(ctx, "builtin_skill_names", ()) or ()),
-                    texts=(
-                        *tuple(ctx.spec_sources.values()),
-                        getattr(ctx, "blueprint_source", "") or "",
-                        *tuple(ctx.dependency_apis.values()),
-                        *tuple((getattr(ctx, "dependency_generated_modules", {}) or {}).values()),
-                        getattr(ctx, "seed_target_content", "") or "",
-                    ),
-                    language="py",
-                    kind=ctx.kind,
-                    activation=getattr(ctx, "skill_activation", "relevant"),
-                    always=tuple(getattr(ctx, "skill_always", ()) or ()),
-                    exclude=tuple(getattr(ctx, "skill_exclude", ()) or ()),
-                ).names,
+                selected_names=select_module_context_skills(ctx).names,
             )
 
             prompt = self._build_prompt(ctx, target.relative_to(root), extra_error_context)

@@ -109,9 +109,6 @@ def generation_request_cache_key(
         "context_files": dict(sorted(request.context_files.items())),
         "cache_payload": request.cache_payload,
         "seed_target_content": request.seed_target_content,
-        "skill_activation": request.skill_activation,
-        "skill_always": sorted(request.skill_always),
-        "skill_exclude": sorted(request.skill_exclude),
         "skills_digest": skills_fingerprint(
             project_root=request.project_root,
             builtin_names=request.builtin_skill_names,

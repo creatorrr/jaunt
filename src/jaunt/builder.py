@@ -3121,25 +3121,10 @@ async def run_build(
         if markers:
             module_needs_deps[module_name] = markers
         from jaunt.skill_seed import skills_workspace_stats
-        from jaunt.skill_selection import select_skills
+        from jaunt.skill_selection import select_module_context_skills
 
         selection_ctx, _selection_expected, _selection_handwritten = _component_payload(entries)
-        selection = select_skills(
-            project_root=selection_ctx.project_root,
-            builtin_names=selection_ctx.builtin_skill_names,
-            texts=(
-                *tuple(selection_ctx.spec_sources.values()),
-                selection_ctx.blueprint_source or "",
-                *tuple(selection_ctx.dependency_apis.values()),
-                *tuple(selection_ctx.dependency_generated_modules.values()),
-                selection_ctx.seed_target_content or "",
-            ),
-            language="py",
-            kind=selection_ctx.kind,
-            activation=selection_ctx.skill_activation,
-            always=selection_ctx.skill_always,
-            exclude=selection_ctx.skill_exclude,
-        )
+        selection = select_module_context_skills(selection_ctx)
         _skill_count, selected_skill_chars = skills_workspace_stats(
             project_root=selection_ctx.project_root,
             builtin_names=selection_ctx.builtin_skill_names,
