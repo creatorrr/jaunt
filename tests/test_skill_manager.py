@@ -310,7 +310,13 @@ def test_add_skill_with_libs(tmp_path: Path) -> None:
         'def greet(name: str) -> str:\n    """Say hello."""\n    return f"Hi {name}"\n'
     )
 
-    ref = LibRef(type="path", name="mylib", path=str(lib_dir), version=None, import_roots=[])
+    ref = LibRef(
+        type="path",
+        name="mylib",
+        path=str(lib_dir),
+        version=None,
+        import_roots=["acme_utils"],
+    )
     path = add_skill(tmp_path, "my-tool", description="My tool", libs=[ref])
     content = path.read_text(encoding="utf-8")
     assert "# my-tool" in content
@@ -322,6 +328,7 @@ def test_add_skill_with_libs(tmp_path: Path) -> None:
     meta_data = json.loads(meta_path.read_text())
     assert meta_data["description"] == "My tool"
     assert len(meta_data["libs"]) == 1
+    assert meta_data["libs"][0]["import_roots"] == ["acme_utils"]
 
 
 # --- read/write skill meta ---

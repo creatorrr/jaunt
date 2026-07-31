@@ -387,9 +387,10 @@ def test_cmd_skill_add_lib_relative_to_root(tmp_path: Path, capsys) -> None:
     """--lib paths should resolve relative to --root, not CWD."""
     project = tmp_path / "myproject"
     project.mkdir()
-    lib_dir = project / "src" / "pkg"
-    lib_dir.mkdir(parents=True)
-    (lib_dir / "__init__.py").write_text("")
+    lib_dir = project / "libs" / "company-utils"
+    package_dir = lib_dir / "acme_utils"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("")
     rc = main(
         [
             "skill",
@@ -398,7 +399,7 @@ def test_cmd_skill_add_lib_relative_to_root(tmp_path: Path, capsys) -> None:
             "--root",
             str(project),
             "--lib",
-            "src/pkg",
+            "libs/company-utils",
             "--json",
         ]
     )
@@ -406,6 +407,8 @@ def test_cmd_skill_add_lib_relative_to_root(tmp_path: Path, capsys) -> None:
     out = json.loads(capsys.readouterr().out)
     assert out["ok"] is True
     assert (project / ".agents/skills/my-tool/SKILL.md").exists()
+    meta = json.loads((project / ".agents/skills/my-tool/META.json").read_text(encoding="utf-8"))
+    assert meta["libs"][0]["import_roots"] == ["acme_utils"]
 
 
 def test_cmd_skill_remove_without_force(tmp_path: Path, capsys) -> None:

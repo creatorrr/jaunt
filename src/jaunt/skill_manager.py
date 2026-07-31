@@ -276,7 +276,13 @@ def add_skill(
                 except ValueError:
                     pass  # outside project root — store absolute as fallback
             lib_dicts.append(
-                {"type": ref.type, "name": ref.name, "path": stored_path, "version": ref.version}
+                {
+                    "type": ref.type,
+                    "name": ref.name,
+                    "path": stored_path,
+                    "version": ref.version,
+                    "import_roots": list(ref.import_roots),
+                }
             )
         write_skill_meta(project_root, name, SkillMeta(libs=lib_dicts, description=description))
     else:
