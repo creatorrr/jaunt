@@ -16,6 +16,7 @@ import pytest
 import jaunt.typescript.worker as typescript_worker
 from jaunt.typescript.config import TypeScriptTargetConfig
 from jaunt.typescript.protocol import PROTOCOL_VERSION, InitializeParams
+from jaunt.typescript.specifier_cache import SpecifierCache, specifier_cache_key
 from jaunt.typescript.worker import (
     _annotation_initializer_starts,
     _create_require_module_specifiers,
@@ -5003,10 +5004,13 @@ def test_package_resolution_closure_reuses_walk_for_same_physical_root(
         package_root: Path,
         *,
         root_label: str,
+        specifier_cache: SpecifierCache | None = None,
     ) -> tuple[typescript_worker._RuntimePackageResolutionEdge, ...]:
         nonlocal closure_calls
         closure_calls += 1
-        return original_closure(package_root, root_label=root_label)
+        return original_closure(
+            package_root, root_label=root_label, specifier_cache=specifier_cache
+        )
 
     monkeypatch.setattr(
         typescript_worker,
@@ -5025,6 +5029,256 @@ def test_package_resolution_closure_reuses_walk_for_same_physical_root(
         )
 
     assert closure_calls == 1
+
+
+def _install_specifier_cache_package(
+    root: Path,
+    package: str,
+    *,
+    files: Mapping[str, str],
+    dependencies: Mapping[str, str] | None = None,
+) -> Path:
+    package_root = root / "node_modules" / package
+    for relative, content in files.items():
+        path = package_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    (package_root / "package.json").write_text(
+        json.dumps(
+            {
+                "name": package,
+                "version": "1.0.0",
+                "main": next(iter(files)),
+                "dependencies": dependencies or {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return package_root
+
+
+def _count_runtime_tokenizer_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[Path]:
+    original = typescript_worker._runtime_module_specifiers
+    calls: list[Path] = []
+
+    def counted(
+        source: str,
+        *,
+        source_path: Path,
+        tolerate_unsupported_loader_flows: bool = False,
+    ) -> tuple[str, ...]:
+        calls.append(source_path)
+        return original(
+            source,
+            source_path=source_path,
+            tolerate_unsupported_loader_flows=tolerate_unsupported_loader_flows,
+        )
+
+    monkeypatch.setattr(typescript_worker, "_runtime_module_specifiers", counted)
+    return calls
+
+
+def test_specifier_cache_is_warm_across_worker_client_instances(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installation = _installation(tmp_path, "console.log('worker');\n")
+    _install_specifier_cache_package(
+        tmp_path,
+        "vite",
+        files={"dist/index.js": "export const vite = true;\n"},
+    )
+    _install_specifier_cache_package(
+        tmp_path,
+        "vitest",
+        files={"dist/index.js": 'import "vite";\nexport const vitest = true;\n'},
+        dependencies={"vite": "1.0.0"},
+    )
+    calls = _count_runtime_tokenizer_calls(monkeypatch)
+
+    first = WorkerClient(root=tmp_path, installation=installation)
+    first.pin_package_resolution_closure(
+        "first Vitest closure",
+        tmp_path,
+        "vitest",
+        boundary=tmp_path,
+        expected_name="vitest",
+    )
+
+    assert len(calls) == 2
+    assert (tmp_path / ".jaunt/cache/ts-specifiers.json").is_file()
+
+    calls.clear()
+    second = WorkerClient(root=tmp_path, installation=installation)
+    second.pin_package_resolution_closure(
+        "second Vitest closure",
+        tmp_path,
+        "vitest",
+        boundary=tmp_path,
+        expected_name="vitest",
+    )
+
+    assert calls == []
+    assert second._specifier_cache.hits == 2
+
+
+def test_specifier_cache_retokenizes_only_changed_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installation = _installation(tmp_path, "console.log('worker');\n")
+    dependency = _install_specifier_cache_package(
+        tmp_path,
+        "vite",
+        files={"dist/index.js": "export const vite = 1;\n"},
+    )
+    _install_specifier_cache_package(
+        tmp_path,
+        "vitest",
+        files={"dist/index.js": 'import "vite";\nexport const vitest = true;\n'},
+        dependencies={"vite": "1.0.0"},
+    )
+    calls = _count_runtime_tokenizer_calls(monkeypatch)
+    WorkerClient(root=tmp_path, installation=installation).pin_package_resolution_closure(
+        "first Vitest closure",
+        tmp_path,
+        "vitest",
+        boundary=tmp_path,
+        expected_name="vitest",
+    )
+    assert len(calls) == 2
+
+    changed = dependency / "dist/index.js"
+    changed.write_text("export const vite = 2;\n", encoding="utf-8")
+    calls.clear()
+    WorkerClient(root=tmp_path, installation=installation).pin_package_resolution_closure(
+        "second Vitest closure",
+        tmp_path,
+        "vitest",
+        boundary=tmp_path,
+        expected_name="vitest",
+    )
+
+    assert calls == [changed]
+
+
+def test_specifier_cache_key_separates_suffix_and_loader_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installation = _installation(tmp_path, "console.log('worker');\n")
+    source = "export const value = true;\n"
+    _install_specifier_cache_package(
+        tmp_path,
+        "vitest",
+        files={"dist/index.js": source, "dist/index.ts": source},
+    )
+    calls = _count_runtime_tokenizer_calls(monkeypatch)
+    WorkerClient(root=tmp_path, installation=installation).pin_package_resolution_closure(
+        "Vitest closure",
+        tmp_path,
+        "vitest",
+        boundary=tmp_path,
+        expected_name="vitest",
+    )
+
+    assert {path.suffix for path in calls} == {".js", ".ts"}
+    content = source.encode()
+    assert specifier_cache_key(
+        content,
+        suffix=".js",
+        tolerate_unsupported_loader_flows=True,
+    ) != specifier_cache_key(
+        content,
+        suffix=".JS",
+        tolerate_unsupported_loader_flows=False,
+    )
+
+
+def test_specifier_cache_version_bump_retokenizes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installation = _installation(tmp_path, "console.log('worker');\n")
+    _install_specifier_cache_package(
+        tmp_path,
+        "vitest",
+        files={"dist/index.js": "export const vitest = true;\n"},
+    )
+    calls = _count_runtime_tokenizer_calls(monkeypatch)
+    WorkerClient(root=tmp_path, installation=installation).pin_package_resolution_closure(
+        "first Vitest closure",
+        tmp_path,
+        "vitest",
+        boundary=tmp_path,
+        expected_name="vitest",
+    )
+    assert len(calls) == 1
+
+    monkeypatch.setattr(typescript_worker, "_RUNTIME_TOKENIZER_CACHE_VERSION", 2)
+    calls.clear()
+    WorkerClient(root=tmp_path, installation=installation).pin_package_resolution_closure(
+        "second Vitest closure",
+        tmp_path,
+        "vitest",
+        boundary=tmp_path,
+        expected_name="vitest",
+    )
+
+    assert len(calls) == 1
+
+
+def test_specifier_cache_recovers_from_corrupt_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installation = _installation(tmp_path, "console.log('worker');\n")
+    _install_specifier_cache_package(
+        tmp_path,
+        "vitest",
+        files={"dist/index.js": "export const vitest = true;\n"},
+    )
+    cache_path = tmp_path / ".jaunt/cache/ts-specifiers.json"
+    cache_path.parent.mkdir(parents=True)
+    cache_path.write_bytes(b"\xffnot-json")
+    calls = _count_runtime_tokenizer_calls(monkeypatch)
+    WorkerClient(root=tmp_path, installation=installation).pin_package_resolution_closure(
+        "first Vitest closure",
+        tmp_path,
+        "vitest",
+        boundary=tmp_path,
+        expected_name="vitest",
+    )
+
+    assert len(calls) == 1
+    assert json.loads(cache_path.read_text(encoding="utf-8"))["entries"]
+
+    calls.clear()
+    WorkerClient(root=tmp_path, installation=installation).pin_package_resolution_closure(
+        "second Vitest closure",
+        tmp_path,
+        "vitest",
+        boundary=tmp_path,
+        expected_name="vitest",
+    )
+    assert calls == []
+
+
+def test_specifier_cache_inert_and_save_errors_are_harmless(tmp_path: Path) -> None:
+    inert = SpecifierCache(None, version="test")
+    assert inert.get("missing") is None
+    inert.put("key", ("value",))
+    inert.save()
+    assert (inert.hits, inert.misses) == (0, 1)
+
+    non_directory = tmp_path / "not-a-directory"
+    non_directory.write_text("blocked", encoding="utf-8")
+    best_effort = SpecifierCache(non_directory / "cache.json", version="test")
+    best_effort.put("key", ("value",))
+    best_effort.save()
+    assert best_effort.get("key") == ("value",)
 
 
 def test_package_resolution_closure_hashes_diamond_dependency_once_per_root(
@@ -5120,10 +5374,13 @@ def test_reset_full_runtime_identity_clears_package_pin_caches(
         package_root: Path,
         *,
         root_label: str,
+        specifier_cache: SpecifierCache | None = None,
     ) -> tuple[typescript_worker._RuntimePackageResolutionEdge, ...]:
         nonlocal closure_calls
         closure_calls += 1
-        return original_closure(package_root, root_label=root_label)
+        return original_closure(
+            package_root, root_label=root_label, specifier_cache=specifier_cache
+        )
 
     def counted_identity(package_root: Path, *, expected_name: str | None = None) -> str:
         nonlocal identity_calls
