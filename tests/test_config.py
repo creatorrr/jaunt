@@ -275,6 +275,9 @@ def test_skills_config_defaults_and_parses(tmp_path: Path) -> None:
     assert cfg.skills.auto is True
     assert cfg.skills.max_chars_per_skill == 8000
     assert cfg.skills.inject_user_skills == []
+    assert cfg.skills.activation == "relevant"
+    assert cfg.skills.always == []
+    assert cfg.skills.exclude == []
 
     (tmp_path / "jaunt-skills.toml").write_text(
         "\n".join(
@@ -285,6 +288,9 @@ def test_skills_config_defaults_and_parses(tmp_path: Path) -> None:
                 "auto = false",
                 "max_chars_per_skill = 1234",
                 'inject_user_skills = ["local-api"]',
+                'activation = "all"',
+                'always = ["local-api"]',
+                'exclude = ["ruff"]',
                 "",
             ]
         )
@@ -295,6 +301,18 @@ def test_skills_config_defaults_and_parses(tmp_path: Path) -> None:
     assert cfg2.skills.auto is False
     assert cfg2.skills.max_chars_per_skill == 1234
     assert cfg2.skills.inject_user_skills == ["local-api"]
+    assert cfg2.skills.activation == "all"
+    assert cfg2.skills.always == ["local-api"]
+    assert cfg2.skills.exclude == ["ruff"]
+
+
+def test_skills_always_and_exclude_must_not_overlap(tmp_path: Path) -> None:
+    (tmp_path / "jaunt.toml").write_text(
+        'version = 1\n[skills]\nalways = ["ruff"]\nexclude = ["ruff"]\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(JauntConfigError, match="overlap"):
+        load_config(root=tmp_path)
 
 
 def test_skills_builtin_defaults(tmp_path: Path) -> None:

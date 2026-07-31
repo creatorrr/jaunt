@@ -35,6 +35,9 @@ class ModuleSpecContext:
     project_root: Path | None = None
     builtin_skill_names: tuple[str, ...] = ()
     skills_digest: str = ""
+    skill_activation: Literal["relevant", "all"] = "relevant"
+    skill_always: tuple[str, ...] = ()
+    skill_exclude: tuple[str, ...] = ()
     module_contract_block: str = ""
     base_contract_block: str = ""
     blueprint_source: str = ""
@@ -72,6 +75,9 @@ class GenerationRequest:
     project_root: Path | None = None
     seed_target_content: str = ""
     builtin_skill_names: tuple[str, ...] = ()
+    skill_activation: Literal["relevant", "all"] = "relevant"
+    skill_always: tuple[str, ...] = ()
+    skill_exclude: tuple[str, ...] = ()
 
 
 def generation_request_cache_key(
@@ -83,6 +89,19 @@ def generation_request_cache_key(
 ) -> str:
     """Return a language-namespaced deterministic key for a generic request."""
 
+    from jaunt.skill_seed import skills_fingerprint
+    from jaunt.skill_selection import select_skills
+
+    selection = select_skills(
+        project_root=request.project_root,
+        builtin_names=request.builtin_skill_names,
+        texts=tuple(request.context_files.values()) + (request.seed_target_content,),
+        language=request.language,
+        kind=request.kind,
+        activation=request.skill_activation,
+        always=request.skill_always,
+        exclude=request.skill_exclude,
+    )
     payload = {
         "language": request.language,
         "kind": request.kind,
@@ -91,6 +110,14 @@ def generation_request_cache_key(
         "cache_payload": request.cache_payload,
         "seed_target_content": request.seed_target_content,
         "builtin_skill_names": sorted(request.builtin_skill_names),
+        "skill_activation": request.skill_activation,
+        "skill_always": sorted(request.skill_always),
+        "skill_exclude": sorted(request.skill_exclude),
+        "skills_digest": skills_fingerprint(
+            project_root=request.project_root,
+            builtin_names=request.builtin_skill_names,
+            selected_names=selection.names,
+        ),
         "model": model,
         "provider": provider,
         "generation_fingerprint": generation_fingerprint,

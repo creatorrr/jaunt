@@ -120,6 +120,13 @@ def test_parse_skill_refresh() -> None:
     assert args.force is True
 
 
+def test_parse_skill_migrate() -> None:
+    args = parse_args(["skill", "migrate", "--apply", "--force"])
+    assert args.skill_command == "migrate"
+    assert args.apply is True
+    assert args.force is True
+
+
 def test_cmd_skill_refresh_expands_globbed_source_roots(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
@@ -270,6 +277,22 @@ def test_cmd_skill_list_json(tmp_path: Path, capsys) -> None:
     assert out["ok"] is True
     assert len(out["skills"]) == 1
     assert out["skills"][0]["name"] == "my-tool"
+    assert out["skills"][0]["effective"] is True
+    assert out["skills"][0]["shadowed_by"] is None
+
+
+def test_cmd_skill_list_reports_registry_shadowing(tmp_path: Path, capsys) -> None:
+    _write(tmp_path / ".jaunt/skills/httpx/SKILL.md", _managed_skill("pypi", "httpx"))
+    _write(tmp_path / ".agents/skills/httpx/SKILL.md", "# project override\n")
+
+    rc = main(["skill", "list", "--root", str(tmp_path), "--json"])
+
+    assert rc == 0
+    skills = json.loads(capsys.readouterr().out)["skills"]
+    by_registry = {skill["registry"]: skill for skill in skills}
+    assert by_registry["user"]["effective"] is True
+    assert by_registry["managed"]["effective"] is False
+    assert by_registry["managed"]["shadowed_by"].endswith(".agents/skills/httpx/SKILL.md")
 
 
 def test_cmd_skill_list_via_skills_alias(tmp_path: Path, capsys) -> None:
@@ -278,6 +301,55 @@ def test_cmd_skill_list_via_skills_alias(tmp_path: Path, capsys) -> None:
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
     assert out["ok"] is True
+
+
+def _managed_skill(kind: str, name: str, version: str = "1.0") -> str:
+    if kind == "pypi":
+        provenance = f"x-jaunt-dist: {name}\nx-jaunt-version: {version}"
+    else:
+        provenance = f"x-jaunt-npm-package: {name}\nx-jaunt-npm-version: {version}"
+    return f"---\nname: generated\n{provenance}\n---\n# generated\n"
+
+
+def test_cmd_skill_migrate_plans_and_applies_both_managed_kinds(tmp_path: Path, capsys) -> None:
+    _write(tmp_path / ".gitignore", ".jaunt/\n")
+    _write(
+        tmp_path / ".agents/skills/httpx/SKILL.md",
+        _managed_skill("pypi", "httpx"),
+    )
+    _write(
+        tmp_path / ".agents/skills/npm-zod/SKILL.md",
+        _managed_skill("npm", "zod"),
+    )
+    _write(tmp_path / ".agents/skills/manual/SKILL.md", "# manual\n")
+
+    rc = main(["skill", "migrate", "--root", str(tmp_path), "--json"])
+    planned = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert planned["applied"] is False
+    assert {item["kind"] for item in planned["actions"]} == {"pypi", "npm"}
+
+    rc = main(["skill", "migrate", "--root", str(tmp_path), "--apply", "--force", "--json"])
+    applied = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert applied["applied"] is True
+    assert (tmp_path / ".jaunt/skills/httpx/SKILL.md").is_file()
+    assert (tmp_path / ".jaunt/skills/npm-zod/SKILL.md").is_file()
+    assert (tmp_path / ".agents/skills/manual/SKILL.md").is_file()
+    assert not (tmp_path / ".agents/skills/httpx").exists()
+    gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert "!/.jaunt/skills/**" in gitignore
+
+
+def test_cmd_skill_migrate_reports_different_destination_conflict(tmp_path: Path, capsys) -> None:
+    _write(tmp_path / ".agents/skills/httpx/SKILL.md", _managed_skill("pypi", "httpx"))
+    _write(tmp_path / ".jaunt/skills/httpx/SKILL.md", _managed_skill("pypi", "httpx", "2"))
+
+    rc = main(["skill", "migrate", "--root", str(tmp_path), "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 2
+    assert out["ok"] is False
+    assert out["conflicts"]
 
 
 def test_cmd_skill_add_json(tmp_path: Path, capsys) -> None:

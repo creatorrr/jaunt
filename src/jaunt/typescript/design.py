@@ -1085,6 +1085,9 @@ async def run_design(
             ),
             project_root=root,
             builtin_skill_names=effective_builtin_skills,
+            skill_activation=config.skills.activation,
+            skill_always=tuple(config.skills.always),
+            skill_exclude=tuple(config.skills.exclude),
         )
         backend = generator or _default_backend(config)
         # Design proposals are deliberately not response-cached: every preview is a

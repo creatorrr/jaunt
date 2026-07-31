@@ -56,7 +56,7 @@ def test_scan_external_imports_filters_stdlib_and_internal(tmp_path: Path, monke
 
 def test_skill_path_layout(tmp_path: Path) -> None:
     p = skill_md_path(project_root=tmp_path, dist="typing_extensions")
-    assert p == (tmp_path / ".agents" / "skills" / "typing-extensions" / "SKILL.md").resolve()
+    assert p == (tmp_path / ".jaunt" / "skills" / "typing-extensions" / "SKILL.md").resolve()
 
 
 def test_frontmatter_roundtrip():

@@ -14,34 +14,64 @@ def _project_skill_dirs(project_root: Path | None) -> list[tuple[str, Path]]:
     if project_root is None:
         return []
 
-    from jaunt.skill_manager import skills_dir
+    from jaunt.skill_manager import managed_skills_dir, parse_managed_skill_meta, skills_dir
 
-    sd = skills_dir(project_root)
-    if not sd.is_dir():
-        return []
-
-    pairs: list[tuple[str, Path]] = []
-    for skill_md in sorted(sd.glob("*/SKILL.md")):
-        pairs.append((skill_md.parent.name, skill_md.parent))
-    return pairs
+    ordered: dict[str, Path] = {}
+    # Classic managed skills are a compatibility fallback until explicitly migrated.
+    user_root = skills_dir(project_root)
+    if user_root.is_dir():
+        for skill_md in sorted(user_root.glob("*/SKILL.md")):
+            try:
+                managed = parse_managed_skill_meta(skill_md.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError):
+                continue
+            if managed is not None:
+                ordered[skill_md.parent.name] = skill_md.parent
+    managed_root = managed_skills_dir(project_root)
+    if managed_root.is_dir():
+        for skill_md in sorted(managed_root.glob("*/SKILL.md")):
+            ordered[skill_md.parent.name] = skill_md.parent
+    # User skills intentionally override managed skills of the same name.
+    if user_root.is_dir():
+        for skill_md in sorted(user_root.glob("*/SKILL.md")):
+            try:
+                managed = parse_managed_skill_meta(skill_md.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError):
+                continue
+            if managed is None:
+                ordered[skill_md.parent.name] = skill_md.parent
+    return list(ordered.items())
 
 
 def _resolved_skill_dirs(
-    *, project_root: Path | None, builtin_names: Sequence[str]
+    *,
+    project_root: Path | None,
+    builtin_names: Sequence[str],
+    selected_names: Sequence[str] | None = None,
 ) -> dict[str, Path]:
     ordered: dict[str, Path] = {}
     for name, src in iter_enabled_builtin_skill_dirs(builtin_names):
         ordered[name] = src
     for name, src in _project_skill_dirs(project_root):
         ordered[name] = src
+    if selected_names is not None:
+        selected = set(selected_names)
+        ordered = {name: path for name, path in ordered.items() if name in selected}
     return ordered
 
 
 def skills_workspace_stats(
-    *, project_root: Path | None, builtin_names: Sequence[str]
+    *,
+    project_root: Path | None,
+    builtin_names: Sequence[str],
+    selected_names: Sequence[str] | None = None,
 ) -> tuple[int, int]:
     """Return ``(skill_count, SKILL.md chars)`` for the workspace Jaunt will seed."""
-    skill_dirs = _resolved_skill_dirs(project_root=project_root, builtin_names=builtin_names)
+    skill_dirs = _resolved_skill_dirs(
+        project_root=project_root,
+        builtin_names=builtin_names,
+        selected_names=selected_names,
+    )
     chars = 0
     for skill_dir in skill_dirs.values():
         path = skill_dir / "SKILL.md"
@@ -57,6 +87,7 @@ def seed_skills_into_workspace(
     *,
     project_root: Path | None,
     builtin_names: Sequence[str],
+    selected_names: Sequence[str] | None = None,
 ) -> list[str]:
     """Copy builtin + project skill dirs into <workspace_root>/.agents/skills/.
 
@@ -66,7 +97,11 @@ def seed_skills_into_workspace(
     warnings: list[str] = []
     dest_root = workspace_root / ".agents" / "skills"
 
-    ordered = _resolved_skill_dirs(project_root=project_root, builtin_names=builtin_names)
+    ordered = _resolved_skill_dirs(
+        project_root=project_root,
+        builtin_names=builtin_names,
+        selected_names=selected_names,
+    )
 
     for name, src in ordered.items():
         dest = dest_root / name
@@ -83,10 +118,15 @@ def skills_fingerprint(
     *,
     project_root: Path | None,
     builtin_names: Sequence[str],
+    selected_names: Sequence[str] | None = None,
 ) -> str:
     """Stable digest over the seeded skill set (names + file contents)."""
     h = hashlib.sha256()
-    ordered = _resolved_skill_dirs(project_root=project_root, builtin_names=builtin_names)
+    ordered = _resolved_skill_dirs(
+        project_root=project_root,
+        builtin_names=builtin_names,
+        selected_names=selected_names,
+    )
 
     for name in sorted(ordered):
         skill_dir = ordered[name]

@@ -41,6 +41,12 @@ build/
 .jaunt/
 .context/
 
+# Jaunt local state; managed skills are tracked.
+!/.jaunt/
+/.jaunt/*
+!/.jaunt/skills/
+!/.jaunt/skills/**
+
 # --- Jaunt-for-TypeScript JWT example (examples/typescript-jwt) ---
 # Its Jaunt-generated output is committed by design; node_modules never is.
 node_modules/

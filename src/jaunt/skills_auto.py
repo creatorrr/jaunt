@@ -89,8 +89,10 @@ class PyPISkillsResult:
 
 
 def skill_md_path(*, project_root: Path, dist: str) -> Path:
+    from jaunt.skill_manager import managed_skills_dir
+
     dist_norm = pep503_normalize(dist)
-    return (project_root / ".agents" / "skills" / dist_norm / "SKILL.md").resolve()
+    return (managed_skills_dir(project_root) / dist_norm / "SKILL.md").resolve()
 
 
 def _read_frontmatter(text: str) -> dict[str, str] | None:

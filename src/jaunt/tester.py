@@ -17,7 +17,7 @@ import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 from jaunt import heldout, paths
 from jaunt.agent_docs import ensure_agent_docs
@@ -981,6 +981,7 @@ class TestGenerationReport:
     failed: dict[str, list[str]]
     generated_files: list[Path]
     advisories: dict[str, list[str]] = field(default_factory=dict)
+    skill_selection: dict[str, list[dict[str, str]]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1000,6 +1001,9 @@ class RepairBuildContext:
     module_owner_dirs: dict[str, Path] = field(default_factory=dict)
     builtin_skill_names: tuple[str, ...] = ()
     skills_digest: str = ""
+    skill_activation: Literal["relevant", "all"] = "relevant"
+    skill_always: tuple[str, ...] = ()
+    skill_exclude: tuple[str, ...] = ()
     jobs: int = 1
     async_runner: str = "asyncio"
     build_instructions: list[str] = field(default_factory=list)
@@ -1017,6 +1021,7 @@ class PytestResult:
     generated: set[str] = field(default_factory=set)
     skipped: set[str] = field(default_factory=set)
     advisories: dict[str, list[str]] = field(default_factory=dict)
+    skill_selection: dict[str, list[dict[str, str]]] = field(default_factory=dict)
     pytest_ran: bool = False
     pytest_command: tuple[str, ...] = ()
     pytest_exit_code: int | None = None
@@ -1115,6 +1120,9 @@ async def run_test_generation(
     project_root: Path | None = None,
     builtin_skill_names: Sequence[str] = (),
     skills_digest: str = "",
+    skill_activation: Literal["relevant", "all"] = "relevant",
+    skill_always: Sequence[str] = (),
+    skill_exclude: Sequence[str] = (),
     initial_error_context_by_module: dict[str, list[str]] | None = None,
 ) -> TestGenerationReport:
     jobs = max(1, int(jobs))
@@ -1154,6 +1162,7 @@ async def run_test_generation(
     failed: dict[str, list[str]] = {}
     generated_files: list[Path] = []
     module_advisories: dict[str, list[str]] = {}
+    module_skill_selection: dict[str, list[dict[str, str]]] = {}
     completed: set[str] = set()
 
     def _phase(module_name: str, stage: str, detail: str = "") -> None:
@@ -1225,7 +1234,27 @@ async def run_test_generation(
             project_root=project_root,
             builtin_skill_names=tuple(builtin_skill_names),
             skills_digest=skills_digest,
+            skill_activation=skill_activation,
+            skill_always=tuple(skill_always),
+            skill_exclude=tuple(skill_exclude),
         )
+        from jaunt.skill_selection import select_skills
+
+        module_skill_selection[module_name] = select_skills(
+            project_root=ctx.project_root,
+            builtin_names=ctx.builtin_skill_names,
+            texts=(
+                *tuple(ctx.spec_sources.values()),
+                *tuple(ctx.dependency_apis.values()),
+                *tuple(ctx.dependency_generated_modules.values()),
+                ctx.seed_target_content or "",
+            ),
+            language="py",
+            kind=ctx.kind,
+            activation=ctx.skill_activation,
+            always=ctx.skill_always,
+            exclude=ctx.skill_exclude,
+        ).metadata()
 
         def _validate_candidate(source: str) -> list[str]:
             return validate_test_generated_source(
@@ -1432,6 +1461,7 @@ async def run_test_generation(
         failed=failed,
         generated_files=sorted(generated_files, key=lambda p: str(p)),
         advisories=module_advisories,
+        skill_selection=module_skill_selection,
     )
 
 
@@ -1463,6 +1493,9 @@ async def run_tests(
     project_root: Path | None = None,
     builtin_skill_names: Sequence[str] = (),
     skills_digest: str = "",
+    skill_activation: Literal["relevant", "all"] = "relevant",
+    skill_always: Sequence[str] = (),
+    skill_exclude: Sequence[str] = (),
     no_redact_derived: bool = False,
     repair_build_context: RepairBuildContext | None = None,
 ) -> PytestResult:
@@ -1471,6 +1504,7 @@ async def run_tests(
     generated: set[str] = set()
     skipped: set[str] = set()
     test_advisories: dict[str, list[str]] = {}
+    test_skill_selection: dict[str, list[dict[str, str]]] = {}
 
     if not no_generate:
         if (
@@ -1507,11 +1541,15 @@ async def run_tests(
             project_root=project_root,
             builtin_skill_names=builtin_skill_names,
             skills_digest=skills_digest,
+            skill_activation=skill_activation,
+            skill_always=skill_always,
+            skill_exclude=skill_exclude,
         )
         generated = report.generated
         skipped = report.skipped
         gen_failed = report.failed
         test_advisories = report.advisories
+        test_skill_selection = report.skill_selection
         test_paths = _collect_generated_test_paths_by_module(
             project_dir=project_dir,
             tests_package=tests_package,
@@ -1544,6 +1582,7 @@ async def run_tests(
             generated=generated,
             skipped=skipped,
             advisories=test_advisories,
+            skill_selection=test_skill_selection,
             pytest_ran=False,
         )
 
@@ -1629,6 +1668,9 @@ async def run_tests(
                     module_owner_dirs=repair_build_context.module_owner_dirs,
                     builtin_skill_names=repair_build_context.builtin_skill_names,
                     skills_digest=repair_build_context.skills_digest,
+                    skill_activation=repair_build_context.skill_activation,
+                    skill_always=repair_build_context.skill_always,
+                    skill_exclude=repair_build_context.skill_exclude,
                     build_instructions=repair_build_context.build_instructions,
                     check_generated_imports=repair_build_context.check_generated_imports,
                     generated_import_allowlist=repair_build_context.generated_import_allowlist,
@@ -1669,6 +1711,9 @@ async def run_tests(
                     project_root=project_root,
                     builtin_skill_names=builtin_skill_names,
                     skills_digest=skills_digest,
+                    skill_activation=skill_activation,
+                    skill_always=skill_always,
+                    skill_exclude=skill_exclude,
                     initial_error_context_by_module={
                         module_name: repair_lines for module_name in failed_test_modules
                     },
@@ -1710,6 +1755,7 @@ async def run_tests(
             generated=generated,
             skipped=skipped,
             advisories=test_advisories,
+            skill_selection=test_skill_selection,
             pytest_ran=bool(generated_files),
             pytest_command=pytest_result.command,
             pytest_exit_code=pytest_exit_code,

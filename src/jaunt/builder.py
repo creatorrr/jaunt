@@ -23,7 +23,7 @@ from contextlib import contextmanager
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 from jaunt import header, paths
 from jaunt.agent_docs import ensure_agent_docs
@@ -839,6 +839,7 @@ class BuildReport:
     emitted_stubs: dict[str, str] = field(default_factory=dict)
     stub_warnings: list[str] = field(default_factory=list)
     work_items: dict[str, list[dict[str, object]]] = field(default_factory=dict)
+    skill_selection: dict[str, list[dict[str, str]]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1900,6 +1901,9 @@ async def run_build(
     module_owner_dirs: dict[str, Path] | None = None,
     builtin_skill_names: Sequence[str] = (),
     skills_digest: str = "",
+    skill_activation: Literal["relevant", "all"] = "relevant",
+    skill_always: Sequence[str] = (),
+    skill_exclude: Sequence[str] = (),
     jobs: int = 4,
     progress: object | None = None,
     response_cache: ResponseCache | None = None,
@@ -2551,6 +2555,7 @@ async def run_build(
     module_needs_deps: dict[str, list[str]] = {}
     module_advisories: dict[str, list[str]] = {}
     module_context_stats: dict[str, dict[str, dict[str, int]]] = {}
+    module_skill_selection: dict[str, list[dict[str, str]]] = {}
     module_work_items: dict[str, list[dict[str, object]]] = {}
     from jaunt.generate.shared import load_prompt as _load_prompt
 
@@ -2860,6 +2865,9 @@ async def run_build(
                 project_root=project_root,
                 builtin_skill_names=tuple(builtin_skill_names),
                 skills_digest=skills_digest,
+                skill_activation=skill_activation,
+                skill_always=tuple(skill_always),
+                skill_exclude=tuple(skill_exclude),
                 seed_target_content=seed_target_content,
                 whole_class_contract_block=whole_class_contract_block,
                 whole_class=bool(whole),
@@ -3112,6 +3120,30 @@ async def run_build(
         markers = _scan_needs_dep_markers(result_source)
         if markers:
             module_needs_deps[module_name] = markers
+        from jaunt.skill_seed import skills_workspace_stats
+        from jaunt.skill_selection import select_skills
+
+        selection_ctx, _selection_expected, _selection_handwritten = _component_payload(entries)
+        selection = select_skills(
+            project_root=selection_ctx.project_root,
+            builtin_names=selection_ctx.builtin_skill_names,
+            texts=(
+                *tuple(selection_ctx.spec_sources.values()),
+                *tuple(selection_ctx.dependency_apis.values()),
+                *tuple(selection_ctx.dependency_generated_modules.values()),
+                selection_ctx.seed_target_content or "",
+            ),
+            language="py",
+            kind=selection_ctx.kind,
+            activation=selection_ctx.skill_activation,
+            always=selection_ctx.skill_always,
+            exclude=selection_ctx.skill_exclude,
+        )
+        _skill_count, selected_skill_chars = skills_workspace_stats(
+            project_root=selection_ctx.project_root,
+            builtin_names=selection_ctx.builtin_skill_names,
+            selected_names=selection.names,
+        )
         module_context_stats[module_name] = _module_context_stats(
             artifacts=module_contract,
             whole_class_contract_block=wcc_module.whole_class_contract_block,
@@ -3120,8 +3152,9 @@ async def run_build(
             repo_map_block=repo_map_block,
             project_overview_block=project_overview_block,
             preamble_chars=_preamble_chars,
-            skills_workspace_chars=_skills_ws_chars,
+            skills_workspace_chars=selected_skill_chars,
         )
+        module_skill_selection[module_name] = selection.metadata()
 
         digest = module_digest(module_name, entries, specs, spec_graph)
         header_fields = {
@@ -3254,4 +3287,5 @@ async def run_build(
             module: sorted(items, key=lambda item: str(item["id"]))
             for module, items in sorted(module_work_items.items())
         },
+        skill_selection=module_skill_selection,
     )

@@ -13,7 +13,7 @@ import math
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Literal, cast
 
 import jaunt
 from jaunt.errors import JauntConfigError
@@ -136,7 +136,16 @@ _CODEX_KEYS = frozenset(
 )
 _DAEMON_KEYS = frozenset({"poll_interval", "max_jobs", "notify_command", "auto_commit"})
 _SKILLS_KEYS = frozenset(
-    {"auto", "max_chars_per_skill", "inject_user_skills", "builtin", "builtin_skills"}
+    {
+        "auto",
+        "max_chars_per_skill",
+        "inject_user_skills",
+        "builtin",
+        "builtin_skills",
+        "activation",
+        "always",
+        "exclude",
+    }
 )
 _CONTRACT_KEYS = frozenset({"battery_dir", "derive", "strength", "property_max_examples"})
 _SEMANTIC_GATE_KEYS = frozenset({"enabled", "model", "reasoning_effort"})
@@ -301,6 +310,9 @@ class SkillsConfig:
     inject_user_skills: list[str] = field(default_factory=list)
     builtin: bool = True
     builtin_skills: list[str] = field(default_factory=lambda: list(_default_builtin_skills()))
+    activation: Literal["relevant", "all"] = "relevant"
+    always: list[str] = field(default_factory=list)
+    exclude: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -1143,6 +1155,17 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
     else:
         skills_builtin_skills = list(_default_builtin_skills())
 
+    skills_activation = _as_str(skills_tbl.get("activation", "relevant"), name="skills.activation")
+    if skills_activation not in {"relevant", "all"}:
+        raise JauntConfigError("Invalid config: skills.activation must be 'relevant' or 'all'.")
+    skills_always = _as_str_list(skills_tbl.get("always", []), name="skills.always")
+    skills_exclude = _as_str_list(skills_tbl.get("exclude", []), name="skills.exclude")
+    overlap = sorted(set(skills_always).intersection(skills_exclude))
+    if overlap:
+        raise JauntConfigError(
+            "Invalid config: skills.always and skills.exclude overlap: " + ", ".join(overlap)
+        )
+
     if "battery_dir" in contract_tbl:
         contract_battery_dir = _as_str(contract_tbl["battery_dir"], name="contract.battery_dir")
     else:
@@ -1358,6 +1381,9 @@ def load_config(*, root: Path | None = None, config_path: Path | None = None) ->
             inject_user_skills=skills_inject_user,
             builtin=skills_builtin,
             builtin_skills=skills_builtin_skills,
+            activation=cast(Literal["relevant", "all"], skills_activation),
+            always=skills_always,
+            exclude=skills_exclude,
         ),
         contract=ContractConfig(
             battery_dir=contract_battery_dir,

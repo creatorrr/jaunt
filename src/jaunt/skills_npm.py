@@ -321,7 +321,9 @@ def _remove_stale_managed_skills(
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Remove npm-managed SKILL.md files outside the current desired mapping."""
 
-    skills_root = project_root / ".agents" / "skills"
+    from jaunt.skill_manager import managed_skills_dir
+
+    skills_root = managed_skills_dir(project_root)
     if not skills_root.is_dir():
         return (), ()
     removed: list[str] = []
@@ -383,7 +385,9 @@ def ensure_npm_skills(
         package = item.package
         version = item.version
         skill_name = item.skill_name
-        path = project_root / ".agents" / "skills" / skill_name / "SKILL.md"
+        from jaunt.skill_manager import managed_skills_dir
+
+        path = managed_skills_dir(project_root) / skill_name / "SKILL.md"
         existing = _generated_metadata(path) if path.exists() else None
         if path.exists() and existing is None:
             skipped.append(skill_name)

@@ -51,7 +51,7 @@ In practice, this means you may need to be more explicit in docstrings (or add `
 
 The skills system adds extra network calls (to PyPI for README fetches) and extra OpenAI calls (to generate skill docs) during `jaunt build`. These are best-effort: failures emit a warning and the build continues without the missing skills.
 
-This means build output can vary based on your environment, network connectivity, and what's installed in the active venv. Skill content does not participate in Python module freshness or committed TypeScript test-battery freshness — the one exception is TypeScript module sidecars, which still hash skill content into their generation fingerprint. Committing `.agents/skills/` is optional and, outside that exception, affects only prompt determinism, not staleness; it also does not stabilize content, because an installed distribution version bump rewrites the committed `SKILL.md`.
+This means build output can vary based on your environment, network connectivity, and what's installed in the active venv. Skill content does not participate in module or committed battery freshness. The selected skill set partitions response-cache entries instead. Jaunt-managed skill updates are tracked under `.jaunt/skills`; user-authored skills remain under `.agents/skills`.
 
 ## Discovery Prescreen and Aliased `jaunt`
 

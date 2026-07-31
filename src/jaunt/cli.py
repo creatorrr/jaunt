@@ -792,6 +792,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", dest="json_output", help="JSON output."
     )
 
+    skill_migrate_p = skill_sub.add_parser(
+        "migrate", help="Move classic Jaunt-managed skills into .jaunt/skills."
+    )
+    skill_migrate_p.add_argument("--root", type=str, default=None)
+    skill_migrate_p.add_argument(
+        "--apply", action="store_true", help="Apply the migration (default: plan only)."
+    )
+    skill_migrate_p.add_argument(
+        "--force", action="store_true", help="Apply even when the git working tree is dirty."
+    )
+    skill_migrate_p.add_argument(
+        "--json", action="store_true", dest="json_output", help="JSON output."
+    )
+
     skill_import_p = skill_sub.add_parser("import", help="Import skills from ancestor dirs.")
     skill_import_p.add_argument("names", nargs="*", help="Exact skill names to import.")
     skill_import_p.add_argument("--root", type=str, default=None)
@@ -3219,9 +3233,9 @@ def cmd_daemon(args: argparse.Namespace) -> int:
 
     if not daemon_mod.jaunt_dir_ignored(root):
         print(
-            "error: .jaunt/ must be gitignored before running the daemon "
+            "error: .jaunt runtime state must be gitignored before running the daemon "
             "(its cache and job state would otherwise trip the landing allowlist). "
-            "Add '.jaunt/' to .gitignore.",
+            "Run 'jaunt skill migrate --apply' or ignore '.jaunt/*' except skills.",
             file=sys.stderr,
         )
         return EXIT_CONFIG_OR_DISCOVERY
@@ -4158,14 +4172,17 @@ def _maybe_load_dotenv(root: Path) -> None:
 def _ensure_jaunt_gitignore(root: Path) -> tuple[str, ...]:
     """Seed all Jaunt-owned local cache directories exactly once."""
 
+    from jaunt.skill_manager import ensure_managed_skills_gitignore
+
     gitignore = root / ".gitignore"
+    tracked_skills_added = ensure_managed_skills_gitignore(root)
     existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
     lines = existing.splitlines()
-    missing = tuple(entry for entry in (".jaunt/", ".jaunt-vitest-cache/") if entry not in lines)
+    missing = tuple(entry for entry in (".jaunt-vitest-cache/",) if entry not in lines)
     if missing:
         joiner = "" if (not existing or existing.endswith("\n")) else "\n"
         gitignore.write_text(existing + joiner + "".join(f"{entry}\n" for entry in missing))
-    return missing
+    return ((".jaunt/skills",) if tracked_skills_added else ()) + missing
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -7137,6 +7154,9 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
             project_root=root,
             builtin_skill_names=builtin_skill_names,
             skills_digest=build_skills_digest,
+            skill_activation=cfg.skills.activation,
+            skill_always=cfg.skills.always,
+            skill_exclude=cfg.skills.exclude,
             emit_stubs=cfg.build.emit_stubs,
             build_preamble_override=cfg.prompts.build_preamble or None,
         )
@@ -7221,6 +7241,7 @@ async def _cmd_build_async(args: argparse.Namespace) -> int:
                 "cache": {"hits": response_cache.hits, "misses": response_cache.misses},
                 "work_items": report.work_items,
                 "context_stats": {k: v for k, v in sorted(report.context_stats.items())},
+                "skill_selection": {k: v for k, v in sorted(report.skill_selection.items())},
                 "context_stats_note": (
                     "skills_workspace_seeded measures lazy-loadable files copied to disk; "
                     "its est_tokens value is a size comparison, not prompt tokens sent"
@@ -7676,6 +7697,9 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             project_root=root,
             builtin_skill_names=builtin_skill_names,
             skills_digest=test_skills_digest,
+            skill_activation=cfg.skills.activation,
+            skill_always=tuple(cfg.skills.always),
+            skill_exclude=tuple(cfg.skills.exclude),
             source_roots=[d for d in source_dirs if d.exists()],
             module_output_bases=workspace.output_bases,
             module_owner_dirs={route.module: route.owner_dir for route in workspace.modules},
@@ -7715,6 +7739,9 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             project_root=root,
             builtin_skill_names=builtin_skill_names,
             skills_digest=test_skills_digest,
+            skill_activation=cfg.skills.activation,
+            skill_always=cfg.skills.always,
+            skill_exclude=cfg.skills.exclude,
         )
 
         if asyncio.iscoroutine(result):
@@ -7774,6 +7801,10 @@ async def _cmd_test_async(args: argparse.Namespace) -> int:
             if getattr(result, "advisories", None):
                 test_payload["advisories"] = {
                     k: list(v) for k, v in sorted(result.advisories.items())
+                }
+            if getattr(result, "skill_selection", None):
+                test_payload["skill_selection"] = {
+                    k: list(v) for k, v in sorted(result.skill_selection.items())
                 }
             _emit_json(test_payload)
 
@@ -8193,17 +8224,88 @@ def cmd_skill(args: argparse.Namespace) -> int:
 
     from jaunt.skill_manager import (
         add_skill,
+        apply_managed_skill_migration,
         discover_all_skills,
         find_importable_skills,
         import_skills,
+        plan_managed_skill_migration,
         remove_auto_skills,
         remove_skill,
         show_skill,
     )
 
+    if subcmd == "migrate":
+        root = _resolve_skill_root(args)
+        plan = plan_managed_skill_migration(root)
+        payload: dict[str, object] = {
+            "command": "skill migrate",
+            "ok": not plan.conflicts,
+            "applied": False,
+            "actions": [
+                {
+                    "name": action.name,
+                    "kind": action.kind,
+                    "action": action.action,
+                    "source": str(action.source.relative_to(root)),
+                    "destination": str(action.destination.relative_to(root)),
+                }
+                for action in plan.actions
+            ],
+            "conflicts": list(plan.conflicts),
+            "gitignore_update": bool(plan.actions),
+        }
+        if plan.conflicts:
+            if json_mode:
+                _emit_json(payload)
+            else:
+                for conflict in plan.conflicts:
+                    _eprint(f"conflict: {conflict}")
+            return EXIT_CONFIG_OR_DISCOVERY
+        if getattr(args, "apply", False):
+            if _is_dirty_worktree(root) and not getattr(args, "force", False):
+                payload["ok"] = False
+                payload["error"] = "git working tree is dirty (use --force)"
+                if json_mode:
+                    _emit_json(payload)
+                else:
+                    _eprint(
+                        "error: refusing to migrate skills; git working tree is dirty (use --force)"
+                    )
+                return EXIT_CONFIG_OR_DISCOVERY
+            try:
+                apply_managed_skill_migration(root, plan)
+            except (OSError, ValueError) as exc:
+                payload["ok"] = False
+                payload["error"] = str(exc)
+                if json_mode:
+                    _emit_json(payload)
+                else:
+                    _eprint(f"error: {exc}")
+                return EXIT_CONFIG_OR_DISCOVERY
+            payload["applied"] = True
+        if json_mode:
+            _emit_json(payload)
+        elif plan.actions:
+            verb = "Migrated" if payload["applied"] else "Would migrate"
+            for action in plan.actions:
+                print(f"{verb} {action.name} ({action.kind}, {action.action})")
+            if not payload["applied"]:
+                print("Rerun with --apply to write these changes.")
+        else:
+            print("No classic Jaunt-managed skills to migrate.")
+        return EXIT_OK
+
     if subcmd == "list":
         root = _resolve_skill_root(args)
         skills = discover_all_skills(root)
+        precedence = {"classic": 0, "managed": 1, "user": 2}
+        winners = {
+            name: max(
+                (skill for skill in skills if skill.name == name),
+                key=lambda skill: precedence[skill.registry],
+            )
+            for name in {skill.name for skill in skills}
+        }
         if json_mode:
             _emit_json(
                 {
@@ -8216,6 +8318,12 @@ def cmd_skill(args: argparse.Namespace) -> int:
                             "dist": s.dist,
                             "version": s.version,
                             "path": str(s.path),
+                            "registry": s.registry,
+                            "managed_kind": s.managed_kind,
+                            "effective": winners[s.name] is s,
+                            "shadowed_by": (
+                                None if winners[s.name] is s else str(winners[s.name].path)
+                            ),
                         }
                         for s in skills
                     ],
@@ -8226,8 +8334,9 @@ def cmd_skill(args: argparse.Namespace) -> int:
                 print("No skills found.")
             else:
                 for s in skills:
-                    tag = f" ({s.source})" if s.source == "auto" else ""
-                    print(f"  {s.name}{tag}")
+                    tag = f" ({s.source}:{s.registry})" if s.source == "auto" else ""
+                    shadowed = " [shadowed]" if winners[s.name] is not s else ""
+                    print(f"  {s.name}{tag}{shadowed}")
         return EXIT_OK
 
     if subcmd == "add":
@@ -8327,7 +8436,7 @@ def cmd_skill(args: argparse.Namespace) -> int:
         _maybe_load_dotenv(root)
 
         if getattr(args, "force", False):
-            removed = remove_auto_skills(root)
+            removed = remove_auto_skills(root, include_classic=False)
             if not json_mode:
                 for name in removed:
                     _eprint(f"removed auto-skill: {name}")
@@ -8356,6 +8465,16 @@ def cmd_skill(args: argparse.Namespace) -> int:
             if res.generation_failures > 0:
                 refresh_ok = False
                 refresh_error = f"{res.generation_failures} skill(s) failed to generate"
+            if cfg.typescript_target is not None:
+                from jaunt.skills_npm import ensure_npm_skills, typescript_package_owners
+
+                npm_result = ensure_npm_skills(
+                    project_root=root,
+                    package_owners=typescript_package_owners(root, cfg.typescript_target),
+                    max_readme_chars=cfg.skills.max_chars_per_skill,
+                )
+                for warning in npm_result.warnings:
+                    _eprint(f"warn: {warning}")
         except Exception as e:  # noqa: BLE001
             refresh_ok = False
             refresh_error = f"{type(e).__name__}: {e}"

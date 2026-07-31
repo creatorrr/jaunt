@@ -187,7 +187,7 @@ def test_generate_module_seeds_skills(monkeypatch) -> None:
         await backend.generate_module(_ctx(builtin_skill_names=("ruff", "pytest")))
 
         prompt = cast(str, captured["prompt"])
-        assert seen["skills"] == ["pytest", "ruff"]
+        assert seen["skills"] == ["ruff"]
         assert "## What it is" not in prompt
 
     asyncio.run(run())

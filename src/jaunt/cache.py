@@ -96,7 +96,30 @@ def cache_key_from_context(
         ).encode()
     )
     h.update(b"\x00")
-    h.update((ctx.skills_digest or "").encode())
+    from jaunt.skill_seed import skills_fingerprint
+    from jaunt.skill_selection import select_skills
+
+    selection = select_skills(
+        project_root=ctx.project_root,
+        builtin_names=ctx.builtin_skill_names,
+        texts=(
+            *tuple(ctx.spec_sources.values()),
+            *tuple(ctx.dependency_apis.values()),
+            *tuple(ctx.dependency_generated_modules.values()),
+            ctx.seed_target_content or "",
+        ),
+        language="py",
+        kind=ctx.kind,
+        activation=ctx.skill_activation,
+        always=ctx.skill_always,
+        exclude=ctx.skill_exclude,
+    )
+    selected_digest = skills_fingerprint(
+        project_root=ctx.project_root,
+        builtin_names=ctx.builtin_skill_names,
+        selected_names=selection.names,
+    )
+    h.update(selected_digest.encode())
     h.update(b"\x00")
     h.update(json.dumps(sorted(ctx.builtin_skill_names)).encode())
     h.update(b"\x00")

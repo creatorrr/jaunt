@@ -552,7 +552,8 @@ Both accept `--root`, `--config`, and `--json`.
 
 ### `jaunt skill`
 
-Manage project-local skills under `.agents/skills/`.
+Manage user skills under `.agents/skills/` and Jaunt-managed skills under
+`.jaunt/skills/`.
 
 ```bash
 jaunt skill list
@@ -561,13 +562,17 @@ jaunt skill add rich --description "Rich usage notes" --lib rich
 jaunt skill remove rich -f
 jaunt skill import --from /path/to/skills-dir
 jaunt skill refresh
+jaunt skill migrate       # preview classic managed-skill migration
+jaunt skill migrate --apply
 jaunt skill build rich
 ```
 
 Two subcommands generate content through the Codex engine: `skill build <name>`
 expands a user-managed checked-in skill (it must already exist with `--lib`
 metadata, usually from `skill add <name> --lib <package>`), and `skill refresh`
-regenerates Jaunt-managed auto skills. Both drive `codex exec` under the hood.
+regenerates Jaunt-managed auto skills. `skill migrate` is deterministic and moves
+only provenance-marked managed skills; it never calls a model or touches manual
+skills.
 
 ### `jaunt migrate`
 

@@ -1,0 +1,106 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from jaunt.errors import JauntConfigError
+from jaunt.skill_seed import skills_fingerprint
+from jaunt.skill_selection import select_skills
+
+
+def _write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _managed(dist: str, version: str = "1") -> str:
+    return f"---\nname: {dist}\nx-jaunt-dist: {dist}\nx-jaunt-version: {version}\n---\nbody\n"
+
+
+def test_relevant_selection_uses_imports_baselines_and_unscoped_manual(tmp_path: Path) -> None:
+    _write(tmp_path / ".jaunt/skills/pydantic/SKILL.md", _managed("pydantic"))
+    _write(tmp_path / ".jaunt/skills/httpx/SKILL.md", _managed("httpx"))
+    _write(tmp_path / ".agents/skills/conventions/SKILL.md", "# conventions\n")
+
+    selection = select_skills(
+        project_root=tmp_path,
+        builtin_names=("ruff", "ty", "pytest"),
+        texts=("from pydantic import BaseModel\n",),
+        language="py",
+        kind="build",
+    )
+
+    assert set(selection.names) == {"conventions", "pydantic", "ruff", "ty"}
+    assert "httpx" not in selection.names
+    assert "pytest" not in selection.names
+
+
+def test_manual_meta_scopes_skill_and_user_overrides_managed(tmp_path: Path) -> None:
+    _write(tmp_path / ".jaunt/skills/httpx/SKILL.md", _managed("httpx"))
+    _write(tmp_path / ".agents/skills/httpx/SKILL.md", "# project override\n")
+    _write(
+        tmp_path / ".agents/skills/httpx/META.json",
+        json.dumps({"libs": [{"type": "pypi", "name": "httpx"}]}),
+    )
+
+    selection = select_skills(
+        project_root=tmp_path,
+        builtin_names=(),
+        texts=("import httpx\n",),
+        language="py",
+        kind="build",
+    )
+
+    assert selection.names == ("httpx",)
+    assert selection.entries[0].source == "user"
+
+
+def test_all_always_exclude_and_unknown_validation(tmp_path: Path) -> None:
+    _write(tmp_path / ".agents/skills/a/SKILL.md", "a\n")
+    _write(tmp_path / ".agents/skills/b/SKILL.md", "b\n")
+    selection = select_skills(
+        project_root=tmp_path,
+        builtin_names=(),
+        texts=(),
+        language="py",
+        kind="build",
+        activation="all",
+        exclude=("b",),
+    )
+    assert selection.names == ("a",)
+
+    with pytest.raises(JauntConfigError, match="Unknown configured skill"):
+        select_skills(
+            project_root=tmp_path,
+            builtin_names=(),
+            texts=(),
+            language="py",
+            kind="build",
+            always=("missing",),
+        )
+
+
+def test_unselected_skill_bytes_do_not_change_selected_fingerprint(tmp_path: Path) -> None:
+    _write(tmp_path / ".jaunt/skills/pydantic/SKILL.md", _managed("pydantic"))
+    _write(tmp_path / ".jaunt/skills/httpx/SKILL.md", _managed("httpx"))
+    selection = select_skills(
+        project_root=tmp_path,
+        builtin_names=(),
+        texts=("import pydantic\n",),
+        language="py",
+        kind="build",
+    )
+    before = skills_fingerprint(
+        project_root=tmp_path,
+        builtin_names=(),
+        selected_names=selection.names,
+    )
+    _write(tmp_path / ".jaunt/skills/httpx/SKILL.md", _managed("httpx", "2"))
+    after = skills_fingerprint(
+        project_root=tmp_path,
+        builtin_names=(),
+        selected_names=selection.names,
+    )
+    assert before == after

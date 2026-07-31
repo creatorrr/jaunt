@@ -186,7 +186,7 @@ def test_cache_key_differs_by_module_context_digest() -> None:
     assert k1 != k2
 
 
-def test_cache_key_changes_with_skills_digest() -> None:
+def test_cache_key_ignores_legacy_global_skills_digest() -> None:
     from jaunt.cache import cache_key_from_context
     from jaunt.generate.base import ModuleSpecContext
 
@@ -204,7 +204,7 @@ def test_cache_key_changes_with_skills_digest() -> None:
     c2 = ModuleSpecContext(**base, skills_digest="bbb")
     k1 = cache_key_from_context(c1, model="m", provider="codex", generation_fingerprint="fp")
     k2 = cache_key_from_context(c2, model="m", provider="codex", generation_fingerprint="fp")
-    assert k1 != k2
+    assert k1 == k2
 
 
 def test_cache_key_differs_by_blueprint_source() -> None:

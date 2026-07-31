@@ -3188,13 +3188,30 @@ def _test_provenance(
                 "compared on read."
             )
         raise RuntimeError("invalid TypeScript battery provenance fields: " + " ".join(failures))
+    effective_builtin_skills = (
+        tuple(builtin_skill_names)
+        if builtin_skill_names is not None
+        else (tuple(config.skills.builtin_skills) if config.skills.builtin else ())
+    )
+    selected_names = None
+    if prepared_request is not None:
+        from jaunt.skill_selection import select_skills
+
+        selected_names = select_skills(
+            project_root=root,
+            builtin_names=effective_builtin_skills,
+            texts=tuple(prepared_request.context_files.values())
+            + (prepared_request.seed_target_content,),
+            language="ts",
+            kind=prepared_request.kind,
+            activation=prepared_request.skill_activation,
+            always=prepared_request.skill_always,
+            exclude=prepared_request.skill_exclude,
+        ).names
     skills = skills_fingerprint(
         project_root=root,
-        builtin_names=(
-            tuple(builtin_skill_names)
-            if builtin_skill_names is not None
-            else (tuple(config.skills.builtin_skills) if config.skills.builtin else ())
-        ),
+        builtin_names=effective_builtin_skills,
+        selected_names=selected_names,
     )
     fast_check_version = _read_package_version(roots, "fast-check")
     committed = _canonical_digest(
@@ -4803,6 +4820,9 @@ def _test_request(
             if builtin_skill_names is not None
             else (tuple(config.skills.builtin_skills) if config.skills.builtin else ())
         ),
+        skill_activation=config.skills.activation,
+        skill_always=tuple(config.skills.always),
+        skill_exclude=tuple(config.skills.exclude),
     )
 
 
