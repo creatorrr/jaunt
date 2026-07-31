@@ -8260,6 +8260,7 @@ def cmd_skill(args: argparse.Namespace) -> int:
         discover_all_skills,
         find_importable_skills,
         import_skills,
+        managed_skills_gitignore_needed,
         plan_managed_skill_migration,
         remove_auto_skills,
         remove_skill,
@@ -8284,7 +8285,9 @@ def cmd_skill(args: argparse.Namespace) -> int:
                 for action in plan.actions
             ],
             "conflicts": list(plan.conflicts),
-            "gitignore_update": bool(plan.actions),
+            # Plan view: whether apply would append the tracked-skills block.
+            # Overwritten with the actual result when --apply runs.
+            "gitignore_update": managed_skills_gitignore_needed(root),
         }
         if plan.conflicts:
             if json_mode:
@@ -8305,7 +8308,7 @@ def cmd_skill(args: argparse.Namespace) -> int:
                     )
                 return EXIT_CONFIG_OR_DISCOVERY
             try:
-                apply_managed_skill_migration(root, plan)
+                gitignore_updated = apply_managed_skill_migration(root, plan)
             except (OSError, ValueError) as exc:
                 payload["ok"] = False
                 payload["error"] = str(exc)
@@ -8315,6 +8318,7 @@ def cmd_skill(args: argparse.Namespace) -> int:
                     _eprint(f"error: {exc}")
                 return EXIT_CONFIG_OR_DISCOVERY
             payload["applied"] = True
+            payload["gitignore_update"] = gitignore_updated
         if json_mode:
             _emit_json(payload)
         elif plan.actions:

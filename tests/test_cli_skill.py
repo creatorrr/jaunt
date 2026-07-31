@@ -363,7 +363,41 @@ def test_cmd_skill_migrate_apply_updates_gitignore_without_classic_skills(
     assert rc == 0
     assert out["applied"] is True
     assert out["actions"] == []
+    assert out["gitignore_update"] is True
     assert "!/.jaunt/skills/**" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
+
+    rc = main(["skill", "migrate", "--root", str(tmp_path), "--apply", "--force", "--json"])
+    rerun = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert rerun["gitignore_update"] is False
+
+
+def test_cmd_skill_migrate_reports_gitignore_state_not_action_count(tmp_path: Path, capsys) -> None:
+    """gitignore_update reflects the ignore-file state, not whether actions exist."""
+
+    _write(tmp_path / ".agents/skills/httpx/SKILL.md", _managed_skill("pypi", "httpx"))
+
+    rc = main(["skill", "migrate", "--root", str(tmp_path), "--json"])
+    planned = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert planned["actions"]
+    assert planned["gitignore_update"] is True  # block absent: apply would add it
+
+    from jaunt.skill_manager import ensure_managed_skills_gitignore
+
+    assert ensure_managed_skills_gitignore(tmp_path) is True
+
+    rc = main(["skill", "migrate", "--root", str(tmp_path), "--json"])
+    planned = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert planned["actions"]
+    assert planned["gitignore_update"] is False  # block already present despite actions
+
+    rc = main(["skill", "migrate", "--root", str(tmp_path), "--apply", "--force", "--json"])
+    applied = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert applied["applied"] is True
+    assert applied["gitignore_update"] is False
 
 
 def test_cmd_skill_add_json(tmp_path: Path, capsys) -> None:

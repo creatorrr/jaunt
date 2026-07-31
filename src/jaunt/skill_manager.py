@@ -430,6 +430,14 @@ _TRACKED_SKILLS_GITIGNORE_BLOCK = """\
 """
 
 
+def managed_skills_gitignore_needed(project_root: Path) -> bool:
+    """Return whether applying a migration would append the tracked-skills block."""
+
+    path = project_root / ".gitignore"
+    original = path.read_text(encoding="utf-8") if path.exists() else ""
+    return _TRACKED_SKILLS_GITIGNORE_BLOCK.strip() not in original
+
+
 def ensure_managed_skills_gitignore(project_root: Path) -> bool:
     """Append the canonical tracked-skills exception block when it is absent."""
 
@@ -477,18 +485,22 @@ def ensure_managed_skills_gitignore(project_root: Path) -> bool:
     return True
 
 
-def apply_managed_skill_migration(project_root: Path, plan: SkillMigrationPlan) -> None:
-    """Apply a validated, conflict-free managed skill migration."""
+def apply_managed_skill_migration(project_root: Path, plan: SkillMigrationPlan) -> bool:
+    """Apply a validated, conflict-free managed skill migration.
+
+    Returns whether the tracked-skills ``.gitignore`` block was appended.
+    """
 
     if plan.conflicts:
         raise ValueError("cannot apply a managed skill migration with conflicts")
-    ensure_managed_skills_gitignore(project_root)
+    gitignore_updated = ensure_managed_skills_gitignore(project_root)
     for action in plan.actions:
         action.destination.parent.mkdir(parents=True, exist_ok=True)
         if action.action == "move":
             shutil.move(str(action.source), str(action.destination))
         else:
             shutil.rmtree(action.source)
+    return gitignore_updated
 
 
 def _git_toplevel(start: Path) -> Path | None:
