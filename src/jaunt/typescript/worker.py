@@ -29,6 +29,7 @@ from jaunt.typescript.protocol import (
     ProtocolResponse,
     ProtocolValidationError,
 )
+from jaunt.typescript.specifier_cache import SpecifierCache, specifier_cache_key
 
 _DEFAULT_TIMEOUT = 30.0
 _DEFAULT_STARTUP_TIMEOUT = 10.0
@@ -6325,6 +6326,16 @@ def _shadowed_native_loader_indices(
     return frozenset(shadowed)
 
 
+_RUNTIME_TOKENIZER_CACHE_VERSION = 1
+
+
+def _runtime_specifier_cache(root: Path) -> SpecifierCache:
+    """Return the project cache using the current tokenizer and worker protocol versions."""
+
+    version = f"{_RUNTIME_TOKENIZER_CACHE_VERSION}:{PROTOCOL_VERSION}"
+    return SpecifierCache(root / ".jaunt" / "cache" / "ts-specifiers.json", version=version)
+
+
 def _runtime_module_specifiers(
     source: str,
     *,
@@ -6750,16 +6761,14 @@ def _runtime_package_import_targets(
 
 def _runtime_package_static_dependencies(
     package_root: Path,
+    *,
+    specifier_cache: SpecifierCache | None = None,
 ) -> tuple[tuple[Path, str], ...]:
     """Return statically executable bare package loads from shipped sources."""
 
-    # TODO(perf): Add a persistent per-package graph-node cache for manifest dependency
-    # declarations, tokenized module specifiers/edges (including importer paths), and
-    # content/symlink identity. Key it by (physical root, full stat epoch including
-    # st_ctime_ns) and version it with the worker schema so tokenizer fixes invalidate old
-    # nodes. Closure discovery is CPU-bound tokenization (~40s for a 94-package Vitest
-    # closure, 99.7% in _runtime_module_specifiers), so the OS page cache does not help cold
-    # runs; persistent graph nodes could reduce cold walks to ~3s.
+    # TODO(perf): Raw tokenizer results now use a persistent per-file content cache. Skipping
+    # package enumeration and source reads entirely would still require the per-package
+    # stat-epoch graph-node design (including manifest, content, and symlink identity).
     physical_root = package_root.resolve(strict=True)
     dependencies: set[tuple[Path, str]] = set()
     for path in _runtime_package_identity_files(physical_root):
@@ -6771,17 +6780,30 @@ def _runtime_package_static_dependencies(
         is_node_script = not path.suffix and content.startswith(b"#!") and b"node" in content[:256]
         if not is_javascript and not is_node_script:
             continue
-        try:
-            source = content.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise TypeScriptWorkerError(
-                f"Could not decode runtime package source at {path}: {exc}"
-            ) from exc
-        specifiers = _runtime_module_specifiers(
-            source,
-            source_path=path,
-            tolerate_unsupported_loader_flows=True,
-        )
+        cache_key: str | None = None
+        specifiers: tuple[str, ...] | None = None
+        if specifier_cache is not None:
+            cache_key = specifier_cache_key(
+                content,
+                suffix=path.suffix.casefold(),
+                tolerate_unsupported_loader_flows=True,
+            )
+            specifiers = specifier_cache.get(cache_key)
+        if specifiers is None:
+            try:
+                source = content.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise TypeScriptWorkerError(
+                    f"Could not decode runtime package source at {path}: {exc}"
+                ) from exc
+            specifiers = _runtime_module_specifiers(
+                source,
+                source_path=path,
+                tolerate_unsupported_loader_flows=True,
+            )
+            if specifier_cache is not None:
+                assert cache_key is not None
+                specifier_cache.put(cache_key, specifiers)
         for specifier in specifiers:
             if specifier.startswith("#"):
                 scope = _runtime_package_scope(physical_root, path)
@@ -6871,6 +6893,8 @@ def _runtime_package_dependencies(package_root: Path) -> tuple[tuple[str, bool],
 
 def _runtime_package_dependency_edges(
     package_root: Path,
+    *,
+    specifier_cache: SpecifierCache | None = None,
 ) -> tuple[_RuntimePackageDependencyEdge, ...]:
     """Merge manifest declarations with discoverable runtime package loads.
 
@@ -6882,7 +6906,10 @@ def _runtime_package_dependency_edges(
 
     physical_root = package_root.resolve(strict=True)
     declared = dict(_runtime_package_dependencies(physical_root))
-    static_dependencies = _runtime_package_static_dependencies(physical_root)
+    static_dependencies = _runtime_package_static_dependencies(
+        physical_root,
+        specifier_cache=specifier_cache,
+    )
     static_names = {package for _importer, package in static_dependencies}
     raw_edges = [
         # A package may ship tests/examples that are not part of its executed
@@ -6957,6 +6984,7 @@ def _runtime_package_resolution_closure(
     package_root: Path,
     *,
     root_label: str,
+    specifier_cache: SpecifierCache | None = None,
 ) -> tuple[_RuntimePackageResolutionEdge, ...]:
     """Resolve the exact recursive runtime graph shared by fingerprints and seals."""
 
@@ -6974,7 +7002,10 @@ def _runtime_package_resolution_closure(
         if physical_root in expanded:
             continue
         expanded.add(physical_root)
-        for edge in _runtime_package_dependency_edges(physical_root):
+        for edge in _runtime_package_dependency_edges(
+            physical_root,
+            specifier_cache=specifier_cache,
+        ):
             dependency_label = f"{label}>{edge.key}"
             resolved = resolve_node_package(
                 edge.importer,
@@ -7587,6 +7618,7 @@ class WorkerClient:
         # rather than re-pin time, matching the guarantee of the per-pass verify cache.
         self._pin_session_identity_cache: dict[tuple[Path, str | None], str] = {}
         self._resolution_closure_cache: dict[Path, tuple[_RuntimePackageResolutionEdge, ...]] = {}
+        self._specifier_cache = _runtime_specifier_cache(self.root)
         self._absent_package_resolution_pins: dict[str, _AbsentPackageResolutionPin] = {}
         self._runtime_identity_sealed = False
         self._stderr = bytearray()
@@ -7999,7 +8031,9 @@ class WorkerClient:
                 closure = _runtime_package_resolution_closure(
                     physical_root,
                     root_label=package,
+                    specifier_cache=self._specifier_cache,
                 )
+                self._specifier_cache.save()
                 self._resolution_closure_cache[physical_root] = closure
         except (OSError, TypeScriptWorkerError) as exc:
             raise WorkerToolchainChangedError(
@@ -8060,6 +8094,7 @@ class WorkerClient:
         self._package_resolution_pins.clear()
         self._pin_session_identity_cache.clear()
         self._resolution_closure_cache.clear()
+        # The content-addressed specifier cache deliberately survives command resets.
         self._absent_package_resolution_pins.clear()
 
     def seal_runtime_identity(self) -> str:

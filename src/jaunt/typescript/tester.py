@@ -106,6 +106,7 @@ from jaunt.typescript.worker import (
     _runtime_package_identity_files,
     _runtime_package_owner,
     _runtime_package_resolution_closure,
+    _runtime_specifier_cache,
     _unsafe_runtime_package_import_fragment,
     compiler_runtime_identity,
     resolve_node_package,
@@ -401,7 +402,8 @@ def _pin_test_dependency_runtimes(
 ) -> None:
     """Pin each Vitest resolution topology through the artifact commit."""
 
-    # TODO(perf): See worker._runtime_package_static_dependencies for persistent graph nodes.
+    # TODO(perf): Tokenizer results are persistently cached per file. Skipping package
+    # enumeration and reads still needs worker's stat-epoch graph-node design.
     pin_closure = getattr(client, "pin_package_resolution_closure", None)
     pin_resolution = getattr(client, "pin_package_resolution_identity", None)
     pin_runtime = getattr(client, "pin_package_runtime_identity", None)
@@ -2103,6 +2105,7 @@ def _config_package_runtime_identities(
     """Fingerprint directly imported config packages for cross-command freshness."""
 
     identities: dict[str, str] = {}
+    specifier_cache = _runtime_specifier_cache(root)
     for relative, source in sorted(config_overlays.items()):
         for specifier, package, resolution_start in _config_package_dependencies(
             root, relative, source
@@ -2131,6 +2134,7 @@ def _config_package_runtime_identities(
                 closure = _runtime_package_resolution_closure(
                     resolved,
                     root_label=package,
+                    specifier_cache=specifier_cache,
                 )
             except TypeScriptWorkerError as exc:
                 raise JauntConfigError(
@@ -2144,6 +2148,7 @@ def _config_package_runtime_identities(
                     if edge.resolved_root is None
                     else runtime_package_identity(edge.resolved_root)
                 )
+    specifier_cache.save()
     return identities
 
 
