@@ -119,6 +119,14 @@ the build afterward.
   this plugin's hooks and unrelated MCP tools are not nested inside generation.
   Older Codex CLIs fall back to legacy behavior; recommend an upgrade when that
   distinction matters.
+- TypeScript commands persist tokenizer results for the npm closure scan in
+  `.jaunt/cache/ts-specifiers.json` (gitignored). On fresh CI runners restore it
+  with the CI cache action keyed on the lockfile hash, with a loose
+  `restore-keys` fallback: entries are content-addressed (SHA-256 of file
+  bytes), so a stale cache is incomplete but never wrong, and version-header
+  rotation discards incompatible entries after a Jaunt or `@usejaunt/ts`
+  upgrade. Warm closure scans drop from ~49s to ~4s on a dashboard-sized
+  project.
 
 ## Authoring specs
 
