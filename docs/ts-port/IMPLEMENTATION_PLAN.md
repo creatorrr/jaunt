@@ -58,8 +58,8 @@ no Jaunt runtime dependency below the public facade.
   routes or artifacts. `--merge-projects` keeps its existing consolidation meaning.
 - The Node version used to run the analyzer is a tool-host requirement, not a
   requirement on the generated program's deployment runtime. The worker package
-  freezes that host range at Node `>=20 <25`; CI tests the Node 20 and Node 24
-  boundaries independently from target runtimes.
+  freezes that host range at Node `>=20 <25`; CI exercises the latest supported
+  host major, Node 24, independently from target runtimes.
 - Generated TypeScript is committed/reviewed just like Python generated output.
   A missing implementation is always a deterministic `jaunt check` failure.
   Before `jaunt sync` it is also a compiler failure; after sync, a provenance-marked
