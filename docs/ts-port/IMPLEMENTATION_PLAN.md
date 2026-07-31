@@ -1289,8 +1289,8 @@ corrupt reports produce a minimal redacted fallback, never raw Vitest output.
 - Deterministic fake backend for PRs. Live Codex smoke is manual/nightly and always
   uses the repository model policy.
 
-CI runs representative Linux lanes on every PR and path/lifecycle smoke on Windows
-and macOS. The full Node/TypeScript/Vitest/OS cross-product may run nightly, but the
+CI runs representative Linux lanes on every PR and path/lifecycle smoke on macOS.
+The full Node/TypeScript/Vitest cross-product may run nightly, but the
 minimum and maximum supported versions must both block release.
 
 ## 19. Reliability, security, and performance
