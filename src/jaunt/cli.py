@@ -4285,11 +4285,11 @@ def _cmd_init_typescript(*, root: Path, toml_path: Path, json_mode: bool) -> int
 
     if (root / "pnpm-lock.yaml").exists():
         install_command = (
-            "pnpm add -D @usejaunt/ts@^0.1.2 'typescript@^5.9' vitest fast-check @types/node"
+            "pnpm add -D @usejaunt/ts@^0.1.3 'typescript@^5.9' vitest fast-check @types/node"
         )
     else:
         install_command = (
-            "npm install -D @usejaunt/ts@^0.1.2 'typescript@^5.9' vitest fast-check @types/node"
+            "npm install -D @usejaunt/ts@^0.1.3 'typescript@^5.9' vitest fast-check @types/node"
         )
     if json_mode:
         _emit_json(

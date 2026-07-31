@@ -4,7 +4,7 @@ All notable changes to Jaunt and `@usejaunt/ts`. Generated from conventional
 commits by [git-cliff](https://git-cliff.org), with one section per published
 Python or TypeScript release.
 
-## [1.7.13] - 2026-07-28
+## [1.7.13 / @usejaunt/ts 0.1.3] - 2026-07-30
 
 ### Fixes
 
@@ -22,10 +22,16 @@ Python or TypeScript release.
 - Enforce that every classified provenance field is either committed to the battery
   header or explicitly non-stamped, preventing future freshness inputs from silently
   escaping comparison.
+- Base TypeScript module structural freshness on the semantic compatibility digest,
+  not the full environment-provenance digest. Package-manager and lockfile churn no
+  longer restale modules when the resolved declaration surface is unchanged.
+- Restrict package-manifest dependency inputs to packages reached through the resolved
+  declaration closure, so adding, removing, or upgrading an unrelated dependency does
+  not invalidate a module.
 
 ### Packages
 
-- Release Jaunt 1.7.13 as a Python-only patch. `@usejaunt/ts` remains at 0.1.2.
+- Release Jaunt 1.7.13 with `@usejaunt/ts` 0.1.3.
 
 ## [1.7.12] - 2026-07-24
 

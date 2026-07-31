@@ -768,10 +768,10 @@ async def test_real_worker_migration_validates_recomposed_modules_together(
     await run_sync(tmp_path, config)
     built = await run_build(tmp_path, config, generator=_SlugGenerator())
     assert built.exit_code == 0
-    (tmp_path / "package-lock.json").write_text(
-        '{"lockfileVersion":3,"packages":{"":{"name":"fixture"}}}\n',
-        encoding="utf-8",
-    )
+    manifest_path = tmp_path / "package.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["jauntFixtureRevision"] = 2
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     from jaunt.typescript import builder
 
@@ -820,7 +820,11 @@ async def test_real_worker_migration_validates_recomposed_modules_together(
     assert {
         diagnostic.code for diagnostic in plan.diagnostics if diagnostic.severity == "error"
     } == {"JAUNT_TS_MIGRATE_COMBINED_VALIDATION_FAILED"}
-    assert all("combined overlay rejected" in diagnostic.message for diagnostic in plan.diagnostics)
+    assert all(
+        "combined overlay rejected" in diagnostic.message
+        for diagnostic in plan.diagnostics
+        if diagnostic.severity == "error"
+    )
 
 
 @pytest.mark.asyncio

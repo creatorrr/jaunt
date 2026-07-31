@@ -6889,6 +6889,56 @@ def _bubblewrap_executable(environment: Mapping[str, str]) -> str | None:
     return shutil.which("bwrap", path=environment.get("PATH", ""))
 
 
+def _permission_symlink_read_roots(
+    client: object,
+    root: Path,
+    runner_root: Path,
+    *,
+    cache_root: Path | None = None,
+) -> set[Path]:
+    """Return external node_modules roots reached by workspace symlinks.
+
+    Protected candidate checks create several disposable views of the same
+    workspace. Their package-manager symlink topology is command-invariant, so
+    retain the expensive repository walk on the worker client while deriving
+    the view-relative grants for each runner invocation.
+    """
+
+    cache = getattr(client, "_jaunt_permission_symlink_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        attributes = getattr(client, "__dict__", None)
+        if isinstance(attributes, dict):
+            attributes["_jaunt_permission_symlink_cache"] = cache
+    # ``root`` is normally a fresh disposable copy for every candidate;
+    # ``cache_root`` identifies the stable source workspace whose topology it
+    # mirrors.
+    cache_key = Path(os.path.abspath(cache_root or root))
+    discovered = cache.get(cache_key)
+    if discovered is None:
+        links: list[tuple[Path, Path | None]] = []
+        for candidate in root.rglob("*"):
+            if not candidate.is_symlink():
+                continue
+            physical = candidate.resolve(strict=True)
+            modules_root = next(
+                (
+                    parent
+                    for parent in (physical, *physical.parents)
+                    if parent.name == "node_modules"
+                ),
+                None,
+            )
+            links.append((physical, modules_root))
+        discovered = tuple(links)
+        cache[cache_key] = discovered
+    return {
+        modules_root
+        for physical, modules_root in discovered
+        if modules_root is not None and not physical.is_relative_to(runner_root)
+    }
+
+
 async def _run_test_runner(
     client: Any,
     root: Path,
@@ -7072,17 +7122,14 @@ async def _run_test_runner(
                     mapped_package = runner_root / mapped_package.relative_to(source)
                 if mapped_package.exists():
                     readable.add(mapped_package)
-            for candidate in root.rglob("*"):
-                if not candidate.is_symlink():
-                    continue
-                physical = candidate.resolve(strict=True)
-                try:
-                    physical.relative_to(runner_root)
-                except ValueError:
-                    for parent in (physical, *physical.parents):
-                        if parent.name == "node_modules":
-                            readable.add(parent)
-                            break
+            readable.update(
+                _permission_symlink_read_roots(
+                    client,
+                    root,
+                    runner_root,
+                    cache_root=isolated_from,
+                )
+            )
             # Node 20's experimental permission model mishandles overlapping
             # allow-fs-read entries: granting both a directory and one of its
             # descendants can deny enumeration of the parent.  Ancestor grants
@@ -7234,6 +7281,7 @@ async def _run_test_batches(
     redact_derived: bool = True,
     typecheck_only: bool = False,
     config_snapshot: tuple[Mapping[str, str], Mapping[str, str]] | None = None,
+    runtime_dependencies_pinned: bool = False,
 ) -> Mapping[str, Any]:
     effective_overlays = dict(overlays or {})
     validation_overlay_roots = set(effective_overlays)
@@ -7254,7 +7302,8 @@ async def _run_test_batches(
                 if digest == MISSING_INPUT and path not in effective_overlays
             )
         )
-        _pin_vitest_config_dependency_runtimes(client, root, config_overlays)
+        if not runtime_dependencies_pinned:
+            _pin_vitest_config_dependency_runtimes(client, root, config_overlays)
     grouped = _group_test_files(
         root,
         config,
@@ -7268,7 +7317,8 @@ async def _run_test_batches(
         grouped,
         overlays=effective_overlays,
     )
-    _pin_test_dependency_runtimes(client, root, workspace, grouped)
+    if not runtime_dependencies_pinned:
+        _pin_test_dependency_runtimes(client, root, workspace, grouped)
     selected_files = set(files)
     test_overlays = {
         path: source for path, source in effective_overlays.items() if path in selected_files
@@ -8142,6 +8192,7 @@ async def run_test(
                 redact_derived=not no_redact_derived,
                 typecheck_only=True,
                 config_snapshot=pinned_vitest_config_snapshot,
+                runtime_dependencies_pinned=True,
             )
             if not bool(checked.get("ok", False)):
                 return (
@@ -8160,6 +8211,7 @@ async def run_test(
                 overlays=candidate_overlays,
                 redact_derived=not no_redact_derived,
                 config_snapshot=pinned_vitest_config_snapshot,
+                runtime_dependencies_pinned=True,
             )
             if bool(ran.get("ok", False)):
                 return "verified", ran
@@ -8278,6 +8330,11 @@ async def run_test(
                     redact_derived=not no_redact_derived,
                     typecheck_only=True,
                     config_snapshot=pinned_vitest_config_snapshot,
+                    # Every planned owner and config dependency was pinned before
+                    # generation started. Re-hashing the same transitive Vitest
+                    # closure for every cached candidate is redundant; the command
+                    # seal still re-verifies every pin before publication.
+                    runtime_dependencies_pinned=True,
                 )
                 if bool(checked.get("ok", False)):
                     return []
@@ -8579,6 +8636,7 @@ async def run_test(
                     redact_derived=not no_redact_derived,
                     typecheck_only=True,
                     config_snapshot=pinned_vitest_config_snapshot,
+                    runtime_dependencies_pinned=True,
                 )
             if not bool(baseline_result.get("ok", False)):
                 if _typecheck_failure_is_infrastructure(baseline_result):
@@ -8627,6 +8685,7 @@ async def run_test(
                     redact_derived=not no_redact_derived,
                     typecheck_only=True,
                     config_snapshot=pinned_vitest_config_snapshot,
+                    runtime_dependencies_pinned=True,
                 )
                 valid = bool(checked.get("ok", False))
                 candidate_results.append({"path": path, "ok": valid})
@@ -8759,6 +8818,7 @@ async def run_test(
                     overlays=current_overlays,
                     redact_derived=not no_redact_derived,
                     config_snapshot=pinned_vitest_config_snapshot,
+                    runtime_dependencies_pinned=True,
                 )
                 if bool(result.get("ok", False)):
                     break
@@ -8802,6 +8862,7 @@ async def run_test(
                     redact_derived=not no_redact_derived,
                     typecheck_only=True,
                     config_snapshot=pinned_vitest_config_snapshot,
+                    runtime_dependencies_pinned=True,
                 )
             stage_preflight_infrastructure = False
             stage_preflight_baseline_failure = False
@@ -9009,6 +9070,7 @@ async def run_test(
                 redact_derived=not no_redact_derived,
                 typecheck_only=True,
                 config_snapshot=pinned_vitest_config_snapshot,
+                runtime_dependencies_pinned=True,
             )
         if not bool(preflight.get("ok", False)):
             (
@@ -9199,6 +9261,7 @@ async def run_test(
                 overlays=overlays,
                 redact_derived=not no_redact_derived,
                 config_snapshot=pinned_vitest_config_snapshot,
+                runtime_dependencies_pinned=True,
             )
         )
 

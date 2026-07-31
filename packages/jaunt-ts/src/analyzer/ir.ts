@@ -1300,7 +1300,8 @@ function buildContractIRInternal(
       }),
     ),
     typeImports: structuralTypeImports(typeImports),
-    typeEnvironmentDigest: typeEnvironment?.digest ?? digestCanonical([]),
+    typeEnvironmentDigest:
+      typeEnvironment?.compatibilityDigest ?? digestCanonical([]),
     dependencyApiDigests,
   };
   const prosePayload = {

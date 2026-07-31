@@ -12,7 +12,7 @@ invalidate built modules. The exception is a correctness repair for artifacts
 whose provenance was previously marked fresh incorrectly; that safety migration
 is called out explicitly below.
 
-## 1.7.13
+## 1.7.13 / `@usejaunt/ts` 0.1.3
 
 Installed skill content and installed-toolchain identity (runner, Vitest, and
 fast-check) no longer gate committed TypeScript battery freshness; only
@@ -50,7 +50,17 @@ drift in `fixture_fingerprint`, `prompt_fingerprint`, `target_api_digest`, or
 pre-split fast-check case above is one more instance of the same point. That
 drift requires regeneration.
 
-This is a Python-only change; no `@usejaunt/ts` upgrade is needed.
+`@usejaunt/ts` 0.1.3 also narrows TypeScript module structural freshness to the
+resolved declaration surface. Package-manager metadata, lockfile-only changes, and
+manifest dependencies that the module never resolves remain provenance, but no longer
+force a rebuild. Changes to declarations that the module imports still invalidate it.
+
+Upgrade both packages for the complete fix:
+
+```bash
+uv add --dev 'jaunt==1.7.13'
+npm install -D @usejaunt/ts@^0.1.3 'typescript@^5.9' vitest fast-check @types/node
+```
 
 ## 1.7.12
 

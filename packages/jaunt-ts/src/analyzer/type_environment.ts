@@ -51,35 +51,70 @@ export interface SemanticEnvironmentRecord {
 
 function compatibilityGroupId(id: string): string {
   if (id.startsWith("package:")) {
-    const path = id.slice("package:".length);
-    const parts = path.split("/");
-    const packageName = path.startsWith("@")
-      ? parts.slice(0, 2).join("/")
-      : (parts[0] ?? path);
-    return `package:${packageName}`;
+    return `package:${packageNameFromRecordId(id)}`;
   }
   if (id.startsWith("unresolved-module:")) return "unresolved-modules";
   if (id.startsWith("unresolved-type:")) return "unresolved-types";
   return id;
 }
 
+function packageNameFromRecordId(id: string): string {
+  const path = id.slice("package:".length);
+  const parts = path.split("/");
+  return path.startsWith("@")
+    ? parts.slice(0, 2).join("/")
+    : (parts[0] ?? path);
+}
+
+function packageNameFromSpecifier(specifier: string): string | undefined {
+  if (
+    specifier.startsWith(".") ||
+    specifier.startsWith("/") ||
+    specifier.startsWith("#")
+  ) {
+    return undefined;
+  }
+  const parts = specifier.split("/");
+  return specifier.startsWith("@")
+    ? parts.length >= 2
+      ? parts.slice(0, 2).join("/")
+      : undefined
+    : parts[0];
+}
+
 export function groupSemanticEnvironmentRecords(
   records: readonly { readonly id: string; readonly digest: string }[],
 ): readonly SemanticEnvironmentRecord[] {
-  const grouped = new Map<string, Map<string, string>>();
+  const grouped = new Map<
+    string,
+    { readonly id: string; readonly digest: string }[]
+  >();
+  const deduplicatedKeys = new Map<string, Set<string>>();
   for (const record of records) {
     const groupId = compatibilityGroupId(record.id);
-    const members = grouped.get(groupId) ?? new Map<string, string>();
-    members.set(record.id, record.digest);
+    const members = grouped.get(groupId) ?? [];
+    const key = `${record.id}\0${record.digest}`;
+    const keys = deduplicatedKeys.get(groupId) ?? new Set<string>();
+    // Package records can intentionally share their portable path and digest
+    // while originating from distinct physical installations. Preserve that
+    // multiplicity; unresolved/workspace duplicates are repeated traversal of
+    // the same semantic input and remain collapsed.
+    if (record.id.startsWith("package:") || !keys.has(key)) {
+      members.push(record);
+    }
+    keys.add(key);
+    deduplicatedKeys.set(groupId, keys);
     grouped.set(groupId, members);
   }
   return [...grouped]
     .map(([id, members]) => ({
       id,
       digest: digestCanonical(
-        [...members]
-          .map(([memberId, digest]) => ({ id: memberId, digest }))
-          .sort((left, right) => compareCodeUnits(left.id, right.id)),
+        members.sort(
+          (left, right) =>
+            compareCodeUnits(left.id, right.id) ||
+            compareCodeUnits(left.digest, right.digest),
+        ),
       ),
     }))
     .sort((left, right) => compareCodeUnits(left.id, right.id));
@@ -109,11 +144,47 @@ function isWithin(root: string, path: string): boolean {
   return value !== ".." && !value.startsWith(`..${sep}`) && !isAbsolute(value);
 }
 
-export function stablePathId(root: string, path: string): string {
+interface InstalledPackageLocation {
+  readonly name: string;
+  readonly root: string;
+  readonly relativePath: string;
+}
+
+function installedPackageLocation(
+  path: string,
+): InstalledPackageLocation | undefined {
   const normalized = path.replaceAll("\\", "/");
-  const nodeModules = normalized.lastIndexOf("/node_modules/");
-  if (nodeModules >= 0) {
-    return `package:${normalized.slice(nodeModules + "/node_modules/".length)}`;
+  const marker = "/node_modules/";
+  const nodeModules = normalized.lastIndexOf(marker);
+  if (nodeModules < 0) return undefined;
+  const suffix = normalized.slice(nodeModules + marker.length);
+  const parts = suffix.split("/");
+  const nameParts = suffix.startsWith("@")
+    ? parts.slice(0, 2)
+    : parts.slice(0, 1);
+  if (nameParts.length === 0 || nameParts.some((part) => part === ""))
+    return undefined;
+  const name = nameParts.join("/");
+  const packageRoot = normalized.slice(0, nodeModules + marker.length) + name;
+  let physicalRoot: string;
+  try {
+    physicalRoot = realpathSync(packageRoot);
+  } catch {
+    physicalRoot = resolve(packageRoot);
+  }
+  return {
+    name,
+    root: physicalRoot,
+    relativePath: parts.slice(nameParts.length).join("/"),
+  };
+}
+
+export function stablePathId(root: string, path: string): string {
+  const installedPackage = installedPackageLocation(path);
+  if (installedPackage) {
+    return `package:${installedPackage.name}${
+      installedPackage.relativePath ? `/${installedPackage.relativePath}` : ""
+    }`;
   }
   if (isWithin(root, path)) return `workspace:${toPosix(relative(root, path))}`;
   // An uncommon custom resolver may return a file outside the workspace.  Do
@@ -161,6 +232,71 @@ function normalizeToolingMetadata(
     );
   }
   return value;
+}
+
+const MANIFEST_DEPENDENCY_MAPS = new Set([
+  "dependencies",
+  "devDependencies",
+  "optionalDependencies",
+  "peerDependencies",
+  "peerDependenciesMeta",
+]);
+
+const MANIFEST_BUNDLED_DEPENDENCIES = new Set([
+  "bundleDependencies",
+  "bundledDependencies",
+]);
+
+function normalizePackageManifest(
+  syntax: unknown,
+  resolvedPackages: ReadonlySet<string>,
+): unknown {
+  const normalized = normalizeToolingMetadata(syntax);
+  if (
+    normalized === null ||
+    typeof normalized !== "object" ||
+    Array.isArray(normalized)
+  ) {
+    return normalized;
+  }
+  return Object.fromEntries(
+    Object.entries(normalized).flatMap(([key, value]) => {
+      if (
+        MANIFEST_DEPENDENCY_MAPS.has(key) &&
+        value !== null &&
+        typeof value === "object" &&
+        !Array.isArray(value)
+      ) {
+        const relevant = Object.fromEntries(
+          Object.entries(value).filter(([name]) => resolvedPackages.has(name)),
+        );
+        return Object.keys(relevant).length > 0 ? [[key, relevant]] : [];
+      }
+      if (MANIFEST_BUNDLED_DEPENDENCIES.has(key) && Array.isArray(value)) {
+        const relevant = value.filter(
+          (name): name is string =>
+            typeof name === "string" && resolvedPackages.has(name),
+        );
+        return relevant.length > 0 ? [[key, relevant]] : [];
+      }
+      return [[key, value]];
+    }),
+  );
+}
+
+function declaredManifestPackages(syntax: unknown): ReadonlySet<string> {
+  if (syntax === null || typeof syntax !== "object" || Array.isArray(syntax)) {
+    return new Set();
+  }
+  const names = new Set<string>();
+  for (const key of MANIFEST_DEPENDENCY_MAPS) {
+    if (key === "peerDependenciesMeta") continue;
+    const value = (syntax as Record<string, unknown>)[key];
+    if (value === null || typeof value !== "object" || Array.isArray(value))
+      continue;
+    for (const name of Object.keys(value)) names.add(name);
+  }
+  return names;
 }
 
 function toolingProvenanceRecords(
@@ -453,6 +589,7 @@ function exportedDocs(
 function moduleSpecifiers(
   compiler: typeof import("@typescript/typescript6"),
   sourceFile: ts.SourceFile,
+  compilerOptions?: ts.CompilerOptions,
 ): readonly string[] {
   const result = new Set<string>();
   function visit(node: ts.Node): void {
@@ -480,6 +617,21 @@ function moduleSpecifiers(
     compiler.forEachChild(node, visit);
   }
   visit(sourceFile);
+  if (compilerOptions && /\.[cm]?tsx$/.test(sourceFile.fileName)) {
+    const automaticRuntime =
+      compilerOptions.jsx === compiler.JsxEmit.ReactJSX ||
+      compilerOptions.jsx === compiler.JsxEmit.ReactJSXDev;
+    if (automaticRuntime || compilerOptions.jsxImportSource) {
+      const base = compilerOptions.jsxImportSource ?? "react";
+      result.add(
+        `${base}/${
+          compilerOptions.jsx === compiler.JsxEmit.ReactJSXDev
+            ? "jsx-dev-runtime"
+            : "jsx-runtime"
+        }`,
+      );
+    }
+  }
   return [...result]
     .filter((value) => !/^@usejaunt\/ts(?:\/spec)?$/.test(value))
     .sort();
@@ -2372,8 +2524,18 @@ export function collectTypeEnvironment(
   const modelTypeSources: ModelTypeSource[] = [];
   const inputPaths = new Set<string>();
   const visited = new Set<string>();
+  const directModuleSpecifiers = moduleSpecifiers(
+    compiler,
+    module.sourceFile,
+    compilerOptions,
+  );
+  const manifestPackageNames = new Set(
+    directModuleSpecifiers
+      .map(packageNameFromSpecifier)
+      .filter((name): name is string => name !== undefined),
+  );
   const pending: { containingFile: string; specifier: string }[] =
-    moduleSpecifiers(compiler, module.sourceFile).map((specifier) => ({
+    directModuleSpecifiers.map((specifier) => ({
       containingFile: module.sourceFile.fileName,
       specifier,
     }));
@@ -2680,7 +2842,11 @@ export function collectTypeEnvironment(
     if (docs.length > 0) {
       proseRecords.push({ id: stablePathId(root, absolute), exports: docs });
     }
-    for (const specifier of moduleSpecifiers(compiler, sourceFile)) {
+    for (const specifier of moduleSpecifiers(
+      compiler,
+      sourceFile,
+      compilerOptions,
+    )) {
       pending.push({ containingFile: absolute, specifier });
     }
     for (const reference of sourceFile.referencedFiles) {
@@ -2740,6 +2906,9 @@ export function collectTypeEnvironment(
     .getAutomaticTypeDirectiveNames(compilerOptions, compiler.sys)
     .sort();
   for (const typeName of automaticTypes) {
+    manifestPackageNames.add(
+      typeName.startsWith("@") ? typeName : `@types/${typeName}`,
+    );
     const resolution = compiler.resolveTypeReferenceDirective(
       typeName,
       module.sourceFile.fileName,
@@ -2758,13 +2927,36 @@ export function collectTypeEnvironment(
   }
   drainPendingModules();
 
-  for (const path of environmentFiles(root, module.route.packageOwner)) {
-    const source = readFileSync(path, "utf8");
+  const environment = environmentFiles(root, module.route.packageOwner).map(
+    (path) => {
+      const source = readFileSync(path, "utf8");
+      const syntax = path.endsWith(".json")
+        ? semanticJson(source)
+        : { sha256: sha256Bytes(source) };
+      return { path, syntax };
+    },
+  );
+  const manifests = environment.filter(
+    ({ path }) => basename(path) === "package.json",
+  );
+  const manifestPackages = new Map<string, Set<string>>();
+  for (const name of manifestPackageNames) {
+    // environmentFiles is nearest-owner first. Attribute a package to the
+    // nearest manifest that declares it instead of comparing physical package
+    // roots: npm hoisting and pnpm's content-addressed store may expose the
+    // same declaration closure through different filesystem topologies.
+    for (const manifest of manifests) {
+      if (!declaredManifestPackages(manifest.syntax).has(name)) continue;
+      const names = manifestPackages.get(manifest.path) ?? new Set<string>();
+      names.add(name);
+      manifestPackages.set(manifest.path, names);
+      break;
+    }
+  }
+
+  for (const { path, syntax } of environment) {
     inputPaths.add(path);
     const id = `environment:${toPosix(relative(root, path))}`;
-    const syntax = path.endsWith(".json")
-      ? semanticJson(source)
-      : { sha256: sha256Bytes(source) };
     records.push({
       id,
       syntax,
@@ -2774,7 +2966,15 @@ export function collectTypeEnvironment(
       compatibilityIgnoredIds.add(id);
       continue;
     }
-    compatibleEnvironmentSyntax.set(id, normalizeToolingMetadata(syntax));
+    compatibleEnvironmentSyntax.set(
+      id,
+      basename(path) === "package.json"
+        ? normalizePackageManifest(
+            syntax,
+            manifestPackages.get(path) ?? new Set(),
+          )
+        : normalizeToolingMetadata(syntax),
+    );
   }
 
   records.sort((left, right) => {

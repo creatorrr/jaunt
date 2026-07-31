@@ -1453,7 +1453,7 @@ export function normalize(value: string): string {
   expect(await freshnessDigests(workspace)).toEqual(documentationEdit);
 });
 
-test("resolved package declarations and lock state participate in structural freshness", async () => {
+test("resolved package declarations participate in structural freshness while lock state is provenance", async () => {
   const workspace = createFixtureWorkspace();
   roots.push(workspace.root);
   write(
@@ -1536,8 +1536,103 @@ export function slugify(title: string, options: SlugOptions): string {
     )}\n`,
   );
   const lockEdit = await freshnessDigests(workspace);
-  expect(lockEdit.structural).not.toBe(declarationEdit.structural);
+  expect(lockEdit.structural).toBe(declarationEdit.structural);
   expect(lockEdit.environment).toBe(declarationEdit.environment);
+});
+
+test("jsxImportSource runtime declarations participate in structural freshness", async () => {
+  const workspace = createFixtureWorkspace();
+  roots.push(workspace.root);
+  rmSync(resolve(workspace.root, "src/slug/index.jaunt.ts"), { force: true });
+  write(
+    workspace.root,
+    "package.json",
+    `${JSON.stringify({
+      name: "fixture",
+      private: true,
+      type: "module",
+      dependencies: { "@fixture/jsx": "1.0.0" },
+      devDependencies: { typescript: "6.0.2" },
+    })}\n`,
+  );
+  write(
+    workspace.root,
+    "tsconfig.json",
+    `${JSON.stringify({
+      compilerOptions: {
+        target: "ES2022",
+        module: "NodeNext",
+        moduleResolution: "NodeNext",
+        strict: true,
+        noEmit: true,
+        jsx: "react-jsx",
+        jsxImportSource: "@fixture/jsx",
+        types: [],
+      },
+      include: ["src/**/*.ts", "src/**/*.tsx"],
+      exclude: ["src/**/__generated__/**"],
+    })}\n`,
+  );
+  write(
+    workspace.root,
+    "node_modules/@fixture/jsx/package.json",
+    `${JSON.stringify({
+      name: "@fixture/jsx",
+      version: "1.0.0",
+      type: "module",
+      exports: {
+        "./jsx-runtime": {
+          types: "./jsx-runtime.d.ts",
+          default: "./jsx-runtime.js",
+        },
+      },
+    })}\n`,
+  );
+  write(
+    workspace.root,
+    "node_modules/@fixture/jsx/jsx-runtime.js",
+    "export const jsx = () => ({}); export { jsx as jsxs };\n",
+  );
+  write(
+    workspace.root,
+    "node_modules/@fixture/jsx/jsx-runtime.d.ts",
+    `export namespace JSX {
+  interface Element { readonly kind: "first"; }
+  interface IntrinsicElements { div: { label: string }; }
+}
+export function jsx(type: unknown, props: unknown): JSX.Element;
+export { jsx as jsxs };
+`,
+  );
+  write(
+    workspace.root,
+    "src/render/index.jaunt.tsx",
+    `import * as jaunt from "@usejaunt/ts/spec";
+jaunt.magicModule();
+const example = <div label="example" />;
+/** Render one labeled element. */
+export function render(label: string): typeof example {
+  return jaunt.magic();
+}
+`,
+  );
+  const before = await freshnessDigests(workspace);
+
+  write(
+    workspace.root,
+    "node_modules/@fixture/jsx/jsx-runtime.d.ts",
+    `export namespace JSX {
+  interface Element { readonly kind: "second"; }
+  interface IntrinsicElements { div: { label: string }; }
+}
+export function jsx(type: unknown, props: unknown): JSX.Element;
+export { jsx as jsxs };
+`,
+  );
+
+  const after = await freshnessDigests(workspace);
+  expect(after.structural).not.toBe(before.structural);
+  expect(after.environment).not.toBe(before.environment);
 });
 
 test("compatibility identity normalizes only Jaunt tool package metadata", async () => {
@@ -1569,8 +1664,170 @@ test("compatibility identity normalizes only Jaunt tool package metadata", async
   write(workspace.root, "package-lock.json", lock("0.1.0-alpha.2"));
   const after = await freshnessDigests(workspace);
 
-  expect(after.structural).not.toBe(before.structural);
+  expect(after.structural).toBe(before.structural);
   expect(after.environment).toBe(before.environment);
+});
+
+test("unresolved manifest dependencies do not invalidate module freshness", async () => {
+  const workspace = createFixtureWorkspace();
+  roots.push(workspace.root);
+  const manifest = (unrelatedVersion?: string) =>
+    `${JSON.stringify({
+      name: "fixture",
+      private: true,
+      type: "module",
+      dependencies: {
+        "@fixture/contracts": "1.0.0",
+        ...(unrelatedVersion ? { unrelated: unrelatedVersion } : {}),
+      },
+      peerDependencies: unrelatedVersion
+        ? { "optional-peer": unrelatedVersion }
+        : {},
+      peerDependenciesMeta: unrelatedVersion
+        ? { "optional-peer": { optional: true, revision: unrelatedVersion } }
+        : {},
+    })}\n`;
+  write(workspace.root, "package.json", manifest("1.0.0"));
+  write(
+    workspace.root,
+    "node_modules/@fixture/contracts/package.json",
+    `${JSON.stringify({ name: "@fixture/contracts", version: "1.0.0", types: "./index.d.ts" })}\n`,
+  );
+  write(
+    workspace.root,
+    "node_modules/@fixture/contracts/index.d.ts",
+    "export interface SlugOptions { separator: string; }\n",
+  );
+  write(
+    workspace.root,
+    "src/slug/index.jaunt.ts",
+    `import * as jaunt from "@usejaunt/ts/spec";
+import type { SlugOptions } from "@fixture/contracts";
+jaunt.magicModule();
+export function slugify(title: string, options: SlugOptions): string {
+  return jaunt.magic();
+}
+`,
+  );
+  const before = await freshnessDigests(workspace);
+
+  write(workspace.root, "package.json", manifest());
+  expect(await freshnessDigests(workspace)).toEqual(before);
+});
+
+test("manifest compatibility follows direct authored package imports", async () => {
+  const workspace = createFixtureWorkspace();
+  roots.push(workspace.root);
+  const manifest = (supportVersion: string) =>
+    `${JSON.stringify({
+      name: "fixture",
+      private: true,
+      type: "module",
+      dependencies: {
+        "@fixture/contracts": "1.0.0",
+        "@fixture/support": supportVersion,
+      },
+    })}\n`;
+  write(workspace.root, "package.json", manifest("1.0.0"));
+  write(
+    workspace.root,
+    "node_modules/@fixture/contracts/package.json",
+    `${JSON.stringify({ name: "@fixture/contracts", version: "1.0.0", types: "./index.d.ts" })}\n`,
+  );
+  write(
+    workspace.root,
+    "node_modules/@fixture/contracts/index.d.ts",
+    `import type { Support } from "@fixture/support";
+export interface SlugOptions { support: Support; }
+`,
+  );
+  write(
+    workspace.root,
+    "node_modules/@fixture/support/package.json",
+    `${JSON.stringify({ name: "@fixture/support", version: "1.0.0", types: "./index.d.ts" })}\n`,
+  );
+  write(
+    workspace.root,
+    "node_modules/@fixture/support/index.d.ts",
+    "export interface Support { separator: string; }\n",
+  );
+  write(
+    workspace.root,
+    "src/slug/index.jaunt.ts",
+    `import * as jaunt from "@usejaunt/ts/spec";
+import type { SlugOptions } from "@fixture/contracts";
+jaunt.magicModule();
+export function slugify(title: string, options: SlugOptions): string {
+  return jaunt.magic();
+}
+`,
+  );
+  const before = await freshnessDigests(workspace);
+
+  write(workspace.root, "package.json", manifest("2.0.0"));
+  expect(await freshnessDigests(workspace)).toEqual(before);
+});
+
+test("only the manifest owning a resolved package installation affects freshness", async () => {
+  const workspace = createFixtureWorkspace();
+  roots.push(workspace.root);
+  rmSync(resolve(workspace.root, "src/slug/index.jaunt.ts"), { force: true });
+  const rootManifest = (version: string) =>
+    `${JSON.stringify({
+      name: "fixture",
+      private: true,
+      type: "module",
+      dependencies: { "@fixture/contracts": version },
+    })}\n`;
+  const appManifest = (version: string) =>
+    `${JSON.stringify({
+      name: "fixture-app",
+      private: true,
+      type: "module",
+      dependencies: { "@fixture/contracts": version },
+    })}\n`;
+  write(workspace.root, "package.json", rootManifest("2.0.0"));
+  write(workspace.root, "src/app/package.json", appManifest("1.0.0"));
+  write(
+    workspace.root,
+    "node_modules/@fixture/contracts/package.json",
+    `${JSON.stringify({ name: "@fixture/contracts", version: "2.0.0", types: "./index.d.ts" })}\n`,
+  );
+  write(
+    workspace.root,
+    "node_modules/@fixture/contracts/index.d.ts",
+    "export interface SlugOptions { rootOnly: boolean; }\n",
+  );
+  write(
+    workspace.root,
+    "src/app/node_modules/@fixture/contracts/package.json",
+    `${JSON.stringify({ name: "@fixture/contracts", version: "1.0.0", types: "./index.d.ts" })}\n`,
+  );
+  write(
+    workspace.root,
+    "src/app/node_modules/@fixture/contracts/index.d.ts",
+    "export interface SlugOptions { separator: string; }\n",
+  );
+  write(
+    workspace.root,
+    "src/app/slug/index.jaunt.ts",
+    `import * as jaunt from "@usejaunt/ts/spec";
+import type { SlugOptions } from "@fixture/contracts";
+jaunt.magicModule();
+export function slugify(title: string, options: SlugOptions): string {
+  return jaunt.magic();
+}
+`,
+  );
+  const before = await freshnessDigests(workspace);
+
+  write(workspace.root, "package.json", rootManifest("3.0.0"));
+  expect(await freshnessDigests(workspace)).toEqual(before);
+
+  write(workspace.root, "src/app/package.json", appManifest("1.1.0"));
+  expect((await freshnessDigests(workspace)).structural).not.toBe(
+    before.structural,
+  );
 });
 
 test("packageManager is tooling provenance rather than semantic compatibility", async () => {
@@ -1592,7 +1849,7 @@ test("packageManager is tooling provenance rather than semantic compatibility", 
 
   write(workspace.root, "package.json", manifest("pnpm@11.5.0"));
   const added = await freshnessModule(workspace);
-  expect(added.structuralDigest).not.toBe(before.structuralDigest);
+  expect(added.structuralDigest).toBe(before.structuralDigest);
   expect(added.semanticEnvironmentDigest).toBe(
     before.semanticEnvironmentDigest,
   );
@@ -1606,7 +1863,7 @@ test("packageManager is tooling provenance rather than semantic compatibility", 
 
   write(workspace.root, "package.json", manifest("npm@11.5.1"));
   const changed = await freshnessModule(workspace);
-  expect(changed.structuralDigest).not.toBe(added.structuralDigest);
+  expect(changed.structuralDigest).toBe(added.structuralDigest);
   expect(changed.semanticEnvironmentDigest).toBe(
     added.semanticEnvironmentDigest,
   );
@@ -1713,12 +1970,12 @@ packages:
     write(workspace.root, "package.json", manifest("0.1.0-alpha.2"));
     write(workspace.root, path, lock("0.1.0-alpha.2", "1.0.0"));
     const toolUpgrade = await freshnessDigests(workspace);
-    expect(toolUpgrade.structural).not.toBe(before.structural);
+    expect(toolUpgrade.structural).toBe(before.structural);
     expect(toolUpgrade.environment).toBe(before.environment);
 
     write(workspace.root, path, lock("0.1.0-alpha.2", "1.1.0"));
     const dependencyUpgrade = await freshnessDigests(workspace);
-    expect(dependencyUpgrade.structural).not.toBe(toolUpgrade.structural);
+    expect(dependencyUpgrade.structural).toBe(toolUpgrade.structural);
     expect(dependencyUpgrade.environment).toBe(toolUpgrade.environment);
   },
 );

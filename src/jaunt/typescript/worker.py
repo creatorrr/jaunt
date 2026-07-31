@@ -7656,6 +7656,24 @@ class WorkerClient:
     def verify_runtime_identity(self) -> str:
         """Pin one immutable worker runtime to the lifetime of this client."""
 
+        # A dependency closure can reach the same physical package through many
+        # import edges (and through both the protected runner and a workspace
+        # owner). Hash each package epoch once per verification pass. The seal
+        # performs a second pass with a fresh cache, so a replacement during the
+        # first pass is still detected before publication.
+        package_identity_cache: dict[tuple[Path, str | None], str] = {}
+
+        def current_package_identity(package_root: Path, expected_name: str | None) -> str:
+            key = (package_root, expected_name)
+            identity = package_identity_cache.get(key)
+            if identity is None:
+                identity = runtime_package_session_identity(
+                    package_root,
+                    expected_name=expected_name,
+                )
+                package_identity_cache[key] = identity
+            return identity
+
         try:
             current = worker_runtime_identity(self.installation)
         except TypeScriptWorkerError as exc:
@@ -7714,10 +7732,7 @@ class WorkerClient:
             expected,
         ) in self._package_runtime_session_identities.items():
             try:
-                package_current = runtime_package_session_identity(
-                    package_root,
-                    expected_name=expected_name,
-                )
+                package_current = current_package_identity(package_root, expected_name)
             except TypeScriptWorkerError as exc:
                 raise WorkerToolchainChangedError(
                     f"The pinned {label} runtime became unreadable during this command. "
@@ -7742,10 +7757,7 @@ class WorkerClient:
                         f"The pinned package {pin.package!r} is no longer resolvable"
                     )
                 resolved_root = Path(os.path.abspath(before))
-                package_current = runtime_package_session_identity(
-                    resolved_root,
-                    expected_name=pin.expected_name,
-                )
+                package_current = current_package_identity(resolved_root, pin.expected_name)
                 after = resolve_node_package(
                     pin.start,
                     pin.package,

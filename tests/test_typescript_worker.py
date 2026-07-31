@@ -4924,6 +4924,53 @@ def test_runtime_seal_rechecks_packages_changed_during_its_first_pass(
     assert verification_count == 1
 
 
+def test_runtime_verification_hashes_duplicate_package_pins_once_per_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installation = _installation(tmp_path, "console.log('worker');\n")
+    package = tmp_path / "node_modules/vitest"
+    runtime = package / "dist/index.js"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("export const value = 1;\n", encoding="utf-8")
+    (package / "package.json").write_text(
+        json.dumps({"name": "vitest", "version": "4.1.10", "main": "./dist/index.js"}),
+        encoding="utf-8",
+    )
+    client = WorkerClient(root=tmp_path, installation=installation)
+    client.pin_package_resolution_identity(
+        "runner Vitest",
+        tmp_path,
+        "vitest",
+        boundary=tmp_path,
+        expected_name="vitest",
+    )
+    client.pin_package_resolution_identity(
+        "workspace Vitest",
+        tmp_path,
+        "vitest",
+        boundary=tmp_path,
+        expected_name="vitest",
+    )
+    original_identity = typescript_worker.runtime_package_session_identity
+    identity_calls = 0
+
+    def counted_identity(package_root: Path, *, expected_name: str | None = None) -> str:
+        nonlocal identity_calls
+        identity_calls += 1
+        return original_identity(package_root, expected_name=expected_name)
+
+    monkeypatch.setattr(
+        typescript_worker,
+        "runtime_package_session_identity",
+        counted_identity,
+    )
+
+    client.verify_runtime_identity()
+
+    assert identity_calls == 1
+
+
 def test_package_resolution_closure_rejects_dependency_symlink_aba(tmp_path: Path) -> None:
     installation = _installation(tmp_path, "console.log('worker');\n")
     vitest = tmp_path / "node_modules/vitest"

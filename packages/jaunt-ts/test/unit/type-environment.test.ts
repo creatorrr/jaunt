@@ -59,6 +59,35 @@ describe("type-environment path identity", () => {
     ]);
   });
 
+  test("retains colliding declaration records from multiple package installations", () => {
+    const records = [
+      { id: "package:shared/index.d.ts", digest: "sha256:first" },
+      { id: "package:shared/index.d.ts", digest: "sha256:second" },
+    ];
+    const before = groupSemanticEnvironmentRecords(records);
+    const after = groupSemanticEnvironmentRecords([
+      { id: "package:shared/index.d.ts", digest: "sha256:changed" },
+      records[1]!,
+    ]);
+
+    expect(after).not.toEqual(before);
+    expect(groupSemanticEnvironmentRecords([...records].reverse())).toEqual(
+      before,
+    );
+
+    const twoFirst = groupSemanticEnvironmentRecords([
+      records[0]!,
+      records[0]!,
+      records[1]!,
+    ]);
+    const twoSecond = groupSemanticEnvironmentRecords([
+      records[0]!,
+      records[1]!,
+      records[1]!,
+    ]);
+    expect(twoSecond).not.toEqual(twoFirst);
+  });
+
   test("groups Unicode record IDs by code units rather than locale", () => {
     const localeCompare = vi
       .spyOn(String.prototype, "localeCompare")

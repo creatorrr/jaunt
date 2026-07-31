@@ -2,237 +2,237 @@
 // jaunt:tier=derived
 // jaunt:source=tests/tokens.jaunt-test.ts
 // jaunt:test_spec_digest=sha256:af5a7a64a6ba14f47956cdca7e8990398929d529817d11c369f8f6ca36b53797
-// jaunt:target_api_digest=sha256:d192a0f0d5f6705c9ca0854d669f6b4b4db585bd5629167fe8b87fab8c937660
+// jaunt:target_api_digest=sha256:f746f2a48488bf063d69d5c7cd7c60559d3f14a725c0b34e744f6c614b97917f
 // jaunt:fixture_fingerprint=sha256:184e0133ce415140efdb1a2a1515cb0e9494a882aaeb027b20e21182dbb785b7
 // jaunt:vitest_fingerprint=sha256:bcf02994ff7e31dfd0b3a6a40ccd69cd082e7540cecf5e7951ea1e2a8fccb834
-// jaunt:fast_check_fingerprint=sha256:97f62ee354ca9285052845e71b421a6e36baf29fd9d99056da8a9e34f27b47d8
-// jaunt:runner_fingerprint=sha256:50d27e7718852bf96ddfee00be5ccf80c718da6d98af5326aabc1a952dfaf8db
+// jaunt:fast_check_fingerprint=sha256:f1c128dc85d13bc09d48112c75bb3a18159bfb2d301fe28fe9140058bd5801ac
+// jaunt:runner_fingerprint=sha256:52602d0c1edc81cb7e6da304e5fbf595cf43146144afa8a8aaf7acf0f1e7880c
 // jaunt:prompt_fingerprint=sha256:c01073b453383c0f7394eaaf1cfeebadd1099a87810a688a2e8785b50876635f
 // jaunt:policy_fingerprint=sha256:babe1406e8e4cc1024536374f7e50070a88000c5e80db5f17d2914c1e7752693
-// jaunt:skills_fingerprint=462d7ee5b605e739480d217bc7874e1490ce7a1a8d700cb2a516c776f04fbcaf
-// jaunt:battery_fingerprint=sha256:df2729fd2c17cec9e9680a11048b15f60e547ee2e8cc4d1d02c0b89048b4834b
-// jaunt:body_digest=sha256:48e8c034b1d9b3808036c0e051d2650aebb41cbc3a3e48d5b19629f1fb6da4da
+// jaunt:battery_fingerprint=sha256:f196050acd95b5a7728bc51fb5c710fb7fa2b304ea33f9e24ba1abf81f9f0a98
+// jaunt:body_digest=sha256:9e8916bd5fed95c273e6b7b0d0eb7910fc0019288dfb528eab6b2c1c7ba5688d
 
 import { createHmac } from "node:crypto";
 
 import { expect, vi } from "vitest";
 
-import { createToken, rotateToken, TokenStore, verifyToken } from "../../src/tokens/index.js";
+import {
+  createToken,
+  rotateToken,
+  TokenStore,
+  verifyToken,
+} from "../../src/tokens/index.js";
 import { test } from "../fixtures.js";
 
-interface ErrorWithCode extends Error {
-  code?: unknown;
+function encode(value: unknown): string {
+  return Buffer.from(JSON.stringify(value)).toString("base64url");
 }
 
-function encodeJson(value: unknown): string {
-  return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+function sign(header: unknown, payload: unknown, secret: string): string {
+  const unsigned = `${encode(header)}.${encode(payload)}`;
+  const signature = createHmac("sha256", secret).update(unsigned).digest("base64url");
+  return `${unsigned}.${signature}`;
 }
 
-function signSegments(header: unknown, payload: unknown, secret: string): string {
-  const encodedHeader = encodeJson(header);
-  const encodedPayload = encodeJson(payload);
-  const signingInput = `${encodedHeader}.${encodedPayload}`;
-  const signature = createHmac("sha256", secret).update(signingInput).digest("base64url");
-  return `${signingInput}.${signature}`;
+function decodeSegment(segment: string): unknown {
+  return JSON.parse(Buffer.from(segment, "base64url").toString("utf8"));
 }
 
-function readJsonSegment(token: string, position: number): unknown {
-  const segment = token.split(".").at(position);
-  if (segment === undefined) {
-    throw new Error("missing JWT segment");
-  }
-  return JSON.parse(Buffer.from(segment, "base64url").toString("utf8")) as unknown;
-}
-
-function captureError(operation: () => unknown): ErrorWithCode {
+function errorCode(action: () => unknown): unknown {
   try {
-    operation();
+    action();
   } catch (error) {
-    if (error instanceof Error) {
-      return error;
+    if (typeof error === "object" && error !== null && "code" in error) {
+      return error.code;
     }
     throw error;
   }
-  throw new Error("operation did not throw");
+  throw new Error("expected action to throw");
 }
 
-test("d-01f4a8", () => {
+test("D001", () => {
   vi.useFakeTimers();
   try {
-    vi.setSystemTime(new Date(1_700_000_123_456));
-    const actual = createToken("subject-a", "key-a", { ttlSeconds: 12.9 });
-    const expected = signSegments(
-      { alg: "HS256", typ: "JWT" },
-      { sub: "subject-a", iat: 1_700_000_123, exp: 1_700_000_135 },
-      "key-a",
-    );
+    vi.setSystemTime(new Date(1_700_000_000_000));
+    const token = createToken("subject-a", "key-a", { ttlSeconds: 17.9 });
+    const segments = token.split(".");
 
-    expect(actual).toBe(expected);
-    expect(actual.split(".")).toHaveLength(3);
-    expect(actual).not.toContain("=");
+    expect(segments).toHaveLength(3);
+    expect(segments.every((segment) => segment.length > 0 && !segment.includes("="))).toBe(true);
+    expect(decodeSegment(segments.at(0)!)).toEqual({ alg: "HS256", typ: "JWT" });
+    expect(decodeSegment(segments.at(1)!)).toEqual({
+      sub: "subject-a",
+      iat: 1_700_000_000,
+      exp: 1_700_000_017,
+    });
+
+    const unsigned = `${segments.at(0)}.${segments.at(1)}`;
+    expect(segments.at(2)).toBe(
+      createHmac("sha256", "key-a").update(unsigned).digest("base64url"),
+    );
   } finally {
     vi.useRealTimers();
   }
 });
 
-test("d-0be37c", () => {
+test("D002", () => {
   vi.useFakeTimers();
   try {
-    vi.setSystemTime(new Date(1_700_010_000_999));
-    const claims = readJsonSegment(createToken("subject-b", "", {}), 1);
-
+    vi.setSystemTime(new Date(1_700_000_000_000));
+    const claims = decodeSegment(createToken("subject-b", "", {}).split(".").at(1)!);
     expect(claims).toEqual({
       sub: "subject-b",
-      iat: 1_700_010_000,
-      exp: 1_700_013_600,
+      iat: 1_700_000_000,
+      exp: 1_700_003_600,
     });
   } finally {
     vi.useRealTimers();
   }
 });
 
-test("d-13ce92", () => {
+test("D003", () => {
   expect(() => createToken("", "key-b")).toThrow(RangeError);
 });
 
-test("d-21a6dd", () => {
+test("D004", () => {
   vi.useFakeTimers();
   try {
-    vi.setSystemTime(new Date(1_700_020_000_000));
-    const token = signSegments(
+    vi.setSystemTime(new Date(1_700_000_000_000));
+    const token = sign(
       { alg: "HS256", typ: "JWT" },
-      { sub: "subject-c", iat: 1_700_019_900, exp: 1_700_020_100 },
-      "signing-key",
+      { sub: "subject-c", iat: 1_699_999_900, exp: 1_700_000_001 },
+      "key-c",
     );
-    const error = captureError(() => verifyToken(token, "verification-key"));
-
-    expect(error.code).toBe("invalid-signature");
+    expect(verifyToken(token, "key-c")).toEqual({
+      sub: "subject-c",
+      iat: 1_699_999_900,
+      exp: 1_700_000_001,
+    });
   } finally {
     vi.useRealTimers();
   }
 });
 
-test("d-3648b1", () => {
-  for (const token of ["", "a.b", "a..c", ".b.c", "a.b.c.d", "a!.b.c"]) {
-    const error = captureError(() => verifyToken(token, "key-c"));
-    expect(error.code).toBe("malformed");
+test("D005", () => {
+  vi.useFakeTimers();
+  try {
+    vi.setSystemTime(new Date(1_700_000_000_000));
+    const token = sign(
+      { alg: "HS256", typ: "JWT" },
+      { sub: "subject-d", iat: 1_699_999_900, exp: 1_700_000_000 },
+      "key-d",
+    );
+    expect(errorCode(() => verifyToken(token, "key-d"))).toBe("expired");
+  } finally {
+    vi.useRealTimers();
   }
 });
 
-test("d-47df05", () => {
+test("D006", () => {
+  const malformed = ["", "a.b", "a..b", "a.b.c.d", "!.e30.eA"];
+  for (const token of malformed) {
+    expect(errorCode(() => verifyToken(token, "key-e"))).toBe("malformed");
+  }
+});
+
+test("D007", () => {
   vi.useFakeTimers();
   try {
-    vi.setSystemTime(new Date(1_700_030_000_000));
-    const validClaims = { sub: "subject-d", iat: 1_700_029_900, exp: 1_700_030_100 };
-    const candidates = [
-      signSegments({ alg: "HS512", typ: "JWT" }, validClaims, "key-d"),
-      signSegments(
-        { alg: "HS256", typ: "JWT" },
-        { ...validClaims, audience: "extra" },
-        "key-d",
-      ),
-      signSegments(
-        { alg: "HS256", typ: "JWT" },
-        { sub: 7, iat: validClaims.iat, exp: validClaims.exp },
-        "key-d",
-      ),
-      signSegments(
-        { alg: "HS256", typ: "JWT" },
-        { sub: validClaims.sub, exp: validClaims.exp },
-        "key-d",
-      ),
-    ];
+    vi.setSystemTime(new Date(1_700_000_000_000));
+    const token = sign(
+      { alg: "HS512", typ: "JWT" },
+      { sub: "subject-e", iat: 1_700_000_000, exp: 1_700_000_100 },
+      "key-f",
+    );
+    expect(errorCode(() => verifyToken(token, "key-f"))).toBe("malformed");
+  } finally {
+    vi.useRealTimers();
+  }
+});
 
-    for (const token of candidates) {
-      const error = captureError(() => verifyToken(token, "key-d"));
-      expect(error.code).toBe("malformed");
+test("D008", () => {
+  vi.useFakeTimers();
+  try {
+    vi.setSystemTime(new Date(1_700_000_000_000));
+    const invalidPayloads = [
+      { sub: 7, iat: 1_700_000_000, exp: 1_700_000_100 },
+      { sub: "subject-f", iat: "1700000000", exp: 1_700_000_100 },
+      { sub: "subject-f", iat: 1_700_000_000, exp: 1_700_000_100, role: "admin" },
+      { sub: "subject-f", iat: 1_700_000_000 },
+    ];
+    for (const payload of invalidPayloads) {
+      const token = sign({ alg: "HS256", typ: "JWT" }, payload, "key-g");
+      expect(errorCode(() => verifyToken(token, "key-g"))).toBe("malformed");
     }
   } finally {
     vi.useRealTimers();
   }
 });
 
-test("d-58c20e", () => {
+test("D009", () => {
   vi.useFakeTimers();
   try {
-    vi.setSystemTime(new Date(1_700_040_000_000));
-    const atBoundary = signSegments(
-      { alg: "HS256", typ: "JWT" },
-      { sub: "subject-e", iat: 1_700_039_900, exp: 1_700_040_000 },
-      "key-e",
-    );
-    const beforeBoundary = signSegments(
-      { alg: "HS256", typ: "JWT" },
-      { sub: "subject-f", iat: 1_700_039_800, exp: 1_700_039_999 },
-      "key-e",
-    );
-
-    expect(captureError(() => verifyToken(atBoundary, "key-e")).code).toBe("expired");
-    expect(captureError(() => verifyToken(beforeBoundary, "key-e")).code).toBe("expired");
+    vi.setSystemTime(new Date(1_700_000_000_000));
+    const token = createToken("subject-g", "key-h");
+    expect(errorCode(() => verifyToken(token, "key-i"))).toBe("invalid-signature");
   } finally {
     vi.useRealTimers();
   }
 });
 
-test("d-69b7f3", () => {
+test("D010", () => {
   vi.useFakeTimers();
   try {
-    vi.setSystemTime(new Date(1_700_050_000_000));
-    const original = createToken("subject-g", "key-f", { ttlSeconds: 600 });
-    const originalClaims = verifyToken(original, "key-f");
-    const rotated = rotateToken(original, "key-f", { ttlSeconds: 1 });
-    const rotatedClaims = verifyToken(rotated, "key-f");
+    vi.setSystemTime(new Date(1_700_000_000_000));
+    const original = createToken("subject-h", "key-j", { ttlSeconds: 100 });
+    const originalClaims = verifyToken(original, "key-j");
+    const rotated = rotateToken(original, "key-j", { ttlSeconds: 1 });
+    const rotatedClaims = verifyToken(rotated, "key-j");
 
-    expect(rotated).not.toBe(original);
     expect(rotatedClaims.sub).toBe(originalClaims.sub);
     expect(rotatedClaims.iat).toBeGreaterThan(originalClaims.iat);
     expect(rotatedClaims.exp).toBeGreaterThan(originalClaims.exp);
-    expect(Object.keys(rotatedClaims).sort()).toEqual(["exp", "iat", "sub"]);
   } finally {
     vi.useRealTimers();
   }
 });
 
-test("d-7a14c9", () => {
-  const malformed = captureError(() => rotateToken("not-a-token", "key-g"));
-  expect(malformed.code).toBe("malformed");
+test("D011", () => {
+  vi.useFakeTimers();
+  try {
+    vi.setSystemTime(new Date(1_700_000_000_000));
+    const token = createToken("subject-i", "key-k");
+    expect(errorCode(() => verifyToken(token, "key-l"))).toBe("invalid-signature");
+    expect(errorCode(() => rotateToken(token, "key-l"))).toBe("invalid-signature");
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
-test("d-8d03e6", ({ clock }) => {
+test("D012", ({ clock }) => {
   const store = new TokenStore(clock.now);
-  store.put("subject-h", "first", clock.now() + 20);
-  store.put("subject-i", "other", clock.now() + 30);
-  store.put("subject-h", "replacement", clock.now() + 40);
+  store.put("alpha", "token-1", clock.now() + 10);
+  store.put("beta", "token-2", clock.now() + 20);
+  store.put("alpha", "token-3", clock.now() + 30);
 
-  expect(store.get("subject-h")).toBe("replacement");
-  expect(store.get("subject-i")).toBe("other");
+  expect(store.get("alpha")).toBe("token-3");
+  expect(store.get("beta")).toBe("token-2");
   expect(store.get("missing")).toBeNull();
   expect(store.size).toBe(2);
 });
 
-test("d-9eb521", ({ clock }) => {
+test("D013", ({ clock }) => {
   const store = new TokenStore(clock.now);
-  store.put("subject-j", "boundary", clock.now() + 5);
-  store.put("subject-k", "later", clock.now() + 6);
+  const boundary = clock.now() + 5;
+  store.put("alpha", "token-1", boundary);
+  store.put("beta", "token-2", boundary + 1);
   clock.advance(5);
 
-  expect(store.get("subject-j")).toBeNull();
-  expect(store.get("subject-j")).toBeNull();
-  expect(store.get("subject-k")).toBe("later");
+  expect(store.get("alpha")).toBeNull();
+  expect(store.get("alpha")).toBeNull();
+  expect(store.get("beta")).toBe("token-2");
   expect(store.size).toBe(1);
   expect(store.sweep()).toBe(1);
   expect(store.sweep()).toBe(0);
-  expect(store.size).toBe(1);
-});
-
-test("d-a24f70", ({ clock }) => {
-  const store = new TokenStore(clock.now);
-  store.put("subject-l", "already-expired", clock.now() - 1);
-  store.put("subject-m", "at-boundary", clock.now());
-  store.put("subject-n", "live", clock.now() + 1);
-
-  expect(store.size).toBe(1);
-  expect(store.sweep()).toBe(2);
-  expect(store.get("subject-n")).toBe("live");
   expect(store.size).toBe(1);
 });

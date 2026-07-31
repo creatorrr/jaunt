@@ -120,7 +120,7 @@ export function slugify(title: string): string {
 ```bash
 uvx jaunt init --language ts
 npm init -y && npm pkg set type=module
-npm install -D @usejaunt/ts@^0.1.2 'typescript@^5.9' vitest fast-check @types/node
+npm install -D @usejaunt/ts@^0.1.3 'typescript@^5.9' vitest fast-check @types/node
 uvx jaunt sync
 uvx jaunt migrate --language ts       # upgrade preview; plan-only and model-free
 uvx jaunt build --language ts
