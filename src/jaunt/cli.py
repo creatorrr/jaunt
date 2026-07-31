@@ -5180,7 +5180,11 @@ def _cmd_typescript_migrate_loaded(args: argparse.Namespace, root: Path, cfg: Ja
             return EXIT_CONFIG_OR_DISCOVERY
 
         applied_paths = apply_typescript_migration(plan)
-        _ensure_jaunt_gitignore(root)
+        # A targeted plan promises that every write belongs to the selected
+        # modules. Keep unrelated repository housekeeping out of that atomic
+        # boundary, including on a no-op apply.
+        if not target_ids:
+            _ensure_jaunt_gitignore(root)
         applied_payload = plan.to_json(applied=True, applied_paths=applied_paths)
         if json_mode:
             _emit_json(applied_payload)
@@ -5204,6 +5208,16 @@ def _cmd_typescript_migrate_loaded(args: argparse.Namespace, root: Path, cfg: Ja
 
 def cmd_migrate(args: argparse.Namespace) -> int:
     json_mode = _is_json_mode(args)
+    raw_targets = tuple(str(value) for value in (getattr(args, "target", []) or []))
+    if raw_targets and (
+        bool(getattr(args, "config_v2", False)) or bool(getattr(args, "merge_projects", False))
+    ):
+        error = "--target applies only to TypeScript artifact migration"
+        if json_mode:
+            _emit_json({"command": "migrate", "ok": False, "error": error})
+        else:
+            _eprint(f"error: {error}")
+        return EXIT_CONFIG_OR_DISCOVERY
     if bool(getattr(args, "config_v2", False)):
         if bool(getattr(args, "merge_projects", False)):
             error = "--config-v2 and --merge-projects are separate migrations"
@@ -5271,6 +5285,11 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         mode = _target_dispatch_mode(args, cfg)
         if mode == "ts":
             return _cmd_typescript_migrate_loaded(args, root, cfg)
+        if raw_targets:
+            raise JauntConfigError(
+                "--target applies only to TypeScript artifact migration; "
+                "use `--language ts` in a mixed workspace"
+            )
         ctx = _discover_build_context(root, cfg, args)
     except (JauntConfigError, JauntDiscoveryError, JauntDependencyCycleError, KeyError) as e:
         _print_error(e)

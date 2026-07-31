@@ -810,6 +810,7 @@ def test_typescript_migrate_forwards_target_to_plan(
                 str(tmp_path),
                 "--target",
                 "ts:src/math",
+                "--apply",
                 "--json",
             ]
         )
@@ -817,6 +818,74 @@ def test_typescript_migrate_forwards_target_to_plan(
     )
     assert json.loads(capsys.readouterr().out)["ok"] is True
     assert captured["target_ids"] == ("ts:src/math",)
+    assert not (tmp_path / ".gitignore").exists()
+
+
+@pytest.mark.parametrize("migration_flag", ["--config-v2", "--merge-projects"])
+def test_typescript_migrate_target_rejects_non_artifact_migrations(
+    migration_flag: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert (
+        main(
+            [
+                "migrate",
+                migration_flag,
+                "--target",
+                "ts:src/math",
+                "--apply",
+                "--json",
+            ]
+        )
+        == 2
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"] == "--target applies only to TypeScript artifact migration"
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_typescript_migrate_target_rejects_python_dispatch(
+    tmp_path: Path, mixed: bool, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    if mixed:
+        (tmp_path / "tsconfig.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "jaunt.toml").write_text(
+        (
+            "version = 2\n"
+            "[target.py]\n"
+            'source_roots = ["src"]\n'
+            'test_roots = ["tests"]\n'
+            + (
+                "[target.ts]\n"
+                'source_roots = ["src"]\n'
+                'test_roots = ["tests"]\n'
+                'projects = ["tsconfig.json"]\n'
+                if mixed
+                else ""
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                "migrate",
+                "--root",
+                str(tmp_path),
+                "--target",
+                "ts:src/math",
+                "--apply",
+                "--json",
+            ]
+        )
+        == 2
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert "use `--language ts`" in payload["error"]
 
 
 def test_typescript_migrate_apply_obeys_dirty_guard_and_force(

@@ -50,7 +50,7 @@ API mirror, sidecar, a newly created canonical facade, and Jaunt metadata.
 
 | Reason | What the next build does |
 |---|---|
-| `structural` | Calls the implementation model and rebuilds the module. |
+| `structural` | Rebuilds with the model, except compatible environment-only drift that passes current overlay validation is recomposed for free. |
 | `prose` | Calls the semantic gate, then refreezes unchanged code or rebuilds. |
 | `fingerprint` / `re-stamp` | Re-stamps validated output without a model call. |
 | `stub` | Re-emits the `.pyi` deterministically when implementation inputs are unchanged. |
