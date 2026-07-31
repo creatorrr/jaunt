@@ -13,6 +13,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  UV_PYTHON: "3.12"
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -55,17 +58,13 @@ jobs:
         run: uv run pytest
 
   typescript:
-    name: TypeScript host bounds (Node ${{ matrix.node-version }})
+    name: TypeScript (Node 24)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        node-version: [20, 24]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: 24
           cache: npm
           cache-dependency-path: |
             packages/jaunt-ts/package-lock.json
@@ -186,7 +185,7 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            node-version: 20
+            node-version: 24
           - os: macos-latest
             node-version: 24
     steps:
@@ -241,7 +240,7 @@ jobs:
       matrix:
         include:
           - label: minimum
-            node-version: 20
+            node-version: 24
             vitest-version: 3.2.4
             fast-check-version: 4.0.0
           - label: maximum
@@ -275,7 +274,7 @@ jobs:
       - name: Build wheel and source distribution
         run: uv build --out-dir "${RUNNER_TEMP}/jaunt-dist" --no-create-gitignore
       - name: Inspect TypeScript resources in Python distributions
-        run: python tests/inspect_typescript_distribution.py "${RUNNER_TEMP}/jaunt-dist"
+        run: uv run --no-project python tests/inspect_typescript_distribution.py "${RUNNER_TEMP}/jaunt-dist"
 
   docs:
     runs-on: ubuntu-latest

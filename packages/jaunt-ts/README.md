@@ -29,7 +29,7 @@ diagnostic.
 
 The worker and protected test runner require Node `>=20 <25`. This is the tool-host
 range, not a restriction on the runtime used to deploy generated JavaScript. CI
-tests both boundary majors, Node 20 and Node 24.
+runs on the latest supported host major, Node 24.
 
 Pin a supported compiler when installing; an unversioned `typescript` install may
 select TypeScript 7:
