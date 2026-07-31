@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noEmit": true,
+    "rootDir": ".",
+    "baseUrl": ".",
+    "paths": {
+      "@jaunt-examples/core/*": ["packages/core/src/*"],
+      "@jaunt-examples/app/*": ["packages/app/src/*"]
+    },
+    "types": ["node", "vitest/globals"],
+    "verbatimModuleSyntax": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "references": [{ "path": "./packages/core" }, { "path": "./packages/app" }],
+  "include": ["tests/**/*.ts", "tests/**/*.tsx"],
+  "exclude": ["**/*.jaunt-test.ts", "**/*.jaunt-test.tsx"]
+}

@@ -69,5 +69,14 @@ node_modules/
 !examples/typescript_project_references/tests/__generated__/
 !examples/typescript_project_references/tests/__generated__/**
 
+# Published 1.7.12 -> current model-free upgrade fixture. These bytes are copied
+# from the release tag and guarded by fixture-manifest.json.
+!tests/fixtures/typescript_upgrade_1_7_12_pnpm/packages/core/src/normalize/__generated__/
+!tests/fixtures/typescript_upgrade_1_7_12_pnpm/packages/core/src/normalize/__generated__/**
+!tests/fixtures/typescript_upgrade_1_7_12_pnpm/packages/app/src/slug/__generated__/
+!tests/fixtures/typescript_upgrade_1_7_12_pnpm/packages/app/src/slug/__generated__/**
+!tests/fixtures/typescript_upgrade_1_7_12_pnpm/tests/__generated__/
+!tests/fixtures/typescript_upgrade_1_7_12_pnpm/tests/__generated__/**
+
 # Riptide artifacts (cloud-synced)
 .humanlayer/tasks/

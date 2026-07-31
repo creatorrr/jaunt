@@ -1,0 +1,27 @@
+version = 2
+
+[target.ts]
+source_roots = ["packages/*/src"]
+test_roots = ["tests"]
+projects = ["tsconfig.json"]
+test_projects = ["tsconfig.test.json"]
+tool_owner = "."
+generated_dir = "__generated__"
+test_runner = "vitest"
+fast_check_runs = 50
+
+[build]
+jobs = 8
+
+[test]
+jobs = 4
+
+[codex]
+model = "gpt-5.6-sol"
+reasoning_effort = "medium"
+sandbox = "workspace-write"
+
+[semantic_gate]
+enabled = true
+model = "gpt-5.6-luna"
+reasoning_effort = "medium"
